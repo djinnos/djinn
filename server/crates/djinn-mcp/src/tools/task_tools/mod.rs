@@ -20,9 +20,28 @@ use djinn_db::SessionRepository;
 use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 
 mod board;
+mod ops;
 mod types;
 
-pub use types::*;
+use self::ops::{
+    CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
+    add_task_comment, create_task, transition_task, update_task,
+};
+pub use self::types::*;
+
+fn collapse_acceptance_criteria(
+    acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
+) -> Option<Vec<String>> {
+    acceptance_criteria.map(|items| {
+        items
+            .into_iter()
+            .map(|item| match item {
+                AcceptanceCriterionItem::Text(text) => text,
+                AcceptanceCriterionItem::Structured(status) => status.criterion,
+            })
+            .collect()
+    })
+}
 
 // ── Tool implementations ─────────────────────────────────────────────────────
 
@@ -62,7 +81,7 @@ impl DjinnMcpServer {
             Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
         };
         let status = match validate_task_create_status(p.status.as_deref()) {
-            Ok(s) => s,
+            Ok(s) => s.map(str::to_owned),
             Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e))),
         };
         if let Some(ref labels) = p.labels
@@ -99,128 +118,26 @@ impl DjinnMcpServer {
             Err(e) => return Json(ErrorOr::Error(e)),
         };
 
-        // Resolve parent epic (optional).
-        let epic_id = if let Some(epic_ref) = p.epic_id.as_deref() {
-            let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
-            let Some(epic) = epic_repo
-                .resolve_in_project(&project_id, epic_ref)
-                .await
-                .ok()
-                .flatten()
-            else {
-                return Json(ErrorOr::Error(ErrorResponse::new(format!(
-                    "epic not found: {epic_ref}"
-                ))));
-            };
-            Some(epic.id)
-        } else {
-            None
-        };
-
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-
-        // Pre-resolve blocker IDs BEFORE inserting the task so we fail fast
-        // without leaving an orphaned unblocked task in the DB.
-        let resolved_blocker_ids = if let Some(ref blockers) = p.blocked_by {
-            let mut ids = Vec::with_capacity(blockers.len());
-            for blocker_ref in blockers {
-                let blocking_id = match self.resolve_task_not_epic(&project_id, blocker_ref).await {
-                    Ok(id) => id,
-                    Err(e) => return Json(ErrorOr::Error(e)),
-                };
-                ids.push(blocking_id);
-            }
-            ids
-        } else {
-            Vec::new()
-        };
-
-        let ac_json = p
-            .acceptance_criteria
-            .as_ref()
-            .filter(|v| !v.is_empty())
-            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()));
-
-        let task = match repo
-            .create_in_project(
-                &project_id,
-                epic_id.as_deref(),
-                &title,
-                description,
-                design,
-                issue_type,
+        create_task(
+            self,
+            &project_id,
+            CreateTaskRequest {
+                title,
+                description: description.to_owned(),
+                design: design.to_owned(),
+                issue_type: issue_type.to_owned(),
                 priority,
-                &owner,
+                owner,
                 status,
-                ac_json.as_deref(),
-            )
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
-        };
-
-        // Apply labels if provided.
-        let has_labels = p.labels.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
-
-        let mut task = task;
-
-        if has_labels {
-            let labels_json = p
-                .labels
-                .as_ref()
-                .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
-                .unwrap_or_else(|| task.labels.clone());
-
-            if let Ok(t) = repo
-                .update(
-                    &task.id,
-                    &task.title,
-                    &task.description,
-                    &task.design,
-                    task.priority,
-                    &task.owner,
-                    &labels_json,
-                    &task.acceptance_criteria,
-                )
-                .await
-            {
-                task = t;
-            }
-        }
-
-        // Apply memory_refs if provided.
-        if let Some(ref refs) = p.memory_refs
-            && !refs.is_empty()
-        {
-            let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".into());
-            if let Ok(t) = repo.update_memory_refs(&task.id, &refs_json).await {
-                task = t;
-            }
-        }
-
-        // Apply pre-resolved blocked_by relationships atomically.
-        if !resolved_blocker_ids.is_empty()
-            && let Err(e) = repo
-                .update_blockers_atomic(&task.id, &resolved_blocker_ids, &[])
-                .await
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
-        }
-
-        // Apply agent_type (specialist routing) if provided.
-        if let Some(ref agent_type) = p.agent_type {
-            let at = if agent_type.is_empty() {
-                None
-            } else {
-                Some(agent_type.as_str())
-            };
-            if let Ok(t) = repo.update_agent_type(&task.id, at).await {
-                task = t;
-            }
-        }
-
-        Json(ErrorOr::Ok(task_to_response(&task)))
+                acceptance_criteria: collapse_acceptance_criteria(p.acceptance_criteria),
+                labels: p.labels.unwrap_or_default(),
+                memory_refs: p.memory_refs.unwrap_or_default(),
+                blocked_by_refs: p.blocked_by.unwrap_or_default(),
+                agent_type: p.agent_type,
+                epic_ref: p.epic_id,
+            },
+        )
+        .await
     }
 
     /// Update allowed fields of a work item.
@@ -268,169 +185,37 @@ impl DjinnMcpServer {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match self.require_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => return Json(ErrorOr::Error(e)),
         };
 
-        let Some(task) = repo
-            .resolve_in_project(&project_id, &p.id)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return Json(ErrorOr::Error(not_found(&p.id)));
-        };
-
-        // Resolve new parent epic if provided.
-        let epic_id: Option<String> = if let Some(ref par) = p.epic_id {
-            let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
-            let Some(epic) = epic_repo
-                .resolve_in_project(&project_id, par)
-                .await
-                .ok()
-                .flatten()
-            else {
-                return Json(ErrorOr::Error(ErrorResponse::new(format!(
-                    "epic not found: {par}"
-                ))));
-            };
-            Some(epic.id)
-        } else {
-            task.epic_id.clone()
-        };
-
-        // Apply partial field overrides.
-        let title = p.title.as_deref().unwrap_or(&task.title);
-        let description = p.description.as_deref().unwrap_or(&task.description);
-        let design = p.design.as_deref().unwrap_or(&task.design);
-        let priority = p.priority.unwrap_or(task.priority);
-        let owner = p.owner.as_deref().unwrap_or(&task.owner);
-
-        // Merge label changes.
-        let labels_json = if p.labels_add.is_some() || p.labels_remove.is_some() {
-            let mut current: Vec<String> = djinn_core::models::parse_json_array(&task.labels);
-            if let Some(add) = &p.labels_add {
-                for lbl in add {
-                    if !current.contains(lbl) {
-                        current.push(lbl.clone());
-                    }
-                }
-            }
-            if let Some(remove) = &p.labels_remove {
-                current.retain(|l| !remove.contains(l));
-            }
-            if let Err(e) = validate_labels_count(current.len()) {
-                return Json(ErrorOr::Error(ErrorResponse::new(e)));
-            }
-            serde_json::to_string(&current).unwrap_or_else(|_| "[]".into())
-        } else {
-            task.labels.clone()
-        };
-
-        let ac_json = p
-            .acceptance_criteria
-            .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
-            .unwrap_or_else(|| task.acceptance_criteria.clone());
-
-        // If parent changed, move the task first.
-        if epic_id != task.epic_id
-            && let Err(e) = repo.move_to_epic(&task.id, epic_id.as_deref()).await
-        {
-            return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
-        }
-
-        let updated = match repo
-            .update(
-                &task.id,
-                title,
-                description,
-                design,
-                priority,
-                owner,
-                &labels_json,
-                &ac_json,
-            )
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
-        };
-
-        // Apply memory_refs changes if requested.
-        let updated = if p.memory_refs_add.is_some() || p.memory_refs_remove.is_some() {
-            let mut refs: Vec<String> =
-                serde_json::from_str(&updated.memory_refs).unwrap_or_default();
-            if let Some(add) = &p.memory_refs_add {
-                for r in add {
-                    if !refs.contains(r) {
-                        refs.push(r.clone());
-                    }
-                }
-            }
-            if let Some(remove) = &p.memory_refs_remove {
-                refs.retain(|r| !remove.contains(r));
-            }
-            let refs_json = serde_json::to_string(&refs).unwrap_or_else(|_| "[]".into());
-            match repo.update_memory_refs(&updated.id, &refs_json).await {
-                Ok(t) => t,
-                Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
-            }
-        } else {
-            updated
-        };
-
-        // Apply blocker changes atomically to prevent a race where the
-        // dispatcher sees zero blockers between individual remove/add calls.
-        if p.blocked_by_add.is_some() || p.blocked_by_remove.is_some() {
-            let mut add_ids = Vec::new();
-            if let Some(ref add) = p.blocked_by_add {
-                for blocker_ref in add {
-                    let blocking_id =
-                        match self.resolve_task_not_epic(&project_id, blocker_ref).await {
-                            Ok(id) => id,
-                            Err(e) => return Json(ErrorOr::Error(e)),
-                        };
-                    add_ids.push(blocking_id);
-                }
-            }
-            let mut remove_ids = Vec::new();
-            if let Some(ref remove) = p.blocked_by_remove {
-                for blocker_ref in remove {
-                    let blocking_id =
-                        match self.resolve_task_not_epic(&project_id, blocker_ref).await {
-                            Ok(id) => id,
-                            Err(e) => return Json(ErrorOr::Error(e)),
-                        };
-                    remove_ids.push(blocking_id);
-                }
-            }
-            if let Err(e) = repo
-                .update_blockers_atomic(&updated.id, &add_ids, &remove_ids)
-                .await
-            {
-                return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
-            }
-        }
-
-        // Apply agent_type (specialist routing) if provided.
-        let updated = if let Some(ref agent_type) = p.agent_type {
-            let at = if agent_type.is_empty() {
-                None
-            } else {
-                Some(agent_type.as_str())
-            };
-            match repo.update_agent_type(&updated.id, at).await {
-                Ok(t) => t,
-                Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
-            }
-        } else {
-            updated
-        };
-
-        Json(ErrorOr::Ok(task_to_response(&updated)))
+        update_task(
+            self,
+            &project_id,
+            UpdateTaskRequest {
+                id: p.id,
+                title: p.title,
+                description: p.description,
+                design: p.design,
+                priority: p.priority,
+                owner: p.owner,
+                acceptance_criteria: collapse_acceptance_criteria(p.acceptance_criteria),
+                labels_add: p.labels_add.unwrap_or_default(),
+                labels_remove: p.labels_remove.unwrap_or_default().into_iter().collect(),
+                memory_refs_add: p.memory_refs_add.unwrap_or_default(),
+                memory_refs_remove: p
+                    .memory_refs_remove
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+                blocked_by_add_refs: p.blocked_by_add.unwrap_or_default(),
+                blocked_by_remove_refs: p.blocked_by_remove.unwrap_or_default(),
+                agent_type: p.agent_type,
+                epic_ref: p.epic_id,
+            },
+        )
+        .await
     }
 
     /// Show details of a work item. Accepts task UUID or short_id.
@@ -803,17 +588,6 @@ impl DjinnMcpServer {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-
-        let Some(task) = repo
-            .resolve_in_project(&project_id, &p.id)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return Json(ErrorOr::Error(not_found(&p.id)));
-        };
-
         let action = match TransitionAction::parse(&p.action) {
             Ok(a) => a,
             Err(e) => return Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
@@ -828,49 +602,19 @@ impl DjinnMcpServer {
             None
         };
 
-        let reason = p.reason.as_deref();
-
-        // Check for downstream dependents before force_close.
-        let downstream_warning = if action == TransitionAction::ForceClose {
-            let downstream = repo.list_blocked_by(&task.id).await.unwrap_or_default();
-            if downstream.is_empty() {
-                None
-            } else {
-                let names: Vec<String> = downstream
-                    .iter()
-                    .map(|b| format!("{} ({})", b.short_id, b.title))
-                    .collect();
-                Some(format!(
-                    "WARNING: {} task(s) were blocked by this task and are now unblocked: {}. \
-                     If replacement work exists, add blockers to these tasks to prevent premature dispatch.",
-                    downstream.len(),
-                    names.join(", ")
-                ))
-            }
-        } else {
-            None
-        };
-
-        match repo
-            .transition(
-                &task.id,
+        transition_task(
+            self,
+            &project_id,
+            TransitionTaskRequest {
+                id: p.id,
                 action,
-                actor_id,
-                actor_role,
-                reason,
+                actor_id: actor_id.to_owned(),
+                actor_role: actor_role.to_owned(),
+                reason: p.reason,
                 target_override,
-            )
-            .await
-        {
-            Ok(updated) => {
-                let mut resp = task_to_response(&updated);
-                if let Some(warning) = downstream_warning {
-                    resp.warning = Some(warning);
-                }
-                Json(ErrorOr::Ok(resp))
-            }
-            Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
-        }
+            },
+        )
+        .await
     }
 
     /// Claim the next available work item and transition it to in_progress.
@@ -932,34 +676,17 @@ impl DjinnMcpServer {
             return Json(ErrorOr::Error(ErrorResponse::new(e)));
         }
 
-        let repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-
-        let Some(task) = repo
-            .resolve_in_project(&project_id, &p.id)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return Json(ErrorOr::Error(not_found(&p.id)));
-        };
-
-        let payload = serde_json::json!({ "body": p.body }).to_string();
-
-        match repo
-            .log_activity(Some(&task.id), actor_id, actor_role, "comment", &payload)
-            .await
-        {
-            Ok(entry) => Json(ErrorOr::Ok(ActivityEntryResponse {
-                id: entry.id,
-                task_id: entry.task_id,
-                actor_id: entry.actor_id,
-                actor_role: entry.actor_role,
-                event_type: entry.event_type,
-                payload: parse_any_json(&entry.payload),
-                created_at: entry.created_at,
-            })),
-            Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
-        }
+        add_task_comment(
+            self,
+            &project_id,
+            CommentTaskRequest {
+                id: p.id,
+                body: p.body,
+                actor_id: actor_id.to_owned(),
+                actor_role: actor_role.to_owned(),
+            },
+        )
+        .await
     }
 
     /// Query the activity log with optional filters.

@@ -950,9 +950,7 @@ impl CoordinatorActor {
                 found
             };
             if !has_active_work {
-                tracing::debug!(
-                    "CoordinatorActor: patrol — no active tasks on board, skipping"
-                );
+                tracing::debug!("CoordinatorActor: patrol — no active tasks on board, skipping");
                 #[cfg(test)]
                 eprintln!("[patrol] skipping: empty board");
                 return;
