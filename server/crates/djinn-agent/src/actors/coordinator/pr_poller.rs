@@ -15,6 +15,19 @@ use super::*;
 /// rather than re-dispatching a worker.
 const PR_REVIEW_ROUND_THRESHOLD: u32 = 3;
 
+/// Minimum seconds a task must have been in `pr_draft` before the poller will
+/// check CI and potentially undraft it.  This prevents a race where the poller
+/// runs before GitHub has registered the required check-runs for a newly-pushed
+/// commit, sees an empty/stale check-run list, and incorrectly concludes CI
+/// has passed.
+const PR_DRAFT_MIN_AGE_SECS: i64 = 10;
+
+/// Maximum consecutive merge failures before the poller invalidates its CI
+/// cache and forces a full re-check.  This catches cases where CI failed
+/// after we cached a "green" SHA, or where branch-protection rules block
+/// the merge for reasons we didn't anticipate.
+const MERGE_RETRY_RECHECK_THRESHOLD: u32 = 3;
+
 /// Activity log event type for stored PR review feedback payloads.
 ///
 /// Re-exported so the worker lifecycle layer can query for PR review feedback
@@ -85,6 +98,23 @@ impl CoordinatorActor {
         );
 
         for task in tasks_with_pr {
+            // ── Minimum-age guard ───────────────────────────────────────────
+            // Skip tasks that just entered pr_draft — GitHub needs a few
+            // seconds to register workflow check-runs for the new commit.
+            let first_seen = *self
+                .pr_draft_first_seen
+                .entry(task.id.clone())
+                .or_insert_with(StdInstant::now);
+            let age = first_seen.elapsed();
+            if age < Duration::from_secs(PR_DRAFT_MIN_AGE_SECS as u64) {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    age_secs = age.as_secs(),
+                    "PR poller: pr_draft task too young, waiting for check-runs to register"
+                );
+                continue;
+            }
+
             let pr_url = task.pr_url.as_deref().unwrap();
             let Some((owner, repo, pull_number)) = parse_pr_url(pr_url) else {
                 tracing::warn!(
@@ -120,6 +150,7 @@ impl CoordinatorActor {
                 self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
                     .await;
                 self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -137,6 +168,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -190,6 +222,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -207,6 +240,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
                 continue;
             }
 
@@ -221,6 +255,7 @@ impl CoordinatorActor {
                     self.apply_pr_transition(&task.id, TransitionAction::PrUndraft, None)
                         .await;
                     self.pr_status_cache.remove(&task.id);
+                    self.pr_draft_first_seen.remove(&task.id);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -299,6 +334,7 @@ impl CoordinatorActor {
                 self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
                     .await;
                 self.pr_status_cache.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
                 continue;
             }
 
@@ -316,6 +352,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
                 continue;
             }
 
@@ -378,21 +415,26 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
                 continue;
             }
 
             // ── CI checks on review PR (cached per head SHA) ──────────────────
+            // Only skip CI re-check if the SHA hasn't changed AND we previously
+            // confirmed all checks completed successfully.  If checks were still
+            // in-progress last time we looked, we must re-check.
             let sha_changed = self
                 .pr_status_cache
                 .get(&task.id)
                 .map(|cached| cached != &current_sha)
                 .unwrap_or(true);
 
-            if sha_changed {
-                self.pr_status_cache
-                    .insert(task.id.clone(), current_sha.clone());
+            if (sha_changed || !self.pr_status_cache.contains_key(&task.id))
+                && !checks.check_runs.is_empty()
+            {
+                    let all_completed =
+                        checks.check_runs.iter().all(|cr| cr.status == "completed");
 
-                if !checks.check_runs.is_empty() {
                     let failed_checks: Vec<&CheckRun> = checks
                         .check_runs
                         .iter()
@@ -429,9 +471,17 @@ impl CoordinatorActor {
                         )
                         .await;
                         self.pr_status_cache.remove(&task.id);
+                        self.merge_fail_count.remove(&task.id);
                         continue;
                     }
-                }
+
+                    // Only cache SHA once all checks have completed successfully.
+                    // If checks are still running, don't cache so we re-check
+                    // next tick.
+                    if all_completed {
+                        self.pr_status_cache
+                            .insert(task.id.clone(), current_sha.clone());
+                    }
             }
 
             // ── Merge eligibility check ───────────────────────────────────────
@@ -450,6 +500,7 @@ impl CoordinatorActor {
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
                 continue;
             }
 
@@ -492,16 +543,35 @@ impl CoordinatorActor {
                     self.apply_pr_transition(&task.id, TransitionAction::PrMerge, None)
                         .await;
                     self.pr_status_cache.remove(&task.id);
+                    self.merge_fail_count.remove(&task.id);
                 }
                 Err(e) => {
+                    let count = self
+                        .merge_fail_count
+                        .entry(task.id.clone())
+                        .or_insert(0);
+                    *count += 1;
                     tracing::warn!(
                         task_id = %task.short_id,
                         pr = pull_number,
+                        attempt = *count,
                         error = %e,
                         "PR poller: merge failed (will retry next tick)"
                     );
-                    // Don't transition — the merge may have been blocked by branch
-                    // protection requiring reviews. The poller will retry next tick.
+                    // After repeated failures, invalidate the CI cache so the
+                    // next tick re-checks whether checks actually passed.
+                    // This catches the case where CI failed after we cached
+                    // a "green" SHA.
+                    if *count >= MERGE_RETRY_RECHECK_THRESHOLD {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            "PR poller: {} consecutive merge failures, invalidating CI cache for re-check",
+                            *count
+                        );
+                        self.pr_status_cache.remove(&task.id);
+                        *count = 0;
+                    }
                 }
             }
         }
@@ -870,68 +940,145 @@ impl CoordinatorActor {
         owner: &str,
         repo: &str,
     ) {
-        let mut check_lines: Vec<String> = Vec::new();
+        let mut sections: Vec<String> = Vec::new();
 
-        for cr in failed_checks {
-            let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
-            check_lines.push(format!(
-                "- **{}** ({}): {}",
-                cr.name, conclusion, cr.html_url
-            ));
+        // Try to get rich job/step info from the Actions API.
+        // Parse run_id from the first failed check run's URL.
+        let run_id = failed_checks
+            .first()
+            .and_then(|cr| {
+                cr.html_url
+                    .split("/actions/runs/")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .and_then(|s| s.parse::<u64>().ok())
+            });
 
-            // Fetch annotations for this check run to surface actual error messages.
-            match gh_client
-                .get_check_run_annotations(owner, repo, cr.id)
-                .await
-            {
-                Ok(annotations) if !annotations.is_empty() => {
-                    for ann in &annotations {
-                        let title_part = ann
-                            .title
-                            .as_deref()
-                            .map(|t| format!(" ({})", t))
-                            .unwrap_or_default();
-                        check_lines.push(format!(
-                            "  - `{}` L{}-L{} [{}]{}: {}",
-                            ann.path,
-                            ann.start_line,
-                            ann.end_line,
-                            ann.annotation_level,
-                            title_part,
-                            ann.message,
+        let jobs = if let Some(rid) = run_id {
+            gh_client.list_run_jobs(owner, repo, rid).await.ok()
+        } else {
+            None
+        };
+
+        // Build the structural overview: workflow, jobs, failed steps.
+        if let Some(ref jobs) = jobs {
+            if let Some(workflow_name) = jobs.first().and_then(|j| j.workflow_name.as_deref()) {
+                sections.push(format!("**Workflow:** {workflow_name}"));
+            }
+
+            for job in jobs.iter().filter(|j| {
+                matches!(
+                    j.conclusion.as_deref(),
+                    Some("failure") | Some("timed_out") | Some("cancelled")
+                )
+            }) {
+                let conclusion = job.conclusion.as_deref().unwrap_or("unknown");
+                sections.push(format!("**Failed job:** {} ({})", job.name, conclusion));
+
+                let failed_steps: Vec<_> = job
+                    .steps
+                    .iter()
+                    .filter(|s| {
+                        matches!(
+                            s.conclusion.as_deref(),
+                            Some("failure") | Some("timed_out") | Some("cancelled")
+                        )
+                    })
+                    .collect();
+
+                if !failed_steps.is_empty() {
+                    for step in &failed_steps {
+                        let step_conclusion = step.conclusion.as_deref().unwrap_or("unknown");
+                        sections.push(format!(
+                            "**Failed step:** {} (step #{}, {})",
+                            step.name, step.number, step_conclusion
                         ));
                     }
                 }
-                Ok(_) => {
-                    // No annotations — the check run may use logs instead.
-                    check_lines.push("  - _(no annotations — check the Actions log)_".to_string());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id,
-                        check_run_id = cr.id,
-                        error = %e,
-                        "PR poller: failed to fetch check run annotations"
-                    );
-                    check_lines.push(format!("  - _(failed to fetch annotations: {})_", e));
+
+                sections.push(format!("Job URL: {}", job.html_url));
+            }
+        } else {
+            // Fallback: just list the check run names.
+            for cr in failed_checks {
+                let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
+                sections.push(format!("- **{}** ({}): {}", cr.name, conclusion, cr.html_url));
+            }
+        }
+
+        // Now add error details: annotations first, then job logs as fallback.
+        let mut has_annotations = false;
+        for cr in failed_checks {
+            if let Ok(annotations) = gh_client
+                .get_check_run_annotations(owner, repo, cr.id)
+                .await
+                && !annotations.is_empty()
+            {
+                has_annotations = true;
+                sections.push(format!("\n**Annotations for {}:**", cr.name));
+                for ann in &annotations {
+                    let title_part = ann
+                        .title
+                        .as_deref()
+                        .map(|t| format!(" ({})", t))
+                        .unwrap_or_default();
+                    sections.push(format!(
+                        "  - `{}` L{}-L{} [{}]{}: {}",
+                        ann.path,
+                        ann.start_line,
+                        ann.end_line,
+                        ann.annotation_level,
+                        title_part,
+                        ann.message,
+                    ));
                 }
             }
         }
 
+        // If no annotations, fetch the first failed job's log.
+        if !has_annotations
+            && let Some(ref jobs) = jobs
+        {
+            let failed_job = jobs.iter().find(|j| {
+                matches!(
+                    j.conclusion.as_deref(),
+                    Some("failure") | Some("timed_out") | Some("cancelled")
+                )
+            });
+            if let Some(job) = failed_job {
+                match gh_client.get_job_logs(owner, repo, job.id).await {
+                    Ok(raw_log) => {
+                        let snippet = Self::clean_and_truncate_log(&raw_log);
+                        sections.push(format!(
+                            "\n**Job log ({}**, truncated):\n```\n{}\n```",
+                            job.name, snippet
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            job_id = job.id,
+                            error = %e,
+                            "PR poller: failed to fetch job logs"
+                        );
+                    }
+                }
+            }
+        }
+
+        sections.push(format!(
+            "\nTo investigate, check the workflow file in `.github/workflows/` and the job log at the URL above.\n\nPR: {pr_url}",
+        ));
+
         let body = format!(
-            "**CI checks failed on PR** (commit `{sha}`)\n\n\
-             The following CI checks failed. Review the error details below and fix the failures before the PR can merge.\n\n\
-             {checks}\n\n\
-             PR: {pr_url}",
+            "**CI checks failed on PR** (commit `{sha}`)\n\n{sections}",
             sha = &sha[..sha.len().min(12)],
-            checks = check_lines.join("\n"),
-            pr_url = pr_url,
+            sections = sections.join("\n"),
         );
 
         let payload = serde_json::json!({ "body": body }).to_string();
         let task_repo = self.task_repo();
         if let Err(e) = task_repo
-            .log_activity(Some(task_id), "pr_poller", "system", "comment", &payload)
+            .log_activity(Some(task_id), "pr_poller", "verification", "comment", &payload)
             .await
         {
             tracing::warn!(
@@ -940,6 +1087,43 @@ impl CoordinatorActor {
                 "PR poller: failed to log CI failure comment"
             );
         }
+    }
+
+    /// Strip GitHub Actions noise from a raw job log and smart-truncate it.
+    ///
+    /// Removes ISO-8601 timestamp prefixes and `##[group]`/`##[endgroup]`
+    /// markers, then applies a 60/40 head+tail split so the worker sees
+    /// both initial context and the actual error output.
+    fn clean_and_truncate_log(raw_log: &str) -> String {
+        /// Maximum characters to include in the snippet.
+        const MAX_LOG_SNIPPET_CHARS: usize = 6000;
+
+        let cleaned: String = raw_log
+            .lines()
+            .map(|line| {
+                // Strip leading ISO-8601 timestamp prefix
+                line.get(..29)
+                    .filter(|prefix| {
+                        prefix.len() >= 20
+                            && prefix.as_bytes().first() == Some(&b'2')
+                            && prefix.contains('T')
+                            && prefix.ends_with(' ')
+                    })
+                    .map(|_| &line[29..])
+                    .unwrap_or(line)
+            })
+            // Drop GitHub Actions command markers but keep their content
+            .filter(|line| !line.starts_with("##[endgroup]"))
+            .map(|line| {
+                line.strip_prefix("##[group]")
+                    .or_else(|| line.strip_prefix("##[error]"))
+                    .or_else(|| line.strip_prefix("##[warning]"))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        crate::truncate::smart_truncate(&cleaned, MAX_LOG_SNIPPET_CHARS)
     }
 }
 

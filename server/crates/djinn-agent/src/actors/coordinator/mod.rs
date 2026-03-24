@@ -251,6 +251,16 @@ struct CoordinatorActor {
     /// Used by the PR poller to skip redundant CI check-run queries when the
     /// PR's head commit has not changed since the previous poll cycle.
     pr_status_cache: HashMap<String, String>,
+    /// Tracks when each task was first seen in `pr_draft` status.
+    ///
+    /// Used by the PR poller to enforce a minimum age before checking CI,
+    /// preventing a race where GitHub hasn't registered workflow check-runs
+    /// yet and the poller incorrectly concludes CI has passed.
+    pr_draft_first_seen: HashMap<String, StdInstant>,
+    /// Consecutive merge failure count per task.  After
+    /// `MERGE_RETRY_RECHECK_THRESHOLD` failures, the poller invalidates
+    /// the CI SHA cache so it re-checks whether CI actually passed.
+    merge_fail_count: HashMap<String, u32>,
     /// Task IDs for which a stall-kill has already been issued.  Prevents
     /// repeated kill + activity-log spam while the async lifecycle cleanup
     /// is still in progress (the DB session record stays `running` until
@@ -312,6 +322,8 @@ impl CoordinatorActor {
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
             stall_killed: HashSet::new(),
             dispatched: 0,
             recovered: 0,

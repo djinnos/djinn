@@ -102,6 +102,22 @@ pub struct ActionsJob {
     pub status: String,
     pub conclusion: Option<String>,
     pub html_url: String,
+    /// The workflow file name (e.g. `quality-gate.yml`).
+    #[serde(default)]
+    pub workflow_name: Option<String>,
+    /// Individual steps within the job.
+    #[serde(default)]
+    pub steps: Vec<ActionsJobStep>,
+}
+
+/// A single step within a GitHub Actions job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionsJobStep {
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    /// 1-based step number within the job.
+    pub number: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
