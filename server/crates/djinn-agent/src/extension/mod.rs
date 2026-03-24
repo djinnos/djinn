@@ -144,6 +144,8 @@ struct TaskUpdateParams {
     acceptance_criteria: Option<Vec<serde_json::Value>>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
+    blocked_by_add: Option<Vec<String>>,
+    blocked_by_remove: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -705,7 +707,7 @@ async fn call_task_update(
         .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
         .unwrap_or_else(|| task.acceptance_criteria.clone());
 
-    let updated = repo
+    let mut updated = repo
         .update(
             &task.id,
             title,
@@ -732,11 +734,39 @@ async fn call_task_update(
             refs.retain(|r| !remove.contains(r));
         }
         let refs_json = serde_json::to_string(&refs).unwrap_or_else(|_| "[]".to_string());
-        let out = repo
+        updated = repo
             .update_memory_refs(&updated.id, &refs_json)
             .await
             .map_err(|e| e.to_string())?;
-        return Ok(task_to_value(&out));
+    }
+
+    // Handle blocked_by_add / blocked_by_remove
+    if p.blocked_by_add.is_some() || p.blocked_by_remove.is_some() {
+        let mut add_ids = Vec::new();
+        if let Some(refs) = p.blocked_by_add {
+            for blocker_ref in &refs {
+                let blocker = repo
+                    .resolve(blocker_ref)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("blocker task not found: {blocker_ref}"))?;
+                add_ids.push(blocker.id);
+            }
+        }
+        let mut remove_ids = Vec::new();
+        if let Some(refs) = p.blocked_by_remove {
+            for blocker_ref in &refs {
+                let blocker = repo
+                    .resolve(blocker_ref)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("blocker task not found: {blocker_ref}"))?;
+                remove_ids.push(blocker.id);
+            }
+        }
+        repo.update_blockers_atomic(&updated.id, &add_ids, &remove_ids)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     Ok(task_to_value(&updated))
