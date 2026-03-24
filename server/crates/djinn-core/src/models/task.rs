@@ -18,8 +18,9 @@ pub enum IssueType {
     Spike,
     /// Open-ended research — simple lifecycle (open → in_progress → closed).
     Research,
-    /// Epic/task decomposition planning — simple lifecycle, routed to Planner.
-    Decomposition,
+    /// Epic/task planning — simple lifecycle, routed to Planner.
+    /// Covers wave decomposition, epic metadata updates, memory-ref attachment, and re-prioritization.
+    Planning,
     /// Architecture/code review — simple lifecycle, routed to Architect.
     Review,
 }
@@ -32,7 +33,7 @@ impl IssueType {
             Self::Bug => "bug",
             Self::Spike => "spike",
             Self::Research => "research",
-            Self::Decomposition => "decomposition",
+            Self::Planning => "planning",
             Self::Review => "review",
         }
     }
@@ -44,7 +45,9 @@ impl IssueType {
             "bug" => Ok(Self::Bug),
             "spike" => Ok(Self::Spike),
             "research" => Ok(Self::Research),
-            "decomposition" => Ok(Self::Decomposition),
+            "planning" => Ok(Self::Planning),
+            // Backward compat: existing DB rows may still say "decomposition".
+            "decomposition" => Ok(Self::Planning),
             "review" => Ok(Self::Review),
             other => Err(Error::Internal(format!("unknown issue_type: {other}"))),
         }
@@ -55,7 +58,7 @@ impl IssueType {
     pub fn uses_simple_lifecycle(&self) -> bool {
         matches!(
             self,
-            Self::Spike | Self::Research | Self::Decomposition | Self::Review
+            Self::Spike | Self::Research | Self::Planning | Self::Review
         )
     }
 }

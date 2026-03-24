@@ -625,12 +625,12 @@ impl CoordinatorActor {
                 );
                 self.publish_status();
             }
-            // Epic created → create a decomposition task for the Planner (wave 1).
+            // Epic created → create a planning task for the Planner (wave 1).
             ("epic", "created") => {
                 let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;
                 };
-                self.maybe_create_decomposition_task(&epic).await;
+                self.maybe_create_planning_task(&epic).await;
             }
             ("task", "created") | ("task", "updated") => {
                 let Some(task_payload) = envelope
@@ -668,12 +668,12 @@ impl CoordinatorActor {
                     self.dispatch_ready_tasks(Some(&task.project_id)).await;
                 }
                 // Batch-completion check: when a task closes, check if all
-                // non-decomposition worker tasks under the epic are closed
+                // non-planning worker tasks under the epic are closed
                 // (AC5/AC6 — wave-based planning).
                 if task.status == "closed"
                     && let Some(ref epic_id) = task.epic_id
                 {
-                    self.maybe_create_next_wave_decomposition(epic_id, &task.project_id)
+                    self.maybe_create_next_wave_planning(epic_id, &task.project_id)
                         .await;
                 }
             }
@@ -1770,7 +1770,7 @@ mod tests {
             let open_decomp: Vec<_> = tasks
                 .into_iter()
                 .filter(|t| {
-                    t.issue_type == "decomposition"
+                    matches!(t.issue_type.as_str(), "planning" | "decomposition")
                         && matches!(t.status.as_str(), "open" | "in_progress")
                 })
                 .collect();
@@ -1906,16 +1906,16 @@ mod tests {
 
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
-        let open_decomp_count = tasks
+        let open_planning_count = tasks
             .iter()
             .filter(|t| {
-                t.issue_type == "decomposition"
+                matches!(t.issue_type.as_str(), "planning" | "decomposition")
                     && matches!(t.status.as_str(), "open" | "in_progress")
             })
             .count();
         assert_eq!(
-            open_decomp_count, 1,
-            "duplicate epic_created events should not create duplicate decomposition tasks"
+            open_planning_count, 1,
+            "duplicate epic_created events should not create duplicate planning tasks"
         );
     }
 

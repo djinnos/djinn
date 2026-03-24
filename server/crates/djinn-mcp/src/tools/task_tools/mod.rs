@@ -127,7 +127,7 @@ fn validate_comment_request(request: &CommentTaskRequest) -> Result<(), ErrorRes
 impl DjinnMcpServer {
     /// Create a new work item under an epic.
     #[tool(
-        description = "Create a new work item (task, feature, bug, spike, research, decomposition, or review) under an epic. Accepts epic_id as UUID or short_id. Use blocked_by to set blocker dependencies atomically at creation. Spike/research/decomposition/review use a simple lifecycle (open → in_progress → closed). acceptance_criteria is required for task/feature/bug types."
+        description = "Create a new work item (task, feature, bug, spike, research, planning, or review) under an epic. Accepts epic_id as UUID or short_id. Use blocked_by to set blocker dependencies atomically at creation. Spike/research/planning/review use a simple lifecycle (open → in_progress → closed). acceptance_criteria is required for task/feature/bug types."
     )]
     pub async fn task_create(
         &self,

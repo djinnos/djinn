@@ -1,6 +1,6 @@
 // Coordinator tick rules (ADR-034):
-//   (1) Spike/research task closure → create decomposition task for Planner.
-//   (2) Batch completion (all worker tasks closed under open epic) → new decomposition task.
+//   (1) Spike/research task closure → create planning task for Planner.
+//   (2) Batch completion (all worker tasks closed under open epic) → new planning task.
 //   (3) Architect patrol: scheduled every 5 min, skipped when no open epics.
 //   (4) Epic throughput: tasks merged per hour per epic (rolling window, in-memory).
 //
@@ -36,10 +36,10 @@ impl CoordinatorActor {
     /// Called when any task transitions to `closed`.
     ///
     /// Checks the two epic-level completion rules:
-    /// 1. Spike/research closure → decomposition task for Planner.
-    /// 2. All worker tasks closed under an open epic → decomposition task for Planner.
+    /// 1. Spike/research closure → planning task for Planner.
+    /// 2. All worker tasks closed under an open epic → planning task for Planner.
     ///
-    /// Deduplicates by checking whether an open decomposition task already exists.
+    /// Deduplicates by checking whether an open planning task already exists.
     pub(super) async fn on_task_closed(&mut self, task: &djinn_core::models::Task) {
         let Some(epic_id) = task.epic_id.as_deref() else {
             return;
@@ -65,8 +65,8 @@ impl CoordinatorActor {
         let is_spike_or_research = matches!(task.issue_type.as_str(), "spike" | "research");
 
         if is_spike_or_research {
-            if !self.open_decomposition_exists(&task_repo, epic_id).await {
-                self.create_decomposition_task_by_ids(
+            if !self.open_planning_task_exists(&task_repo, epic_id).await {
+                self.create_planning_task_by_ids(
                     &task_repo,
                     epic_id,
                     &task.project_id,
@@ -77,11 +77,11 @@ impl CoordinatorActor {
             return; // Rule 1 fires; skip rule 2 for this event.
         }
 
-        // Rule 2: Batch completion — all non-decomposition/review tasks closed.
-        // (Decomposition tasks themselves don't trigger further decomposition.)
-        let is_decomposition_or_review =
-            matches!(task.issue_type.as_str(), "decomposition" | "review");
-        if is_decomposition_or_review {
+        // Rule 2: Batch completion — all non-planning/review tasks closed.
+        // (Planning tasks themselves don't trigger further planning.)
+        let is_planning_or_review =
+            matches!(task.issue_type.as_str(), "planning" | "decomposition" | "review");
+        if is_planning_or_review {
             return;
         }
 
@@ -98,10 +98,10 @@ impl CoordinatorActor {
             }
         };
 
-        // Worker tasks = not decomposition / review.
+        // Worker tasks = not planning / review.
         let worker_tasks: Vec<_> = all_tasks
             .iter()
-            .filter(|t| !matches!(t.issue_type.as_str(), "decomposition" | "review"))
+            .filter(|t| !matches!(t.issue_type.as_str(), "planning" | "decomposition" | "review"))
             .collect();
 
         if worker_tasks.is_empty() {
@@ -124,9 +124,9 @@ impl CoordinatorActor {
 
         if all_closed
             && !any_in_progress
-            && !self.open_decomposition_exists(&task_repo, epic_id).await
+            && !self.open_planning_task_exists(&task_repo, epic_id).await
         {
-            self.create_decomposition_task_by_ids(
+            self.create_planning_task_by_ids(
                 &task_repo,
                 epic_id,
                 &task.project_id,
@@ -136,8 +136,8 @@ impl CoordinatorActor {
         }
     }
 
-    /// Returns `true` if there is already an open `decomposition` task under the epic.
-    async fn open_decomposition_exists(
+    /// Returns `true` if there is already an open `planning` task under the epic.
+    async fn open_planning_task_exists(
         &self,
         task_repo: &djinn_db::TaskRepository,
         epic_id: &str,
@@ -145,14 +145,14 @@ impl CoordinatorActor {
         match task_repo.list_by_epic(epic_id).await {
             Ok(tasks) => tasks
                 .iter()
-                .any(|t| t.issue_type == IssueType::Decomposition.as_str() && t.status != "closed"),
+                .any(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition") && t.status != "closed"),
             Err(_) => false,
         }
     }
 
-    /// Create a decomposition task for the Planner under the given epic (by ID).
+    /// Create a planning task for the Planner under the given epic (by ID).
     /// Used by spike/research and batch-completion rules that already hold the IDs.
-    async fn create_decomposition_task_by_ids(
+    async fn create_planning_task_by_ids(
         &self,
         task_repo: &djinn_db::TaskRepository,
         epic_id: &str,
@@ -165,9 +165,9 @@ impl CoordinatorActor {
                 project_id,
                 Some(epic_id),
                 &title,
-                "Decompose the epic into the next wave of implementation tasks. Review completed work and identify what remains.",
+                "Plan the next wave of work for this epic. Review completed work, update the roadmap, and create 3–5 tasks.",
                 "",
-                IssueType::Decomposition.as_str(),
+                IssueType::Planning.as_str(),
                 0,
                 "system",
                 Some("open"),
@@ -180,7 +180,7 @@ impl CoordinatorActor {
                     epic_id,
                     task_short_id = %t.short_id,
                     trigger,
-                    "CoordinatorActor: created decomposition task"
+                    "CoordinatorActor: created planning task"
                 );
             }
             Err(e) => {
@@ -188,7 +188,7 @@ impl CoordinatorActor {
                     epic_id,
                     trigger,
                     error = %e,
-                    "CoordinatorActor: failed to create decomposition task"
+                    "CoordinatorActor: failed to create planning task"
                 );
             }
         }
@@ -339,10 +339,10 @@ mod tests {
             .unwrap();
     }
 
-    fn decomposition_count(tasks: &[djinn_core::models::Task]) -> usize {
+    fn planning_count(tasks: &[djinn_core::models::Task]) -> usize {
         tasks
             .iter()
-            .filter(|t| t.issue_type == "decomposition" && t.status != "closed")
+            .filter(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition") && t.status != "closed")
             .count()
     }
 
@@ -367,9 +367,9 @@ mod tests {
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
-            decomposition_count(&tasks),
+            planning_count(&tasks),
             1,
-            "spike closure should create exactly one decomposition task"
+            "spike closure should create exactly one planning task"
         );
     }
 
@@ -392,9 +392,9 @@ mod tests {
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
-            decomposition_count(&tasks),
+            planning_count(&tasks),
             1,
-            "research closure should create one decomposition task"
+            "research closure should create one planning task"
         );
     }
 
@@ -406,13 +406,13 @@ mod tests {
         let epic = make_epic(&db, &project.id, &tx).await;
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-        // Pre-create an open decomposition task.
+        // Pre-create an open planning task.
         create_task(
             &db,
             &epic.id,
             &project.id,
             "Existing plan",
-            "decomposition",
+            "planning",
             &tx,
         )
         .await;
@@ -425,9 +425,9 @@ mod tests {
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
-            decomposition_count(&tasks),
+            planning_count(&tasks),
             1,
-            "should not create a duplicate decomposition task when one already exists"
+            "should not create a duplicate planning task when one already exists"
         );
     }
 
@@ -452,9 +452,9 @@ mod tests {
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
-            decomposition_count(&tasks),
+            planning_count(&tasks),
             0,
-            "partial completion should not create decomposition task"
+            "partial completion should not create planning task"
         );
 
         // Close t2 — batch complete now.
@@ -463,9 +463,9 @@ mod tests {
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
-            decomposition_count(&tasks),
+            planning_count(&tasks),
             1,
-            "batch completion should create exactly one decomposition task"
+            "batch completion should create exactly one planning task"
         );
     }
 
@@ -478,13 +478,13 @@ mod tests {
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
         let t1 = create_task(&db, &epic.id, &project.id, "Task 1", "task", &tx).await;
-        // Pre-existing open decomposition task.
+        // Pre-existing open planning task.
         create_task(
             &db,
             &epic.id,
             &project.id,
             "Existing plan",
-            "decomposition",
+            "planning",
             &tx,
         )
         .await;
@@ -495,9 +495,9 @@ mod tests {
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
-            decomposition_count(&tasks),
+            planning_count(&tasks),
             1,
-            "should not create duplicate decomposition on batch completion"
+            "should not create duplicate planning task on batch completion"
         );
     }
 
@@ -523,9 +523,9 @@ mod tests {
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
-            decomposition_count(&tasks),
+            planning_count(&tasks),
             0,
-            "closed epic should not trigger decomposition task"
+            "closed epic should not trigger planning task"
         );
     }
 
