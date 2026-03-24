@@ -128,10 +128,11 @@ jobs:
     steps:
       - name: Check results
         run: |
-          if [[ "${{ needs.server.result }}" == "failure" || \
-                "${{ needs.desktop-frontend.result }}" == "failure" || \
-                "${{ needs.desktop-tauri.result }}" == "failure" ]]; then
-            echo "One or more checks failed"
-            exit 1
-          fi
+          results=("${{ needs.server.result }}" "${{ needs.desktop-frontend.result }}" "${{ needs.desktop-tauri.result }}")
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              echo "Quality gate failed: found result '$r'"
+              exit 1
+            fi
+          done
           echo "All checks passed (or were skipped)"
