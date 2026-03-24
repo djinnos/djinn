@@ -5862,7 +5862,7 @@ expression: signatures
           "type": "string"
         },
         "issue_type": {
-          "description": "Task type: \"task\" (default), \"feature\", \"bug\", \"spike\", \"research\", \"decomposition\", or \"review\".\nSpike, research, decomposition, and review use a simple lifecycle: open → in_progress → closed.\nDecomposition tasks are routed to the Planner; spike and review tasks are routed to the Architect.",
+          "description": "Task type: \"task\" (default), \"feature\", \"bug\", \"spike\", \"research\", \"planning\", or \"review\".\nSpike, research, planning, and review use a simple lifecycle: open → in_progress → closed.\nPlanning tasks are routed to the Planner; spike and review tasks are routed to the Architect.",
           "nullable": true,
           "type": "string"
         },
