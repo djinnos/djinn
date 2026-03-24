@@ -374,14 +374,13 @@ impl DjinnMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::*;
     use crate::state::stubs::test_mcp_state;
     use djinn_db::ProjectRepository;
     use tempfile::TempDir;
 
     async fn test_server() -> (DjinnMcpServer, TempDir, String) {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let db = djinn_db::Database::open_in_memory().await.expect("db");
+        let db = djinn_db::Database::open_in_memory().expect("db");
         let project_repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         let project = project_repo
             .create("agent-tools", tempdir.path().to_str().expect("path"))
@@ -450,6 +449,12 @@ mod tests {
             agents[0].get("agent_name").and_then(|value| value.as_str()),
             Some("Shared Agent")
         );
-        assert!(agents[0].get("learned_prompt").is_some());
+        assert!(
+            agents[0]
+                .get("success_rate")
+                .and_then(|value| value.as_f64())
+                .is_some(),
+            "metrics entry should preserve numeric payload fields"
+        );
     }
 }
