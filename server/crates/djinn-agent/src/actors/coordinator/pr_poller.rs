@@ -432,56 +432,55 @@ impl CoordinatorActor {
             if (sha_changed || !self.pr_status_cache.contains_key(&task.id))
                 && !checks.check_runs.is_empty()
             {
-                    let all_completed =
-                        checks.check_runs.iter().all(|cr| cr.status == "completed");
+                let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
 
-                    let failed_checks: Vec<&CheckRun> = checks
-                        .check_runs
-                        .iter()
-                        .filter(|cr| {
-                            matches!(
-                                cr.conclusion.as_deref(),
-                                Some("failure") | Some("timed_out") | Some("cancelled")
-                            )
-                        })
-                        .collect();
-
-                    if !failed_checks.is_empty() {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            pr = pull_number,
-                            sha = %current_sha,
-                            failed_count = failed_checks.len(),
-                            "PR poller: CI check failed on review PR → reopening task for rework"
-                        );
-                        self.apply_pr_transition(
-                            &task.id,
-                            TransitionAction::PrCiFailed,
-                            Some("CI checks failed on PR"),
+                let failed_checks: Vec<&CheckRun> = checks
+                    .check_runs
+                    .iter()
+                    .filter(|cr| {
+                        matches!(
+                            cr.conclusion.as_deref(),
+                            Some("failure") | Some("timed_out") | Some("cancelled")
                         )
-                        .await;
-                        self.log_ci_failure_comment(
-                            &task.id,
-                            &failed_checks,
-                            pr_url,
-                            &current_sha,
-                            gh_client,
-                            &owner,
-                            &repo,
-                        )
-                        .await;
-                        self.pr_status_cache.remove(&task.id);
-                        self.merge_fail_count.remove(&task.id);
-                        continue;
-                    }
+                    })
+                    .collect();
 
-                    // Only cache SHA once all checks have completed successfully.
-                    // If checks are still running, don't cache so we re-check
-                    // next tick.
-                    if all_completed {
-                        self.pr_status_cache
-                            .insert(task.id.clone(), current_sha.clone());
-                    }
+                if !failed_checks.is_empty() {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        sha = %current_sha,
+                        failed_count = failed_checks.len(),
+                        "PR poller: CI check failed on review PR → reopening task for rework"
+                    );
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::PrCiFailed,
+                        Some("CI checks failed on PR"),
+                    )
+                    .await;
+                    self.log_ci_failure_comment(
+                        &task.id,
+                        &failed_checks,
+                        pr_url,
+                        &current_sha,
+                        gh_client,
+                        &owner,
+                        &repo,
+                    )
+                    .await;
+                    self.pr_status_cache.remove(&task.id);
+                    self.merge_fail_count.remove(&task.id);
+                    continue;
+                }
+
+                // Only cache SHA once all checks have completed successfully.
+                // If checks are still running, don't cache so we re-check
+                // next tick.
+                if all_completed {
+                    self.pr_status_cache
+                        .insert(task.id.clone(), current_sha.clone());
+                }
             }
 
             // ── Merge eligibility check ───────────────────────────────────────
@@ -546,10 +545,7 @@ impl CoordinatorActor {
                     self.merge_fail_count.remove(&task.id);
                 }
                 Err(e) => {
-                    let count = self
-                        .merge_fail_count
-                        .entry(task.id.clone())
-                        .or_insert(0);
+                    let count = self.merge_fail_count.entry(task.id.clone()).or_insert(0);
                     *count += 1;
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -944,15 +940,13 @@ impl CoordinatorActor {
 
         // Try to get rich job/step info from the Actions API.
         // Parse run_id from the first failed check run's URL.
-        let run_id = failed_checks
-            .first()
-            .and_then(|cr| {
-                cr.html_url
-                    .split("/actions/runs/")
-                    .nth(1)
-                    .and_then(|rest| rest.split('/').next())
-                    .and_then(|s| s.parse::<u64>().ok())
-            });
+        let run_id = failed_checks.first().and_then(|cr| {
+            cr.html_url
+                .split("/actions/runs/")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .and_then(|s| s.parse::<u64>().ok())
+        });
 
         let jobs = if let Some(rid) = run_id {
             gh_client.list_run_jobs(owner, repo, rid).await.ok()
@@ -1002,7 +996,10 @@ impl CoordinatorActor {
             // Fallback: just list the check run names.
             for cr in failed_checks {
                 let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
-                sections.push(format!("- **{}** ({}): {}", cr.name, conclusion, cr.html_url));
+                sections.push(format!(
+                    "- **{}** ({}): {}",
+                    cr.name, conclusion, cr.html_url
+                ));
             }
         }
 
@@ -1047,7 +1044,13 @@ impl CoordinatorActor {
         let payload = serde_json::json!({ "body": body }).to_string();
         let task_repo = self.task_repo();
         if let Err(e) = task_repo
-            .log_activity(Some(task_id), "pr_poller", "verification", "comment", &payload)
+            .log_activity(
+                Some(task_id),
+                "pr_poller",
+                "verification",
+                "comment",
+                &payload,
+            )
             .await
         {
             tracing::warn!(
