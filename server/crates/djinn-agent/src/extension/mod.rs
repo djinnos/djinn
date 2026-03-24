@@ -39,7 +39,10 @@ use djinn_provider::github_api::GitHubApiClient;
 use djinn_provider::repos::CredentialRepository;
 use rmcp::Json;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -2985,7 +2988,7 @@ mod tests {
     };
     use djinn_core::events::EventBus;
     use djinn_db::NoteRepository;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tokio_util::sync::CancellationToken;
 
     pub(crate) mod fuzzy_replace_tests {
