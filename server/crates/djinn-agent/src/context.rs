@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::{McpState, bridge, tools::task_tools::ErrorResponse};
 use tokio::sync::Mutex;
@@ -43,7 +44,7 @@ pub struct AgentContext {
 
 struct AgentSyncOps;
 
-#[async_trait::async_trait]
+#[async_trait]
 impl bridge::SyncOps for AgentSyncOps {
     async fn enable_project(&self, _: &str) -> Result<(), String> {
         Err("sync not available in djinn-agent task-mutation bridge".into())
@@ -76,7 +77,7 @@ struct AgentRuntimeOps {
     health_tracker: HealthTracker,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl bridge::RuntimeOps for AgentRuntimeOps {
     async fn apply_settings(&self, _: &djinn_core::models::DjinnSettings) -> Result<(), String> {
         Ok(())
@@ -106,7 +107,7 @@ struct AgentGitOps {
     git_actors: Arc<Mutex<HashMap<PathBuf, GitActorHandle>>>,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl bridge::GitOps for AgentGitOps {
     async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
         let mut map = self.git_actors.lock().await;
@@ -114,7 +115,7 @@ impl bridge::GitOps for AgentGitOps {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl bridge::LspOps for LspManager {
     async fn warnings(&self) -> Vec<bridge::LspWarning> {
         self.warnings()

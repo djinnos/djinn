@@ -35,15 +35,24 @@ struct IncomingToolCall {
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
+/// Supported djinn-agent → djinn-mcp integration seam for shared task mutation ops.
+///
+/// External callers should bridge their existing runtime context through
+/// [`AgentContext::to_mcp_state`] and resolve the project id with
+/// [`AgentContext::require_project_id_for_task_ops`] using the session/worktree root
+/// rather than a crate-local source path. This preserves MCP-side project resolution
+/// semantics and lets shared mutation helpers return the same public response shapes
+/// that agent dispatch tests assert.
 fn acceptance_criterion_to_string(value: &serde_json::Value) -> String {
-    value
-        .get("criterion")
-        .and_then(|criterion| criterion.as_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| match value {
-            serde_json::Value::String(text) => text.clone(),
-            _ => value.to_string(),
-        })
+    match value {
+        serde_json::Value::Object(map) => map
+            .get("criterion")
+            .and_then(|criterion| criterion.as_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| value.to_string()),
+        serde_json::Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    }
 }
 
 fn task_response_to_value(
@@ -99,6 +108,7 @@ where
         let path_str = worktree_path.to_string_lossy();
         repo.resolve(&path_str).await.ok().flatten()
     };
+    let worktree_project_path = worktree_path.display().to_string();
 
     if let Some(schemas) = allowed_schemas
         && !is_tool_allowed_for_schemas(schemas, &call.name)
@@ -112,13 +122,18 @@ where
     match call.name.as_str() {
         "task_list" => call_task_list(state, &call.arguments, project_id.as_deref()).await,
         "task_show" => call_task_show(state, &call.arguments).await,
-        "task_create" => call_task_create(state, &call.arguments).await,
-        "task_update" => call_task_update(state, &call.arguments).await,
+        "task_create" => call_task_create(state, &call.arguments, &worktree_project_path).await,
+        "task_update" => call_task_update(state, &call.arguments, &worktree_project_path).await,
         "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
-        "task_comment_add" => call_task_comment_add(state, &call.arguments, session_role).await,
+        "task_comment_add" => {
+            call_task_comment_add(state, &call.arguments, session_role, &worktree_project_path)
+                .await
+        }
         "request_lead" => call_request_lead(state, &call.arguments).await,
         "request_architect" => call_request_architect(state, &call.arguments).await,
-        "task_transition" => call_task_transition(state, &call.arguments).await,
+        "task_transition" => {
+            call_task_transition(state, &call.arguments, &worktree_project_path).await
+        }
         "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
         "task_archive_activity" => call_task_archive_activity(state, &call.arguments).await,
         "task_reset_counters" => call_task_reset_counters(state, &call.arguments).await,
@@ -619,6 +634,7 @@ async fn call_epic_tasks(
 async fn call_task_create(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: TaskCreateParams = parse_args(arguments)?;
     let status = match p.status.as_deref() {
@@ -628,8 +644,7 @@ async fn call_task_create(
             return Err(format!("invalid status: {other:?} (expected open)"));
         }
     };
-    let project_path = resolve_project_path(None);
-    let project_id = project_id_for_path(state, &project_path).await?;
+    let project_id = project_id_for_path(state, project_path).await?;
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     let Json(response) = shared_create_task(
         &server,
@@ -658,10 +673,10 @@ async fn call_task_create(
 async fn call_task_update(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: TaskUpdateParams = parse_args(arguments)?;
-    let project_path = resolve_project_path(None);
-    let project_id = project_id_for_path(state, &project_path).await?;
+    let project_id = project_id_for_path(state, project_path).await?;
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     let Json(response) = shared_update_task(
         &server,
@@ -871,11 +886,11 @@ async fn call_task_comment_add(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     session_role: Option<&str>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: TaskCommentAddParams = parse_args(arguments)?;
     let default_role = session_role.unwrap_or("system");
-    let project_path = resolve_project_path(None);
-    let project_id = project_id_for_path(state, &project_path).await?;
+    let project_id = project_id_for_path(state, project_path).await?;
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     let Json(response) = shared_add_task_comment(
         &server,
@@ -2154,6 +2169,7 @@ struct TaskResetCountersParams {
 async fn call_task_transition(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     use djinn_core::models::{TaskStatus, TransitionAction};
     let p: TaskTransitionParams = parse_args(arguments)?;
@@ -2249,8 +2265,7 @@ async fn call_task_transition(
         .map(TaskStatus::parse)
         .transpose()
         .map_err(|e| e.to_string())?;
-    let project_path = resolve_project_path(None);
-    let project_id = project_id_for_path(state, &project_path).await?;
+    let project_id = project_id_for_path(state, project_path).await?;
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     let Json(response) = shared_transition_task(
         &server,
@@ -3350,8 +3365,9 @@ mod tests {
                 .get("acceptance_criteria")
                 .and_then(|v| v.as_array())
                 .and_then(|items| items.first())
-                .and_then(|item| item.get("criterion"))
-                .and_then(|v| v.as_str()),
+                .and_then(|item| item
+                    .as_str()
+                    .or_else(|| item.get("criterion").and_then(|v| v.as_str()))),
             Some("first criterion")
         );
         assert_eq!(
@@ -3438,8 +3454,9 @@ mod tests {
                 .get("acceptance_criteria")
                 .and_then(|v| v.as_array())
                 .and_then(|items| items.first())
-                .and_then(|item| item.get("criterion"))
-                .and_then(|v| v.as_str()),
+                .and_then(|item| item
+                    .as_str()
+                    .or_else(|| item.get("criterion").and_then(|v| v.as_str()))),
             Some("updated criterion")
         );
         assert_eq!(
