@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3815
+assertion_line: 3782
 expression: tool_schemas_architect()
 ---
 [
@@ -429,112 +429,6 @@ expression: tool_schemas_architect()
     "name": "task_update"
   },
   {
-    "description": "Add a comment or strategic observation to a task's activity log.",
-    "inputSchema": {
-      "properties": {
-        "body": {
-          "description": "Comment body to add to the activity log",
-          "type": "string"
-        },
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "body"
-      ],
-      "type": "object"
-    },
-    "name": "task_comment_add"
-  },
-  {
-    "description": "Transition a task using a named workflow action.",
-    "inputSchema": {
-      "properties": {
-        "action": {
-          "description": "Transition action name",
-          "type": "string"
-        },
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "action"
-      ],
-      "type": "object"
-    },
-    "name": "task_transition"
-  },
-  {
-    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_delete_branch"
-  },
-  {
-    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_archive_activity"
-  },
-  {
-    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_reset_counters"
-  },
-  {
-    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_kill_session"
-  },
-  {
     "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
     "inputSchema": {
       "properties": {
@@ -626,6 +520,48 @@ expression: tool_schemas_architect()
     "name": "epic_tasks"
   },
   {
+    "description": "Transition a task using a named workflow action.",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "description": "Transition action name",
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "action"
+      ],
+      "type": "object"
+    },
+    "name": "task_transition"
+  },
+  {
+    "description": "Add a comment or strategic observation to a task's activity log.",
+    "inputSchema": {
+      "properties": {
+        "body": {
+          "description": "Comment body to add to the activity log",
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "body"
+      ],
+      "type": "object"
+    },
+    "name": "task_comment_add"
+  },
+  {
     "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
     "inputSchema": {
       "properties": {
@@ -663,35 +599,6 @@ expression: tool_schemas_architect()
     "name": "agent_metrics"
   },
   {
-    "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.",
-    "inputSchema": {
-      "properties": {
-        "agent_id": {
-          "description": "Agent UUID or name to amend",
-          "type": "string"
-        },
-        "amendment": {
-          "description": "Amendment text to append to learned_prompt",
-          "type": "string"
-        },
-        "metrics_snapshot": {
-          "description": "JSON string of current metrics for the history record",
-          "type": "string"
-        },
-        "project": {
-          "description": "Absolute project path",
-          "type": "string"
-        }
-      },
-      "required": [
-        "agent_id",
-        "amendment"
-      ],
-      "type": "object"
-    },
-    "name": "agent_amend_prompt"
-  },
-  {
     "description": "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.",
     "inputSchema": {
       "properties": {
@@ -723,6 +630,99 @@ expression: tool_schemas_architect()
       "type": "object"
     },
     "name": "agent_create"
+  },
+  {
+    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_delete_branch"
+  },
+  {
+    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_archive_activity"
+  },
+  {
+    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_reset_counters"
+  },
+  {
+    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_kill_session"
+  },
+  {
+    "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "description": "Agent UUID or name to amend",
+          "type": "string"
+        },
+        "amendment": {
+          "description": "Amendment text to append to learned_prompt",
+          "type": "string"
+        },
+        "metrics_snapshot": {
+          "description": "JSON string of current metrics for the history record",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "amendment"
+      ],
+      "type": "object"
+    },
+    "name": "agent_amend_prompt"
   },
   {
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",

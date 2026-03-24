@@ -4,12 +4,7 @@ use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use shared_schemas::{
-    tool_epic_show, tool_epic_tasks, tool_epic_update, tool_memory_build_context, tool_memory_list,
-    tool_memory_read, tool_memory_search, tool_role_create, tool_role_metrics,
-    tool_task_activity_list, tool_task_blocked_list, tool_task_comment_add, tool_task_create,
-    tool_task_list, tool_task_show, tool_task_transition, tool_task_update,
-};
+use shared_schemas::{shared_base_tool_schemas, shared_pm_tool_schemas, tool_task_transition};
 
 use super::sandbox;
 use crate::context::AgentContext;
@@ -2748,14 +2743,7 @@ fn tool_output_grep() -> RmcpTool {
 }
 
 fn base_tool_schemas() -> Vec<serde_json::Value> {
-    let mut tool_values = vec![
-        serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
-        serde_json::to_value(tool_task_list()).expect("serialize tool_task_list"),
-        serde_json::to_value(tool_task_activity_list()).expect("serialize tool_task_activity_list"),
-        serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
-        serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
-        serde_json::to_value(tool_memory_list()).expect("serialize tool_memory_list"),
-    ];
+    let mut tool_values = shared_base_tool_schemas();
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
     tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
     tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
@@ -2801,19 +2789,16 @@ pub(crate) fn tool_schemas_lead() -> Vec<serde_json::Value> {
 /// task_comment_add and task_transition are excluded — submit_decision drives transitions.
 pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
+    for value in shared_pm_tool_schemas() {
+        tool_values.push(value);
+    }
     for value in [
-        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
-        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
         serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
         serde_json::to_value(tool_task_archive_activity())
             .expect("serialize tool_task_archive_activity"),
         serde_json::to_value(tool_task_reset_counters())
             .expect("serialize tool_task_reset_counters"),
         serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
-        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
-        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
-        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
-        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
         serde_json::to_value(tool_request_architect()).expect("serialize tool_request_architect"),
         serde_json::to_value(crate::roles::finalize::tool_submit_decision())
             .expect("serialize tool_submit_decision"),
@@ -2827,20 +2812,19 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
 /// task_comment_add is excluded — submit_grooming captures session output.
 pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in [
-        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
-        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
+    for value in shared_pm_tool_schemas() {
+        tool_values.push(value);
+    }
+    tool_values.push(
         serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+    );
+    for value in [
         serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
         serde_json::to_value(tool_task_archive_activity())
             .expect("serialize tool_task_archive_activity"),
         serde_json::to_value(tool_task_reset_counters())
             .expect("serialize tool_task_reset_counters"),
         serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
-        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
-        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
-        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
-        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
         serde_json::to_value(crate::roles::finalize::tool_submit_grooming())
             .expect("serialize tool_submit_grooming"),
     ] {
@@ -2854,26 +2838,36 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
 /// Does not include write/edit/apply_patch. The Architect diagnoses and directs but does not write code.
 pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in [
-        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
-        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
-        serde_json::to_value(tool_task_comment_add()).expect("serialize tool_task_comment_add"),
+    for value in shared_pm_tool_schemas() {
+        tool_values.push(value);
+    }
+    tool_values.push(
         serde_json::to_value(tool_task_transition()).expect("serialize tool_task_transition"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_task_comment_add())
+            .expect("serialize tool_task_comment_add"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_build_context())
+            .expect("serialize tool_memory_build_context"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_role_metrics())
+            .expect("serialize tool_role_metrics"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_role_create())
+            .expect("serialize tool_role_create"),
+    );
+    for value in [
         serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
         serde_json::to_value(tool_task_archive_activity())
             .expect("serialize tool_task_archive_activity"),
         serde_json::to_value(tool_task_reset_counters())
             .expect("serialize tool_task_reset_counters"),
         serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
-        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
-        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
-        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
-        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
-        serde_json::to_value(tool_memory_build_context())
-            .expect("serialize tool_memory_build_context"),
-        serde_json::to_value(tool_role_metrics()).expect("serialize tool_role_metrics"),
         serde_json::to_value(tool_role_amend_prompt()).expect("serialize tool_role_amend_prompt"),
-        serde_json::to_value(tool_role_create()).expect("serialize tool_role_create"),
         serde_json::to_value(crate::roles::finalize::tool_submit_work())
             .expect("serialize tool_submit_work"),
     ] {

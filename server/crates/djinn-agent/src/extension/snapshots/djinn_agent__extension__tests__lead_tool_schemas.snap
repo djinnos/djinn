@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3791
+assertion_line: 3758
 expression: tool_schemas_lead()
 ---
 [
@@ -429,70 +429,6 @@ expression: tool_schemas_lead()
     "name": "task_update"
   },
   {
-    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_delete_branch"
-  },
-  {
-    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_archive_activity"
-  },
-  {
-    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_reset_counters"
-  },
-  {
-    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_kill_session"
-  },
-  {
     "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
     "inputSchema": {
       "properties": {
@@ -582,6 +518,70 @@ expression: tool_schemas_lead()
       "type": "object"
     },
     "name": "epic_tasks"
+  },
+  {
+    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_delete_branch"
+  },
+  {
+    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_archive_activity"
+  },
+  {
+    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_reset_counters"
+  },
+  {
+    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "task_kill_session"
   },
   {
     "description": "Escalate to the Architect when the task requires strategic technical review that is beyond Lead intervention scope. Use when the problem is architectural, requires codebase-wide analysis, or has failed multiple Lead interventions. Adds a comment and dispatches the Architect. Your session should end after this call.",

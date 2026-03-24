@@ -1,6 +1,28 @@
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
+pub(crate) fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
+        serde_json::to_value(tool_task_list()).expect("serialize tool_task_list"),
+        serde_json::to_value(tool_task_activity_list()).expect("serialize tool_task_activity_list"),
+        serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
+        serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
+        serde_json::to_value(tool_memory_list()).expect("serialize tool_memory_list"),
+    ]
+}
+
+pub(crate) fn shared_pm_tool_schemas() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
+        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
+        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
+        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
+        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
+        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+    ]
+}
+
 pub(crate) fn tool_epic_show() -> RmcpTool {
     RmcpTool::new(
         "epic_show".to_string(),
