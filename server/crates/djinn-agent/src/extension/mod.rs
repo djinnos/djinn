@@ -205,8 +205,10 @@ struct TaskUpdateParams {
     acceptance_criteria: Option<Vec<serde_json::Value>>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
-    blocked_by_add: Option<Vec<String>>,
-    blocked_by_remove: Option<Vec<String>>,
+    #[serde(default)]
+    blocked_by_add: Vec<String>,
+    #[serde(default)]
+    blocked_by_remove: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -708,8 +710,8 @@ async fn call_task_update(
                 .unwrap_or_default()
                 .into_iter()
                 .collect::<HashSet<_>>(),
-            blocked_by_add_refs: p.blocked_by_add.unwrap_or_default(),
-            blocked_by_remove_refs: p.blocked_by_remove.unwrap_or_default(),
+            blocked_by_add_refs: p.blocked_by_add,
+            blocked_by_remove_refs: p.blocked_by_remove,
             agent_type: None,
             epic_ref: None,
         },
