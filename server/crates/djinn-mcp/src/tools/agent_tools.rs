@@ -4,6 +4,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
+use crate::tools::AnyJson;
 use crate::tools::validation::{validate_limit, validate_offset};
 use djinn_db::{AgentListQuery, AgentRepository, AgentUpdateInput};
 
