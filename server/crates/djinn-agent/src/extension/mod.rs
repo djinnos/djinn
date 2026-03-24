@@ -13,7 +13,6 @@ use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use djinn_core::models::Task;
 use djinn_db::EpicRepository;
-use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
@@ -3122,6 +3121,7 @@ fn tool_lsp() -> RmcpTool {
 
 #[cfg(test)]
 mod tests {
+    use djinn_db::NoteRepository;
     use super::*;
     use crate::AgentType;
     use crate::test_helpers::create_test_db;
