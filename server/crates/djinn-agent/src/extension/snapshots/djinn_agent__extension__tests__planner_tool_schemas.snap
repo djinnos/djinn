@@ -325,9 +325,11 @@ expression: tool_schemas_planner()
     "inputSchema": {
       "properties": {
         "acceptance_criteria": {
+          "description": "Required. At least one criterion object with 'criterion' (string) and 'met' (bool) fields. Tasks without acceptance criteria cannot be dispatched.",
           "items": {
             "type": "object"
           },
+          "minItems": 1,
           "type": "array"
         },
         "description": {
@@ -367,7 +369,8 @@ expression: tool_schemas_planner()
       },
       "required": [
         "epic_id",
-        "title"
+        "title",
+        "acceptance_criteria"
       ],
       "type": "object"
     },
