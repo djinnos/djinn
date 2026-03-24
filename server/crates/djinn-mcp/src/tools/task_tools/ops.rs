@@ -29,7 +29,7 @@ use crate::tools::task_tools::types::{
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
 use djinn_db::TaskRepository;
 
-pub(super) fn task_to_response(task: &Task) -> TaskResponse {
+pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
     TaskResponse {
         id: task.id.clone(),
         short_id: task.short_id.clone(),
@@ -73,7 +73,7 @@ pub(super) fn task_to_response(task: &Task) -> TaskResponse {
     }
 }
 
-pub(super) fn activity_entry_response(entry: ActivityEntry) -> ActivityEntryResponse {
+pub(crate) fn activity_entry_response(entry: ActivityEntry) -> ActivityEntryResponse {
     ActivityEntryResponse {
         id: entry.id,
         task_id: entry.task_id,
@@ -85,16 +85,16 @@ pub(super) fn activity_entry_response(entry: ActivityEntry) -> ActivityEntryResp
     }
 }
 
-pub(super) fn parse_string_array(value: &str) -> Vec<String> {
+pub(crate) fn parse_string_array(value: &str) -> Vec<String> {
     serde_json::from_str(value).unwrap_or_default()
 }
 
-pub(super) fn parse_any_json(value: &str) -> crate::tools::AnyJson {
+pub(crate) fn parse_any_json(value: &str) -> crate::tools::AnyJson {
     serde_json::from_str(value)
         .unwrap_or_else(|_| serde_json::Value::String(value.to_owned()).into())
 }
 
-pub(super) fn not_found(id: &str) -> ErrorResponse {
+pub(crate) fn not_found(id: &str) -> ErrorResponse {
     ErrorResponse::new(format!("task not found: {id}"))
 }
 
