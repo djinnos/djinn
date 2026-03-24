@@ -281,16 +281,13 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "agent_id": {
-          "description": "Optional agent UUID or name — if omitted returns metrics for all agents.",
           "nullable": true,
           "type": "string"
         },
         "project": {
-          "description": "Absolute project path.",
           "type": "string"
         },
         "window_days": {
-          "description": "How many days back to include session data (default 30).",
           "format": "int64",
           "nullable": true,
           "type": "integer"
@@ -314,17 +311,14 @@ expression: signatures
               "type": "string"
             },
             "avg_reopens": {
-              "description": "Average reopen_count across tasks dispatched to this role.",
               "format": "double",
               "type": "number"
             },
             "avg_time_seconds": {
-              "description": "Average session wall-clock duration in seconds (completed sessions only).",
               "format": "double",
               "type": "number"
             },
             "avg_tokens": {
-              "description": "Average total tokens (in + out) per completed session.",
               "format": "double",
               "type": "number"
             },
@@ -332,17 +326,18 @@ expression: signatures
               "type": "string"
             },
             "completed_task_count": {
-              "description": "Number of completed tasks included in the calculation.",
               "format": "int64",
               "type": "integer"
             },
+            "learned_prompt": {
+              "nullable": true,
+              "type": "string"
+            },
             "success_rate": {
-              "description": "Fraction of completed tasks that closed as \"completed\" (0.0–1.0).",
               "format": "double",
               "type": "number"
             },
             "verification_pass_rate": {
-              "description": "Fraction of tasks with zero verification failures (0.0–1.0).",
               "format": "double",
               "type": "number"
             }
@@ -375,7 +370,6 @@ expression: signatures
           "type": "string"
         },
         "window_days": {
-          "description": "Window used for session queries (days back from now).",
           "format": "int64",
           "type": "integer"
         }

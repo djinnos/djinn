@@ -16,7 +16,11 @@ use djinn_db::EpicRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
+use djinn_db::AgentRepository;
+use djinn_mcp::tools::agent_tools::{
+    AgentCreateParams as SharedAgentCreateParams, AgentMetricsParams as SharedAgentMetricsParams,
+    create_agent as shared_create_agent, metrics_for_agents as shared_metrics_for_agents,
+};
 use djinn_provider::github_api::GitHubApiClient;
 use djinn_provider::repos::CredentialRepository;
 use std::sync::Arc;
@@ -317,28 +321,11 @@ struct MemoryBuildContextParams {
 }
 
 #[derive(Deserialize)]
-struct AgentMetricsParams {
-    project: Option<String>,
-    agent_id: Option<String>,
-    window_days: Option<i64>,
-}
-
-#[derive(Deserialize)]
 struct AgentAmendPromptParams {
     project: Option<String>,
     agent_id: String,
     amendment: String,
     metrics_snapshot: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AgentCreateParams {
-    project: Option<String>,
-    name: String,
-    base_role: String,
-    description: Option<String>,
-    system_prompt_extensions: Option<String>,
-    model_preference: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1028,72 +1015,51 @@ async fn call_agent_metrics(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: AgentMetricsParams = parse_args(arguments)?;
-    let project_path = resolve_project_path(p.project);
+    let project_path = resolve_project_path(
+        arguments
+            .as_ref()
+            .and_then(|map| map.get("project"))
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+    );
     let project_id = project_id_for_path(state, &project_path).await?;
-    let window_days = p.window_days.unwrap_or(30).max(1);
 
-    let repo = AgentRepository::new(state.db.clone(), state.event_bus.clone());
+    let raw = arguments.clone().unwrap_or_default();
+    let mut params: SharedAgentMetricsParams =
+        serde_json::from_value(serde_json::Value::Object(raw))
+            .map_err(|e| format!("invalid arguments: {e}"))?;
+    params.project = project_path;
 
-    // Normalize empty/whitespace-only agent_id to None (return all agents).
-    let agent_id = p.agent_id.filter(|s| !s.trim().is_empty());
+    let response = shared_metrics_for_agents(
+        &AgentRepository::new(state.db.clone(), state.event_bus.clone()),
+        &project_id,
+        params,
+    )
+    .await;
 
-    let roles: Vec<djinn_core::models::Agent> = if let Some(ref id_or_name) = agent_id {
-        let role = repo.get(id_or_name).await.map_err(|e| e.to_string())?;
-        let role = match role {
-            Some(r) if r.project_id == project_id => Some(r),
-            _ => repo
-                .get_by_name_for_project(&project_id, id_or_name)
-                .await
-                .map_err(|e| e.to_string())?,
-        };
-        match role {
-            Some(r) => vec![r],
-            None => return Err(format!("agent not found: {id_or_name}")),
-        }
-    } else {
-        repo.list_for_project(djinn_db::AgentListQuery {
-            project_id: project_id.clone(),
-            base_role: None,
-            limit: 200,
-            offset: 0,
-        })
-        .await
-        .map_err(|e| e.to_string())?
+    let roles = response
         .agents
-    };
-
-    let mut entries = Vec::with_capacity(roles.len());
-    for role in &roles {
-        let agent_type = role.base_role.as_str();
-        let m = repo
-            .get_metrics(&project_id, agent_type, window_days)
-            .await
-            .unwrap_or(djinn_db::AgentMetrics {
-                success_rate: 0.0,
-                avg_reopens: 0.0,
-                verification_pass_rate: 0.0,
-                completed_task_count: 0,
-                avg_tokens: 0.0,
-                avg_time_seconds: 0.0,
-            });
-        entries.push(serde_json::json!({
-            "agent_id": role.id,
-            "agent_name": role.name,
-            "base_role": role.base_role,
-            "learned_prompt": role.learned_prompt,
-            "success_rate": m.success_rate,
-            "avg_reopens": m.avg_reopens,
-            "verification_pass_rate": m.verification_pass_rate,
-            "completed_task_count": m.completed_task_count,
-            "avg_tokens": m.avg_tokens,
-            "avg_time_seconds": m.avg_time_seconds,
-        }));
-    }
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "agent_id": entry.agent_id,
+                "agent_name": entry.agent_name,
+                "base_role": entry.base_role,
+                "learned_prompt": entry.learned_prompt,
+                "success_rate": entry.success_rate,
+                "avg_reopens": entry.avg_reopens,
+                "verification_pass_rate": entry.verification_pass_rate,
+                "completed_task_count": entry.completed_task_count,
+                "avg_tokens": entry.avg_tokens,
+                "avg_time_seconds": entry.avg_time_seconds,
+            })
+        })
+        .collect::<Vec<_>>();
 
     Ok(serde_json::json!({
-        "roles": entries,
-        "window_days": window_days,
+        "roles": roles,
+        "window_days": response.window_days,
     }))
 }
 
@@ -1147,55 +1113,39 @@ async fn call_agent_create(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p: AgentCreateParams = parse_args(arguments)?;
-    let project_path = resolve_project_path(p.project);
+    let project_path = resolve_project_path(
+        arguments
+            .as_ref()
+            .and_then(|map| map.get("project"))
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+    );
     let project_id = project_id_for_path(state, &project_path).await?;
 
-    let name = p.name.trim().to_string();
-    if name.is_empty() {
-        return Err("name must not be empty".to_string());
+    let raw = arguments.clone().unwrap_or_default();
+    let mut params: SharedAgentCreateParams =
+        serde_json::from_value(serde_json::Value::Object(raw))
+            .map_err(|e| format!("invalid arguments: {e}"))?;
+    params.project = project_path;
+
+    let response = shared_create_agent(
+        &AgentRepository::new(state.db.clone(), state.event_bus.clone()),
+        &project_id,
+        params,
+    )
+    .await;
+
+    match response.agent {
+        Some(agent) => Ok(serde_json::json!({
+            "agent_id": agent.id,
+            "agent_name": agent.name,
+            "base_role": agent.base_role,
+            "created": true,
+        })),
+        None => Err(response
+            .error
+            .unwrap_or_else(|| "failed to create agent".to_string())),
     }
-    if !VALID_BASE_ROLES.contains(&p.base_role.as_str()) {
-        return Err(format!(
-            "invalid base_role '{}'; must be one of: {}",
-            p.base_role,
-            VALID_BASE_ROLES.join(", ")
-        ));
-    }
-
-    let repo = AgentRepository::new(state.db.clone(), state.event_bus.clone());
-
-    // Enforce name uniqueness within project.
-    if let Ok(Some(_)) = repo.get_by_name_for_project(&project_id, &name).await {
-        return Err(format!(
-            "an agent named '{name}' already exists in this project"
-        ));
-    }
-
-    let created = repo
-        .create_for_project(
-            &project_id,
-            AgentCreateInput {
-                name: &name,
-                base_role: &p.base_role,
-                description: p.description.as_deref().unwrap_or(""),
-                system_prompt_extensions: p.system_prompt_extensions.as_deref().unwrap_or(""),
-                model_preference: p.model_preference.as_deref(),
-                verification_command: None,
-                mcp_servers: None,
-                skills: None,
-                is_default: false,
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(serde_json::json!({
-        "agent_id": created.id,
-        "agent_name": created.name,
-        "base_role": created.base_role,
-        "created": true,
-    }))
 }
 
 // ─── CI job log tool ────────────────────────────────────────────────────────
@@ -3329,7 +3279,6 @@ fn tool_lsp() -> RmcpTool {
 
 #[cfg(test)]
 mod tests {
-    use djinn_db::NoteRepository;
     use super::*;
     use crate::AgentType;
     use crate::test_helpers::create_test_db;
@@ -3337,6 +3286,7 @@ mod tests {
         agent_context_from_db, create_test_epic, create_test_project, create_test_task,
     };
     use djinn_core::events::EventBus;
+    use djinn_db::NoteRepository;
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
 
@@ -3699,6 +3649,101 @@ mod tests {
             transitioned.get("title").and_then(|v| v.as_str()),
             Some(task.title.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+        let create_response = call_tool(
+            &state,
+            "agent_create",
+            Some(
+                serde_json::json!({
+                    "project": project.path,
+                    "name": "Rust specialist",
+                    "base_role": "worker",
+                    "description": "Handles Rust-heavy tasks",
+                    "system_prompt_extensions": "Focus on Rust diagnostics",
+                    "model_preference": "gpt-5"
+                })
+                .as_object()
+                .expect("agent_create args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            None,
+            Some("architect"),
+        )
+        .await
+        .expect("agent_create dispatch should succeed");
+
+        assert_eq!(
+            create_response
+                .get("agent_name")
+                .and_then(|value| value.as_str()),
+            Some("Rust specialist")
+        );
+        assert_eq!(
+            create_response
+                .get("base_role")
+                .and_then(|value| value.as_str()),
+            Some("worker")
+        );
+        assert_eq!(
+            create_response
+                .get("created")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        let created_agent_id = create_response
+            .get("agent_id")
+            .and_then(|value| value.as_str())
+            .expect("agent id in create response")
+            .to_string();
+
+        let metrics_response = call_tool(
+            &state,
+            "agent_metrics",
+            Some(
+                serde_json::json!({
+                    "project": project.path,
+                    "agent_id": created_agent_id,
+                    "window_days": 14
+                })
+                .as_object()
+                .expect("agent_metrics args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            None,
+            Some("architect"),
+        )
+        .await
+        .expect("agent_metrics dispatch should succeed");
+
+        assert_eq!(
+            metrics_response
+                .get("window_days")
+                .and_then(|value| value.as_i64()),
+            Some(14)
+        );
+        let roles = metrics_response
+            .get("roles")
+            .and_then(|value| value.as_array())
+            .expect("roles array in metrics response");
+        assert_eq!(roles.len(), 1);
+        assert_eq!(
+            roles[0].get("agent_name").and_then(|value| value.as_str()),
+            Some("Rust specialist")
+        );
+        assert_eq!(
+            roles[0].get("base_role").and_then(|value| value.as_str()),
+            Some("worker")
+        );
+        assert!(roles[0].get("learned_prompt").is_some());
     }
 
     #[tokio::test]

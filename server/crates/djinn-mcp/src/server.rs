@@ -162,8 +162,7 @@ impl DjinnMcpServer {
                 + Self::session_tool_router()
                 + Self::task_tool_router()
                 + Self::epic_tool_router()
-                + Self::agent_tool_router()
-                + Self::agent_metrics_tool_router(),
+                + Self::agent_tool_router(),
         }
     }
 

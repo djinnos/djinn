@@ -7,3 +7,4 @@
 # Build / test artifacts
 target/
 tmp/
+.tmp/
