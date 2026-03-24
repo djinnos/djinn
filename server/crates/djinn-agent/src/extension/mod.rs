@@ -1159,6 +1159,7 @@ async fn call_agent_metrics(
             "agent_id": role.id,
             "agent_name": role.name,
             "base_role": role.base_role,
+            "learned_prompt": role.learned_prompt,
             "success_rate": m.success_rate,
             "avg_reopens": m.avg_reopens,
             "verification_pass_rate": m.verification_pass_rate,
