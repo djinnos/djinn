@@ -166,12 +166,36 @@ impl AgentContext {
     ) -> Result<String, ErrorResponse> {
         let project = self
             .task_ops_project_path_override
-            .as_ref()
+            .as_deref()
             .and_then(|override_path| override_path.to_str())
             .filter(|path| !path.is_empty())
             .unwrap_or(project);
         let server = djinn_mcp::server::DjinnMcpServer::new(self.to_mcp_state());
-        server.require_project_id_public(project).await
+        match server.require_project_id_public(project).await {
+            Ok(project_id) => Ok(project_id),
+            Err(_initial_error)
+                if project
+                    != project
+                        .trim_end_matches(std::path::MAIN_SEPARATOR)
+                        .trim_end_matches('/') =>
+            {
+                server
+                    .require_project_id_public(
+                        project
+                            .trim_end_matches(std::path::MAIN_SEPARATOR)
+                            .trim_end_matches('/'),
+                    )
+                    .await
+            }
+            Err(error) => {
+                let repo =
+                    djinn_db::ProjectRepository::new(self.db.clone(), self.event_bus.clone());
+                repo.resolve_id_by_path_fuzzy(project)
+                    .await
+                    .map_err(|repo_error| ErrorResponse::new(repo_error.to_string()))?
+                    .ok_or(error)
+            }
+        }
     }
 
     /// Get or spawn a `GitActorHandle` for the given project path.
