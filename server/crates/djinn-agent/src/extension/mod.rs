@@ -42,7 +42,14 @@ struct IncomingToolCall {
 /// [`AgentContext::require_project_id_for_task_ops`] using the session/worktree root
 /// rather than a crate-local source path. This preserves MCP-side project resolution
 /// semantics and lets shared mutation helpers return the same public response shapes
-/// that agent dispatch tests assert.
+/// and JSON error envelopes that agent dispatch tests assert.
+async fn project_id_for_path(state: &AgentContext, project_path: &str) -> Result<String, String> {
+    state
+        .require_project_id_for_task_ops(project_path)
+        .await
+        .map_err(|error| error.error)
+}
+
 fn acceptance_criterion_to_string(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => map
@@ -2074,13 +2081,6 @@ fn merge_acceptance_criteria(existing_json: &str, incoming: &[serde_json::Value]
         .collect();
 
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
-}
-
-async fn project_id_for_path(state: &AgentContext, project_path: &str) -> Result<String, String> {
-    state
-        .require_project_id_for_task_ops(project_path)
-        .await
-        .map_err(|error| error.error)
 }
 
 fn resolve_project_path(project: Option<String>) -> String {
