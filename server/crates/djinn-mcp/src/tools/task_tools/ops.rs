@@ -1,13 +1,14 @@
 //! Public task-mutation operation seam shared by MCP handlers and external adapters.
 //!
 //! External callers should construct a [`DjinnMcpServer`] from an existing [`crate::McpState`],
-//! resolve the project once, then call the mutation helpers in this module:
+//! resolve the project once with [`DjinnMcpServer::require_project_id_public`], then call the
+//! mutation helpers re-exported from [`crate::tools::task_tools`]:
 //!
 //! ```ignore
 //! use djinn_mcp::server::DjinnMcpServer;
 //! use djinn_mcp::tools::task_tools::{
-//!     add_task_comment, create_task, transition_task, update_task, CommentTaskRequest,
-//!     CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
+//!     CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
+//!     add_task_comment, create_task, transition_task, update_task,
 //! };
 //!
 //! let server = DjinnMcpServer::new(state.clone());
@@ -423,7 +424,7 @@ pub async fn add_task_comment(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CreateTaskRequest {
     pub title: String,
     pub description: String,
@@ -440,7 +441,7 @@ pub struct CreateTaskRequest {
     pub epic_ref: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UpdateTaskRequest {
     pub id: String,
     pub title: Option<String>,
@@ -459,7 +460,7 @@ pub struct UpdateTaskRequest {
     pub epic_ref: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransitionTaskRequest {
     pub id: String,
     pub action: TransitionAction,
@@ -469,7 +470,7 @@ pub struct TransitionTaskRequest {
     pub target_override: Option<TaskStatus>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CommentTaskRequest {
     pub id: String,
     pub body: String,
