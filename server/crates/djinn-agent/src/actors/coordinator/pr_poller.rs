@@ -925,7 +925,7 @@ impl CoordinatorActor {
     }
 
     /// Log a comment on the task with details about which CI checks failed,
-    /// including the actual error annotations from GitHub so the worker can fix them.
+    /// including the actual job logs from GitHub so the worker can fix them.
     ///
     /// This comment becomes part of the activity log that the re-dispatched worker
     /// reads in its system prompt, giving it context about what needs to be fixed.
@@ -1006,51 +1006,20 @@ impl CoordinatorActor {
             }
         }
 
-        // Now add error details: annotations first, then job logs as fallback.
-        let mut has_annotations = false;
-        for cr in failed_checks {
-            if let Ok(annotations) = gh_client
-                .get_check_run_annotations(owner, repo, cr.id)
-                .await
-                && !annotations.is_empty()
-            {
-                has_annotations = true;
-                sections.push(format!("\n**Annotations for {}:**", cr.name));
-                for ann in &annotations {
-                    let title_part = ann
-                        .title
-                        .as_deref()
-                        .map(|t| format!(" ({})", t))
-                        .unwrap_or_default();
-                    sections.push(format!(
-                        "  - `{}` L{}-L{} [{}]{}: {}",
-                        ann.path,
-                        ann.start_line,
-                        ann.end_line,
-                        ann.annotation_level,
-                        title_part,
-                        ann.message,
-                    ));
-                }
-            }
-        }
-
-        // If no annotations, fetch the first failed job's log.
-        if !has_annotations
-            && let Some(ref jobs) = jobs
-        {
-            let failed_job = jobs.iter().find(|j| {
+        // Fetch job logs for each failed job — annotations are unreliable
+        // (GitHub often only reports "Process completed with exit code N").
+        if let Some(ref jobs) = jobs {
+            for job in jobs.iter().filter(|j| {
                 matches!(
                     j.conclusion.as_deref(),
                     Some("failure") | Some("timed_out") | Some("cancelled")
                 )
-            });
-            if let Some(job) = failed_job {
+            }) {
                 match gh_client.get_job_logs(owner, repo, job.id).await {
                     Ok(raw_log) => {
                         let snippet = Self::clean_and_truncate_log(&raw_log);
                         sections.push(format!(
-                            "\n**Job log ({}**, truncated):\n```\n{}\n```",
+                            "\n**Job log ({}):**\n```\n{}\n```",
                             job.name, snippet
                         ));
                     }
