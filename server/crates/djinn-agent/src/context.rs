@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use djinn_git::{GitActorHandle, GitError};
+use djinn_mcp::{McpState, bridge, tools::task_tools::ErrorResponse};
 use tokio::sync::Mutex;
 
 use crate::actors::coordinator::{CoordinatorHandle, VerificationTracker};
@@ -40,7 +41,131 @@ pub struct AgentContext {
     pub active_tasks: ActivityTracker,
 }
 
+struct AgentSyncOps;
+
+#[async_trait::async_trait]
+impl bridge::SyncOps for AgentSyncOps {
+    async fn enable_project(&self, _: &str) -> Result<(), String> {
+        Err("sync not available in djinn-agent task-mutation bridge".into())
+    }
+
+    async fn disable_project(&self, _: &str) -> Result<(), String> {
+        Err("sync not available in djinn-agent task-mutation bridge".into())
+    }
+
+    async fn delete_remote_branch(&self, _: &str, _: &Path) -> Result<(), String> {
+        Err("sync not available in djinn-agent task-mutation bridge".into())
+    }
+
+    async fn export_all(&self, _: Option<&str>) -> Vec<bridge::SyncResult> {
+        vec![]
+    }
+
+    async fn import_all(&self) -> Vec<bridge::SyncResult> {
+        vec![]
+    }
+
+    async fn status(&self) -> Vec<bridge::ChannelStatus> {
+        vec![]
+    }
+}
+
+struct AgentRuntimeOps {
+    db: Database,
+    event_bus: EventBus,
+    health_tracker: HealthTracker,
+}
+
+#[async_trait::async_trait]
+impl bridge::RuntimeOps for AgentRuntimeOps {
+    async fn apply_settings(&self, _: &djinn_core::models::DjinnSettings) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn reset_runtime_settings(&self) {}
+
+    async fn persist_model_health_state(&self) {
+        use djinn_db::SettingsRepository;
+        const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
+        let repo = SettingsRepository::new(self.db.clone(), self.event_bus.clone());
+        let snapshot = self.health_tracker.all_health();
+        match serde_json::to_string(&snapshot) {
+            Ok(raw) => {
+                if let Err(e) = repo.set(MODEL_HEALTH_STATE_KEY, &raw).await {
+                    tracing::warn!(error = %e, "failed to persist model health state");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to serialize model health state"),
+        }
+    }
+
+    async fn purge_worktrees(&self) {}
+}
+
+struct AgentGitOps {
+    git_actors: Arc<Mutex<HashMap<PathBuf, GitActorHandle>>>,
+}
+
+#[async_trait::async_trait]
+impl bridge::GitOps for AgentGitOps {
+    async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
+        let mut map = self.git_actors.lock().await;
+        djinn_git::get_or_spawn(&mut map, path)
+    }
+}
+
+#[async_trait::async_trait]
+impl bridge::LspOps for LspManager {
+    async fn warnings(&self) -> Vec<bridge::LspWarning> {
+        self.warnings()
+            .await
+            .into_iter()
+            .map(|warning| bridge::LspWarning {
+                server: warning.server,
+                message: warning.message,
+            })
+            .collect()
+    }
+}
+
 impl AgentContext {
+    /// Build the public djinn-mcp state bridge expected by the shared task-mutation ops.
+    ///
+    /// This keeps djinn-agent on the supported ADR-041 seam: shared business logic stays in
+    /// djinn-mcp, while agent adapters reuse their existing database/event-bus/project resolver
+    /// dependencies instead of reconstructing MCP internals locally.
+    pub fn to_mcp_state(&self) -> McpState {
+        McpState::new(
+            self.db.clone(),
+            self.event_bus.clone(),
+            self.catalog.clone(),
+            self.health_tracker.clone(),
+            "agent".to_owned(),
+            None,
+            None,
+            Arc::new(self.lsp.clone()),
+            Arc::new(AgentSyncOps),
+            Arc::new(AgentRuntimeOps {
+                db: self.db.clone(),
+                event_bus: self.event_bus.clone(),
+                health_tracker: self.health_tracker.clone(),
+            }),
+            Arc::new(AgentGitOps {
+                git_actors: self.git_actors.clone(),
+            }),
+        )
+    }
+
+    /// Resolve a project path through the same public djinn-mcp contract used by external
+    /// task-mutation callers.
+    pub async fn require_project_id_for_task_ops(
+        &self,
+        project: &str,
+    ) -> Result<String, ErrorResponse> {
+        let server = djinn_mcp::server::DjinnMcpServer::new(self.to_mcp_state());
+        server.require_project_id_public(project).await
+    }
+
     /// Get or spawn a `GitActorHandle` for the given project path.
     pub async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
         let mut map = self.git_actors.lock().await;

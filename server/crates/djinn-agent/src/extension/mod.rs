@@ -19,6 +19,13 @@ use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 use djinn_db::{AgentCreateInput, AgentRepository, VALID_BASE_ROLES};
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
+use djinn_mcp::tools::task_tools::{
+    CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
+    TransitionTaskRequest as SharedTransitionTaskRequest,
+    UpdateTaskRequest as SharedUpdateTaskRequest, add_task_comment as shared_add_task_comment,
+    create_task as shared_create_task, transition_task as shared_transition_task,
+    update_task as shared_update_task,
+};
 
 #[derive(Deserialize)]
 struct IncomingToolCall {
@@ -2106,11 +2113,10 @@ fn merge_acceptance_criteria(existing_json: &str, incoming: &[serde_json::Value]
 }
 
 async fn project_id_for_path(state: &AgentContext, project_path: &str) -> Result<String, String> {
-    let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
-    repo.resolve(project_path)
+    state
+        .require_project_id_for_task_ops(project_path)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("project not found: {project_path}"))
+        .map_err(|error| error.error)
 }
 
 fn resolve_project_path(project: Option<String>) -> String {
