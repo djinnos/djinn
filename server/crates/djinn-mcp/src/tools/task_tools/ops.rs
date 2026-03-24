@@ -342,6 +342,10 @@ pub async fn transition_task(
     project_id: &str,
     request: TransitionTaskRequest,
 ) -> Json<ErrorOr<TaskResponse>> {
+    if let Err(error) = super::validate_transition_request(&request) {
+        return Json(ErrorOr::Error(error));
+    }
+
     let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
 
     let Some(task) = repo
@@ -397,6 +401,10 @@ pub async fn add_task_comment(
     project_id: &str,
     request: CommentTaskRequest,
 ) -> Json<ErrorOr<ActivityEntryResponse>> {
+    if let Err(error) = super::validate_comment_request(&request) {
+        return Json(ErrorOr::Error(error));
+    }
+
     let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
 
     let Some(task) = repo
