@@ -29,6 +29,20 @@ use self::ops::{
 };
 pub use self::types::*;
 
+fn collapse_acceptance_criteria(
+    acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
+) -> Option<Vec<String>> {
+    acceptance_criteria.map(|items| {
+        items
+            .into_iter()
+            .map(|item| match item {
+                AcceptanceCriterionItem::Text(text) => text,
+                AcceptanceCriterionItem::Structured(status) => status.criterion,
+            })
+            .collect()
+    })
+}
+
 // ── Tool implementations ─────────────────────────────────────────────────────
 
 #[tool_router(router = task_tool_router, vis = "pub")]
@@ -115,14 +129,7 @@ impl DjinnMcpServer {
                 priority,
                 owner,
                 status,
-                acceptance_criteria: p.acceptance_criteria.map(|ac| {
-                    ac.into_iter()
-                        .map(|item| match item {
-                            AcceptanceCriterionItem::Text(text) => text,
-                            AcceptanceCriterionItem::Structured(status) => status.criterion,
-                        })
-                        .collect()
-                }),
+                acceptance_criteria: collapse_acceptance_criteria(p.acceptance_criteria),
                 labels: p.labels.unwrap_or_default(),
                 memory_refs: p.memory_refs.unwrap_or_default(),
                 blocked_by_refs: p.blocked_by.unwrap_or_default(),
@@ -193,14 +200,7 @@ impl DjinnMcpServer {
                 design: p.design,
                 priority: p.priority,
                 owner: p.owner,
-                acceptance_criteria: p.acceptance_criteria.map(|ac| {
-                    ac.into_iter()
-                        .map(|item| match item {
-                            AcceptanceCriterionItem::Text(text) => text,
-                            AcceptanceCriterionItem::Structured(status) => status.criterion,
-                        })
-                        .collect()
-                }),
+                acceptance_criteria: collapse_acceptance_criteria(p.acceptance_criteria),
                 labels_add: p.labels_add.unwrap_or_default(),
                 labels_remove: p.labels_remove.unwrap_or_default().into_iter().collect(),
                 memory_refs_add: p.memory_refs_add.unwrap_or_default(),
