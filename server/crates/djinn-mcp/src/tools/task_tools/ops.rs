@@ -104,6 +104,10 @@ pub async fn create_task(
     project_id: &str,
     request: CreateTaskRequest,
 ) -> Json<ErrorOr<TaskResponse>> {
+    if let Err(e) = super::validate_create_request(&request) {
+        return Json(ErrorOr::Error(e));
+    }
+
     let epic_id = if let Some(epic_ref) = request.epic_ref.as_deref() {
         let epic_repo =
             djinn_db::EpicRepository::new(server.state.db().clone(), server.state.event_bus());
