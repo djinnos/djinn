@@ -10,7 +10,6 @@ pub const VALID_BASE_ROLES: &[&str] = &[
     "planner",
     "architect",
     "reviewer",
-    "resolver",
 ];
 
 pub struct AgentCreateInput<'a> {
@@ -428,8 +427,8 @@ impl AgentRepository {
             "SELECT
                 CAST(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END) AS REAL)
                     / CAST(MAX(1, COUNT(DISTINCT t.id)) AS REAL),
-                COALESCE(AVG(CAST(t.reopen_count AS REAL)), 0.0),
-                CAST(SUM(CASE WHEN t.verification_failure_count = 0 THEN 1 ELSE 0 END) AS REAL)
+                COALESCE(AVG(CAST(t.total_reopen_count AS REAL)), 0.0),
+                CAST(SUM(CASE WHEN t.total_verification_failure_count = 0 THEN 1 ELSE 0 END) AS REAL)
                     / CAST(MAX(1, COUNT(DISTINCT t.id)) AS REAL),
                 COUNT(DISTINCT t.id)
              FROM tasks t

@@ -82,6 +82,10 @@ pub struct Task {
     pub reopen_count: i64,
     pub continuation_count: i64,
     pub verification_failure_count: i64,
+    pub total_reopen_count: i64,
+    pub total_verification_failure_count: i64,
+    pub intervention_count: i64,
+    pub last_intervention_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
@@ -322,6 +326,8 @@ pub struct TransitionApply {
     pub set_merge_conflict_metadata: bool,
     /// Clear merge_conflict_metadata to NULL.
     pub clear_merge_conflict_metadata: bool,
+    /// Increment intervention_count and set last_intervention_at.
+    pub record_intervention: bool,
     /// Value for `event_type` in the activity log entry.
     pub activity_type: &'static str,
 }
@@ -341,6 +347,7 @@ impl Default for TransitionApply {
             clear_close_reason: false,
             set_merge_conflict_metadata: false,
             clear_merge_conflict_metadata: false,
+            record_intervention: false,
             activity_type: "status_changed",
         }
     }
@@ -587,6 +594,7 @@ pub fn compute_transition(
                 to_status: Some(TaskStatus::Open),
                 reset_continuation: true,
                 reset_verification_failure: true,
+                record_intervention: true,
                 ..Default::default()
             }
         }

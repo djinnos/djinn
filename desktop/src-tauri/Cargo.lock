@@ -1095,6 +1095,7 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "djinn-git",
+ "djinn-mcp",
  "djinn-provider",
  "futures",
  "git2",

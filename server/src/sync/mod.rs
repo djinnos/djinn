@@ -797,6 +797,10 @@ mod tests {
             memory_refs: "[]".to_string(),
             agent_type: None,
             unresolved_blocker_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
         };
 
         let changed = task_repo.upsert_peer(&peer_task).await.unwrap();
@@ -841,6 +845,10 @@ mod tests {
             memory_refs: "[]".to_string(),
             agent_type: None,
             unresolved_blocker_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
         };
 
         let envelope = DjinnEventEnvelope::task_updated(&task, true);
@@ -888,6 +896,10 @@ mod tests {
             memory_refs: "[]".to_string(),
             agent_type: None,
             unresolved_blocker_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
         };
 
         // Local event → should trigger export.

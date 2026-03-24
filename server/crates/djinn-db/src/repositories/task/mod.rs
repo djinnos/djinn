@@ -199,7 +199,10 @@ impl TaskRepository {
 pub(super) const TASK_SELECT_WHERE_ID: &str =
     "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
             status, priority, owner, labels, acceptance_criteria,
-            reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+            reopen_count, continuation_count, verification_failure_count,
+            total_reopen_count, total_verification_failure_count,
+            intervention_count, last_intervention_at,
+            created_at, updated_at, closed_at,
             close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
      FROM tasks WHERE id = ?1";
 

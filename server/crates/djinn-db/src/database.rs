@@ -12,6 +12,7 @@ use crate::migrations;
 #[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
+    db_path: std::path::PathBuf,
     readonly: bool,
     initialized: Arc<OnceCell<()>>,
 }
@@ -38,6 +39,7 @@ impl Database {
 
         Ok(Self {
             pool,
+            db_path: path.to_path_buf(),
             readonly: false,
             initialized: Arc::new(OnceCell::new()),
         })
@@ -60,14 +62,21 @@ impl Database {
 
         Ok(Self {
             pool,
+            db_path: path.to_path_buf(),
             readonly: true,
             initialized: Arc::new(OnceCell::new()),
         })
     }
 
-    /// Open an in-memory database for tests.
+    /// Open a temporary database for tests.
+    ///
+    /// Uses a temp file so that both rusqlite (for refinery migrations) and
+    /// sqlx can access the same database.
     pub fn open_in_memory() -> DbResult<Self> {
-        let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
+        let tmp = std::env::temp_dir().join(format!("djinn-test-{}.db", uuid::Uuid::now_v7()));
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", tmp.display()))?
+            .create_if_missing(true)
+            .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(300))
@@ -81,6 +90,7 @@ impl Database {
 
         Ok(Self {
             pool,
+            db_path: tmp,
             readonly: false,
             initialized: Arc::new(OnceCell::new()),
         })
@@ -95,9 +105,13 @@ impl Database {
             return Ok(());
         }
 
+        let db_path = self.db_path.clone();
         self.initialized
             .get_or_try_init(|| async {
-                migrations::run(&self.pool).await?;
+                tokio::task::spawn_blocking(move || migrations::run(&db_path))
+                    .await
+                    .expect("migration task panicked")
+                    .map_err(|e| DbError::InvalidData(e.to_string()))?;
                 Ok::<(), DbError>(())
             })
             .await?;

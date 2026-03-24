@@ -31,8 +31,8 @@ pub(crate) const ARCHITECT_TEMPLATE: &str = include_str!("prompts/architect.md")
 /// Runtime context injected alongside the task's stored fields at render time.
 ///
 /// Worker agents need `project_path` and `workspace_path`. Reviewer agents
-/// additionally use the workspace to inspect code. Conflict resolvers supply
-/// merge context.
+/// additionally use the workspace to inspect code. Workers with conflict
+/// context receive merge details.
 pub struct TaskContext {
     /// Absolute path to the project root (passed to Djinn tools as `project`).
     pub project_path: String,
@@ -404,6 +404,10 @@ mod tests {
             memory_refs: "[]".into(),
             agent_type: None,
             unresolved_blocker_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
         }
     }
 

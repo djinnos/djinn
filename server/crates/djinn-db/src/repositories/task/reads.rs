@@ -9,7 +9,10 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks WHERE project_id = ?1 ORDER BY priority, created_at",
         )
@@ -23,7 +26,10 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks WHERE epic_id = ?1 ORDER BY priority, created_at",
         )
@@ -37,7 +43,10 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
         )
@@ -59,7 +68,10 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks WHERE short_id = ?1",
         )
@@ -74,7 +86,10 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks WHERE id = ?1 OR short_id = ?1",
         )
@@ -92,7 +107,10 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)",
         )
@@ -112,7 +130,10 @@ impl TaskRepository {
         Ok(sqlx::query_as::<_, Task>(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks WHERE memory_refs LIKE ?1
              ORDER BY priority, created_at",
@@ -132,7 +153,10 @@ impl TaskRepository {
         let sql = if project_id.is_some() {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks
              WHERE project_id = ?1
@@ -141,7 +165,10 @@ impl TaskRepository {
         } else {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count, created_at, updated_at, closed_at,
+                    reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
+                    created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks
              WHERE (status != 'closed' OR closed_at > datetime('now', '-1 hour'))
@@ -194,11 +221,13 @@ impl TaskRepository {
                     id, project_id, short_id, epic_id, title, description, design,
                     issue_type, status, priority, owner, labels,
                     acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     project_id          = excluded.project_id,
@@ -214,6 +243,10 @@ impl TaskRepository {
                     reopen_count        = excluded.reopen_count,
                     continuation_count  = excluded.continuation_count,
                     verification_failure_count = excluded.verification_failure_count,
+                    total_reopen_count  = excluded.total_reopen_count,
+                    total_verification_failure_count = excluded.total_verification_failure_count,
+                    intervention_count  = excluded.intervention_count,
+                    last_intervention_at = excluded.last_intervention_at,
                     updated_at          = excluded.updated_at,
                     closed_at           = excluded.closed_at,
                     close_reason        = excluded.close_reason,
@@ -240,6 +273,10 @@ impl TaskRepository {
             .bind(task.reopen_count)
             .bind(task.continuation_count)
             .bind(task.verification_failure_count)
+            .bind(task.total_reopen_count)
+            .bind(task.total_verification_failure_count)
+            .bind(task.intervention_count)
+            .bind(&task.last_intervention_at)
             .bind(&task.created_at)
             .bind(&task.updated_at)
             .bind(&task.closed_at)
@@ -350,11 +387,13 @@ impl TaskRepository {
                     id, project_id, short_id, epic_id, title, description, design,
                     issue_type, status, priority, owner, labels,
                     acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
+                    total_reopen_count, total_verification_failure_count,
+                    intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
                  )
                  ON CONFLICT(id) DO UPDATE SET
                     project_id          = excluded.project_id,
@@ -370,6 +409,10 @@ impl TaskRepository {
                     reopen_count        = excluded.reopen_count,
                     continuation_count  = excluded.continuation_count,
                     verification_failure_count = excluded.verification_failure_count,
+                    total_reopen_count  = excluded.total_reopen_count,
+                    total_verification_failure_count = excluded.total_verification_failure_count,
+                    intervention_count  = excluded.intervention_count,
+                    last_intervention_at = excluded.last_intervention_at,
                     updated_at          = excluded.updated_at,
                     closed_at           = excluded.closed_at,
                     close_reason        = excluded.close_reason,
@@ -396,6 +439,10 @@ impl TaskRepository {
             .bind(task.reopen_count)
             .bind(task.continuation_count)
             .bind(task.verification_failure_count)
+            .bind(task.total_reopen_count)
+            .bind(task.total_verification_failure_count)
+            .bind(task.intervention_count)
+            .bind(&task.last_intervention_at)
             .bind(&task.created_at)
             .bind(&task.updated_at)
             .bind(&task.closed_at)

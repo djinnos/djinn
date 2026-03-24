@@ -1222,6 +1222,10 @@ fn make_peer_task(
         memory_refs: "[]".to_string(),
         agent_type: None,
         unresolved_blocker_count: 0,
+        total_reopen_count: 0,
+        total_verification_failure_count: 0,
+        intervention_count: 0,
+        last_intervention_at: None,
     }
 }
 

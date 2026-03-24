@@ -328,6 +328,10 @@ mod tests {
             memory_refs: "[]".into(),
             agent_type: None,
             unresolved_blocker_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
         }
     }
 
@@ -391,7 +395,7 @@ mod tests {
     #[test]
     fn role_for_task_dispatch_returns_worker_role() {
         let task = make_task("open");
-        // Test that conflict-context tasks route to Worker (not a dedicated conflict_resolver)
+        // Test that conflict-context tasks route to Worker
         let role = role_for_task_dispatch(&task, true);
         assert_eq!(
             role.config().name,

@@ -249,14 +249,14 @@ fn tool_role_amend_prompt() -> RmcpTool {
 fn tool_role_create() -> RmcpTool {
     RmcpTool::new(
         "agent_create".to_string(),
-        "Create a new specialist agent extending a base role (worker, reviewer, resolver). Use when existing agents lack capabilities for a specific domain."
+        "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain."
             .to_string(),
         object!({
             "type": "object",
             "required": ["name", "base_role"],
             "properties": {
                 "name": {"type": "string", "description": "Unique agent name within the project"},
-                "base_role": {"type": "string", "description": "Base role to extend: worker, reviewer, or resolver"},
+                "base_role": {"type": "string", "description": "Base role to extend: worker or reviewer"},
                 "description": {"type": "string", "description": "Short description of what this agent specialises in"},
                 "system_prompt_extensions": {"type": "string", "description": "Additional system prompt content appended to the base role prompt"},
                 "model_preference": {"type": "string", "description": "Preferred model ID (falls back to project default)"}

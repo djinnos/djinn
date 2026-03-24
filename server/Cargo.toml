@@ -30,7 +30,8 @@ async-stream = "0.3"
 bytes = "1"
 git2 = "0.20"
 dirs = "6"
-refinery = { version = "0.9", features = ["int8-versions"] }
+refinery = { version = "0.9", features = ["int8-versions", "rusqlite"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 rmcp = { version = "0.16", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 libc = "0.2"
 ring = "0.17"

@@ -1143,13 +1143,7 @@ async fn call_agent_metrics(
 
     let mut entries = Vec::with_capacity(roles.len());
     for role in &roles {
-        let agent_type = match role.base_role.as_str() {
-            "worker" | "resolver" => "worker",
-            "reviewer" => "reviewer",
-            "planner" => "planner",
-            "lead" => "lead",
-            other => other,
-        };
+        let agent_type = role.base_role.as_str();
         let m = repo
             .get_metrics(&project_id, agent_type, window_days)
             .await
@@ -1207,7 +1201,7 @@ async fn call_agent_amend_prompt(
     // Only allow amending specialist roles. Prevents patching high-level orchestration roles.
     if matches!(role.base_role.as_str(), "architect" | "lead" | "planner") {
         return Err(format!(
-            "cannot amend learned_prompt for base_role '{}'; only specialist roles (worker, reviewer, resolver) are eligible",
+            "cannot amend learned_prompt for base_role '{}'; only specialist roles (worker, reviewer) are eligible",
             role.base_role
         ));
     }
@@ -2380,7 +2374,7 @@ async fn call_task_reset_counters(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
     sqlx::query(
-        "UPDATE tasks SET reopen_count = 0, continuation_count = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1"
+        "UPDATE tasks SET reopen_count = 0, continuation_count = 0, intervention_count = intervention_count + 1, last_intervention_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1"
     )
     .bind(&task.id)
     .execute(state.db.pool())
@@ -2706,7 +2700,7 @@ fn tool_role_metrics() -> RmcpTool {
 fn tool_role_amend_prompt() -> RmcpTool {
     RmcpTool::new(
         "agent_amend_prompt".to_string(),
-        "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer, resolver base_role). Do NOT use on architect, lead, or planner roles.".to_string(),
+        "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.".to_string(),
         object!({
             "type": "object",
             "required": ["agent_id", "amendment"],
@@ -2723,14 +2717,14 @@ fn tool_role_amend_prompt() -> RmcpTool {
 fn tool_role_create() -> RmcpTool {
     RmcpTool::new(
         "agent_create".to_string(),
-        "Create a new specialist agent extending a base role (worker, reviewer, resolver). Use when existing agents lack capabilities for a specific domain.".to_string(),
+        "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.".to_string(),
         object!({
             "type": "object",
             "required": ["name", "base_role"],
             "properties": {
                 "project": {"type": "string", "description": "Absolute project path"},
                 "name": {"type": "string", "description": "Unique agent name within the project"},
-                "base_role": {"type": "string", "description": "Base role to extend: worker, reviewer, or resolver"},
+                "base_role": {"type": "string", "description": "Base role to extend: worker or reviewer"},
                 "description": {"type": "string", "description": "Short description of what this agent specialises in"},
                 "system_prompt_extensions": {"type": "string", "description": "Additional system prompt content appended to the base role prompt"},
                 "model_preference": {"type": "string", "description": "Preferred model ID (falls back to project default)"}

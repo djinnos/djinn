@@ -130,8 +130,12 @@ impl TaskRepository {
             "UPDATE tasks SET
                 status = ?2,
                 reopen_count = reopen_count + ?3,
+                total_reopen_count = total_reopen_count + ?3,
                 continuation_count = CASE WHEN ?4 THEN 0 WHEN ?5 THEN continuation_count + 1 ELSE continuation_count END,
                 verification_failure_count = CASE WHEN ?10 THEN 0 WHEN ?11 THEN verification_failure_count + 1 ELSE verification_failure_count END,
+                total_verification_failure_count = total_verification_failure_count + CASE WHEN ?11 THEN 1 ELSE 0 END,
+                intervention_count = CASE WHEN ?15 THEN intervention_count + 1 ELSE intervention_count END,
+                last_intervention_at = CASE WHEN ?15 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE last_intervention_at END,
                 closed_at = CASE
                     WHEN ?6 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                     WHEN ?7 THEN NULL
@@ -164,6 +168,7 @@ impl TaskRepository {
         .bind(apply.clear_merge_conflict_metadata)
         .bind(apply.set_merge_conflict_metadata)
         .bind(conflict_meta_ref)
+        .bind(apply.record_intervention)
         .execute(&mut *tx)
         .await?;
 
@@ -236,6 +241,7 @@ impl TaskRepository {
         sqlx::query(&format!(
             "UPDATE tasks SET status = ?2, {closed_at_sql}
                 reopen_count = reopen_count + ?3,
+                total_reopen_count = total_reopen_count + ?3,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1"
         ))
@@ -303,6 +309,7 @@ impl TaskRepository {
                     ELSE closed_at
                 END,
                 reopen_count = reopen_count + ?3,
+                total_reopen_count = total_reopen_count + ?3,
                 close_reason = CASE
                     WHEN ?2 = 'closed' THEN ?4
                     ELSE NULL
