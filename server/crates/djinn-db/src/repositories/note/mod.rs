@@ -13,7 +13,7 @@ use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
 mod association;
-mod consolidation;
+pub(crate) mod consolidation;
 mod context;
 mod crud;
 mod file_helpers;
@@ -27,7 +27,9 @@ pub use association::NoteAssociationEntry;
 pub use consolidation::{CreateConsolidationRunMetric, NoteConsolidationRepository};
 pub use context::BuildContextResponse;
 pub use djinn_core::models::{
-    ConsolidatedNoteProvenance, ConsolidationRunMetric, ContradictionCandidate, NoteDedupCandidate,
+    ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
+    ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate, DbNoteGroup,
+    NoteDedupCandidate,
 };
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
@@ -2005,6 +2007,169 @@ mod tests {
             .unwrap();
         }
         id
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consolidation_lists_db_note_groups_and_clusters_deterministically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let project_a = make_project(&db, tmp.path()).await;
+        let project_b_root = tempfile::tempdir().unwrap();
+        let project_b = make_project(&db, project_b_root.path()).await;
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let alpha = repo
+            .create_db_note(
+                &project_a.id,
+                "Schema seam prerequisite check",
+                "Verify the prerequisite seam exists before wiring the schema seam. prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let beta = repo
+            .create_db_note(
+                &project_a.id,
+                "Verify prerequisite seam before schema wiring",
+                "Always verify the prerequisite seam exists before wiring the schema seam. prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let gamma = repo
+            .create_db_note(
+                &project_a.id,
+                "Deterministic seam verification for schema query",
+                "Use deterministic verification to confirm the prerequisite seam before schema query wiring. prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _singleton = repo
+            .create_db_note(
+                &project_a.id,
+                "Unrelated pitfall",
+                "This content is unrelated and should not cluster with the prerequisite seam notes.",
+                "pitfall",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _other_project = repo
+            .create_db_note(
+                &project_b.id,
+                "Project B duplicate cluster seed",
+                "project b duplicate cluster seed prerequisite seam schema seam check",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        for note in [&alpha, &beta, &gamma] {
+            let abstract_text = format!(
+                "{} prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
+                note.title
+            );
+            sqlx::query(
+                "UPDATE notes
+                 SET abstract = ?2,
+                     overview = ?3
+                 WHERE id = ?1",
+            )
+            .bind(&note.id)
+            .bind(&abstract_text)
+            .bind(&abstract_text)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let groups = consolidation_repo.list_db_note_groups().await.unwrap();
+        let mut got = groups
+            .into_iter()
+            .map(|group| (group.project_id, group.note_type, group.note_count))
+            .collect::<Vec<_>>();
+        got.sort();
+        let mut expected = vec![
+            (project_a.id.clone(), "pattern".to_string(), 3),
+            (project_a.id.clone(), "pitfall".to_string(), 1),
+            (project_b.id.clone(), "pattern".to_string(), 1),
+        ];
+        expected.sort();
+        assert_eq!(got, expected);
+
+        let clusters = consolidation_repo
+            .likely_duplicate_clusters(&project_a.id, "pattern")
+            .await
+            .unwrap();
+        assert_eq!(clusters.len(), 1);
+        let cluster = &clusters[0];
+        let cluster_note_ids = cluster
+            .notes
+            .iter()
+            .map(|note| note.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(cluster_note_ids.len(), 2);
+        assert!(cluster_note_ids.contains(&alpha.id));
+        assert!(cluster_note_ids.contains(&beta.id) || cluster_note_ids.contains(&gamma.id));
+        assert_eq!(
+            cluster.note_ids,
+            cluster
+                .notes
+                .iter()
+                .map(|note| note.id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(!cluster.edges.is_empty());
+        assert!(
+            cluster
+                .edges
+                .windows(2)
+                .all(|window| window[0].left_note_id <= window[1].left_note_id
+                    && (window[0].left_note_id < window[1].left_note_id
+                        || window[0].right_note_id <= window[1].right_note_id))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consolidation_clusters_ignore_below_threshold_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let project = make_project(&db, tmp.path()).await;
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        repo.create_db_note(
+            &project.id,
+            "Sparse note one",
+            "alpha unique tokens only",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create_db_note(
+            &project.id,
+            "Sparse note two",
+            "omega unrelated language only",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let clusters = consolidation_repo
+            .likely_duplicate_clusters(&project.id, "pattern")
+            .await
+            .unwrap();
+        assert!(clusters.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

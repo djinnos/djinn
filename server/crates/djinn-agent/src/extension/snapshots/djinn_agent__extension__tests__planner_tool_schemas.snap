@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3829
+assertion_line: 3835
 expression: tool_schemas_planner()
 ---
 [
@@ -315,6 +315,13 @@ expression: tool_schemas_planner()
           "minItems": 1,
           "type": "array"
         },
+        "blocked_by": {
+          "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "description": {
           "type": "string"
         },
@@ -360,12 +367,26 @@ expression: tool_schemas_planner()
     "name": "task_create"
   },
   {
-    "description": "Update task fields and append/remove memory refs when supported by the workflow.",
+    "description": "Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.",
     "inputSchema": {
       "properties": {
         "acceptance_criteria": {
           "items": {
             "type": "object"
+          },
+          "type": "array"
+        },
+        "blocked_by_add": {
+          "description": "Task IDs (UUID or short_id) to add as blockers. Task will not be dispatched until all blockers are resolved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blocked_by_remove": {
+          "description": "Task IDs (UUID or short_id) to remove as blockers.",
+          "items": {
+            "type": "string"
           },
           "type": "array"
         },

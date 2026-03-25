@@ -133,11 +133,13 @@ impl AgentRepository {
     /// Return all roles across all projects, ordered by project_id, base_role, name.
     pub async fn list_all(&self) -> Result<Vec<Agent>> {
         self.db.ensure_initialized().await?;
-        let sql = format!("SELECT {AGENT_COLUMNS} FROM agents \
-             ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC");
+        let sql = format!(
+            "SELECT {AGENT_COLUMNS} FROM agents \
+             ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC"
+        );
         Ok(sqlx::query_as::<_, Agent>(&sql)
-        .fetch_all(self.db.pool())
-        .await?)
+            .fetch_all(self.db.pool())
+            .await?)
     }
 
     /// Return the full `learned_prompt_history` for a role, newest first.
@@ -203,9 +205,9 @@ impl AgentRepository {
         self.db.ensure_initialized().await?;
         let sql = format!("SELECT {AGENT_COLUMNS} FROM agents WHERE id = ?1");
         Ok(sqlx::query_as::<_, Agent>(&sql)
-        .bind(id)
-        .fetch_optional(self.db.pool())
-        .await?)
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?)
     }
 
     /// Return the default role for a given base_role within a project, or None
@@ -216,14 +218,15 @@ impl AgentRepository {
         base_role: &str,
     ) -> Result<Option<Agent>> {
         self.db.ensure_initialized().await?;
-        let sql = format!("SELECT {AGENT_COLUMNS} FROM agents \
-             WHERE project_id = ?1 AND base_role = ?2 AND is_default = 1 LIMIT 1");
-        Ok(sqlx::query_as::<_, Agent>(&sql
-        )
-        .bind(project_id)
-        .bind(base_role)
-        .fetch_optional(self.db.pool())
-        .await?)
+        let sql = format!(
+            "SELECT {AGENT_COLUMNS} FROM agents \
+             WHERE project_id = ?1 AND base_role = ?2 AND is_default = 1 LIMIT 1"
+        );
+        Ok(sqlx::query_as::<_, Agent>(&sql)
+            .bind(project_id)
+            .bind(base_role)
+            .fetch_optional(self.db.pool())
+            .await?)
     }
 
     /// Return an `Agent` by its exact `name` within a project.
@@ -238,23 +241,24 @@ impl AgentRepository {
         self.db.ensure_initialized().await?;
         let sql = format!("SELECT {AGENT_COLUMNS} FROM agents WHERE project_id = ?1 AND name = ?2");
         Ok(sqlx::query_as::<_, Agent>(&sql)
-        .bind(project_id)
-        .bind(name)
-        .fetch_optional(self.db.pool())
-        .await?)
+            .bind(project_id)
+            .bind(name)
+            .fetch_optional(self.db.pool())
+            .await?)
     }
 
     /// Return all roles for a project without pagination — used for the planner
     /// specialist roster where a complete list is always needed.
     pub async fn all_for_project(&self, project_id: &str) -> Result<Vec<Agent>> {
         self.db.ensure_initialized().await?;
-        let sql = format!("SELECT {AGENT_COLUMNS} FROM agents \
-             WHERE project_id = ?1 ORDER BY is_default DESC, base_role ASC, name ASC");
-        Ok(sqlx::query_as::<_, Agent>(&sql
-        )
-        .bind(project_id)
-        .fetch_all(self.db.pool())
-        .await?)
+        let sql = format!(
+            "SELECT {AGENT_COLUMNS} FROM agents \
+             WHERE project_id = ?1 ORDER BY is_default DESC, base_role ASC, name ASC"
+        );
+        Ok(sqlx::query_as::<_, Agent>(&sql)
+            .bind(project_id)
+            .fetch_all(self.db.pool())
+            .await?)
     }
 
     pub async fn create_for_project(

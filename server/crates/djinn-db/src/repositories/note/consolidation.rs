@@ -1,7 +1,13 @@
-use djinn_core::models::{ConsolidatedNoteProvenance, ConsolidationRunMetric};
+use djinn_core::models::{
+    ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
+    ConsolidationNote, ConsolidationRunMetric, DbNoteGroup, NoteDedupCandidate,
+};
 
 use crate::Database;
 use crate::error::{DbError as Error, DbResult as Result};
+
+const DEDUP_SCORE_THRESHOLD: f64 = -3.0;
+const DEDUP_LIMIT: i64 = 16;
 
 pub struct CreateConsolidationRunMetric<'a> {
     pub project_id: &'a str,
@@ -24,6 +30,200 @@ pub struct NoteConsolidationRepository {
 impl NoteConsolidationRepository {
     pub fn new(db: Database) -> Self {
         Self { db }
+    }
+
+    pub async fn list_db_note_groups(&self) -> Result<Vec<DbNoteGroup>> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query_as::<_, DbNoteGroup>(
+            "SELECT project_id, note_type, COUNT(*) as note_count
+             FROM notes
+             WHERE storage = 'db'
+               AND note_type IN ('case', 'pattern', 'pitfall')
+             GROUP BY project_id, note_type
+             ORDER BY project_id ASC, note_type ASC",
+        )
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn list_db_notes_in_group(
+        &self,
+        project_id: &str,
+        note_type: &str,
+    ) -> Result<Vec<ConsolidationNote>> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query_as::<_, ConsolidationNote>(
+            "SELECT id, project_id, permalink, title, note_type, folder, content,
+                    abstract as abstract_, overview, confidence
+             FROM notes
+             WHERE project_id = ?1
+               AND note_type = ?2
+               AND storage = 'db'
+             ORDER BY permalink ASC, id ASC",
+        )
+        .bind(project_id)
+        .bind(note_type)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn likely_duplicate_clusters(
+        &self,
+        project_id: &str,
+        note_type: &str,
+    ) -> Result<Vec<ConsolidationCluster>> {
+        let notes = self.list_db_notes_in_group(project_id, note_type).await?;
+        self.clusters_from_notes(project_id, &notes).await
+    }
+
+    async fn clusters_from_notes(
+        &self,
+        project_id: &str,
+        notes: &[ConsolidationNote],
+    ) -> Result<Vec<ConsolidationCluster>> {
+        use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+
+        if notes.len() < 2 {
+            return Ok(Vec::new());
+        }
+
+        let notes_by_id: HashMap<String, ConsolidationNote> = notes
+            .iter()
+            .cloned()
+            .map(|note| (note.id.clone(), note))
+            .collect();
+
+        let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut edge_scores: BTreeMap<(String, String), f64> = BTreeMap::new();
+
+        for note in notes {
+            let query_text = build_query_text(note);
+            let candidates = self
+                .dedup_candidates_for_group(project_id, &note.folder, &note.note_type, &query_text)
+                .await?;
+
+            for candidate in candidates {
+                if candidate.id == note.id || !notes_by_id.contains_key(&candidate.id) {
+                    continue;
+                }
+
+                let (left, right) = canonical_pair(&note.id, &candidate.id);
+                adjacency
+                    .entry(left.clone())
+                    .or_default()
+                    .insert(right.clone());
+                adjacency
+                    .entry(right.clone())
+                    .or_default()
+                    .insert(left.clone());
+                edge_scores
+                    .entry((left, right))
+                    .and_modify(|existing| *existing = existing.max(candidate.score))
+                    .or_insert(candidate.score);
+            }
+        }
+
+        if edge_scores.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::new();
+        let mut components = Vec::new();
+
+        for start in adjacency.keys() {
+            if !visited.insert(start.clone()) {
+                continue;
+            }
+
+            let mut queue = VecDeque::from([start.clone()]);
+            let mut component_ids = BTreeSet::from([start.clone()]);
+
+            while let Some(node) = queue.pop_front() {
+                if let Some(neighbors) = adjacency.get(&node) {
+                    for neighbor in neighbors {
+                        if visited.insert(neighbor.clone()) {
+                            queue.push_back(neighbor.clone());
+                        }
+                        component_ids.insert(neighbor.clone());
+                    }
+                }
+            }
+
+            if component_ids.len() < 2 {
+                continue;
+            }
+
+            let component_id_set: HashSet<_> = component_ids.iter().cloned().collect();
+            let notes = sorted_component_notes(&component_ids, &notes_by_id);
+            let note_ids = notes.iter().map(|note| note.id.clone()).collect::<Vec<_>>();
+
+            let mut edges = Vec::new();
+            for (left, right) in edge_scores.keys() {
+                if component_id_set.contains(left) && component_id_set.contains(right) {
+                    edges.push(ConsolidationCandidateEdge {
+                        left_note_id: left.clone(),
+                        right_note_id: right.clone(),
+                        score: edge_scores[&(left.clone(), right.clone())],
+                    });
+                }
+            }
+            edges.sort_by(|left, right| {
+                left.left_note_id
+                    .cmp(&right.left_note_id)
+                    .then_with(|| left.right_note_id.cmp(&right.right_note_id))
+            });
+
+            components.push(ConsolidationCluster {
+                note_ids,
+                notes,
+                edges,
+            });
+        }
+
+        components.sort_by(|left, right| left.note_ids.cmp(&right.note_ids));
+        Ok(components)
+    }
+
+    async fn dedup_candidates_for_group(
+        &self,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        query_text: &str,
+    ) -> Result<Vec<NoteDedupCandidate>> {
+        self.db.ensure_initialized().await?;
+        let safe_query = sanitize_fts5_query(query_text);
+        let Some(safe_query) = safe_query else {
+            return Ok(Vec::new());
+        };
+
+        sqlx::query_as::<_, NoteDedupCandidate>(
+            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract as abstract_, n.overview,
+                    -bm25(notes_fts, 3.0, 1.0, 2.0) as score
+             FROM notes_fts
+             JOIN notes n ON notes_fts.rowid = n.rowid
+             WHERE notes_fts MATCH ?1
+               AND n.project_id = ?2
+               AND n.folder = ?3
+               AND n.note_type = ?4
+               AND n.storage = 'db'
+               AND -bm25(notes_fts, 3.0, 1.0, 2.0) > ?5
+             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
+             LIMIT ?6",
+        )
+        .bind(&safe_query)
+        .bind(project_id)
+        .bind(folder)
+        .bind(note_type)
+        .bind(DEDUP_SCORE_THRESHOLD)
+        .bind(DEDUP_LIMIT)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn add_provenance(
@@ -167,4 +367,64 @@ impl NoteConsolidationRepository {
             other => other.into(),
         })
     }
+}
+
+fn build_query_text(note: &ConsolidationNote) -> String {
+    let mut query_text = String::new();
+    if let Some(abstract_) = note.abstract_.as_deref() {
+        query_text.push_str(abstract_);
+        query_text.push(' ');
+    }
+    if let Some(overview) = note.overview.as_deref() {
+        query_text.push_str(overview);
+        query_text.push(' ');
+    }
+    query_text.push_str(&note.title);
+    query_text.push(' ');
+    query_text.push_str(&note.content);
+    query_text
+}
+
+fn sorted_component_notes(
+    component_ids: &std::collections::BTreeSet<String>,
+    notes_by_id: &std::collections::HashMap<String, ConsolidationNote>,
+) -> Vec<ConsolidationNote> {
+    let mut notes = component_ids
+        .iter()
+        .filter_map(|id| notes_by_id.get(id).cloned())
+        .collect::<Vec<_>>();
+    notes.sort_by(|left, right| {
+        left.permalink
+            .cmp(&right.permalink)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    notes
+}
+
+fn canonical_pair(left: &str, right: &str) -> (String, String) {
+    if left <= right {
+        (left.to_string(), right.to_string())
+    } else {
+        (right.to_string(), left.to_string())
+    }
+}
+
+fn sanitize_fts5_query(raw: &str) -> Option<String> {
+    let tokens: Vec<&str> = raw
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| {
+            let t = t.to_uppercase();
+            !t.is_empty() && t != "AND" && t != "OR" && t != "NOT" && t != "NEAR"
+        })
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(
+        tokens
+            .into_iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
