@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
 use djinn_core::models::Agent;
+use djinn_db::repositories::agent::ExtractionQualityMetrics as DbExtractionQualityMetrics;
 use djinn_db::{
     AgentCreateInput, AgentListQuery, AgentMetrics as DbAgentMetrics, AgentRepository,
-    AgentUpdateInput, ExtractionQualityMetrics as DbExtractionQualityMetrics,
+    AgentUpdateInput,
 };
 
 pub(super) fn router() -> Router<AppState> {
