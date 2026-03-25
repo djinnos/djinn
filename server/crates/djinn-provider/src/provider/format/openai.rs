@@ -3,6 +3,7 @@ use futures::StreamExt;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation, Role};
@@ -207,6 +208,7 @@ struct DeltaFunction {
 
 #[derive(Deserialize)]
 struct DeltaToolCall {
+    index: Option<u32>,
     id: Option<String>,
     function: Option<DeltaFunction>,
 }
@@ -243,7 +245,7 @@ struct StreamChunk {
 /// Returns zero or more `StreamEvent`s produced by this line.
 pub fn parse_openai_line(
     line: &str,
-    tool_acc: &mut Option<(String, String, String)>, // (id, name, arguments)
+    tool_acc: &mut BTreeMap<u32, (String, String, String)>, // index -> (id, name, arguments)
 ) -> Vec<StreamEvent> {
     let chunk: StreamChunk = match serde_json::from_str(line) {
         Ok(c) => c,
@@ -287,43 +289,56 @@ pub fn parse_openai_line(
             events.push(StreamEvent::Delta(ContentBlock::Text { text }));
         }
 
-        // Tool calls — accumulate across chunks
+        // Tool calls — accumulate across chunks, keyed by index
         if let Some(tool_calls) = delta.tool_calls {
             for tc in tool_calls {
+                let idx = tc.index.unwrap_or(0);
                 let func = tc.function.unwrap_or_default();
-                match tool_acc {
-                    None => {
-                        // First chunk for this tool call
-                        *tool_acc = Some((
-                            tc.id.unwrap_or_default(),
-                            func.name.unwrap_or_default(),
-                            func.arguments.unwrap_or_default(),
-                        ));
-                    }
-                    Some((_, _, args)) => {
-                        // Append arguments fragment
-                        if let Some(frag) = func.arguments {
-                            args.push_str(&frag);
+                if let Some(entry) = tool_acc.get_mut(&idx) {
+                    // Existing entry — append fragments
+                    if let Some(id) = tc.id {
+                        if !id.is_empty() {
+                            entry.0 = id;
                         }
                     }
+                    if let Some(name) = func.name {
+                        if !name.is_empty() {
+                            entry.1 = name;
+                        }
+                    }
+                    if let Some(frag) = func.arguments {
+                        entry.2.push_str(&frag);
+                    }
+                } else {
+                    // New entry for this index
+                    tool_acc.insert(idx, (
+                        tc.id.unwrap_or_default(),
+                        func.name.unwrap_or_default(),
+                        func.arguments.unwrap_or_default(),
+                    ));
                 }
             }
         }
 
-        // On finish_reason="tool_calls", emit the accumulated tool use
+        // On finish_reason="tool_calls", emit all accumulated tool uses
         if choice
             .finish_reason
             .as_deref()
             .map(|r| r == "tool_calls")
             .unwrap_or(false)
-            && let Some((id, name, args)) = tool_acc.take()
         {
-            let input = serde_json::from_str(&args).unwrap_or(Value::Null);
-            events.push(StreamEvent::Delta(ContentBlock::ToolUse {
-                id,
-                name,
-                input,
-            }));
+            // Drain all entries sorted by index (BTreeMap iterates in order)
+            let entries: Vec<_> = tool_acc.keys().cloned().collect();
+            for idx in entries {
+                if let Some((id, name, args)) = tool_acc.remove(&idx) {
+                    let input = serde_json::from_str(&args).unwrap_or(Value::Null);
+                    events.push(StreamEvent::Delta(ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                    }));
+                }
+            }
         }
     }
 
@@ -431,7 +446,7 @@ impl LlmProvider for OpenAIProvider {
             let raw = self.client.stream_sse(&url, body, &auth, extra_headers);
             let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
                 Box::pin(stream! {
-                    let mut tool_acc: Option<(String, String, String)> = None;
+                    let mut tool_acc: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
                     let mut raw_stream = raw;
                     while let Some(result) = raw_stream.next().await {
                         match result {
@@ -554,7 +569,7 @@ mod tests {
     #[test]
     fn test_parse_text_delta() {
         let line = r#"{"choices":[{"delta":{"content":"hello"},"finish_reason":null,"index":0}]}"#;
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line(line, &mut acc);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -566,7 +581,7 @@ mod tests {
     #[test]
     fn test_parse_empty_content_skipped() {
         let line = r#"{"choices":[{"delta":{"content":""},"finish_reason":null,"index":0}]}"#;
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line(line, &mut acc);
         assert!(events.is_empty());
     }
@@ -580,10 +595,10 @@ mod tests {
         // Final chunk: finish_reason=tool_calls
         let line3 = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
 
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let e1 = parse_openai_line(line1, &mut acc);
         assert!(e1.is_empty(), "no events on first tool chunk");
-        assert!(acc.is_some());
+        assert!(!acc.is_empty());
 
         let e2 = parse_openai_line(line2, &mut acc);
         assert!(e2.is_empty(), "no events while accumulating");
@@ -598,7 +613,7 @@ mod tests {
             }
             _ => panic!("expected tool use"),
         }
-        assert!(acc.is_none(), "accumulator cleared after emit");
+        assert!(acc.is_empty(), "accumulator cleared after emit");
     }
 
     #[test]
@@ -620,16 +635,16 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_json_ignored() {
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line("{not-json", &mut acc);
         assert!(events.is_empty());
-        assert!(acc.is_none());
+        assert!(acc.is_empty());
     }
 
     #[test]
     fn test_parse_missing_choices_with_usage_only() {
         let line = r#"{"usage":{"prompt_tokens":7}}"#;
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line(line, &mut acc);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -643,7 +658,7 @@ mod tests {
     #[test]
     fn test_parse_reasoning_content() {
         let line = r#"{"choices":[{"delta":{"reasoning_content":"let me think..."},"finish_reason":null,"index":0}]}"#;
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line(line, &mut acc);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -655,7 +670,7 @@ mod tests {
     #[test]
     fn test_parse_reasoning_details() {
         let line = r#"{"choices":[{"delta":{"reasoning_details":"step 1: analyze"},"finish_reason":null,"index":0}]}"#;
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line(line, &mut acc);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -668,7 +683,7 @@ mod tests {
     fn test_parse_reasoning_content_with_text() {
         // Some models send both reasoning and content in same chunk
         let line = r#"{"choices":[{"delta":{"reasoning_content":"thinking","content":"hello"},"finish_reason":null,"index":0}]}"#;
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line(line, &mut acc);
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], StreamEvent::Thinking(t) if t == "thinking"));
@@ -681,16 +696,137 @@ mod tests {
     fn test_parse_empty_reasoning_content_skipped() {
         let line =
             r#"{"choices":[{"delta":{"reasoning_content":""},"finish_reason":null,"index":0}]}"#;
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line(line, &mut acc);
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_parse_done_sentinel_ignored() {
-        let mut acc = None;
+        let mut acc = BTreeMap::new();
         let events = parse_openai_line("[DONE]", &mut acc);
         assert!(events.is_empty());
-        assert!(acc.is_none());
+        assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn test_parse_parallel_tool_calls() {
+        let mut acc = BTreeMap::new();
+
+        // Chunk 1: two tool calls start
+        let line1 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":""}},{"index":1,"id":"call_2","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}"#;
+        let e1 = parse_openai_line(line1, &mut acc);
+        assert!(e1.is_empty(), "no events on first tool chunk");
+        assert_eq!(acc.len(), 2);
+
+        // Chunk 2: arguments for index 0
+        let line2 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":null}]}"#;
+        let e2 = parse_openai_line(line2, &mut acc);
+        assert!(e2.is_empty());
+
+        // Chunk 3: arguments for index 1
+        let line3 = r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"path\":\"/tmp\"}"}}]},"finish_reason":null}]}"#;
+        let e3 = parse_openai_line(line3, &mut acc);
+        assert!(e3.is_empty());
+
+        // Chunk 4: finish
+        let line4 = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let e4 = parse_openai_line(line4, &mut acc);
+        assert_eq!(e4.len(), 2);
+
+        match &e4[0] {
+            StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "shell");
+                assert_eq!(input["cmd"].as_str(), Some("ls"));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        match &e4[1] {
+            StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) => {
+                assert_eq!(id, "call_2");
+                assert_eq!(name, "read");
+                assert_eq!(input["path"].as_str(), Some("/tmp"));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        assert!(acc.is_empty(), "accumulator cleared after emit");
+    }
+
+    #[test]
+    fn test_parse_parallel_tool_calls_with_thinking() {
+        let mut acc = BTreeMap::new();
+
+        // Chunk 1: reasoning + two tool calls start
+        let line1 = r#"{"choices":[{"delta":{"reasoning_content":"Let me run these commands","tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":""}},{"index":1,"id":"call_2","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}"#;
+        let e1 = parse_openai_line(line1, &mut acc);
+        assert_eq!(e1.len(), 1);
+        match &e1[0] {
+            StreamEvent::Thinking(text) => assert_eq!(text, "Let me run these commands"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+
+        // Chunk 2: arguments for index 0
+        let line2 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":null}]}"#;
+        parse_openai_line(line2, &mut acc);
+
+        // Chunk 3: arguments for index 1
+        let line3 = r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"path\":\"/tmp\"}"}}]},"finish_reason":null}]}"#;
+        parse_openai_line(line3, &mut acc);
+
+        // Chunk 4: finish
+        let line4 = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let e4 = parse_openai_line(line4, &mut acc);
+        assert_eq!(e4.len(), 2);
+
+        match &e4[0] {
+            StreamEvent::Delta(ContentBlock::ToolUse { id, name, .. }) => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "shell");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        match &e4[1] {
+            StreamEvent::Delta(ContentBlock::ToolUse { id, name, .. }) => {
+                assert_eq!(id, "call_2");
+                assert_eq!(name, "read");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_thinking_before_tool_call() {
+        let mut acc = BTreeMap::new();
+
+        // Chunk 1: reasoning token
+        let line1 = r#"{"choices":[{"delta":{"reasoning_content":"thinking step 1"},"finish_reason":null}]}"#;
+        let e1 = parse_openai_line(line1, &mut acc);
+        assert_eq!(e1.len(), 1);
+        assert!(matches!(&e1[0], StreamEvent::Thinking(t) if t == "thinking step 1"));
+
+        // Chunk 2: more reasoning
+        let line2 = r#"{"choices":[{"delta":{"reasoning_content":"thinking step 2"},"finish_reason":null}]}"#;
+        let e2 = parse_openai_line(line2, &mut acc);
+        assert_eq!(e2.len(), 1);
+        assert!(matches!(&e2[0], StreamEvent::Thinking(t) if t == "thinking step 2"));
+
+        // Chunk 3: tool call
+        let line3 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":null}]}"#;
+        let e3 = parse_openai_line(line3, &mut acc);
+        assert!(e3.is_empty());
+
+        // Chunk 4: finish
+        let line4 = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let e4 = parse_openai_line(line4, &mut acc);
+        assert_eq!(e4.len(), 1);
+        match &e4[0] {
+            StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "shell");
+                assert_eq!(input["cmd"].as_str(), Some("ls"));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
     }
 }
