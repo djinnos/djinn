@@ -22,7 +22,7 @@ use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use serde::Deserialize;
 
-use super::session_extraction::{ExtractionQuality, SessionTaxonomy};
+use super::session_extraction::SessionTaxonomy;
 use crate::context::AgentContext;
 
 // ── Prompt constants ──────────────────────────────────────────────────────────
@@ -463,6 +463,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::actors::slot::session_extraction::ExtractionQuality;
     use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
 
     #[test]
