@@ -83,6 +83,5 @@ pub(crate) const ARCHITECT_CONFIG: RoleConfig = RoleConfig {
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::ARCHITECT_TEMPLATE,
     preserves_session: false,
-    is_project_scoped: false,
     finalize_tool_names: &["submit_work"],
 };

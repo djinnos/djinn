@@ -143,18 +143,6 @@ impl SlotPool {
             } => {
                 let _ = respond_to.send(self.dispatch(task_id, project_path, model_id).await);
             }
-            PoolMessage::DispatchProject {
-                project_id,
-                project_path,
-                agent_type,
-                model_id,
-                respond_to,
-            } => {
-                let _ = respond_to.send(
-                    self.dispatch_project(project_id, project_path, agent_type, model_id)
-                        .await,
-                );
-            }
             PoolMessage::HasSession {
                 task_id,
                 respond_to,
@@ -236,56 +224,6 @@ impl SlotPool {
                 task_id,
                 started_at: now_unix_string(),
                 agent_type: "worker".to_string(),
-            },
-        );
-        Ok(())
-    }
-
-    async fn dispatch_project(
-        &mut self,
-        project_id: String,
-        project_path: String,
-        agent_type: String,
-        model_id: String,
-    ) -> Result<(), PoolError> {
-        let task_id = format!("project:{project_id}:{agent_type}");
-        if self.task_to_slot.contains_key(&task_id) {
-            return Err(PoolError::SessionAlreadyActive { task_id });
-        }
-
-        let slot_id = self
-            .free_slots
-            .entry(model_id.clone())
-            .or_default()
-            .pop()
-            .ok_or(PoolError::AtCapacity {
-                model_id: model_id.clone(),
-            })?;
-
-        let slot = self.slot(slot_id)?;
-        if let Err(err) = slot
-            .run_project(
-                project_id.clone(),
-                project_path,
-                agent_type.clone(),
-                model_id.clone(),
-            )
-            .await
-        {
-            self.free_slots.entry(model_id).or_default().push(slot_id);
-            return Err(PoolError::Slot(err));
-        }
-
-        self.task_to_slot.insert(task_id.clone(), slot_id);
-        self.task_started.insert(task_id.clone(), Instant::now());
-        self.task_projects
-            .insert(task_id.clone(), project_id.clone());
-        self.slot_states.insert(
-            slot_id,
-            SlotState::Busy {
-                task_id,
-                started_at: now_unix_string(),
-                agent_type,
             },
         );
         Ok(())

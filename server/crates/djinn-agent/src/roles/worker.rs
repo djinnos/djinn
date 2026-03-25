@@ -56,6 +56,5 @@ pub(crate) const WORKER_CONFIG: RoleConfig = RoleConfig {
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::DEV_TEMPLATE,
     preserves_session: true,
-    is_project_scoped: false,
     finalize_tool_names: &["submit_work", "request_lead"],
 };

@@ -15,13 +15,8 @@ impl AgentRole for PlannerRole {
         &PLANNER_CONFIG
     }
 
-    fn render_prompt(&self, _task: &Task, ctx: &TaskContext) -> String {
-        crate::prompts::render_project_prompt_for_role(
-            self.config(),
-            &ctx.project_path,
-            ctx.verification_commands.as_deref(),
-            None,
-        )
+    fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String {
+        crate::prompts::render_prompt_for_role(self.config(), task, ctx)
     }
 
     fn on_complete<'a>(
@@ -55,6 +50,5 @@ pub(crate) const PLANNER_CONFIG: RoleConfig = RoleConfig {
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::PLANNER_TEMPLATE,
     preserves_session: false,
-    is_project_scoped: true,
     finalize_tool_names: &["submit_grooming"],
 };

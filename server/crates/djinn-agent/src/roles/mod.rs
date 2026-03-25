@@ -31,7 +31,6 @@ pub(crate) struct RoleConfig {
     pub(crate) release_action: fn() -> TransitionAction,
     pub(crate) initial_message: &'static str,
     pub(crate) preserves_session: bool,
-    pub(crate) is_project_scoped: bool,
     /// Tool names the agent can call to signal completion for this role.
     /// The first entry is the primary finalize tool; additional entries are
     /// alternate exit paths (e.g. `request_lead` for workers).

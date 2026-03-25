@@ -63,23 +63,6 @@ impl SlotPoolHandle {
         .await
     }
 
-    pub async fn dispatch_project(
-        &self,
-        project_id: &str,
-        project_path: &str,
-        agent_type: &str,
-        model_id: &str,
-    ) -> Result<(), PoolError> {
-        self.request(|tx| PoolMessage::DispatchProject {
-            project_id: project_id.to_owned(),
-            project_path: project_path.to_owned(),
-            agent_type: agent_type.to_owned(),
-            model_id: model_id.to_owned(),
-            respond_to: tx,
-        })
-        .await
-    }
-
     pub async fn has_session(&self, task_id: &str) -> Result<bool, PoolError> {
         self.request(|tx| PoolMessage::HasSession {
             task_id: task_id.to_owned(),
