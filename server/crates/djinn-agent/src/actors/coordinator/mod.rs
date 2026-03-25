@@ -111,7 +111,7 @@ pub struct CoordinatorDeps {
     pub health: HealthTracker,
     pub role_registry: Arc<RoleRegistry>,
     pub verification_tracker: VerificationTracker,
-    consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
+    pub(crate) consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
 }
 
 mod dispatch;
