@@ -8,6 +8,7 @@ use scip::types::{
     Descriptor, Document, Index, Metadata, Occurrence, Relationship, SymbolInformation,
     symbol_information,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::repo_map::ScipArtifact;
 
@@ -94,7 +95,7 @@ pub enum ScipSymbolRole {
     ForwardDefinition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScipSymbolKind {
     Package,
     Namespace,
