@@ -20,9 +20,10 @@ pub use repositories::{
     git_settings::GitSettingsRepository,
     models::ModelsRepository,
     note::{
-        CONTRADICTION, ContradictionCandidate, NoteAssociationEntry, NoteDedupCandidate,
-        NoteRepository, STALE_CITATION, UpdateNoteIndexParams, file_path_for, folder_for_type,
-        is_singleton, permalink_for, slugify,
+        CONTRADICTION, ConsolidatedNoteProvenance, ConsolidationRunMetric, ContradictionCandidate,
+        CreateConsolidationRunMetric, NoteAssociationEntry, NoteConsolidationRepository,
+        NoteDedupCandidate, NoteRepository, STALE_CITATION, UpdateNoteIndexParams, file_path_for,
+        folder_for_type, is_singleton, permalink_for, slugify,
     },
     project::{ProjectConfig, ProjectRepository, VerificationRule, validate_verification_rules},
     session::{CreateSessionParams, SessionRepository},

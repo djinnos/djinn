@@ -13,6 +13,7 @@ use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
 mod association;
+mod consolidation;
 mod context;
 mod crud;
 mod file_helpers;
@@ -23,8 +24,11 @@ mod scoring;
 mod search;
 
 pub use association::NoteAssociationEntry;
+pub use consolidation::{CreateConsolidationRunMetric, NoteConsolidationRepository};
 pub use context::BuildContextResponse;
-pub use djinn_core::models::{ContradictionCandidate, NoteDedupCandidate};
+pub use djinn_core::models::{
+    ConsolidatedNoteProvenance, ConsolidationRunMetric, ContradictionCandidate, NoteDedupCandidate,
+};
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
     USER_CONFIRM, bayesian_update,
@@ -1937,5 +1941,142 @@ mod tests {
         assert!(m[&zero_age.id].is_finite());
         assert!(m[&old.id].is_finite());
         assert!(m[&zero_age.id] > m[&old.id]);
+    }
+
+    async fn make_session(
+        db: &Database,
+        project_id: &str,
+        task_id: Option<&str>,
+        branch: &str,
+    ) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO sessions (id, project_id, task_id, branch, status, started_at)
+             VALUES (?1, ?2, ?3, ?4, 'completed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        )
+        .bind(&id)
+        .bind(project_id)
+        .bind(task_id)
+        .bind(branch)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consolidation_provenance_round_trips_in_stable_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let note = note_repo
+            .create_db_note(&project.id, "Consolidated Pattern", "body", "pattern", "[]")
+            .await
+            .unwrap();
+
+        let earlier_session = make_session(&db, &project.id, None, "worker/earlier").await;
+        let later_session = make_session(&db, &project.id, None, "worker/later").await;
+
+        let first = consolidation_repo
+            .add_provenance(&note.id, &earlier_session)
+            .await
+            .unwrap();
+        let second = consolidation_repo
+            .add_provenance(&note.id, &later_session)
+            .await
+            .unwrap();
+
+        assert_eq!(first.note_id, note.id);
+        assert_eq!(first.session_id, earlier_session);
+        assert_eq!(second.session_id, later_session);
+
+        let listed = consolidation_repo.list_provenance(&note.id).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].session_id, earlier_session);
+        assert_eq!(listed[1].session_id, later_session);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consolidation_run_metrics_round_trip_and_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db, tmp.path()).await;
+        let other_root = tempfile::tempdir().unwrap();
+        let other_project = make_project(&db, other_root.path()).await;
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let first = consolidation_repo
+            .create_run_metric(CreateConsolidationRunMetric {
+                project_id: &project.id,
+                note_type: "pattern",
+                status: "completed",
+                scanned_note_count: 7,
+                candidate_cluster_count: 2,
+                consolidated_cluster_count: 1,
+                consolidated_note_count: 1,
+                source_note_count: 3,
+                started_at: "2026-03-25T10:00:00.000Z",
+                completed_at: Some("2026-03-25T10:01:00.000Z"),
+                error_message: None,
+            })
+            .await
+            .unwrap();
+
+        let second = consolidation_repo
+            .create_run_metric(CreateConsolidationRunMetric {
+                project_id: &project.id,
+                note_type: "pitfall",
+                status: "failed",
+                scanned_note_count: 4,
+                candidate_cluster_count: 1,
+                consolidated_cluster_count: 0,
+                consolidated_note_count: 0,
+                source_note_count: 0,
+                started_at: "2026-03-25T11:00:00.000Z",
+                completed_at: Some("2026-03-25T11:02:00.000Z"),
+                error_message: Some("llm timeout"),
+            })
+            .await
+            .unwrap();
+
+        consolidation_repo
+            .create_run_metric(CreateConsolidationRunMetric {
+                project_id: &other_project.id,
+                note_type: "pattern",
+                status: "completed",
+                scanned_note_count: 9,
+                candidate_cluster_count: 3,
+                consolidated_cluster_count: 1,
+                consolidated_note_count: 1,
+                source_note_count: 4,
+                started_at: "2026-03-25T12:00:00.000Z",
+                completed_at: Some("2026-03-25T12:03:00.000Z"),
+                error_message: None,
+            })
+            .await
+            .unwrap();
+
+        let listed = consolidation_repo
+            .list_run_metrics(&project.id, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, second.id);
+        assert_eq!(listed[0].error_message.as_deref(), Some("llm timeout"));
+        assert_eq!(listed[1].id, first.id);
+
+        let filtered = consolidation_repo
+            .list_run_metrics(&project.id, Some("pattern"), 10)
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, first.id);
+        assert_eq!(filtered[0].consolidated_cluster_count, 1);
+        assert_eq!(filtered[0].consolidated_note_count, 1);
+        assert_eq!(filtered[0].source_note_count, 3);
     }
 }
