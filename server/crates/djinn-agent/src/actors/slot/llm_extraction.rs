@@ -72,15 +72,7 @@ struct NoveltyDecision {
 }
 
 #[cfg(test)]
-type CandidateLookup = fn(&NoteRepository, &str, &str, &str, &str) -> CandidateLookupFuture;
-
-#[cfg(test)]
-type CandidateLookupFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>>>
-            + Send,
-    >,
->;
+type CandidateLookup = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -95,7 +87,15 @@ pub(crate) async fn run_llm_extraction(
     taxonomy: SessionTaxonomy,
     app_state: AgentContext,
 ) {
-    run_llm_extraction_inner(session_id, taxonomy, app_state, None).await;
+    run_llm_extraction_inner(
+        session_id,
+        taxonomy,
+        app_state,
+        None,
+        #[cfg(test)]
+        None,
+    )
+    .await;
 }
 
 /// Test-only entry point that injects a pre-built LLM provider, bypassing
@@ -107,7 +107,25 @@ pub(crate) async fn run_llm_extraction_with_provider(
     app_state: AgentContext,
     provider: Arc<dyn LlmProvider>,
 ) {
-    run_llm_extraction_inner(session_id, taxonomy, app_state, Some(provider)).await;
+    run_llm_extraction_inner(session_id, taxonomy, app_state, Some(provider), None).await;
+}
+
+#[cfg(test)]
+pub(crate) async fn run_llm_extraction_with_provider_and_candidate_lookup(
+    session_id: String,
+    taxonomy: SessionTaxonomy,
+    app_state: AgentContext,
+    provider: Arc<dyn LlmProvider>,
+    candidate_lookup_override: CandidateLookup,
+) {
+    run_llm_extraction_inner(
+        session_id,
+        taxonomy,
+        app_state,
+        Some(provider),
+        Some(candidate_lookup_override),
+    )
+    .await;
 }
 
 /// Inner implementation that accepts an optional provider override for test injection.
@@ -119,6 +137,7 @@ async fn run_llm_extraction_inner(
     taxonomy: SessionTaxonomy,
     app_state: AgentContext,
     provider_override: Option<Arc<dyn LlmProvider>>,
+    #[cfg(test)] candidate_lookup_override: Option<CandidateLookup>,
 ) {
     // ── Load session ───────────────────────────────────────────────────────
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -346,7 +365,7 @@ async fn run_llm_extraction_inner(
                 note,
                 &provenance,
                 #[cfg(test)]
-                None,
+                candidate_lookup_override,
             )
             .await;
         }
@@ -521,7 +540,7 @@ async fn lookup_candidates(
 ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
     #[cfg(test)]
     if let Some(lookup) = candidate_lookup_override {
-        return lookup(note_repo, project_id, folder, note_type, candidate_abstract).await;
+        return Ok(lookup(project_id, folder, note_type, candidate_abstract));
     }
 
     note_repo

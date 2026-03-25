@@ -1,4 +1,5 @@
-//! Integration tests for the session reflection pipeline.
+#![allow(clippy::too_many_lines)]
+// Tests for the full reflection pipeline and extracted-note persistence.
 //!
 //! Covers:
 //! AC1 - Session completion triggers full reflection pipeline
@@ -15,11 +16,14 @@ use tokio_util::sync::CancellationToken;
 
 use djinn_core::message::{ContentBlock, Message, Role};
 use djinn_db::{
-    CreateSessionParams, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,
-    SessionRepository, TaskRepository,
+    CreateSessionParams, EpicCreateInput, EpicRepository, NoteDedupCandidate, NoteRepository,
+    ProjectRepository, SessionRepository, TaskRepository,
 };
 
-use crate::actors::slot::llm_extraction::{run_llm_extraction, run_llm_extraction_with_provider};
+use crate::actors::slot::llm_extraction::{
+    run_llm_extraction, run_llm_extraction_with_provider,
+    run_llm_extraction_with_provider_and_candidate_lookup,
+};
 use crate::actors::slot::session_extraction::{SessionTaxonomy, extract_session_signals};
 use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, create_test_db};
 
@@ -28,6 +32,20 @@ use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, 
 /// Creates a temp directory (notes will be written there).
 fn make_tmpdir() -> TempDir {
     crate::test_helpers::test_tempdir("djinn-llm-extraction-")
+}
+
+static SEMANTIC_DUPLICATE_CANDIDATE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn semantic_duplicate_candidate_lookup(
+    _project_id: &str,
+    _folder: &str,
+    _note_type: &str,
+    _candidate_abstract: &str,
+) -> Vec<NoteDedupCandidate> {
+    let existing_id = SEMANTIC_DUPLICATE_CANDIDATE_ID
+        .get()
+        .expect("semantic duplicate candidate id configured");
+    vec![novelty_candidate(existing_id)]
 }
 
 struct TestFixture {
@@ -55,7 +73,7 @@ async fn make_fixture() -> TestFixture {
     let project = project_repo
         .create(
             &format!("test-project-{uid}"),
-            tmpdir.path().to_str().unwrap(),
+            tmpdir.path().to_str().expect("tmpdir path to str"),
         )
         .await
         .expect("create project");
@@ -123,12 +141,46 @@ fn fake_extraction_provider() -> Arc<FakeProvider> {
     Arc::new(FakeProvider::text(json))
 }
 
+fn novelty_candidate(existing_id: &str) -> NoteDedupCandidate {
+    NoteDedupCandidate {
+        id: existing_id.to_string(),
+        permalink: "cases/existing-semantic-note".to_string(),
+        title: "Existing Semantic Note".to_string(),
+        folder: "cases".to_string(),
+        note_type: "case".to_string(),
+        abstract_: Some(
+            "Fix flaky semantic duplicate tests by injecting dedup candidates.".to_string(),
+        ),
+        overview: Some(
+            "Inject a stable candidate seam so novelty compares summaries deterministically."
+                .to_string(),
+        ),
+        score: 1.0,
+    }
+}
+
+fn novelty_failure_candidate_lookup(
+    _project_id: &str,
+    _folder: &str,
+    _note_type: &str,
+    _candidate_abstract: &str,
+) -> Vec<NoteDedupCandidate> {
+    vec![NoteDedupCandidate {
+        id: "candidate-for-invalid-json".to_string(),
+        permalink: "cases/candidate-for-invalid-json".to_string(),
+        title: "Candidate For Invalid JSON".to_string(),
+        folder: "cases".to_string(),
+        note_type: "case".to_string(),
+        abstract_: Some("Existing candidate summary".to_string()),
+        overview: Some("Existing candidate overview".to_string()),
+        score: 1.0,
+    }]
+}
+
 // ─── AC2: Structural extraction ────────────────────────────────────────────────
 
-/// AC2 part 1: structural extraction produces correct event taxonomy from messages.
 #[test]
 fn structural_extraction_produces_correct_taxonomy() {
-    // Build messages: 2 memory_reads, 2 git ops, 1 error, 1 file write, 1 task_transition
     let messages = vec![
         Message {
             role: Role::Assistant,
@@ -197,21 +249,17 @@ fn structural_extraction_produces_correct_taxonomy() {
 
     let (taxonomy, notes_read, _stale) = extract_session_signals(&messages);
 
-    assert_eq!(taxonomy.notes_read, 2, "should count 2 memory_reads");
-    assert_eq!(taxonomy.git_ops, 2, "should count git_commit + git_push");
-    assert_eq!(taxonomy.errors, 1, "should count 1 tool error");
-    assert_eq!(taxonomy.files_changed, 1, "should count 1 unique file");
-    assert_eq!(
-        taxonomy.tasks_transitioned, 1,
-        "should count 1 task_transition"
-    );
-    assert_eq!(taxonomy.tools_used, 5, "should count 5 unique tool names");
+    assert_eq!(taxonomy.notes_read, 2);
+    assert_eq!(taxonomy.git_ops, 2);
+    assert_eq!(taxonomy.errors, 1);
+    assert_eq!(taxonomy.files_changed, 1);
+    assert_eq!(taxonomy.tasks_transitioned, 1);
+    assert_eq!(taxonomy.tools_used, 5);
     assert_eq!(notes_read.len(), 2);
     assert!(notes_read.contains(&"decisions/adr-001".to_string()));
     assert!(notes_read.contains(&"decisions/adr-002".to_string()));
 }
 
-/// AC2 part 2: structural extraction updates co-access associations in DB.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn structural_extraction_flushes_co_access_associations() {
     let fixture = make_fixture().await;
@@ -220,7 +268,6 @@ async fn structural_extraction_flushes_co_access_associations() {
     let events = djinn_core::events::EventBus::noop();
     let note_repo = NoteRepository::new(fixture.db.clone(), events.clone());
 
-    // Create two notes in the project that we will "read" in the session
     let note_a = note_repo
         .create(
             &fixture.project.id,
@@ -244,7 +291,6 @@ async fn structural_extraction_flushes_co_access_associations() {
         .await
         .expect("create note_b");
 
-    // Build messages that read both notes (by permalink/title)
     let messages = vec![
         Message {
             role: Role::Assistant,
@@ -272,7 +318,6 @@ async fn structural_extraction_flushes_co_access_associations() {
         },
     ];
 
-    // Run structural extraction
     let taxonomy = crate::actors::slot::session_extraction::run_structural_extraction(
         fixture.session_id.clone(),
         messages,
@@ -280,38 +325,24 @@ async fn structural_extraction_flushes_co_access_associations() {
     )
     .await;
 
-    // Taxonomy should be returned (not None)
-    assert!(
-        taxonomy.is_some(),
-        "run_structural_extraction should return Some(taxonomy)"
-    );
-    let taxonomy = taxonomy.unwrap();
+    assert!(taxonomy.is_some());
+    let taxonomy = taxonomy.expect("taxonomy present");
     assert_eq!(taxonomy.notes_read, 2);
 
-    // Co-access association should now exist
     let associations = note_repo
         .get_associations_for_note(&note_a.id)
         .await
         .expect("get associations");
-    assert!(
-        !associations.is_empty(),
-        "co-access association should have been flushed for note_a"
-    );
+    assert!(!associations.is_empty());
     let assoc = &associations[0];
     let other_id = if assoc.note_a_id == note_a.id {
         &assoc.note_b_id
     } else {
         &assoc.note_a_id
     };
-    assert_eq!(
-        other_id, &note_b.id,
-        "association should link note_a and note_b"
-    );
+    assert_eq!(other_id, &note_b.id);
 }
 
-// ─── AC3: LLM extraction with FakeProvider ────────────────────────────────────
-
-/// AC3: FakeProvider produces case/pattern/pitfall notes in the DB.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
     let fixture = make_fixture().await;
@@ -330,7 +361,6 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
-    // Verify notes were written to DB and are DB-backed only (no markdown artifacts)
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
@@ -347,20 +377,16 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
         .filter(|n| n.note_type == "pitfall")
         .collect();
 
-    assert_eq!(cases.len(), 1, "should have created 1 case note");
-    assert_eq!(patterns.len(), 1, "should have created 1 pattern note");
-    assert_eq!(pitfalls.len(), 1, "should have created 1 pitfall note");
-
+    assert_eq!(cases.len(), 1);
+    assert_eq!(patterns.len(), 1);
+    assert_eq!(pitfalls.len(), 1);
     assert_eq!(cases[0].title, "Test Case Note");
     assert_eq!(patterns[0].title, "Test Pattern Note");
     assert_eq!(pitfalls[0].title, "Test Pitfall Note");
 
     for note in [cases[0], patterns[0], pitfalls[0]] {
         assert_eq!(note.storage, "db");
-        assert!(
-            note.file_path.is_empty(),
-            "db-backed extracted notes should not keep file paths"
-        );
+        assert!(note.file_path.is_empty());
     }
 
     assert!(
@@ -368,30 +394,24 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
             .tmpdir
             .path()
             .join(".djinn/cases/test-case-note.md")
-            .exists(),
-        "case extraction should not create a markdown file"
+            .exists()
     );
     assert!(
         !fixture
             .tmpdir
             .path()
             .join(".djinn/patterns/test-pattern-note.md")
-            .exists(),
-        "pattern extraction should not create a markdown file"
+            .exists()
     );
     assert!(
         !fixture
             .tmpdir
             .path()
             .join(".djinn/pitfalls/test-pitfall-note.md")
-            .exists(),
-        "pitfall extraction should not create a markdown file"
+            .exists()
     );
 }
 
-// ─── AC4: Confidence 0.5 and session provenance ───────────────────────────────
-
-/// AC4 part 1: extracted notes have confidence exactly 0.5.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_extracted_notes_have_confidence_0_5() {
     let fixture = make_fixture().await;
@@ -416,18 +436,12 @@ async fn llm_extracted_notes_have_confidence_0_5() {
         .await
         .expect("list notes");
 
-    assert!(!all_notes.is_empty(), "should have written notes");
+    assert!(!all_notes.is_empty());
     for note in &all_notes {
-        assert!(
-            (note.confidence - 0.5).abs() < 1e-9,
-            "note '{}' should have confidence 0.5, got {}",
-            note.title,
-            note.confidence
-        );
+        assert!((note.confidence - 0.5).abs() < 1e-9);
     }
 }
 
-/// AC4 part 2: note content contains the session_id as provenance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_extracted_notes_contain_session_id_provenance() {
     let fixture = make_fixture().await;
@@ -435,8 +449,6 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
     let taxonomy = SessionTaxonomy::default();
-
-    // Use a custom provider that always returns exactly one case note
     let json = r#"{"cases":[{"title":"Provenance Test","content":"This content should have provenance."}],"patterns":[],"pitfalls":[]}"#;
     let provider = Arc::new(FakeProvider::text(json));
 
@@ -448,28 +460,13 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
         .await
         .expect("list notes");
 
-    assert_eq!(notes.len(), 1, "should have written exactly 1 note");
+    assert_eq!(notes.len(), 1);
     let note = &notes[0];
-    assert!(
-        note.content.contains(&session_id),
-        "note content should contain session_id '{}', got: {}",
-        session_id,
-        note.content
-    );
-    assert!(
-        note.content.contains("Extracted from session"),
-        "note content should contain provenance marker"
-    );
-    assert!(
-        note.content.contains("0.5"),
-        "note content should mention confidence 0.5 in provenance"
-    );
+    assert!(note.content.contains(&session_id));
+    assert!(note.content.contains("Extracted from session"));
+    assert!(note.content.contains("0.5"));
 }
 
-// ─── AC5: Graceful degradation when LLM unavailable ──────────────────────────
-
-/// AC5: When LLM is unavailable (FailingProvider), no notes are written and
-/// the function returns without panicking or propagating errors.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written() {
     let fixture = make_fixture().await;
@@ -485,26 +482,18 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
         tasks_transitioned: 1,
     };
 
-    // FailingProvider always returns an error from stream()
     let provider = Arc::new(FailingProvider::new("injected LLM failure for test"));
-    // Should complete without panicking
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
-    // No notes should have been written
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
 
-    assert!(
-        notes.is_empty(),
-        "no notes should be written when LLM provider fails"
-    );
+    assert!(notes.is_empty());
 }
 
-/// AC5: When no credentials are configured (real code path), resolve_memory_provider
-/// fails gracefully and no notes are written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_extraction_graceful_degradation_no_provider_configured() {
     let fixture = make_fixture().await;
@@ -520,7 +509,6 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         tasks_transitioned: 1,
     };
 
-    // No credentials configured — resolve_memory_provider will fail → graceful skip
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
@@ -529,16 +517,9 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         .await
         .expect("list notes");
 
-    assert!(
-        notes.is_empty(),
-        "no notes should be written when no provider is configured"
-    );
+    assert!(notes.is_empty());
 }
 
-// ─── AC6: Novelty pipeline ────────────────────────────────────────────────────
-
-/// AC6: semantic novelty check skips duplicate writes and boosts the existing
-/// note confidence when the duplicate path is selected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_confidence() {
     let fixture = make_fixture().await;
@@ -563,6 +544,10 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         )
         .await
         .expect("update summaries");
+    note_repo
+        .set_confidence(&existing.id, 0.5)
+        .await
+        .expect("set starting confidence");
     let starting_confidence = note_repo
         .get(&existing.id)
         .await
@@ -597,29 +582,31 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
             djinn_provider::provider::StreamEvent::Done,
         ],
     ]));
-    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let _ = SEMANTIC_DUPLICATE_CANDIDATE_ID.set(existing.id.clone());
+
+    run_llm_extraction_with_provider_and_candidate_lookup(
+        fixture.session_id.clone(),
+        taxonomy,
+        ctx,
+        provider,
+        semantic_duplicate_candidate_lookup,
+    )
+    .await;
 
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     let dedup_notes: Vec<_> = notes.iter().filter(|n| n.note_type == "case").collect();
-    assert_eq!(
-        dedup_notes.len(),
-        1,
-        "semantic duplicate should not create a second duplicate note row"
-    );
+    assert_eq!(dedup_notes.len(), 1);
 
     let updated_existing = note_repo
         .get(&existing.id)
         .await
         .expect("get existing after run")
         .expect("existing note after run");
-    assert!(
-        updated_existing.confidence > starting_confidence,
-        "matched existing note confidence should increase observably"
-    );
+    assert!(updated_existing.confidence > starting_confidence);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -652,7 +639,14 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
         ],
     ]));
 
-    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+    run_llm_extraction_with_provider_and_candidate_lookup(
+        fixture.session_id.clone(),
+        taxonomy,
+        ctx,
+        provider,
+        novelty_failure_candidate_lookup,
+    )
+    .await;
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
@@ -660,27 +654,16 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
         .await
         .expect("list notes");
 
-    assert_eq!(
-        notes.len(),
-        1,
-        "fallback path should still create the extracted note"
-    );
+    assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].title, "Fallback Novel Note");
 }
 
-// ─── AC1: Full pipeline integration ──────────────────────────────────────────
-
-/// AC1: End-to-end test — structural extraction chained with LLM extraction
-/// (using FakeProvider) writes notes to the DB correctly, verifying the
-/// complete pipeline flow described in the task background.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_reflection_pipeline_structural_then_llm_extraction() {
     let fixture = make_fixture().await;
     let ctx_structural = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
     let ctx_llm = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
-    // Build a session with some tool calls (no actual notes to co-access here,
-    // but the structural extraction should still return a taxonomy).
     let messages = vec![
         Message {
             role: Role::Assistant,
@@ -720,7 +703,6 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
         },
     ];
 
-    // Step 1: structural extraction
     let taxonomy = crate::actors::slot::session_extraction::run_structural_extraction(
         fixture.session_id.clone(),
         messages,
@@ -728,18 +710,13 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
     )
     .await;
 
-    assert!(
-        taxonomy.is_some(),
-        "structural extraction should return Some(taxonomy) for non-empty messages"
-    );
-    let taxonomy = taxonomy.unwrap();
-    assert_eq!(taxonomy.files_changed, 1, "1 file written");
-    assert_eq!(taxonomy.git_ops, 1, "1 git op");
-    assert_eq!(taxonomy.notes_written, 1, "1 memory_write");
-    assert_eq!(taxonomy.tasks_transitioned, 1, "1 task transition");
+    assert!(taxonomy.is_some());
+    let taxonomy = taxonomy.expect("taxonomy present");
+    assert_eq!(taxonomy.files_changed, 1);
+    assert_eq!(taxonomy.git_ops, 1);
+    assert_eq!(taxonomy.notes_written, 1);
+    assert_eq!(taxonomy.tasks_transitioned, 1);
 
-    // Verify taxonomy was also stored on the session record (queried directly
-    // since the SessionRecord model does not surface event_taxonomy as a field)
     fixture
         .db
         .ensure_initialized()
@@ -752,54 +729,30 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
             .await
             .expect("query session event_taxonomy");
 
-    assert!(
-        stored_json.is_some(),
-        "event_taxonomy should be stored on session record after structural extraction"
-    );
+    assert!(stored_json.is_some());
     let stored_taxonomy: SessionTaxonomy =
-        serde_json::from_str(stored_json.as_deref().unwrap()).expect("deserialize stored taxonomy");
+        serde_json::from_str(stored_json.as_deref().expect("stored taxonomy text"))
+            .expect("deserialize stored taxonomy");
     assert_eq!(stored_taxonomy.files_changed, 1);
     assert_eq!(stored_taxonomy.git_ops, 1);
 
-    // Step 2: LLM extraction
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx_llm, provider).await;
 
-    // Verify notes were written with correct types
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
 
-    assert!(!all_notes.is_empty(), "full pipeline should produce notes");
-
+    assert!(!all_notes.is_empty());
     let note_types: Vec<_> = all_notes.iter().map(|n| n.note_type.as_str()).collect();
-    assert!(
-        note_types.contains(&"case"),
-        "pipeline should produce case notes"
-    );
-    assert!(
-        note_types.contains(&"pattern"),
-        "pipeline should produce pattern notes"
-    );
-    assert!(
-        note_types.contains(&"pitfall"),
-        "pipeline should produce pitfall notes"
-    );
+    assert!(note_types.contains(&"case"));
+    assert!(note_types.contains(&"pattern"));
+    assert!(note_types.contains(&"pitfall"));
 
-    // All notes should have confidence 0.5 and session provenance
     for note in &all_notes {
-        assert!(
-            (note.confidence - 0.5).abs() < 1e-9,
-            "note '{}' should have confidence 0.5, got {}",
-            note.title,
-            note.confidence
-        );
-        assert!(
-            note.content.contains(&fixture.session_id),
-            "note '{}' should contain session_id in content",
-            note.title
-        );
+        assert!((note.confidence - 0.5).abs() < 1e-9);
+        assert!(note.content.contains(&fixture.session_id));
     }
 }
