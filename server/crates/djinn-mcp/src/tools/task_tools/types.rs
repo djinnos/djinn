@@ -512,6 +512,9 @@ pub struct BoardHealthResponse {
     /// query but indicate degraded operational readiness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
+    /// Per-project PR creation errors (project_id → error message).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_errors: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]

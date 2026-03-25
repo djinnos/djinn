@@ -1164,14 +1164,21 @@ impl CoordinatorActor {
             .await;
 
             match result {
-                Some((action, _)) if action == SKIP_SENTINEL => {
+                Some((action, reason)) if action == SKIP_SENTINEL => {
                     // Transient failure — leave in approved, retry next tick.
                     tracing::debug!(
                         task_id = %task.short_id,
                         "CoordinatorActor: approved task PR/merge deferred (will retry)"
                     );
+                    // Surface PR creation errors so board_health can display them.
+                    if let Some(ref err) = reason {
+                        self.pr_errors.insert(task.project_id.clone(), err.clone());
+                        self.publish_status();
+                    }
                 }
                 Some((action, reason)) => {
+                    // PR created successfully — clear any stored error.
+                    self.pr_errors.remove(&task.project_id);
                     if let Err(e) = repo
                         .transition(
                             &task.id,

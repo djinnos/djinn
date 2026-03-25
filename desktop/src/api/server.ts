@@ -192,7 +192,17 @@ export type Project = ProjectListOutputSchema.ProjectInfo & {
 
 export async function fetchProjects(): Promise<Project[]> {
   const data = await callMcpTool("project_list");
-  return data.projects;
+  const projects: Project[] = await Promise.all(
+    data.projects.map(async (p) => {
+      try {
+        const config = await callMcpTool("project_config_get", { project: p.path });
+        return { ...p, branch: config.target_branch, auto_merge: config.auto_merge };
+      } catch {
+        return p;
+      }
+    }),
+  );
+  return projects;
 }
 
 export async function addProject(path: string): Promise<Project> {

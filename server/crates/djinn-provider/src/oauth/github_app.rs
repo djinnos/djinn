@@ -34,6 +34,8 @@ const DEFAULT_INTERVAL_SECS: u64 = 5;
 
 /// Credential key for storing GitHub OAuth tokens.
 pub const GITHUB_APP_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_APP";
+/// Credential key for storing orgs with pending/restricted OAuth App access.
+pub const GITHUB_PENDING_ORGS_KEY: &str = "__GITHUB_PENDING_ORGS";
 
 // ─── Token types ─────────────────────────────────────────────────────────────
 
@@ -190,7 +192,106 @@ pub async fn poll_and_store(
     tokens.save_to_db(repo).await?;
     tracing::info!(user = ?tokens.user_login, "GitHubApp: authentication successful");
 
+    // Check which orgs the token can access. If the user's org has OAuth App
+    // restrictions and the app isn't approved, the org won't appear in this list.
+    let pending_orgs = check_org_access(&tokens.access_token).await;
+    if !pending_orgs.is_empty() {
+        tracing::warn!(
+            orgs = ?pending_orgs,
+            "GitHubApp: token does not have access to some organizations — \
+             an org admin must approve the Djinn OAuth App"
+        );
+        // Persist so board_health can surface this.
+        let _ = repo
+            .set(
+                "github_app",
+                GITHUB_PENDING_ORGS_KEY,
+                &serde_json::to_string(&pending_orgs).unwrap_or_default(),
+            )
+            .await;
+    } else {
+        // Clear any previous pending orgs.
+        let _ = repo.delete(GITHUB_PENDING_ORGS_KEY).await;
+    }
+
     Ok(tokens)
+}
+
+/// Load orgs with pending/restricted access from the DB.
+pub async fn load_pending_orgs(repo: &CredentialRepository) -> Vec<String> {
+    match repo.get_decrypted(GITHUB_PENDING_ORGS_KEY).await {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+        _ => vec![],
+    }
+}
+
+/// Returned by [`check_org_access`] when org access is pending/restricted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OrgAccessStatus {
+    pub org: String,
+    pub accessible: bool,
+}
+
+/// Check which GitHub orgs the token can access.
+/// Returns a list of orgs where access is NOT granted (pending/restricted).
+///
+/// Uses `GET /user/memberships/orgs` which shows membership status even for
+/// orgs with OAuth App restrictions.
+pub async fn check_org_access(access_token: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct OrgMembership {
+        organization: OrgInfo,
+        state: String,
+    }
+    #[derive(Deserialize)]
+    struct OrgInfo {
+        login: String,
+    }
+
+    let client = Client::new();
+
+    // First get orgs the user belongs to via membership API
+    let memberships: Vec<OrgMembership> = match client
+        .get("https://api.github.com/user/memberships/orgs")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "djinn-server")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
+        _ => return vec![],
+    };
+
+    // Now check which orgs the token can actually access via the orgs endpoint
+    // (this respects OAuth App restrictions)
+    let accessible_orgs: Vec<String> = match client
+        .get("https://api.github.com/user/orgs")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "djinn-server")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            #[derive(Deserialize)]
+            struct Org {
+                login: String,
+            }
+            let orgs: Vec<Org> = resp.json().await.unwrap_or_default();
+            orgs.into_iter().map(|o| o.login).collect()
+        }
+        _ => return vec![],
+    };
+
+    // Orgs the user is a member of but the token can't access
+    let accessible_set: std::collections::HashSet<&str> =
+        accessible_orgs.iter().map(|s| s.as_str()).collect();
+    memberships
+        .into_iter()
+        .filter(|m| m.state == "active" && !accessible_set.contains(m.organization.login.as_str()))
+        .map(|m| m.organization.login)
+        .collect()
 }
 
 /// Poll GitHub until the user authorizes, then return the token response.

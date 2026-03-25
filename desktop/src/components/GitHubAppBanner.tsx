@@ -11,8 +11,15 @@ interface GitHubAppBannerProps {
   projectPaths: string[];
 }
 
+type WarningKind = "not_connected" | "org_pending";
+
+interface GitHubWarning {
+  kind: WarningKind;
+  orgs: string[];
+}
+
 export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
-  const [showWarning, setShowWarning] = useState(false);
+  const [warning, setWarning] = useState<GitHubWarning | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [checking, setChecking] = useState(false);
 
@@ -20,8 +27,8 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
   const pathsKey = projectPaths.slice().sort().join("\0");
   const stablePaths = useMemo(() => projectPaths, [pathsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const checkHealth = useCallback(async () => {
-    if (stablePaths.length === 0) return false;
+  const checkHealth = useCallback(async (): Promise<GitHubWarning | null> => {
+    if (stablePaths.length === 0) return null;
 
     const results = await Promise.all(
       stablePaths.map((path) =>
@@ -31,21 +38,33 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
       )
     );
 
+    const pendingOrgs = new Set<string>();
     for (const result of results) {
       if (!result) continue;
       const warnings = result.warnings as string[] | undefined;
-      if (warnings?.includes("github_not_connected") || warnings?.includes("github_app_not_installed")) {
-        return true;
+      if (!warnings) continue;
+      if (warnings.includes("github_not_connected") || warnings.includes("github_app_not_installed")) {
+        return { kind: "not_connected", orgs: [] };
+      }
+      for (const w of warnings) {
+        if (w.startsWith("github_org_access_pending:")) {
+          pendingOrgs.add(w.split(":")[1]);
+        }
       }
     }
-    return false;
+    if (pendingOrgs.size > 0) {
+      return { kind: "org_pending", orgs: Array.from(pendingOrgs) };
+    }
+    return null;
   }, [stablePaths]);
+
+  const showWarning = warning !== null;
 
   // Initial check
   useEffect(() => {
     let active = true;
-    checkHealth().then((hasWarning) => {
-      if (active) setShowWarning(hasWarning);
+    checkHealth().then((result) => {
+      if (active) setWarning(result);
     });
     return () => {
       active = false;
@@ -58,23 +77,38 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
   const handleCheckAgain = async () => {
     setChecking(true);
     try {
-      const stillDisconnected = await checkHealth();
-      if (stillDisconnected) {
+      const result = await checkHealth();
+      if (result) {
         showToast.warning(
-          "App not yet installed. Make sure to install it on your organization."
+          result.kind === "org_pending"
+            ? `Organization access still pending for: ${result.orgs.join(", ")}`
+            : "App not yet installed. Make sure to install it on your organization."
         );
+        setWarning(result);
       } else {
-        setShowWarning(false);
-        showToast.success("GitHub App connected successfully!");
+        setWarning(null);
+        showToast.success("GitHub connected successfully!");
       }
     } catch {
-      showToast.error("Failed to check GitHub App status.");
+      showToast.error("Failed to check GitHub status.");
     } finally {
       setChecking(false);
     }
   };
 
   if (!showWarning || dismissed) return null;
+
+  const isOrgPending = warning?.kind === "org_pending";
+  const title = isOrgPending
+    ? "Organization Access Pending"
+    : "GitHub App Not Installed";
+  const description = isOrgPending
+    ? `An org admin must approve the Djinn OAuth App for: ${warning.orgs.join(", ")}. PR creation is blocked until approved.`
+    : "Install the Djinn app on your GitHub organization to enable PR creation and review feedback.";
+  const actionLabel = isOrgPending ? "Request Access" : "Install on GitHub";
+  const actionUrl = isOrgPending
+    ? "https://docs.github.com/articles/restricting-access-to-your-organization-s-data/"
+    : "https://github.com/apps/djinn-ai-bot/installations/new";
 
   return (
     <Card className="mx-4 border-none ring-orange-500/50 bg-orange-500/10">
@@ -89,11 +123,10 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
             </div>
             <div className="flex flex-col gap-1">
               <h3 className="text-sm font-semibold text-orange-200">
-                GitHub App Not Installed
+                {title}
               </h3>
               <p className="text-sm text-muted-foreground">
-                Install the Djinn app on your GitHub organization to enable PR
-                creation and review feedback.
+                {description}
               </p>
             </div>
           </div>
@@ -109,7 +142,7 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
 
         <div className="mt-3 flex items-center gap-2 pl-11">
           <a
-            href="https://github.com/apps/djinn-ai-bot/installations/new"
+            href={actionUrl}
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -118,7 +151,7 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
               size="sm"
               className="h-7 gap-1.5 px-3 text-xs"
             >
-              Install on GitHub
+              {actionLabel}
             </Button>
           </a>
           <Button

@@ -15,9 +15,15 @@ interface LspWarning {
   message: string;
 }
 
+interface PrError {
+  projectId: string;
+  message: string;
+}
+
 interface BoardHealthData {
   lspWarnings: LspWarning[];
   projectIssues: Record<string, string>;
+  prErrors: PrError[];
   failedSteps: StepEntry[];
   failedRun: VerificationRun | null;
 }
@@ -27,6 +33,7 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
   const [projectIssues, setProjectIssues] = useState<Record<string, string>>(
     {}
   );
+  const [prErrors, setPrErrors] = useState<PrError[]>([]);
 
   // Stabilize the paths array so deps don't fire on every render
   const pathsKey = projectPaths.slice().sort().join("\0");
@@ -72,15 +79,23 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
         if (!active) return;
         const allWarnings: LspWarning[] = [];
         const allIssues: Record<string, string> = {};
+        const allPrErrors: PrError[] = [];
         for (const result of results) {
           if (!result) continue;
           const w = result.lsp_warnings as LspWarning[] | undefined;
           if (w) allWarnings.push(...w);
           const i = result.project_issues as Record<string, string> | undefined;
           if (i) Object.assign(allIssues, i);
+          const pe = result.pr_errors as Record<string, string> | undefined;
+          if (pe) {
+            for (const [projectId, message] of Object.entries(pe)) {
+              allPrErrors.push({ projectId, message });
+            }
+          }
         }
         setLspWarnings(allWarnings);
         setProjectIssues(allIssues);
+        setPrErrors(allPrErrors);
       });
     };
 
@@ -95,11 +110,12 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
   const hasIssues =
     lspWarnings.length > 0 ||
     Object.keys(projectIssues).length > 0 ||
+    prErrors.length > 0 ||
     failedSteps.length > 0;
 
   if (!hasIssues) return null;
 
-  return { lspWarnings, projectIssues, failedSteps, failedRun };
+  return { lspWarnings, projectIssues, prErrors, failedSteps, failedRun };
 }
 
 interface BoardHealthBannerProps {
@@ -116,10 +132,10 @@ export function BoardHealthBanner({ projectPaths }: BoardHealthBannerProps) {
 
   if (!health || dismissed) return null;
 
-  const { lspWarnings, projectIssues, failedSteps, failedRun } = health;
+  const { lspWarnings, projectIssues, prErrors, failedSteps, failedRun } = health;
   const issueEntries = Object.entries(projectIssues);
   const totalIssues =
-    lspWarnings.length + issueEntries.length + failedSteps.length;
+    lspWarnings.length + issueEntries.length + prErrors.length + failedSteps.length;
 
   return (
     <Card className="mx-4 border-amber-500/20 bg-amber-500/[0.04]">
@@ -158,6 +174,34 @@ export function BoardHealthBanner({ projectPaths }: BoardHealthBannerProps) {
               <span className="text-red-300/80">{message}</span>
             </div>
           ))}
+
+          {/* PR creation errors */}
+          {prErrors.map((pe) => {
+            const isOrgRestricted = pe.message.includes("OAuth App access restrictions");
+            return (
+              <div
+                key={pe.projectId}
+                className="flex items-start gap-2 text-xs text-red-400"
+              >
+                <span className="mt-px shrink-0 font-medium">PR blocked:</span>
+                <span className="text-red-300/80">
+                  {isOrgRestricted
+                    ? "Your GitHub organization restricts OAuth App access. An org admin must approve the Djinn app."
+                    : pe.message}
+                  {isOrgRestricted && (
+                    <a
+                      href="https://docs.github.com/articles/restricting-access-to-your-organization-s-data/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="ml-1.5 text-amber-400 underline underline-offset-2 hover:text-amber-300"
+                    >
+                      Learn how
+                    </a>
+                  )}
+                </span>
+              </div>
+            );
+          })}
 
           {/* LSP warnings */}
           {lspWarnings.map((w) => (
