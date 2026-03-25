@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3770
 expression: tool_schemas_planner()
 ---
 [
@@ -521,6 +520,22 @@ expression: tool_schemas_planner()
       "type": "object"
     },
     "name": "epic_tasks"
+  },
+  {
+    "description": "Close an epic. Use when all work is complete and no further waves are needed.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "epic_close"
   },
   {
     "description": "Transition a task using a named workflow action.",

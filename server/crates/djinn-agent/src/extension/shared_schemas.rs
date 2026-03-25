@@ -20,7 +20,22 @@ pub(crate) fn shared_pm_tool_schemas() -> Vec<serde_json::Value> {
         serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
         serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
         serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
+        serde_json::to_value(tool_epic_close()).expect("serialize tool_epic_close"),
     ]
+}
+
+pub(crate) fn tool_epic_close() -> RmcpTool {
+    RmcpTool::new(
+        "epic_close".to_string(),
+        "Close an epic. Use when all work is complete and no further waves are needed.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"}
+            }
+        }),
+    )
 }
 
 pub(crate) fn tool_epic_show() -> RmcpTool {

@@ -53,6 +53,7 @@ You have access to these tools via the `djinn` extension:
 - `epic_show(id)` — read epic details (description, memory_refs, task counts)
 - `epic_tasks(id)` — list tasks belonging to an epic
 - `epic_update(id, ...)` — update epic fields (description, memory_refs)
+- `epic_close(id)` — close an epic when all work is complete
 
 ### Knowledge Base
 - `memory_read(project, url)` — read a knowledge base note by URL
@@ -94,6 +95,15 @@ memory_write(
 Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadmap-permalink>"])`.
 
 **If a roadmap note exists:** Read it with `memory_read`, then update it with the current wave's results before creating tasks.
+
+### Step 2b: Close the Epic if Complete
+
+After reviewing the epic state (open/closed task counts, roadmap, session reflections), determine whether the epic's goal has been fully met. Signs an epic is complete:
+- The epic description states the work is done (e.g. "functionally complete").
+- All worker tasks are closed with successful outcomes.
+- No remaining work items are described in the roadmap.
+
+**If the epic is complete:** Call `epic_close(id)`, then `submit_grooming(summary="Epic complete — closed.")`. Do NOT create new tasks for a completed epic.
 
 ### Step 3: Decide — Spike or Tasks?
 
