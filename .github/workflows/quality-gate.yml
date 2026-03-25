@@ -49,7 +49,6 @@ jobs:
         with:
           workspaces: server
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -121,7 +120,6 @@ jobs:
         with:
           workspaces: desktop/src-tauri
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
