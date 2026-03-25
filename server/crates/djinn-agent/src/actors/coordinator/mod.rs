@@ -115,6 +115,7 @@ pub struct CoordinatorDeps {
 }
 
 impl CoordinatorDeps {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         events_tx: broadcast::Sender<DjinnEventEnvelope>,
         cancel: CancellationToken,
@@ -139,6 +140,7 @@ impl CoordinatorDeps {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn with_consolidation_runner(mut self, runner: Arc<dyn ConsolidationRunner>) -> Self {
         self.consolidation_runner = Some(runner);
         self
