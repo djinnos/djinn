@@ -21,7 +21,7 @@ const MAX_VERIFICATION_CHARS: usize = 3000;
 /// Max characters for a single inline PR review comment included in the prompt.
 const MAX_PR_COMMENT_CHARS: usize = 500;
 
-/// Return the most recent N high-signal comments (PM, reviewer, verification)
+/// Return the most recent N high-signal comments (lead, reviewer, verification)
 /// from the activity log, in chronological order (oldest first).
 /// Each entry is formatted as "**Label:** body".
 pub(crate) fn recent_feedback(
@@ -481,7 +481,7 @@ calls will be treated as a failure.\n\n";
         );
     }
 
-    // Last 3 high-signal comments (PM, reviewer, verification) in
+    // Last 3 high-signal comments (lead, reviewer, verification) in
     // chronological order. Simple and gives the worker full recent context.
     let sections = recent_feedback(&activity, 3);
 
@@ -534,7 +534,7 @@ calls will be treated as a failure.\n\n";
 }
 
 /// Build an initial user message for a fresh worker session. If the activity
-/// log contains PM or reviewer feedback, include it prominently so the worker
+/// log contains lead or reviewer feedback, include it prominently so the worker
 /// acts on it immediately rather than discovering it buried in the system prompt.
 ///
 /// PR review feedback (from GitHub reviewer inline comments) is surfaced first

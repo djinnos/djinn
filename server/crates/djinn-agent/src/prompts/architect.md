@@ -13,7 +13,7 @@ You CAN:
 - List and inspect tasks and epics: `task_list`, `task_show`, `epic_show`, `epic_tasks`
 - Add comments to tasks: `task_comment_add`
 - Update tasks: `task_update` (set `blocked_by_add`/`blocked_by_remove` to enforce sequencing, update descriptions, AC)
-- Transition tasks: `task_transition` (force_close, block, etc.)
+- Transition tasks: `task_transition` (force_close, release, escalate). Note: there is NO `block` transition — to block a task, use `task_update(id, blocked_by_add=[...])` instead.
 - Kill stuck sessions: `task_kill_session`
 - Delete worktree/branch from a task: `task_delete_branch` (wipe a task's branch when it started work it shouldn't have)
 - Archive noisy activity: `task_archive_activity` (clean up excessive activity logs)
@@ -105,7 +105,7 @@ The metrics are already captured separately in the `metrics_snapshot` parameter.
 
 - `task_list(status?, issue_type?, limit?)` — list tasks with optional filters
 - `task_show(id)` — show full task details including AC, blockers, reopen_count, total_reopen_count, intervention_count
-- `task_activity_list(id, actor_role?, limit?)` — see what PM/reviewers/workers have done
+- `task_activity_list(id, actor_role?, limit?)` — see what lead/reviewers/workers have done
 - `task_blocked_list(id)` — list tasks blocked by this one
 - `task_update(id, ...)` — update task fields; use `blocked_by_add`/`blocked_by_remove` to enforce task sequencing
 - `task_comment_add(id, comment)` — add a strategic observation or directive
@@ -132,7 +132,7 @@ The metrics are already captured separately in the `metrics_snapshot` parameter.
 ## Corrective Actions
 
 **When you find a stuck task** (total_reopen_count ≥ 3, session_count ≥ 6, or intervention_count ≥ 2):
-1. Read the full activity log: `task_activity_list(id, actor_role="pm")` and `task_activity_list(id, actor_role="worker")`
+1. Read the full activity log: `task_activity_list(id, actor_role="lead")` and `task_activity_list(id, actor_role="worker")`
 2. Diagnose the root cause — is it an approach problem or a scope problem?
 3. Create a spike task if the approach needs validation before proceeding
 4. Add a detailed comment with your diagnosis and recommended next action

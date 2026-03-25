@@ -76,7 +76,7 @@ impl AgentRole for ReviewerRole {
                         tracing::info!(
                             task_id = %task_id,
                             continuation_count = continuation_count,
-                            "task reviewer: stale cycle limit reached → escalating to PM"
+                            "task reviewer: stale cycle limit reached → escalating to lead"
                         );
                         return Some((
                             TransitionAction::Escalate,
@@ -122,7 +122,7 @@ impl AgentRole for ReviewerRole {
                             tracing::info!(
                                 task_id = %task_id,
                                 continuation_count = continuation_count,
-                                "task reviewer: stale cycle limit reached → escalating to PM"
+                                "task reviewer: stale cycle limit reached → escalating to lead"
                             );
                             Some((
                                 TransitionAction::Escalate,

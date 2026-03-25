@@ -92,7 +92,7 @@ pub(crate) const LEAD_CONFIG: RoleConfig = RoleConfig {
         _ => None,
     },
     release_action: || TransitionAction::LeadInterventionRelease,
-    initial_message: crate::prompts::PM_TEMPLATE,
+    initial_message: crate::prompts::LEAD_TEMPLATE,
     preserves_session: false,
     finalize_tool_names: &["submit_decision"],
 };

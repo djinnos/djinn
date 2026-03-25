@@ -12,7 +12,7 @@ pub(crate) fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
     ]
 }
 
-pub(crate) fn shared_pm_tool_schemas() -> Vec<serde_json::Value> {
+pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
     vec![
         serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
         serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
@@ -266,7 +266,8 @@ pub(crate) fn tool_task_create() -> RmcpTool {
                 "owner": {"type": "string"},
                 "status": {"type": "string"},
                 "parent_id": {"type": "string"},
-                "labels": {"type": "array", "items": {"type": "string"}}
+                "labels": {"type": "array", "items": {"type": "string"}},
+                "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched."}
             }
         }),
     )
@@ -275,7 +276,7 @@ pub(crate) fn tool_task_create() -> RmcpTool {
 pub(crate) fn tool_task_update() -> RmcpTool {
     RmcpTool::new(
         "task_update".to_string(),
-        "Update task fields and append/remove memory refs when supported by the workflow."
+        "Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched."
             .to_string(),
         object!({
             "type": "object",
@@ -291,7 +292,9 @@ pub(crate) fn tool_task_update() -> RmcpTool {
                 "owner": {"type": "string"},
                 "epic_id": {"type": "string"},
                 "memory_refs_add": {"type": "array", "items": {"type": "string"}},
-                "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
+                "memory_refs_remove": {"type": "array", "items": {"type": "string"}},
+                "blocked_by_add": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) to add as blockers. Task will not be dispatched until all blockers are resolved."},
+                "blocked_by_remove": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) to remove as blockers."}
             }
         }),
     )

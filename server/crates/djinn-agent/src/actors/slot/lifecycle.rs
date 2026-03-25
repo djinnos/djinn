@@ -664,7 +664,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     let activity_entries = task_repo.list_activity(&task.id).await.ok();
     let activity_text = match &activity_entries {
         Some(entries) if !entries.is_empty() => {
-            // Last 3 high-signal comments (PM, reviewer, verification)
+            // Last 3 high-signal comments (lead, reviewer, verification)
             let feedback = recent_feedback(entries, 3);
 
             // Count comments by role for the summary line
@@ -708,7 +708,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     let (worker_summary, worker_concerns, verification_failure) =
         extract_worker_context(&activity_entries);
 
-    // ── Build epic context for roles that need it (e.g. PM) ─────────────────
+    // ── Build epic context for roles that need it (e.g. lead) ─────────────────
     let epic_context = if role.needs_epic_context() {
         if let Some(ref epic_id) = task.epic_id {
             let epic_repo =
@@ -1174,7 +1174,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     // Worktree: commit final work.  For workers, preserve the worktree and
     // save the conversation so the session can be resumed after review.
-    // Non-workers (reviewers, PM) still clean up immediately.
+    // Non-workers (reviewers, lead) still clean up immediately.
     if is_worker_done {
         let commit_msg = if final_output
             .finalize_tool_name
