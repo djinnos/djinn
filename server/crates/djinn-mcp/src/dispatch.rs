@@ -47,7 +47,19 @@ use crate::tools::task_tools::{
 };
 
 fn decode_args<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T, String> {
-    serde_json::from_value(args).map_err(|e| format!("invalid arguments for tool '{tool}': {e}"))
+    serde_json::from_value(args).map_err(|e| {
+        let msg = e.to_string();
+        // Surface a clearer hint when acceptance_criteria deserialization fails
+        if (tool == "task_create" || tool == "task_update") && msg.contains("acceptance_criter") {
+            format!(
+                "invalid arguments for tool '{tool}': {msg}. \
+                 Hint: acceptance_criteria must be an array of strings, \
+                 e.g. [\"criterion 1\", \"criterion 2\"]"
+            )
+        } else {
+            format!("invalid arguments for tool '{tool}': {msg}")
+        }
+    })
 }
 
 fn map_error_or<T: Serialize>(tool: &str, out: Json<ErrorOr<T>>) -> Result<Value, String> {

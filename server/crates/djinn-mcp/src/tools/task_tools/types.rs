@@ -60,11 +60,46 @@ pub struct TaskUpdateParams {
     pub agent_type: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+#[derive(Serialize, Clone, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum AcceptanceCriterionItem {
     Text(String),
     Structured(AcceptanceCriterionStatus),
+}
+
+impl<'de> serde::Deserialize<'de> for AcceptanceCriterionItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::String(s) => Ok(AcceptanceCriterionItem::Text(s.clone())),
+            serde_json::Value::Object(_) => {
+                serde_json::from_value::<AcceptanceCriterionStatus>(value)
+                    .map(AcceptanceCriterionItem::Structured)
+                    .map_err(|_| {
+                        serde::de::Error::custom(
+                            "each acceptance criterion must be a plain string, e.g. \
+                             [\"criterion 1\", \"criterion 2\"]. Objects with \
+                             {\"criterion\": ..., \"met\": ...} are also accepted.",
+                        )
+                    })
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "each acceptance criterion must be a plain string, e.g. \
+                 [\"criterion 1\", \"criterion 2\"], but got {}. \
+                 Objects with {{\"criterion\": ..., \"met\": ...}} are also accepted.",
+                match other {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "a boolean",
+                    serde_json::Value::Number(_) => "a number",
+                    serde_json::Value::Array(_) => "an array",
+                    _ => "an unexpected type",
+                }
+            ))),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
