@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3779
+assertion_line: 3805
 expression: tool_schemas_reviewer()
 ---
 [
@@ -93,14 +93,9 @@ expression: tool_schemas_reviewer()
         "identifier": {
           "description": "Permalink or title",
           "type": "string"
-        },
-        "project": {
-          "description": "Absolute project path",
-          "type": "string"
         }
       },
       "required": [
-        "project",
         "identifier"
       ],
       "type": "object"
@@ -117,10 +112,6 @@ expression: tool_schemas_reviewer()
         "limit": {
           "type": "integer"
         },
-        "project": {
-          "description": "Absolute project path",
-          "type": "string"
-        },
         "query": {
           "type": "string"
         },
@@ -133,7 +124,6 @@ expression: tool_schemas_reviewer()
         }
       },
       "required": [
-        "project",
         "query"
       ],
       "type": "object"
@@ -152,18 +142,11 @@ expression: tool_schemas_reviewer()
           "description": "Filter by folder (e.g. \"decisions\")",
           "type": "string"
         },
-        "project": {
-          "description": "Absolute project path",
-          "type": "string"
-        },
         "type": {
           "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")",
           "type": "string"
         }
       },
-      "required": [
-        "project"
-      ],
       "type": "object"
     },
     "name": "memory_list"
