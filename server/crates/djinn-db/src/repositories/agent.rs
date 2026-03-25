@@ -57,6 +57,16 @@ pub struct AgentMetrics {
     pub avg_tokens: f64,
     /// Average session duration in seconds (completed sessions in the window).
     pub avg_time_seconds: f64,
+    /// Aggregated extraction-quality counters across sessions in the window.
+    pub extraction_quality: ExtractionQualityMetrics,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtractionQualityMetrics {
+    pub extracted: i64,
+    pub dedup_skipped: i64,
+    pub novelty_skipped: i64,
+    pub written: i64,
 }
 
 /// A pending amendment in `learned_prompt_history` that has not yet been
@@ -440,14 +450,18 @@ impl AgentRepository {
         .unwrap_or((0.0, 0.0, 0.0, 0));
 
         // Session-level metrics: completed sessions within the lookback window.
-        let session_row: (f64, f64) = sqlx::query_as(
+        let session_row: (f64, f64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
                 COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS REAL)), 0.0),
                 COALESCE(AVG(
                     CASE WHEN s.ended_at IS NOT NULL
                         THEN CAST((julianday(s.ended_at) - julianday(s.started_at)) * 86400 AS REAL)
                         ELSE NULL END
-                ), 0.0)
+                ), 0.0),
+                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.extracted') AS INTEGER)), 0),
+                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.dedup_skipped') AS INTEGER)), 0),
+                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.novelty_skipped') AS INTEGER)), 0),
+                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.written') AS INTEGER)), 0)
              FROM sessions s
              JOIN tasks t ON t.id = s.task_id
              WHERE t.project_id = ?1
@@ -460,7 +474,7 @@ impl AgentRepository {
         .bind(window_days)
         .fetch_one(self.db.pool())
         .await
-        .unwrap_or((0.0, 0.0));
+        .unwrap_or((0.0, 0.0, 0, 0, 0, 0));
 
         Ok(AgentMetrics {
             success_rate: task_row.0,
@@ -469,6 +483,12 @@ impl AgentRepository {
             completed_task_count: task_row.3,
             avg_tokens: session_row.0,
             avg_time_seconds: session_row.1,
+            extraction_quality: ExtractionQualityMetrics {
+                extracted: session_row.2,
+                dedup_skipped: session_row.3,
+                novelty_skipped: session_row.4,
+                written: session_row.5,
+            },
         })
     }
 

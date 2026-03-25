@@ -1,7 +1,9 @@
 use crate::tools::json_object::AnyJson;
 use djinn_core::models::Agent;
-use djinn_db::AgentMetrics as DbAgentMetrics;
 use djinn_db::{AgentCreateInput, AgentListQuery, AgentRepository, VALID_BASE_ROLES};
+use djinn_db::{
+    AgentMetrics as DbAgentMetrics, ExtractionQualityMetrics as DbExtractionQualityMetrics,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +89,15 @@ pub struct AgentMetricEntry {
     pub verification_pass_rate: f64,
     pub avg_reopens: f64,
     pub completed_task_count: i64,
+    pub extraction_quality: ExtractionQualityMetricEntry,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ExtractionQualityMetricEntry {
+    pub extracted: i64,
+    pub dedup_skipped: i64,
+    pub novelty_skipped: i64,
+    pub written: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -284,6 +295,7 @@ pub async fn metrics_for_agents(
                 completed_task_count: 0,
                 avg_tokens: 0.0,
                 avg_time_seconds: 0.0,
+                extraction_quality: DbExtractionQualityMetrics::default(),
             });
 
         entries.push(AgentMetricEntry {
@@ -297,6 +309,12 @@ pub async fn metrics_for_agents(
             completed_task_count: m.completed_task_count,
             avg_tokens: m.avg_tokens,
             avg_time_seconds: m.avg_time_seconds,
+            extraction_quality: ExtractionQualityMetricEntry {
+                extracted: m.extraction_quality.extracted,
+                dedup_skipped: m.extraction_quality.dedup_skipped,
+                novelty_skipped: m.extraction_quality.novelty_skipped,
+                written: m.extraction_quality.written,
+            },
         });
     }
 

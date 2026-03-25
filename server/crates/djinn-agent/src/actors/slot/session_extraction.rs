@@ -37,6 +37,18 @@ pub struct SessionTaxonomy {
     pub notes_written: u32,
     /// Number of task state transitions triggered via task_transition
     pub tasks_transitioned: u32,
+    /// Extraction-quality counters persisted for this session.
+    #[serde(default)]
+    pub extraction_quality: ExtractionQuality,
+}
+
+/// Extraction quality counters persisted alongside session taxonomy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtractionQuality {
+    pub extracted: u32,
+    pub dedup_skipped: u32,
+    pub novelty_skipped: u32,
+    pub written: u32,
 }
 
 // ── Tool name classification ──────────────────────────────────────────────────
@@ -592,9 +604,32 @@ mod tests {
             notes_read: 4,
             notes_written: 1,
             tasks_transitioned: 1,
+            extraction_quality: ExtractionQuality {
+                extracted: 2,
+                dedup_skipped: 1,
+                novelty_skipped: 0,
+                written: 1,
+            },
         };
         let json = serde_json::to_string(&tax).unwrap();
         let parsed: SessionTaxonomy = serde_json::from_str(&json).unwrap();
         assert_eq!(tax, parsed);
+    }
+
+    #[test]
+    fn taxonomy_deserializes_without_extraction_quality_field() {
+        let json = serde_json::json!({
+            "files_changed": 1,
+            "errors": 0,
+            "git_ops": 0,
+            "tools_used": 1,
+            "notes_read": 0,
+            "notes_written": 0,
+            "tasks_transitioned": 0
+        })
+        .to_string();
+
+        let parsed: SessionTaxonomy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.extraction_quality, ExtractionQuality::default());
     }
 }

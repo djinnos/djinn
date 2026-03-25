@@ -20,7 +20,9 @@ use djinn_db::{
 };
 
 use crate::actors::slot::llm_extraction::{run_llm_extraction, run_llm_extraction_with_provider};
-use crate::actors::slot::session_extraction::{SessionTaxonomy, extract_session_signals};
+use crate::actors::slot::session_extraction::{
+    ExtractionQuality, SessionTaxonomy, extract_session_signals,
+};
 use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, create_test_db};
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -425,6 +427,19 @@ async fn llm_extracted_notes_have_confidence_0_5() {
             note.confidence
         );
     }
+
+    let stored_json: Option<String> =
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+            .bind(&fixture.session_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .expect("query session event_taxonomy after llm extraction");
+    let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
+        .expect("deserialize stored taxonomy after llm extraction");
+    assert_eq!(stored_taxonomy.extraction_quality.extracted, 3);
+    assert_eq!(stored_taxonomy.extraction_quality.dedup_skipped, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.novelty_skipped, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.written, 3);
 }
 
 /// AC4 part 2: note content contains the session_id as provenance.
