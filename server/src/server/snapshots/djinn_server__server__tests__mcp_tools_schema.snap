@@ -1,5 +1,6 @@
 ---
 source: src/server/mod.rs
+assertion_line: 587
 expression: signatures
 ---
 [
@@ -329,6 +330,9 @@ expression: signatures
               "format": "int64",
               "type": "integer"
             },
+            "extraction_quality": {
+              "$ref": "#/$defs/ExtractionQualityMetricEntry"
+            },
             "learned_prompt": {
               "nullable": true,
               "type": "string"
@@ -351,7 +355,35 @@ expression: signatures
             "avg_time_seconds",
             "verification_pass_rate",
             "avg_reopens",
-            "completed_task_count"
+            "completed_task_count",
+            "extraction_quality"
+          ],
+          "type": "object"
+        },
+        "ExtractionQualityMetricEntry": {
+          "properties": {
+            "dedup_skipped": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "extracted": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "novelty_skipped": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "written": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "extracted",
+            "dedup_skipped",
+            "novelty_skipped",
+            "written"
           ],
           "type": "object"
         }
