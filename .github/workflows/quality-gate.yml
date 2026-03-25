@@ -35,6 +35,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
+      CARGO_BUILD_BUILD_DIR: target
       RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
