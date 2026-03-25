@@ -1095,6 +1095,7 @@ async fn call_agent_metrics(
                 "completed_task_count": entry.completed_task_count,
                 "avg_tokens": entry.avg_tokens,
                 "avg_time_seconds": entry.avg_time_seconds,
+                "extraction_quality": entry.extraction_quality,
             })
         })
         .collect::<Vec<_>>();
@@ -3466,6 +3467,16 @@ mod tests {
             Some("worker")
         );
         assert!(roles[0].get("learned_prompt").is_some());
+        let extraction_quality = roles[0]
+            .get("extraction_quality")
+            .and_then(|value| value.as_object())
+            .expect("extraction_quality object");
+        assert_eq!(
+            extraction_quality
+                .get("extracted")
+                .and_then(|value| value.as_i64()),
+            Some(0)
+        );
     }
 
     #[tokio::test]

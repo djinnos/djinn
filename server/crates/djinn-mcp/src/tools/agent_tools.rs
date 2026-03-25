@@ -456,5 +456,15 @@ mod tests {
                 .is_some(),
             "metrics entry should preserve numeric payload fields"
         );
+        let extraction_quality = agents[0]
+            .get("extraction_quality")
+            .and_then(|value| value.as_object())
+            .expect("extraction quality payload");
+        assert_eq!(
+            extraction_quality
+                .get("extracted")
+                .and_then(|value| value.as_i64()),
+            Some(0)
+        );
     }
 }
