@@ -7,6 +7,7 @@
 // All rules are deterministic — zero LLM calls.
 
 use super::*;
+use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_core::models::IssueType;
 use djinn_db::EpicRepository;
 
@@ -176,7 +177,7 @@ impl CoordinatorActor {
                 "Plan the next wave of work for this epic. Review completed work, update the roadmap, and create 3–5 tasks.",
                 "",
                 IssueType::Planning.as_str(),
-                0,
+                PRIORITY_CRITICAL,
                 "system",
                 Some("open"),
                 None,

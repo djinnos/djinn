@@ -159,9 +159,8 @@ pub(crate) fn tool_memory_read() -> RmcpTool {
         "Read a note by permalink or title.".to_string(),
         object!({
             "type": "object",
-            "required": ["project", "identifier"],
+            "required": ["identifier"],
             "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
                 "identifier": {"type": "string", "description": "Permalink or title"}
             }
         }),
@@ -174,9 +173,8 @@ pub(crate) fn tool_memory_search() -> RmcpTool {
         "Search notes in project memory.".to_string(),
         object!({
             "type": "object",
-            "required": ["project", "query"],
+            "required": ["query"],
             "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
                 "query": {"type": "string"},
                 "folder": {"type": "string"},
                 "type": {"type": "string"},
@@ -193,9 +191,7 @@ pub(crate) fn tool_memory_list() -> RmcpTool {
         "List notes in project memory. Returns compact summaries without full content.".to_string(),
         object!({
             "type": "object",
-            "required": ["project"],
             "properties": {
-                "project": {"type": "string", "description": "Absolute project path"},
                 "folder": {"type": "string", "description": "Filter by folder (e.g. \"decisions\")"},
                 "type": {"type": "string", "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"},
                 "depth": {"type": "integer", "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"}

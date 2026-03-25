@@ -162,15 +162,30 @@ where
         "epic_update" => call_epic_update(state, &call.arguments).await,
         "epic_tasks" => call_epic_tasks(state, &call.arguments).await,
         "epic_close" => call_epic_close(state, &call.arguments).await,
-        "memory_read" => call_memory_read(state, &call.arguments).await,
-        "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
-        "memory_list" => call_memory_list(state, &call.arguments).await,
-        "memory_build_context" => {
-            call_memory_build_context(state, &call.arguments, session_task_id).await
+        "memory_read" => call_memory_read(state, &call.arguments, &worktree_project_path).await,
+        "memory_search" => {
+            call_memory_search(state, &call.arguments, session_task_id, &worktree_project_path)
+                .await
         }
-        "agent_metrics" => call_agent_metrics(state, &call.arguments).await,
-        "agent_amend_prompt" => call_agent_amend_prompt(state, &call.arguments).await,
-        "agent_create" => call_agent_create(state, &call.arguments).await,
+        "memory_list" => call_memory_list(state, &call.arguments, &worktree_project_path).await,
+        "memory_build_context" => {
+            call_memory_build_context(
+                state,
+                &call.arguments,
+                session_task_id,
+                &worktree_project_path,
+            )
+            .await
+        }
+        "agent_metrics" => {
+            call_agent_metrics(state, &call.arguments, &worktree_project_path).await
+        }
+        "agent_amend_prompt" => {
+            call_agent_amend_prompt(state, &call.arguments, &worktree_project_path).await
+        }
+        "agent_create" => {
+            call_agent_create(state, &call.arguments, &worktree_project_path).await
+        }
         "ci_job_log" => call_ci_job_log(state, &call.arguments, session_task_id).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
         "read" => call_read(state, &call.arguments, worktree_path).await,
@@ -287,13 +302,11 @@ struct TaskCommentAddParams {
 
 #[derive(Deserialize)]
 struct MemoryReadParams {
-    project: Option<String>,
     identifier: String,
 }
 
 #[derive(Deserialize)]
 struct MemorySearchParams {
-    project: Option<String>,
     query: String,
     folder: Option<String>,
     #[serde(rename = "type")]
@@ -304,7 +317,6 @@ struct MemorySearchParams {
 
 #[derive(Deserialize)]
 struct MemoryListParams {
-    project: Option<String>,
     folder: Option<String>,
     #[serde(rename = "type")]
     note_type: Option<String>,
@@ -313,7 +325,6 @@ struct MemoryListParams {
 
 #[derive(Deserialize)]
 struct MemoryBuildContextParams {
-    project: Option<String>,
     url: String,
     /// Link traversal depth (default 1). Currently unused at the dispatch layer.
     _depth: Option<i64>,
@@ -324,7 +335,6 @@ struct MemoryBuildContextParams {
 
 #[derive(Deserialize)]
 struct AgentAmendPromptParams {
-    project: Option<String>,
     agent_id: String,
     amendment: String,
     metrics_snapshot: Option<String>,
@@ -397,6 +407,8 @@ async fn resolve_project_id_for_agent_tools(
         _ => Err("project is required when multiple projects are configured".to_string()),
     }
 }
+
+
 
 async fn call_task_list(
     state: &AgentContext,
@@ -944,9 +956,10 @@ async fn call_task_comment_add(
 async fn call_memory_read(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryReadParams = parse_args(arguments)?;
-    let project_path = resolve_project_path(p.project);
+    let project_path = project_path.to_owned();
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
         djinn_mcp::tools::memory_tools::ops::memory_read(
@@ -965,9 +978,10 @@ async fn call_memory_search(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     session_task_id: Option<&str>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: MemorySearchParams = parse_args(arguments)?;
-    let project_path = resolve_project_path(p.project);
+    let project_path = project_path.to_owned();
     let task_id = p.task_id.or_else(|| session_task_id.map(ToOwned::to_owned));
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
@@ -992,9 +1006,10 @@ async fn call_memory_search(
 async fn call_memory_list(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryListParams = parse_args(arguments)?;
-    let project_path = resolve_project_path(p.project);
+    let project_path = project_path.to_owned();
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
         djinn_mcp::tools::memory_tools::ops::memory_list(
@@ -1015,9 +1030,10 @@ async fn call_memory_build_context(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     session_task_id: Option<&str>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryBuildContextParams = parse_args(arguments)?;
-    let project_path = resolve_project_path(p.project);
+    let project_path = project_path.to_owned();
     let task_id = p.task_id.or_else(|| session_task_id.map(ToOwned::to_owned));
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
@@ -1043,21 +1059,21 @@ async fn call_memory_build_context(
 async fn call_agent_metrics(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
-    let project_path = resolve_project_path(
-        arguments
-            .as_ref()
-            .and_then(|map| map.get("project"))
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned),
-    );
-    let project_id = project_id_for_path(state, &project_path).await?;
+    let project_id = project_id_for_path(state, project_path).await?;
 
     let raw = arguments.clone().unwrap_or_default();
-    let mut params: SharedAgentMetricsParams =
-        serde_json::from_value(serde_json::Value::Object(raw))
-            .map_err(|e| format!("invalid arguments: {e}"))?;
-    params.project = project_path;
+    let params = SharedAgentMetricsParams {
+        project: project_path.to_owned(),
+        agent_id: raw
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned),
+        window_days: raw
+            .get("window_days")
+            .and_then(|v| v.as_i64()),
+    };
 
     let response = shared_metrics_for_agents(
         &AgentRepository::new(state.db.clone(), state.event_bus.clone()),
@@ -1095,10 +1111,10 @@ async fn call_agent_metrics(
 async fn call_agent_amend_prompt(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: AgentAmendPromptParams = parse_args(arguments)?;
-    let project_path = resolve_project_path(p.project);
-    let project_id = project_id_for_path(state, &project_path).await?;
+    let project_id = project_id_for_path(state, project_path).await?;
 
     let repo = AgentRepository::new(state.db.clone(), state.event_bus.clone());
 
@@ -1141,21 +1157,17 @@ async fn call_agent_amend_prompt(
 async fn call_agent_create(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
 ) -> Result<serde_json::Value, String> {
-    let project_path = resolve_project_path(
-        arguments
-            .as_ref()
-            .and_then(|map| map.get("project"))
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned),
-    );
-    let project_id = project_id_for_path(state, &project_path).await?;
+    let project_id = project_id_for_path(state, project_path).await?;
 
-    let raw = arguments.clone().unwrap_or_default();
-    let mut params: SharedAgentCreateParams =
+    let mut raw = arguments.clone().unwrap_or_default();
+    // Inject project so the shared params struct deserialises.
+    raw.entry("project")
+        .or_insert_with(|| serde_json::json!(project_path));
+    let params: SharedAgentCreateParams =
         serde_json::from_value(serde_json::Value::Object(raw))
             .map_err(|e| format!("invalid arguments: {e}"))?;
-    params.project = project_path;
 
     let response = shared_create_agent(
         &AgentRepository::new(state.db.clone(), state.event_bus.clone()),
@@ -2188,15 +2200,6 @@ fn merge_acceptance_criteria(existing_json: &str, incoming: &[serde_json::Value]
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn resolve_project_path(project: Option<String>) -> String {
-    match project {
-        Some(path) => path,
-        None => std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .display()
-            .to_string(),
-    }
-}
 
 fn task_to_value(t: &Task) -> serde_json::Value {
     let labels = djinn_core::models::parse_json_array(&t.labels);
