@@ -790,21 +790,26 @@ mod tests {
 
     #[test]
     fn parse_https_with_user_prefix() {
-        let (owner, repo) = parse_github_owner_repo("https://CroosALt@github.com/getalternative/svc-accounts-payable.git").unwrap();
+        let (owner, repo) = parse_github_owner_repo(
+            "https://CroosALt@github.com/getalternative/svc-accounts-payable.git",
+        )
+        .unwrap();
         assert_eq!(owner, "getalternative");
         assert_eq!(repo, "svc-accounts-payable");
     }
 
     #[test]
     fn parse_https_with_user_prefix_no_dot_git() {
-        let (owner, repo) = parse_github_owner_repo("https://user@github.com/acme/widgets").unwrap();
+        let (owner, repo) =
+            parse_github_owner_repo("https://user@github.com/acme/widgets").unwrap();
         assert_eq!(owner, "acme");
         assert_eq!(repo, "widgets");
     }
 
     #[test]
     fn parse_http_with_user_prefix() {
-        let (owner, repo) = parse_github_owner_repo("http://user@github.com/acme/widgets.git").unwrap();
+        let (owner, repo) =
+            parse_github_owner_repo("http://user@github.com/acme/widgets.git").unwrap();
         assert_eq!(owner, "acme");
         assert_eq!(repo, "widgets");
     }

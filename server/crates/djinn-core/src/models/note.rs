@@ -94,6 +94,7 @@ pub struct NoteSearchResult {
 }
 
 /// Compact near-duplicate candidate returned by pre-write dedup lookup.
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NoteDedupCandidate {
     pub id: String,
