@@ -130,10 +130,6 @@ mod tests {
             agent_type.role_config().preserves_session,
             cfg.preserves_session
         );
-        assert_eq!(
-            agent_type.role_config().is_project_scoped,
-            cfg.is_project_scoped
-        );
         assert_eq!(agent_type.tool_schemas(), (cfg.tool_schemas)());
     }
 

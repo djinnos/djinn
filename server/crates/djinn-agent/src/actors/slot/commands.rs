@@ -13,14 +13,6 @@ pub(crate) enum SlotCommand {
         project_path: String,
         respond_to: oneshot::Sender<Result<(), SlotError>>,
     },
-    /// Run a project lifecycle in this slot.
-    RunProject {
-        project_id: String,
-        project_path: String,
-        agent_type: String,
-        model_id: String,
-        respond_to: oneshot::Sender<Result<(), SlotError>>,
-    },
     /// Kill the currently running task.
     Kill,
     /// Pause the currently running task (commit WIP, preserve worktree).
