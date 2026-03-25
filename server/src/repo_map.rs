@@ -127,13 +127,17 @@ pub struct IndexingRun {
 }
 
 pub fn detect_indexers() -> Vec<IndexerAvailability> {
-    let path_var = env::var("PATH").unwrap_or_default();
+    detect_indexers_in_path(env::var("PATH").unwrap_or_default())
+}
+
+fn detect_indexers_in_path(path_var: impl AsRef<str>) -> Vec<IndexerAvailability> {
+    let path_var = path_var.as_ref();
     SupportedIndexer::ALL
         .into_iter()
         .map(|indexer| IndexerAvailability {
             indexer,
             binary: indexer.binary_name().to_string(),
-            path: which_in_path(indexer.binary_name(), &path_var),
+            path: which_in_path(indexer.binary_name(), path_var),
         })
         .collect()
 }
@@ -344,14 +348,7 @@ mod tests {
             make_executable(&path);
         }
 
-        let previous_path = env::var_os("PATH");
-        env::set_var("PATH", tmp.path());
-        let detections = detect_indexers();
-        if let Some(previous_path) = previous_path {
-            env::set_var("PATH", previous_path);
-        } else {
-            env::remove_var("PATH");
-        }
+        let detections = detect_indexers_in_path(tmp.path().display().to_string());
 
         assert_eq!(detections.len(), SupportedIndexer::ALL.len());
         for detection in detections {
@@ -490,10 +487,5 @@ mod tests {
         let missing = PathBuf::from("/tmp/does-not-exist-djinn-scip");
         let artifacts = collect_scip_artifacts(&missing, &[]).expect("collect artifacts");
         assert!(artifacts.is_empty());
-    }
-
-    #[test]
-    fn io_result_type_is_used() {
-        let _ = io::Result::Ok(());
     }
 }
