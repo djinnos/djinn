@@ -276,17 +276,16 @@ mod tests {
                 role_priorities: HashMap::new(),
             },
         );
-        CoordinatorHandle::spawn(CoordinatorDeps {
-            events_tx: tx.clone(),
+        CoordinatorHandle::spawn(CoordinatorDeps::new(
+            tx.clone(),
             cancel,
-            db: db.clone(),
+            db.clone(),
             pool,
-            catalog: djinn_provider::catalog::CatalogService::new(),
-            health: HealthTracker::new(),
-            role_registry: Arc::new(RoleRegistry::new()),
-            verification_tracker: VerificationTracker::default(),
-            consolidation_runner: None,
-        })
+            djinn_provider::catalog::CatalogService::new(),
+            HealthTracker::new(),
+            Arc::new(RoleRegistry::new()),
+            VerificationTracker::default(),
+        ))
     }
 
     async fn make_epic(
@@ -562,17 +561,16 @@ mod tests {
         });
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let mut actor = CoordinatorActor::new(
-            CoordinatorDeps {
-                events_tx: events_tx.clone(),
+            CoordinatorDeps::new(
+                events_tx.clone(),
                 cancel,
                 db,
                 pool,
-                catalog: djinn_provider::catalog::CatalogService::new(),
-                health: HealthTracker::new(),
-                role_registry: Arc::new(RoleRegistry::new()),
-                verification_tracker: VerificationTracker::default(),
-                consolidation_runner: None,
-            },
+                djinn_provider::catalog::CatalogService::new(),
+                HealthTracker::new(),
+                Arc::new(RoleRegistry::new()),
+                VerificationTracker::default(),
+            ),
             receiver,
             sender,
             status_tx,
@@ -626,17 +624,16 @@ mod tests {
         });
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let mut actor = CoordinatorActor::new(
-            CoordinatorDeps {
-                events_tx: events_tx.clone(),
+            CoordinatorDeps::new(
+                events_tx.clone(),
                 cancel,
                 db,
                 pool,
-                catalog: djinn_provider::catalog::CatalogService::new(),
-                health: HealthTracker::new(),
-                role_registry: Arc::new(RoleRegistry::new()),
-                verification_tracker: VerificationTracker::default(),
-                consolidation_runner: None,
-            },
+                djinn_provider::catalog::CatalogService::new(),
+                HealthTracker::new(),
+                Arc::new(RoleRegistry::new()),
+                VerificationTracker::default(),
+            ),
             receiver,
             sender,
             status_tx,

@@ -111,7 +111,38 @@ pub struct CoordinatorDeps {
     pub health: HealthTracker,
     pub role_registry: Arc<RoleRegistry>,
     pub verification_tracker: VerificationTracker,
-    pub(crate) consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
+    consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
+}
+
+impl CoordinatorDeps {
+    pub fn new(
+        events_tx: broadcast::Sender<DjinnEventEnvelope>,
+        cancel: CancellationToken,
+        db: Database,
+        pool: SlotPoolHandle,
+        catalog: CatalogService,
+        health: HealthTracker,
+        role_registry: Arc<RoleRegistry>,
+        verification_tracker: VerificationTracker,
+    ) -> Self {
+        Self {
+            events_tx,
+            cancel,
+            db,
+            pool,
+            catalog,
+            health,
+            role_registry,
+            verification_tracker,
+            consolidation_runner: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_consolidation_runner(mut self, runner: Arc<dyn ConsolidationRunner>) -> Self {
+        self.consolidation_runner = Some(runner);
+        self
+    }
 }
 
 mod dispatch;
@@ -1382,17 +1413,16 @@ mod tests {
         let health = HealthTracker::new();
         let verification_tracker = VerificationTracker::default();
         let role_registry = Arc::new(RoleRegistry::new());
-        CoordinatorHandle::spawn(CoordinatorDeps {
-            events_tx: tx.clone(),
+        CoordinatorHandle::spawn(CoordinatorDeps::new(
+            tx.clone(),
             cancel,
-            db: db.clone(),
+            db.clone(),
             pool,
             catalog,
             health,
             role_registry,
             verification_tracker,
-            consolidation_runner: None,
-        })
+        ))
     }
 
     async fn make_epic(
@@ -1789,17 +1819,16 @@ mod tests {
         let health = HealthTracker::new();
         let verification_tracker = VerificationTracker::default();
         let tracker_clone = verification_tracker.clone();
-        let handle = CoordinatorHandle::spawn(CoordinatorDeps {
-            events_tx: tx.clone(),
+        let handle = CoordinatorHandle::spawn(CoordinatorDeps::new(
+            tx.clone(),
             cancel,
-            db: db.clone(),
+            db.clone(),
             pool,
             catalog,
             health,
-            role_registry: Arc::new(RoleRegistry::new()),
+            Arc::new(RoleRegistry::new()),
             verification_tracker,
-            consolidation_runner: None,
-        });
+        ));
         (handle, tracker_clone)
     }
 
@@ -2021,17 +2050,16 @@ mod tests {
         let health = HealthTracker::new();
         let verification_tracker = VerificationTracker::default();
         let role_registry = Arc::new(RoleRegistry::new());
-        CoordinatorHandle::spawn(CoordinatorDeps {
-            events_tx: tx.clone(),
+        CoordinatorHandle::spawn(CoordinatorDeps::new(
+            tx.clone(),
             cancel,
-            db: db.clone(),
+            db.clone(),
             pool,
             catalog,
             health,
             role_registry,
             verification_tracker,
-            consolidation_runner: None,
-        })
+        ))
     }
 
     fn spawn_coordinator_with_architect(
