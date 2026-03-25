@@ -236,42 +236,18 @@ impl CoordinatorActor {
             return;
         }
 
-        // If discarding: revert the learned_prompt.
-        if action == "discard" {
-            match role_repo
-                .revert_learned_prompt(&amendment.agent_id, &amendment.proposed_text)
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!(
-                        role_id = %amendment.agent_id,
-                        history_id = %amendment.history_id,
-                        pre_success_rate = pre_metrics.success_rate,
-                        post_success_rate = post_metrics.success_rate,
-                        pre_avg_tokens = pre_metrics.avg_tokens,
-                        post_avg_tokens = post_metrics.avg_tokens,
-                        "CoordinatorActor: prompt eval — amendment discarded, learned_prompt reverted"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        role_id = %amendment.agent_id,
-                        error = %e,
-                        "CoordinatorActor: prompt eval — failed to revert learned_prompt"
-                    );
-                }
-            }
-        } else {
-            tracing::info!(
-                role_id = %amendment.agent_id,
-                history_id = %amendment.history_id,
-                pre_success_rate = pre_metrics.success_rate,
-                post_success_rate = post_metrics.success_rate,
-                pre_avg_tokens = pre_metrics.avg_tokens,
-                post_avg_tokens = post_metrics.avg_tokens,
-                "CoordinatorActor: prompt eval — amendment confirmed"
-            );
-        }
+        // learned_prompt is now derived from active history rows, so marking
+        // the record as 'discard' is sufficient — no text manipulation needed.
+        tracing::info!(
+            role_id = %amendment.agent_id,
+            history_id = %amendment.history_id,
+            action,
+            pre_success_rate = pre_metrics.success_rate,
+            post_success_rate = post_metrics.success_rate,
+            pre_avg_tokens = pre_metrics.avg_tokens,
+            post_avg_tokens = post_metrics.avg_tokens,
+            "CoordinatorActor: prompt eval — amendment {action}"
+        );
     }
 }
 
