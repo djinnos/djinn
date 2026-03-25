@@ -8,7 +8,6 @@ import architectAvatar from "@/assets/architect.png";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
 import {
-  AlertDiamondIcon,
   ArrowReloadHorizontalIcon,
   FullSignalIcon,
   LowSignalIcon,
@@ -65,7 +64,6 @@ function IssueTypeBadge({ issueType }: { issueType: string }) {
 }
 
 const PRIORITY_CONFIG: Record<number, { icon: typeof NoSignalIcon; color: string }> = {
-  [-1]: { icon: AlertDiamondIcon, color: "text-orange-400" },
   0: { icon: FullSignalIcon, color: "text-[#D1D5DB]" },
   1: { icon: MediumSignalIcon, color: "text-[#9CA3AF]" },
   2: { icon: LowSignalIcon, color: "text-[#6B7280]" },
@@ -73,13 +71,13 @@ const PRIORITY_CONFIG: Record<number, { icon: typeof NoSignalIcon; color: string
 };
 
 function PriorityBadge({ priority }: { priority: number }) {
-  const config = PRIORITY_CONFIG[priority] ?? PRIORITY_CONFIG[Math.min(Math.max(priority ?? 3, 0), 3)];
+  const config = PRIORITY_CONFIG[Math.min(Math.max(priority ?? 3, 0), 3)];
   return (
     <HugeiconsIcon
       icon={config.icon}
       size={14}
       className={`shrink-0 ${config.color}`}
-      aria-label={priority === -1 ? "Priority Critical" : `Priority P${priority}`}
+      aria-label={`Priority P${priority}`}
     />
   );
 }

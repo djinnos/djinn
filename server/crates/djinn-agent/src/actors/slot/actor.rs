@@ -428,5 +428,4 @@ mod tests {
             other => panic!("expected SlotEvent::Free, got {other:?}"),
         }
     }
-
 }

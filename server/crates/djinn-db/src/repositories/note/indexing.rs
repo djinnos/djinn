@@ -67,8 +67,11 @@ impl NoteRepository {
             }
         }
 
-        // Any indexed note that no longer exists on disk is deleted.
+        // Any indexed file-backed note that no longer exists on disk is deleted.
         for (_permalink, stale_note) in existing_by_permalink {
+            if stale_note.storage != "file" {
+                continue;
+            }
             if seen_permalinks.contains(&stale_note.permalink) {
                 continue;
             }
@@ -90,14 +93,15 @@ impl NoteRepository {
         sqlx::query(
             "INSERT INTO notes
                 (id, project_id, permalink, title, file_path,
-                 note_type, folder, tags, content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 storage, note_type, folder, tags, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(&id)
         .bind(project_id)
         .bind(&scanned_note.permalink)
         .bind(&scanned_note.title)
         .bind(&scanned_note.file_path)
+        .bind("file")
         .bind(&scanned_note.note_type)
         .bind(&scanned_note.folder)
         .bind(&scanned_note.tags)

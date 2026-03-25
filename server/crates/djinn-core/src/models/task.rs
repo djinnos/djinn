@@ -63,10 +63,6 @@ impl IssueType {
     }
 }
 
-/// System-only priority level that sorts above P0.
-/// MCP tools reject -1, so only the coordinator/system can set this.
-pub const PRIORITY_CRITICAL: i64 = -1;
-
 /// Task board work item, always scoped under an epic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]

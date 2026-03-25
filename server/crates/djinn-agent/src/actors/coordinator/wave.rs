@@ -15,7 +15,6 @@
 //   (task, research, …) are worker tasks.
 
 use super::*;
-use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_db::EpicRepository;
 
 /// Worker issue_types that count toward batch-completion.  Any `issue_type`
@@ -25,10 +24,7 @@ const WORKER_ISSUE_TYPES: &[&str] = &["task", "research", "feature"];
 impl CoordinatorActor {
     /// Called when an epic is created.  Creates the first planning task
     /// unless one already exists for the epic (idempotent).
-    pub(super) async fn maybe_create_planning_task(
-        &mut self,
-        epic: &djinn_core::models::Epic,
-    ) {
+    pub(super) async fn maybe_create_planning_task(&mut self, epic: &djinn_core::models::Epic) {
         if epic.status == "closed" {
             return;
         }
@@ -107,7 +103,8 @@ impl CoordinatorActor {
         // Check for an existing open/in-progress planning task — if one
         // exists we don't create another.
         let has_open_planning = all_tasks.iter().any(|t| {
-            matches!(t.issue_type.as_str(), "planning" | "decomposition") && matches!(t.status.as_str(), "open" | "in_progress")
+            matches!(t.issue_type.as_str(), "planning" | "decomposition")
+                && matches!(t.status.as_str(), "open" | "in_progress")
         });
         if has_open_planning {
             return;
@@ -178,7 +175,7 @@ impl CoordinatorActor {
                 &description,
                 &design,
                 "planning",
-                PRIORITY_CRITICAL,
+                0,
                 "planner",
                 Some("open"),
                 Some(&ac),

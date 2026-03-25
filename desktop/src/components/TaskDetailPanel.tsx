@@ -38,7 +38,6 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const PRIORITY_LABELS: Record<number, string> = {
-  [-1]: "Critical",
   0: "P0",
   1: "P1",
   2: "P2",
