@@ -11,6 +11,7 @@ import { GitRemoteSetupBanner, useGitRemoteCheck } from "@/components/GitRemoteS
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
 import { GitHubAppBanner } from "@/components/GitHubAppBanner";
 import {
+  AlertDiamondIcon,
   ArrowDown01Icon,
   ArrowRight01Icon,
   CheckmarkCircle03Icon,
@@ -67,9 +68,10 @@ const STATUS_COLUMNS: Array<{
   { key: "done", label: "Merged", colorClass: "bg-[#10B981]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40", icon: CheckmarkCircle03Icon },
 ];
 
-const PRIORITIES = [0, 1, 2, 3] as const;
+const PRIORITIES = [-1, 0, 1, 2, 3] as const;
 
 const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: string; activeColor: string }> = {
+  [-1]: { icon: AlertDiamondIcon, color: "text-muted-foreground/50", activeColor: "text-orange-400" },
   0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#D1D5DB]" },
   1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#9CA3AF]" },
   2: { icon: LowSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#6B7280]" },
@@ -183,10 +185,11 @@ export function KanbanBoard({
       .split(",")
       .filter(Boolean)
       .map((p) => {
-        const match = p.match(/^P?(\d)$/i);
-        return match ? Number(match[1]) : -1;
+        if (p.toLowerCase() === "critical") return -1;
+        const match = p.match(/^P?(-?\d)$/i);
+        return match ? Number(match[1]) : -99;
       })
-      .filter((p) => p >= 0 && p <= 3)
+      .filter((p) => p >= -1 && p <= 3)
   );
   const [issueTypeFilters, setIssueTypeFilters] = useState<string[]>(
     (searchParams.get("type") ?? "").split(",").filter(Boolean)
@@ -231,7 +234,7 @@ export function KanbanBoard({
     if (ownerFilters.length > 0) next.set("owner", ownerFilters.join(","));
     else next.delete("owner");
 
-    if (priorityFilters.length > 0) next.set("priority", priorityFilters.map((p) => `P${p}`).join(","));
+    if (priorityFilters.length > 0) next.set("priority", priorityFilters.map((p) => p === -1 ? "critical" : `P${p}`).join(","));
     else next.delete("priority");
 
     if (issueTypeFilters.length > 0) next.set("type", issueTypeFilters.join(","));
@@ -352,7 +355,7 @@ export function KanbanBoard({
               <button
                 key={priority}
                 type="button"
-                title={`P${priority}`}
+                title={priority === -1 ? "Critical" : `P${priority}`}
                 onClick={() =>
                   setPriorityFilters((prev) =>
                     prev.includes(priority)

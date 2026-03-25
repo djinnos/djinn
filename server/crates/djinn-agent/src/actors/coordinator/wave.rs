@@ -15,6 +15,7 @@
 //   (task, research, …) are worker tasks.
 
 use super::*;
+use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_db::EpicRepository;
 
 /// Worker issue_types that count toward batch-completion.  Any `issue_type`
@@ -177,7 +178,7 @@ impl CoordinatorActor {
                 &description,
                 &design,
                 "planning",
-                0,
+                PRIORITY_CRITICAL,
                 "planner",
                 Some("open"),
                 Some(&ac),
