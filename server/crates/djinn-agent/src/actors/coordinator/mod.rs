@@ -24,6 +24,7 @@ use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
 use djinn_db::Database;
 use djinn_db::GitSettingsRepository;
+use djinn_db::NoteConsolidationRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
@@ -37,6 +38,45 @@ use djinn_provider::catalog::health::HealthTracker;
 /// detection so it can distinguish live pipelines from orphans after restart.
 pub type VerificationTracker = Arc<std::sync::Mutex<HashSet<String>>>;
 
+trait ConsolidationRunner: Send + Sync {
+    fn run_for_group<'a>(
+        &'a self,
+        group: djinn_db::DbNoteGroup,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = djinn_db::Result<()>> + Send + 'a>>;
+}
+
+struct DbConsolidationRunner {
+    db: Database,
+}
+
+impl DbConsolidationRunner {
+    fn new(db: Database) -> Self {
+        Self { db }
+    }
+}
+
+impl ConsolidationRunner for DbConsolidationRunner {
+    fn run_for_group<'a>(
+        &'a self,
+        group: djinn_db::DbNoteGroup,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = djinn_db::Result<()>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let repo = NoteConsolidationRepository::new(self.db.clone());
+            let clusters = repo
+                .likely_duplicate_clusters(&group.project_id, &group.note_type)
+                .await?;
+            if clusters
+                .iter()
+                .all(|cluster| cluster.note_ids.len() < CONSOLIDATION_MIN_CLUSTER_SIZE)
+            {
+                return Ok(());
+            }
+            Ok(())
+        })
+    }
+}
+
 pub struct CoordinatorDeps {
     pub events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub cancel: CancellationToken,
@@ -46,6 +86,7 @@ pub struct CoordinatorDeps {
     pub health: HealthTracker,
     pub role_registry: Arc<RoleRegistry>,
     pub verification_tracker: VerificationTracker,
+    consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
 }
 
 mod dispatch;
@@ -58,6 +99,7 @@ mod wave;
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
 const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const CONSOLIDATION_MIN_CLUSTER_SIZE: usize = 3;
 const TASK_OUTCOME_CONFIDENCE_ACTIVITY: &str = "task_outcome_confidence";
 const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
 const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
@@ -252,6 +294,7 @@ struct CoordinatorActor {
     dispatch_cooldowns: HashMap<String, StdInstant>,
     /// Shared tracker for in-flight verification background tasks.
     verification_tracker: VerificationTracker,
+    consolidation_runner: Arc<dyn ConsolidationRunner>,
     last_stale_sweep: StdInstant,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     prune_tick_counter: u32,
@@ -311,6 +354,7 @@ impl CoordinatorActor {
             health,
             role_registry,
             verification_tracker,
+            consolidation_runner,
         } = deps;
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
@@ -320,7 +364,7 @@ impl CoordinatorActor {
             events,
             cancel,
             tick,
-            db,
+            db: db.clone(),
             events_tx,
             pool,
             catalog,
@@ -336,6 +380,8 @@ impl CoordinatorActor {
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             verification_tracker,
+            consolidation_runner: consolidation_runner
+                .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
             last_stale_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             architect_tick_counter: 0,
@@ -429,6 +475,7 @@ impl CoordinatorActor {
                     if self.prune_tick_counter >= 120 {
                         self.prune_tick_counter = 0;
                         self.prune_note_associations().await;
+                        self.run_note_consolidation().await;
                         self.evict_throughput_events();
                         self.evaluate_prompt_amendments().await;
                     }
@@ -960,6 +1007,28 @@ impl CoordinatorActor {
         );
         repo.get_path(project_id).await.ok().flatten()
     }
+
+    async fn run_note_consolidation(&self) {
+        let repo = NoteConsolidationRepository::new(self.db.clone());
+        let groups = match repo.list_db_note_groups().await {
+            Ok(groups) => groups,
+            Err(error) => {
+                tracing::warn!(error = %error, "CoordinatorActor: failed to list DB note groups for consolidation");
+                return;
+            }
+        };
+
+        for group in groups {
+            if let Err(error) = self.consolidation_runner.run_for_group(group.clone()).await {
+                tracing::warn!(
+                    project_id = %group.project_id,
+                    note_type = %group.note_type,
+                    error = %error,
+                    "CoordinatorActor: failed to run DB note consolidation"
+                );
+            }
+        }
+    }
 }
 
 // ─── Handle ───────────────────────────────────────────────────────────────────
@@ -985,6 +1054,13 @@ impl CoordinatorHandle {
             pr_errors: HashMap::new(),
         };
         let (status_tx, status_rx) = watch::channel(initial_state);
+        let deps = CoordinatorDeps {
+            consolidation_runner: Some(
+                deps.consolidation_runner
+                    .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(deps.db.clone()))),
+            ),
+            ..deps
+        };
         let actor = CoordinatorActor::new(deps, receiver, sender.clone(), status_tx);
         tokio::spawn(actor.run());
         Self { sender, status_rx }
@@ -1202,7 +1278,10 @@ impl CoordinatorHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::path::Path;
+    use std::pin::Pin;
+    use std::sync::Mutex;
 
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
@@ -1216,6 +1295,34 @@ mod tests {
     use djinn_db::NoteRepository;
     use djinn_db::TaskRepository;
     use djinn_provider::catalog::health::HealthTracker;
+
+    struct RecordingConsolidationRunner {
+        calls: Arc<Mutex<Vec<djinn_db::DbNoteGroup>>>,
+    }
+
+    impl RecordingConsolidationRunner {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn groups(&self) -> Vec<djinn_db::DbNoteGroup> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ConsolidationRunner for RecordingConsolidationRunner {
+        fn run_for_group<'a>(
+            &'a self,
+            group: djinn_db::DbNoteGroup,
+        ) -> Pin<Box<dyn Future<Output = djinn_db::Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(group);
+                Ok(())
+            })
+        }
+    }
 
     fn spawn_coordinator(
         db: &Database,
@@ -1259,6 +1366,7 @@ mod tests {
             health,
             role_registry,
             verification_tracker,
+            consolidation_runner: None,
         })
     }
 
@@ -1321,6 +1429,154 @@ mod tests {
             .await
             .unwrap();
         (task, note)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hourly_background_tick_invokes_consolidation_runner_for_db_note_group() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Storm A",
+                "Retry storm causes duplicate work during incident recovery.",
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+        note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Storm B",
+                "Retry storm causes duplicate work during incident recovery.",
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let runner = Arc::new(RecordingConsolidationRunner::new());
+        let actor = CoordinatorActor {
+            receiver: tokio::sync::mpsc::channel(1).1,
+            events: tx.subscribe(),
+            cancel: CancellationToken::new(),
+            tick: tokio::time::interval(STUCK_INTERVAL),
+            db: db.clone(),
+            events_tx: tx.clone(),
+            pool: SlotPoolHandle::spawn(
+                test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+                CancellationToken::new(),
+                SlotPoolConfig {
+                    models: vec![ModelSlotConfig {
+                        model_id: DEFAULT_MODEL_ID.to_owned(),
+                        max_slots: 1,
+                        roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+                    }],
+                    role_priorities: HashMap::new(),
+                },
+            ),
+            catalog: CatalogService::new(),
+            health: HealthTracker::new(),
+            role_registry: Arc::new(RoleRegistry::new()),
+            self_sender: tokio::sync::mpsc::channel(1).0,
+            status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
+                paused_projects: HashSet::new(),
+                unhealthy_project_ids: HashSet::new(),
+                unhealthy_project_errors: HashMap::new(),
+                dispatched: 0,
+                recovered: 0,
+                epic_throughput: HashMap::new(),
+                pr_errors: HashMap::new(),
+            })
+            .0,
+            paused_projects: HashSet::new(),
+            dispatch_limit: 50,
+            model_priorities: HashMap::new(),
+            unhealthy_projects: HashMap::new(),
+            pr_errors: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
+            verification_tracker: VerificationTracker::default(),
+            consolidation_runner: runner.clone(),
+            last_stale_sweep: StdInstant::now(),
+            prune_tick_counter: 0,
+            architect_tick_counter: 0,
+            next_patrol_ticks: rules::ARCHITECT_PATROL_TICKS,
+            throughput_events: HashMap::new(),
+            escalation_counts: HashMap::new(),
+            pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
+            stall_killed: HashSet::new(),
+            dispatched: 0,
+            recovered: 0,
+        };
+        actor.run_note_consolidation().await;
+
+        let groups = runner.groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].project_id, project.id);
+        assert_eq!(groups[0].note_type, "case");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn below_threshold_clusters_are_noop_for_consolidation_runner() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        note_repo
+            .create_db_note(
+                &project.id,
+                "Incident Pattern A",
+                "Repeated timeout while syncing cache data.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        note_repo
+            .create_db_note(
+                &project.id,
+                "Incident Pattern B",
+                "Repeated timeout while syncing cache data.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let metrics_before = NoteConsolidationRepository::new(db.clone())
+            .list_run_metrics(&project.id, Some("pattern"), 20)
+            .await
+            .unwrap();
+        assert!(metrics_before.is_empty());
+
+        let _actor = spawn_coordinator(&db, &tx);
+        NoteConsolidationRepository::new(db.clone())
+            .list_db_note_groups()
+            .await
+            .unwrap();
+
+        let metrics_after = NoteConsolidationRepository::new(db.clone())
+            .list_run_metrics(&project.id, Some("pattern"), 20)
+            .await
+            .unwrap();
+        assert!(
+            metrics_after.is_empty(),
+            "below-threshold groups should remain a no-op"
+        );
+        let provenance_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM consolidated_note_provenance WHERE note_id IN (SELECT id FROM notes WHERE project_id = ?1)",
+        )
+        .bind(&project.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(provenance_count, 0);
     }
 
     // ── Status ───────────────────────────────────────────────────────────────
@@ -1505,6 +1761,7 @@ mod tests {
             health,
             role_registry: Arc::new(RoleRegistry::new()),
             verification_tracker,
+            consolidation_runner: None,
         });
         (handle, tracker_clone)
     }
@@ -1736,6 +1993,7 @@ mod tests {
             health,
             role_registry,
             verification_tracker,
+            consolidation_runner: None,
         })
     }
 

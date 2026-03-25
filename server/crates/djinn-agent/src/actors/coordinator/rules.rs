@@ -285,6 +285,7 @@ mod tests {
             health: HealthTracker::new(),
             role_registry: Arc::new(RoleRegistry::new()),
             verification_tracker: VerificationTracker::default(),
+            consolidation_runner: None,
         })
     }
 
@@ -570,6 +571,7 @@ mod tests {
                 health: HealthTracker::new(),
                 role_registry: Arc::new(RoleRegistry::new()),
                 verification_tracker: VerificationTracker::default(),
+                consolidation_runner: None,
             },
             receiver,
             sender,
@@ -633,6 +635,7 @@ mod tests {
                 health: HealthTracker::new(),
                 role_registry: Arc::new(RoleRegistry::new()),
                 verification_tracker: VerificationTracker::default(),
+                consolidation_runner: None,
             },
             receiver,
             sender,
