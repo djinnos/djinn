@@ -72,7 +72,7 @@ struct NoveltyDecision {
 }
 
 #[cfg(test)]
-type CandidateLookup = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
+type CandidateLookupOverride = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
 
 struct ExtractionContext<'a> {
     note_repo: &'a NoteRepository,
@@ -80,8 +80,29 @@ struct ExtractionContext<'a> {
     project_id: &'a str,
     session_id: &'a str,
     provenance: &'a str,
+    candidate_lookup: CandidateLookup,
+}
+
+#[derive(Clone, Copy)]
+struct CandidateLookup {
     #[cfg(test)]
-    candidate_lookup_override: Option<CandidateLookup>,
+    override_lookup: Option<CandidateLookupOverride>,
+}
+
+impl CandidateLookup {
+    const fn production() -> Self {
+        Self {
+            #[cfg(test)]
+            override_lookup: None,
+        }
+    }
+
+    #[cfg(test)]
+    const fn with_override(override_lookup: CandidateLookupOverride) -> Self {
+        Self {
+            override_lookup: Some(override_lookup),
+        }
+    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -126,7 +147,7 @@ pub(crate) async fn run_llm_extraction_with_provider_and_candidate_lookup(
     taxonomy: SessionTaxonomy,
     app_state: AgentContext,
     provider: Arc<dyn LlmProvider>,
-    candidate_lookup_override: CandidateLookup,
+    candidate_lookup_override: CandidateLookupOverride,
 ) {
     run_llm_extraction_inner(
         session_id,
@@ -147,7 +168,7 @@ async fn run_llm_extraction_inner(
     mut taxonomy: SessionTaxonomy,
     app_state: AgentContext,
     provider_override: Option<Arc<dyn LlmProvider>>,
-    #[cfg(test)] candidate_lookup_override: Option<CandidateLookup>,
+    #[cfg(test)] candidate_lookup_override: Option<CandidateLookupOverride>,
 ) {
     // ── Load session ───────────────────────────────────────────────────────
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -373,8 +394,18 @@ async fn run_llm_extraction_inner(
         project_id: &project.id,
         session_id: &session_id,
         provenance: &provenance,
-        #[cfg(test)]
-        candidate_lookup_override,
+        candidate_lookup: {
+            #[cfg(test)]
+            {
+                candidate_lookup_override
+                    .map(|lookup| CandidateLookup::with_override(lookup))
+                    .unwrap_or_else(CandidateLookup::production)
+            }
+            #[cfg(not(test))]
+            {
+                CandidateLookup::production()
+            }
+        },
     };
 
     for (note_type, notes) in note_pairs {
@@ -569,7 +600,7 @@ async fn lookup_candidates(
     candidate_abstract: &str,
 ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
     #[cfg(test)]
-    if let Some(lookup) = extraction_context.candidate_lookup_override {
+    if let Some(lookup) = extraction_context.candidate_lookup.override_lookup {
         return Ok(lookup(
             extraction_context.project_id,
             folder,
