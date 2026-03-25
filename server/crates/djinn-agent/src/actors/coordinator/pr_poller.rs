@@ -504,11 +504,15 @@ impl CoordinatorActor {
             }
 
             let has_approved = reviews.iter().any(|r| r.state.as_str() == "APPROVED");
-            let has_reviews = !reviews.is_empty();
+            // Only count reviews that are merge-gating (APPROVED or CHANGES_REQUESTED).
+            // COMMENTED reviews are informational and should not block auto-merge.
+            let has_reviews = reviews
+                .iter()
+                .any(|r| matches!(r.state.as_str(), "APPROVED" | "CHANGES_REQUESTED"));
 
             if has_reviews && !has_approved {
-                // Reviews exist but none APPROVED (and no CHANGES_REQUESTED handled above).
-                // This means reviews are pending or only COMMENTED. Wait for approval.
+                // Merge-gating reviews exist but none APPROVED (and no CHANGES_REQUESTED
+                // handled above). Wait for approval.
                 self.maybe_re_request_review(
                     &task.id,
                     &task.short_id,

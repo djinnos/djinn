@@ -135,6 +135,14 @@ async fn try_create_github_pr(
     let (owner, repo_name) = parse_github_owner_repo(&remote_url)
         .ok_or_else(|| format!("could not parse GitHub owner/repo from remote: {remote_url}"))?;
 
+    // Prune stale remote-tracking refs so --force-with-lease doesn't
+    // reject pushes to branch names that were deleted after a prior merge.
+    let _ = djinn_git::run_git_command(
+        project_dir.to_path_buf(),
+        vec!["fetch".into(), "--prune".into(), "origin".into()],
+    )
+    .await;
+
     // Push the branch to origin before opening the PR.
     djinn_git::run_git_command(
         project_dir.to_path_buf(),
@@ -310,13 +318,30 @@ async fn try_create_github_pr(
 /// Supports both HTTPS (`https://github.com/owner/repo.git`) and SSH
 /// (`git@github.com:owner/repo.git`) formats.
 fn parse_github_owner_repo(remote_url: &str) -> Option<(String, String)> {
+    // Normalize: strip user@ from HTTPS URLs (e.g. https://user@github.com/...)
+    let url = if let Some(rest) = remote_url.strip_prefix("https://") {
+        if let Some(at_pos) = rest.find('@') {
+            format!("https://{}", &rest[at_pos + 1..])
+        } else {
+            remote_url.to_string()
+        }
+    } else if let Some(rest) = remote_url.strip_prefix("http://") {
+        if let Some(at_pos) = rest.find('@') {
+            format!("http://{}", &rest[at_pos + 1..])
+        } else {
+            remote_url.to_string()
+        }
+    } else {
+        remote_url.to_string()
+    };
+
     // SSH: git@github.com:owner/repo.git
-    if let Some(path) = remote_url.strip_prefix("git@github.com:") {
+    if let Some(path) = url.strip_prefix("git@github.com:") {
         return split_owner_repo(path);
     }
     // HTTPS: https://github.com/owner/repo.git
     for prefix in &["https://github.com/", "http://github.com/"] {
-        if let Some(path) = remote_url.strip_prefix(prefix) {
+        if let Some(path) = url.strip_prefix(prefix) {
             return split_owner_repo(path);
         }
     }
@@ -736,4 +761,64 @@ async fn project_path_for_id(project_id: &str, app_state: &AgentContext) -> Path
         .await
         .unwrap_or_else(|| ".".to_string());
     PathBuf::from(project_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ssh_remote() {
+        let (owner, repo) = parse_github_owner_repo("git@github.com:acme/widgets.git").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_https_remote() {
+        let (owner, repo) = parse_github_owner_repo("https://github.com/acme/widgets.git").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_https_without_dot_git() {
+        let (owner, repo) = parse_github_owner_repo("https://github.com/acme/widgets").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_https_with_user_prefix() {
+        let (owner, repo) = parse_github_owner_repo("https://CroosALt@github.com/getalternative/svc-accounts-payable.git").unwrap();
+        assert_eq!(owner, "getalternative");
+        assert_eq!(repo, "svc-accounts-payable");
+    }
+
+    #[test]
+    fn parse_https_with_user_prefix_no_dot_git() {
+        let (owner, repo) = parse_github_owner_repo("https://user@github.com/acme/widgets").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_http_with_user_prefix() {
+        let (owner, repo) = parse_github_owner_repo("http://user@github.com/acme/widgets.git").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_non_github_returns_none() {
+        assert!(parse_github_owner_repo("git@gitlab.com:acme/widgets.git").is_none());
+        assert!(parse_github_owner_repo("https://gitlab.com/acme/widgets.git").is_none());
+        assert!(parse_github_owner_repo("https://user@gitlab.com/acme/widgets.git").is_none());
+    }
+
+    #[test]
+    fn parse_empty_owner_or_repo_returns_none() {
+        assert!(parse_github_owner_repo("git@github.com:/widgets.git").is_none());
+        assert!(parse_github_owner_repo("git@github.com:acme/").is_none());
+    }
 }

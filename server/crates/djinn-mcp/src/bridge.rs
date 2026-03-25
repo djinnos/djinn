@@ -21,6 +21,8 @@ pub struct CoordinatorStatus {
     pub unhealthy_projects: HashMap<String, String>,
     /// Tasks merged per hour per epic in the past hour (epic_id → count).
     pub epic_throughput: HashMap<String, usize>,
+    /// Per-project PR creation errors (e.g. org OAuth restrictions).
+    pub pr_errors: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]

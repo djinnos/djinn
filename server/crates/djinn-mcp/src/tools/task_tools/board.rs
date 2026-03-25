@@ -1,6 +1,6 @@
 use super::*;
 use djinn_db::ProjectRepository;
-use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
+use djinn_provider::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, load_pending_orgs};
 
 pub(super) async fn board_health_impl(
     server: &DjinnMcpServer,
@@ -25,6 +25,10 @@ pub(super) async fn board_health_impl(
                     if !status.epic_throughput.is_empty() {
                         parsed.epic_throughput = Some(status.epic_throughput);
                     }
+                    // Surface PR creation errors (e.g. org OAuth restrictions).
+                    if !status.pr_errors.is_empty() {
+                        parsed.pr_errors = Some(status.pr_errors);
+                    }
                 }
 
                 // Check for GitHub OAuth credential existence (ADR-039).
@@ -40,6 +44,15 @@ pub(super) async fn board_health_impl(
                     if !has_token {
                         let warnings = parsed.warnings.get_or_insert_with(Vec::new);
                         warnings.push("github_not_connected".to_string());
+                    } else {
+                        // Check for pending org access.
+                        let pending = load_pending_orgs(&cred_repo).await;
+                        if !pending.is_empty() {
+                            let warnings = parsed.warnings.get_or_insert_with(Vec::new);
+                            for org in &pending {
+                                warnings.push(format!("github_org_access_pending:{org}"));
+                            }
+                        }
                     }
                 }
 

@@ -96,6 +96,9 @@ pub struct CoordinatorStatus {
     pub unhealthy_projects: HashMap<String, String>,
     /// Tasks merged per hour per epic (rolling 1-hour window).
     pub epic_throughput: HashMap<String, usize>,
+    /// Per-project PR creation errors (project_id → error message).
+    /// Populated when GitHub PR creation fails (e.g. org OAuth restrictions).
+    pub pr_errors: HashMap<String, String>,
 }
 
 /// Internal snapshot published via `watch` channel so `get_status()` reads
@@ -109,6 +112,8 @@ struct SharedCoordinatorState {
     recovered: u64,
     /// Tasks merged per hour per epic (rolling window snapshot).
     epic_throughput: HashMap<String, usize>,
+    /// Per-project PR creation errors (project_id → error message).
+    pr_errors: HashMap<String, String>,
 }
 
 impl SharedCoordinatorState {
@@ -131,12 +136,25 @@ impl SharedCoordinatorState {
                 .unwrap_or_default(),
             None => self.unhealthy_project_errors.clone(),
         };
+        let pr_errors = match project_id {
+            Some(id) => self
+                .pr_errors
+                .get(id)
+                .map(|err| {
+                    let mut m = HashMap::new();
+                    m.insert(id.to_string(), err.clone());
+                    m
+                })
+                .unwrap_or_default(),
+            None => self.pr_errors.clone(),
+        };
         CoordinatorStatus {
             paused,
             tasks_dispatched: self.dispatched,
             sessions_recovered: self.recovered,
             unhealthy_projects,
             epic_throughput: self.epic_throughput.clone(),
+            pr_errors,
         }
     }
 }
@@ -224,6 +242,8 @@ struct CoordinatorActor {
     model_priorities: HashMap<String, Vec<String>>,
     // Per-project health: project_id → error message (only unhealthy projects appear here).
     unhealthy_projects: HashMap<String, String>,
+    /// Per-project PR creation errors (project_id → error message).
+    pr_errors: HashMap<String, String>,
     /// Per-task dispatch tracking: task UUID → last dispatch instant.
     /// When a task becomes ready again within `RAPID_FAILURE_THRESHOLD` of its
     /// last dispatch, it is placed in cooldown for `DISPATCH_COOLDOWN` to prevent
@@ -312,6 +332,7 @@ impl CoordinatorActor {
             dispatch_limit: 50,
             model_priorities: HashMap::new(),
             unhealthy_projects: HashMap::new(),
+            pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             verification_tracker,
@@ -433,6 +454,7 @@ impl CoordinatorActor {
             dispatched: self.dispatched,
             recovered: self.recovered,
             epic_throughput: self.throughput_snapshot(),
+            pr_errors: self.pr_errors.clone(),
         });
     }
 
@@ -960,6 +982,7 @@ impl CoordinatorHandle {
             dispatched: 0,
             recovered: 0,
             epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
         };
         let (status_tx, status_rx) = watch::channel(initial_state);
         let actor = CoordinatorActor::new(deps, receiver, sender.clone(), status_tx);
