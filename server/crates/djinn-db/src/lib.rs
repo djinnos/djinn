@@ -20,7 +20,9 @@ pub use repositories::{
     git_settings::GitSettingsRepository,
     models::ModelsRepository,
     note::{
-        CONTRADICTION, ContradictionCandidate, NoteAssociationEntry, NoteDedupCandidate,
+        CONSOLIDATION_DEDUP_THRESHOLD, CONTRADICTION, ConsolidationCandidateEdge,
+        ConsolidationCluster, ConsolidationNoteGroup, ConsolidationNoteRef, ContradictionCandidate,
+        DEFAULT_CONSOLIDATION_CLUSTER_MIN_SIZE, NoteAssociationEntry, NoteDedupCandidate,
         NoteRepository, STALE_CITATION, UpdateNoteIndexParams, file_path_for, folder_for_type,
         is_singleton, permalink_for, slugify,
     },

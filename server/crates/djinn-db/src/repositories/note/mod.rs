@@ -13,6 +13,7 @@ use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
 mod association;
+mod consolidation;
 mod context;
 mod crud;
 mod file_helpers;
@@ -23,8 +24,12 @@ mod scoring;
 mod search;
 
 pub use association::NoteAssociationEntry;
+pub use consolidation::{CONSOLIDATION_DEDUP_THRESHOLD, DEFAULT_CONSOLIDATION_CLUSTER_MIN_SIZE};
 pub use context::BuildContextResponse;
-pub use djinn_core::models::{ContradictionCandidate, NoteDedupCandidate};
+pub use djinn_core::models::{
+    ConsolidationCandidateEdge, ConsolidationCluster, ConsolidationNoteGroup, ConsolidationNoteRef,
+    ContradictionCandidate, NoteDedupCandidate,
+};
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
     USER_CONFIRM, bayesian_update,
@@ -1937,5 +1942,159 @@ mod tests {
         assert!(m[&zero_age.id].is_finite());
         assert!(m[&old.id].is_finite());
         assert!(m[&zero_age.id] > m[&old.id]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_db_consolidation_groups_only_returns_db_backed_knowledge_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let db_case = repo
+            .create_db_note(
+                &project.id,
+                "Case A",
+                "shared incident recovery token",
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let db_pattern = repo
+            .create_db_note(
+                &project.id,
+                "Pattern A",
+                "shared incident recovery token",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "ADR A",
+            "shared incident recovery token",
+            "adr",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let groups = repo.list_db_consolidation_groups().await.unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].project_id, project.id);
+        assert_eq!(groups[0].note_type, "case");
+        assert_eq!(groups[0].notes.len(), 1);
+        assert_eq!(groups[0].notes[0].id, db_case.id);
+        assert_eq!(groups[1].note_type, "pattern");
+        assert_eq!(groups[1].notes[0].id, db_pattern.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn likely_duplicate_clusters_are_deterministic_and_use_connected_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let alpha = repo
+            .create_db_note(
+                &project.id,
+                "Alpha",
+                "alpha bridge cluster-token-42 unique-a",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let beta = repo
+            .create_db_note(
+                &project.id,
+                "Beta",
+                "alpha beta bridge cluster-token-42 unique-b",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let gamma = repo
+            .create_db_note(
+                &project.id,
+                "Gamma",
+                "beta gamma bridge cluster-token-42 unique-c",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let first = repo
+            .likely_duplicate_clusters_for_group(&project.id, "pattern")
+            .await
+            .unwrap();
+        let second = repo
+            .likely_duplicate_clusters_for_group(&project.id, "pattern")
+            .await
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 1);
+
+        let cluster = &first[0];
+        assert_eq!(cluster.project_id, project.id);
+        assert_eq!(cluster.note_type, "pattern");
+
+        let cluster_note_ids: Vec<&str> =
+            cluster.notes.iter().map(|note| note.id.as_str()).collect();
+        let mut expected_note_ids = vec![alpha.id.as_str(), beta.id.as_str(), gamma.id.as_str()];
+        expected_note_ids.sort();
+        assert_eq!(cluster_note_ids, expected_note_ids);
+
+        assert_eq!(cluster.edges.len(), 2);
+        assert_eq!(cluster.edges[0].left_note_id, expected_note_ids[0]);
+        assert_eq!(cluster.edges[0].right_note_id, expected_note_ids[1]);
+        assert!(cluster.edges[0].score > CONSOLIDATION_DEDUP_THRESHOLD);
+        assert_eq!(cluster.edges[1].left_note_id, expected_note_ids[1]);
+        assert_eq!(cluster.edges[1].right_note_id, expected_note_ids[2]);
+        assert!(cluster.edges[1].score > CONSOLIDATION_DEDUP_THRESHOLD);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn likely_duplicate_clusters_skip_below_threshold_or_too_small_groups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        repo.create_db_note(&project.id, "One", "isolated novelty alpha", "case", "[]")
+            .await
+            .unwrap();
+        repo.create_db_note(&project.id, "Two", "isolated novelty beta", "case", "[]")
+            .await
+            .unwrap();
+
+        assert!(
+            repo.likely_duplicate_clusters_for_group(&project.id, "case")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        repo.create_db_note(&project.id, "Three", "isolated novelty gamma", "case", "[]")
+            .await
+            .unwrap();
+
+        assert!(
+            repo.likely_duplicate_clusters_for_group(&project.id, "case")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

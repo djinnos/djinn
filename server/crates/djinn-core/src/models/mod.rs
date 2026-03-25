@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod consolidation;
 pub mod credential;
 pub mod epic;
 pub mod git_settings;
@@ -12,6 +13,9 @@ pub mod settings;
 pub mod task;
 
 pub use agent::Agent;
+pub use consolidation::{
+    ConsolidationCandidateEdge, ConsolidationCluster, ConsolidationNoteGroup, ConsolidationNoteRef,
+};
 pub use credential::Credential;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
