@@ -22,6 +22,37 @@ pub fn is_retryable_git_command_error(err: &GitError) -> bool {
     .any(|needle| s.contains(needle))
 }
 
+/// Returns `true` when the error looks like a transient network / connectivity
+/// problem that is worth retrying (as opposed to a permanent auth or ref error).
+pub fn is_transient_network_error(err: &GitError) -> bool {
+    if matches!(err, GitError::Timeout { .. }) {
+        return true;
+    }
+    let GitError::CommandFailed { stderr, .. } = err else {
+        return false;
+    };
+    let s = stderr.to_lowercase();
+    [
+        "connection closed by remote host",
+        "broken pipe",
+        "could not read from remote repository",
+        "unable to access",
+        "connection timed out",
+        "connection refused",
+        "could not resolve host",
+        "ssl",
+        "tls",
+        "gnutls",
+        "connection reset",
+        "remote end hung up unexpectedly",
+        "the remote end hung up unexpectedly",
+        "early eof",
+        "unexpected disconnect",
+    ]
+    .iter()
+    .any(|needle| s.contains(needle))
+}
+
 pub fn is_non_fast_forward_error(err: &GitError) -> bool {
     let GitError::CommandFailed { stderr, .. } = err else {
         return false;
@@ -84,6 +115,13 @@ pub enum GitError {
 
     #[error("no response from actor")]
     NoResponse,
+
+    #[error("git command timed out after {timeout_secs}s in {cwd}: git {command}")]
+    Timeout {
+        timeout_secs: u64,
+        command: String,
+        cwd: String,
+    },
 }
 
 pub mod actor;
@@ -150,6 +188,85 @@ pub async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<Command
         stderr,
         code,
     })
+}
+
+/// Like [`run_git_command`] but kills the child process if it does not complete
+/// within `timeout`.  Returns [`GitError::Timeout`] on expiry.
+pub async fn run_git_command_with_timeout(
+    path: PathBuf,
+    args: Vec<String>,
+    timeout: std::time::Duration,
+) -> Result<CommandOutput, GitError> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
+    let mut child = tokio::process::Command::new("git")
+        .args(&args)
+        .current_dir(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Take stdout/stderr handles so we can read them concurrently with wait,
+    // avoiding deadlocks if the child fills a pipe buffer, while still being
+    // able to kill the child on timeout.
+    let mut stdout_handle = child.stdout.take();
+    let mut stderr_handle = child.stderr.take();
+
+    let io_future = async {
+        let (status, stdout_buf, stderr_buf) = tokio::try_join!(
+            child.wait(),
+            async {
+                let mut buf = Vec::new();
+                if let Some(ref mut r) = stdout_handle {
+                    r.read_to_end(&mut buf).await?;
+                }
+                Ok(buf)
+            },
+            async {
+                let mut buf = Vec::new();
+                if let Some(ref mut r) = stderr_handle {
+                    r.read_to_end(&mut buf).await?;
+                }
+                Ok(buf)
+            },
+        )?;
+        Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf))
+    };
+
+    match tokio::time::timeout(timeout, io_future).await {
+        Ok(Ok((status, stdout_buf, stderr_buf))) => {
+            let code = status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&stdout_buf).into_owned();
+            let stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
+
+            if !status.success() {
+                return Err(GitError::CommandFailed {
+                    code,
+                    command: args.join(" "),
+                    cwd: path.display().to_string(),
+                    stdout,
+                    stderr,
+                });
+            }
+
+            Ok(CommandOutput {
+                stdout,
+                stderr,
+                code,
+            })
+        }
+        Ok(Err(io_err)) => Err(GitError::Io(io_err)),
+        Err(_elapsed) => {
+            // Timeout — the child is dropped here which sends SIGKILL.
+            Err(GitError::Timeout {
+                timeout_secs: timeout.as_secs(),
+                command: args.join(" "),
+                cwd: path.display().to_string(),
+            })
+        }
+    }
 }
 
 pub async fn create_branch(
