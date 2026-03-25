@@ -11,7 +11,7 @@ use djinn_db::VerificationCacheRepository;
 
 use super::*;
 
-/// After this many consecutive verification failures, escalate to PM.
+/// After this many consecutive verification failures, escalate to lead.
 const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 
 /// Minimum pipeline timeout even when no commands are configured.
@@ -298,9 +298,9 @@ pub(crate) async fn run_verification_gate(
 /// Log verification failure and transition appropriately.
 ///
 /// If the consecutive failure count will reach the escalation threshold, go
-/// directly from `verifying` → `needs_pm_intervention` (single Escalate
+/// directly from `verifying` → `needs_lead_intervention` (single Escalate
 /// transition) to avoid a race where the intermediate `open` status triggers
-/// a worker dispatch before the PM escalation happens.
+/// a worker dispatch before the lead escalation happens.
 async fn handle_verification_failure(
     task_id: &str,
     feedback: &str,
@@ -319,7 +319,7 @@ async fn handle_verification_failure(
         .await;
 
     // Check if this failure will hit the escalation threshold BEFORE
-    // transitioning, so we can go directly to PM without an intermediate
+    // transitioning, so we can go directly to lead without an intermediate
     // `open` state that would trigger a spurious worker dispatch.
     let current_count = task_repo
         .get(task_id)
@@ -335,7 +335,7 @@ async fn handle_verification_failure(
         tracing::warn!(
             task_id = %task_id,
             verification_failure_count = current_count + 1,
-            "Verification: escalating directly to PM after {} consecutive failures",
+            "Verification: escalating directly to lead after {} consecutive failures",
             current_count + 1,
         );
         let reason = format!(

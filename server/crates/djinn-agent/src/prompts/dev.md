@@ -33,7 +33,7 @@ When resolving merge conflicts, you will see conflict information populated in t
 
 ## Instructions
 
-1. **Check for prior feedback** — read the Activity Log section above carefully. If there is PM guidance or reviewer feedback, your previous attempt was rejected for specific reasons. Fix exactly what was asked for before proceeding. Use `task_activity_list(id="{{task_id}}", actor_role="pm")` or `task_activity_list(id="{{task_id}}", actor_role="task_reviewer")` if you need full details.
+1. **Check for prior feedback** — read the Activity Log section above carefully. If there is lead guidance or reviewer feedback, your previous attempt was rejected for specific reasons. Fix exactly what was asked for before proceeding. Use `task_activity_list(id="{{task_id}}", actor_role="lead")` or `task_activity_list(id="{{task_id}}", actor_role="task_reviewer")` if you need full details.
 2. **Read the task** — understand what needs to be done from the description, design, and acceptance criteria.
 3. **Check memory** — look up any ADRs or patterns referenced in the design field.
 4. **Read before editing** — Before modifying any file, read it with the `read` tool. The edit and write tools will reject changes to files you haven't read. If you need to understand an API, struct, or enum before using it, read the file that defines it.

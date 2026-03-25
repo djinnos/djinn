@@ -4,7 +4,7 @@ use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use shared_schemas::{shared_base_tool_schemas, shared_pm_tool_schemas, tool_task_transition};
+use shared_schemas::{shared_base_tool_schemas, shared_lead_tool_schemas, tool_task_transition};
 
 use super::sandbox;
 use crate::context::AgentContext;
@@ -2809,14 +2809,14 @@ pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
 /// Tool schemas for Lead: base + task/epic management tools + submit_decision finalize tool.
 /// task_comment_add and task_transition are excluded — submit_decision drives transitions.
 pub(crate) fn tool_schemas_lead() -> Vec<serde_json::Value> {
-    tool_schemas_pm()
+    tool_schemas_lead_inner()
 }
 
-/// Tool schemas for PM (Lead): base + task/epic management tools + submit_decision finalize tool.
+/// Tool schemas for Lead: base + task/epic management tools + submit_decision finalize tool.
 /// task_comment_add and task_transition are excluded — submit_decision drives transitions.
-pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
+fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in shared_pm_tool_schemas() {
+    for value in shared_lead_tool_schemas() {
         tool_values.push(value);
     }
     for value in [
@@ -2839,7 +2839,7 @@ pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
 /// task_comment_add is excluded — submit_grooming captures session output.
 pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in shared_pm_tool_schemas() {
+    for value in shared_lead_tool_schemas() {
         tool_values.push(value);
     }
     tool_values.push(
@@ -2865,7 +2865,7 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
 /// Does not include write/edit/apply_patch. The Architect diagnoses and directs but does not write code.
 pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in shared_pm_tool_schemas() {
+    for value in shared_lead_tool_schemas() {
         tool_values.push(value);
     }
     tool_values.push(
@@ -3643,8 +3643,8 @@ mod tests {
     }
 
     #[test]
-    fn worker_cannot_use_pm_only_tool() {
-        // submit_decision is PM-only (ADR-036: finalize tools are role-specific).
+    fn worker_cannot_use_lead_only_tool() {
+        // submit_decision is lead-only (ADR-036: finalize tools are role-specific).
         assert!(!is_tool_allowed_for_agent(
             AgentType::Worker,
             "submit_decision"
@@ -3653,7 +3653,7 @@ mod tests {
             AgentType::Lead,
             "submit_decision"
         ));
-        // task_transition is not in the PM tool set (removed by ADR-036).
+        // task_transition is not in the lead tool set (removed by ADR-036).
         assert!(!is_tool_allowed_for_agent(
             AgentType::Lead,
             "task_transition"

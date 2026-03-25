@@ -12,7 +12,7 @@ pub(crate) fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
     ]
 }
 
-pub(crate) fn shared_pm_tool_schemas() -> Vec<serde_json::Value> {
+pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
     vec![
         serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
         serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),

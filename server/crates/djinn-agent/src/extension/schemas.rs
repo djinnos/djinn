@@ -5,7 +5,7 @@ mod shared_schemas;
 
 use shared_schemas::{
     shared_architect_tool_schemas, shared_base_tool_schemas, shared_planner_tool_schemas,
-    shared_pm_tool_schemas,
+    shared_lead_tool_schemas,
 };
 
 fn tool_request_lead() -> RmcpTool {
@@ -28,7 +28,7 @@ fn tool_request_lead() -> RmcpTool {
 fn tool_request_architect() -> RmcpTool {
     RmcpTool::new(
         "request_architect".to_string(),
-        "Escalate a task to the Architect role when implementation is blocked on codebase analysis, root-cause investigation, or cross-cutting technical design. This is for strategic technical intervention rather than PM/lead triage."
+        "Escalate a task to the Architect role when implementation is blocked on codebase analysis, root-cause investigation, or cross-cutting technical design. This is for strategic technical intervention rather than lead triage."
             .to_string(),
         object!({
             "type": "object",
@@ -316,12 +316,8 @@ pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
 }
 
 pub(crate) fn tool_schemas_lead() -> Vec<serde_json::Value> {
-    tool_schemas_pm()
-}
-
-pub(crate) fn tool_schemas_pm() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    for value in shared_pm_tool_schemas().into_iter().chain([
+    for value in shared_lead_tool_schemas().into_iter().chain([
         serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
         serde_json::to_value(tool_task_archive_activity())
             .expect("serialize tool_task_archive_activity"),

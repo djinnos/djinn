@@ -22,7 +22,7 @@ const MAX_SYSTEM_PROMPT_CHARS: usize = 30_000;
 const BASE_TEMPLATE: &str = include_str!("prompts/base.md");
 pub(crate) const DEV_TEMPLATE: &str = include_str!("prompts/dev.md");
 pub(crate) const REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.md");
-pub(crate) const PM_TEMPLATE: &str = include_str!("prompts/pm.md");
+pub(crate) const LEAD_TEMPLATE: &str = include_str!("prompts/lead.md");
 pub(crate) const PLANNER_TEMPLATE: &str = include_str!("prompts/planner.md");
 pub(crate) const ARCHITECT_TEMPLATE: &str = include_str!("prompts/architect.md");
 
@@ -79,7 +79,7 @@ pub struct TaskContext {
     pub verification_failure: Option<String>,
 
     // ── Epic context ─────────────────────────────────────────────────────
-    /// Epic context section for PM agents (title, description, memory_refs, sibling tasks).
+    /// Epic context section for lead agents (title, description, memory_refs, sibling tasks).
     pub epic_context: Option<String>,
 }
 

@@ -170,7 +170,7 @@ pub(crate) async fn prepare_worktree(
     // Reuse existing worktree if it's still valid.  This preserves the
     // branch's own target/ build cache across worker → verify → review
     // cycles, avoiding full rebuilds on every session.  The worktree is
-    // only nuked on task close/merge or when the PM calls
+    // only nuked on task close/merge or when the lead calls
     // `task_delete_branch` (which invokes `teardown_worktree`).
     if resumed_worktree_exists {
         let conflict_files = try_rebase_existing_task_branch(
@@ -612,7 +612,7 @@ pub(crate) async fn commit_final_work_if_needed(
 /// Post-session worktree cleanup.  The worktree is intentionally **kept alive**
 /// so that subsequent sessions on the same task branch can reuse its `target/`
 /// build cache.  Real cleanup happens via `teardown_worktree` on task
-/// close/merge or when the PM calls `task_delete_branch`.
+/// close/merge or when the lead calls `task_delete_branch`.
 pub(crate) async fn cleanup_worktree(
     task_id: &str,
     worktree_path: &Path,

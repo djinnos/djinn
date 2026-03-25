@@ -8,7 +8,7 @@ use djinn_db::TaskRepository;
 /// activity entries and performs side effects specific to each finalize tool:
 /// - `submit_work`: logs work summary and files changed
 /// - `submit_review`: atomically sets AC met/unmet state, logs verdict
-/// - `submit_decision`: logs PM decision and rationale
+/// - `submit_decision`: logs lead decision and rationale
 /// - `submit_grooming`: logs per-task grooming entries
 ///
 /// Silently no-ops if `payload` is `None` (session ended without a finalize tool call).
@@ -193,7 +193,7 @@ fn apply_ac_verdicts(existing_json: &str, verdicts: &[AcVerdict]) -> String {
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Log PM decision as a structured activity entry.
+/// Log lead decision as a structured activity entry.
 async fn handle_submit_decision(
     payload: &serde_json::Value,
     task_id: &str,
