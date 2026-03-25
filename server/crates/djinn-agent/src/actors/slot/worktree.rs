@@ -229,14 +229,23 @@ pub(crate) async fn prepare_worktree(
         Err(e) => return Err(anyhow::anyhow!("show-ref failed: {e}")),
     };
 
-    if !branch_exists {
-        git.create_branch(&task.short_id, &target_branch)
-            .await
-            .map_err(|e| anyhow::anyhow!("create branch: {e}"))?;
-    } else {
-        try_rebase_existing_task_branch(project_dir, &branch, &target_branch, None, app_state)
-            .await;
+    if branch_exists {
+        // The worktree is gone but the branch still exists — this is a stale
+        // leftover from a previous session (killed, failed, or intervention
+        // reset).  Rebasing it would carry forward dirty commits from the old
+        // attempt, contaminating the new session's diff.  Delete it so the
+        // worker starts from a clean target branch.
+        tracing::info!(
+            task_id = %task.short_id,
+            branch = %branch,
+            "Lifecycle: deleting stale task branch (worktree already removed)"
+        );
+        let _ = git.delete_branch(&branch).await;
     }
+
+    git.create_branch(&task.short_id, &target_branch)
+        .await
+        .map_err(|e| anyhow::anyhow!("create branch: {e}"))?;
 
     let path = git
         .create_worktree(&task.short_id, &branch, false)
