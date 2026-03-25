@@ -535,17 +535,40 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
     );
 }
 
-// ─── AC6: Dedup pipeline ──────────────────────────────────────────────────────
+// ─── AC6: Novelty pipeline ────────────────────────────────────────────────────
 
-/// AC6: Running LLM extraction twice with the same title does not create
-/// duplicate notes (the DB UNIQUE constraint on permalink enforces this,
-/// meaning the second write fails gracefully and is skipped).
-///
-/// Note: The current implementation skips note creation when the permalink
-/// already exists (the DB insert fails). We verify the count stays at 1.
+/// AC6: semantic novelty check skips duplicate writes and boosts the existing
+/// note confidence when the duplicate path is selected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn llm_extraction_repeated_sessions_produce_no_duplicate_notes() {
+async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_confidence() {
     let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+
+    let existing = note_repo
+        .create_db_note(
+            &fixture.project.id,
+            "Existing Semantic Note",
+            "Existing content",
+            "case",
+            "[]",
+        )
+        .await
+        .expect("create existing note");
+    note_repo
+        .update_summaries(
+            &existing.id,
+            Some("Fix flaky semantic duplicate tests by injecting dedup candidates."),
+            Some("Inject a stable candidate seam so novelty compares summaries deterministically."),
+        )
+        .await
+        .expect("update summaries");
+    let starting_confidence = note_repo
+        .get(&existing.id)
+        .await
+        .expect("get existing before run")
+        .expect("existing note before run")
+        .confidence;
 
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
@@ -557,20 +580,79 @@ async fn llm_extraction_repeated_sessions_produce_no_duplicate_notes() {
         tasks_transitioned: 1,
     };
 
-    // Both sessions return the same title → same permalink → second insert fails.
-    // The FakeProvider must be created fresh for each call (scripted turns = 1).
-    for _ in 0..2_u32 {
-        let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-        let json = r#"{"cases":[{"title":"Duplicate Note Title","content":"Content for dedup test."}],"patterns":[],"pitfalls":[]}"#;
-        let provider = Arc::new(FakeProvider::text(json));
-        run_llm_extraction_with_provider(
-            fixture.session_id.clone(),
-            taxonomy.clone(),
-            ctx,
-            provider,
-        )
-        .await;
-    }
+    let provider = Arc::new(FakeProvider::script(vec![
+        vec![
+            djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
+                text: r#"{"cases":[{"title":"Duplicate Semantic Note","content":"Fix flaky semantic duplicate tests by injecting dedup candidates and comparing stable summaries."}],"patterns":[],"pitfalls":[]}"#.to_string(),
+            }),
+            djinn_provider::provider::StreamEvent::Done,
+        ],
+        vec![
+            djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
+                text: format!(
+                    r#"{{"decision":"already_known","existing_note_id":"{}"}}"#,
+                    existing.id
+                ),
+            }),
+            djinn_provider::provider::StreamEvent::Done,
+        ],
+    ]));
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+
+    let dedup_notes: Vec<_> = notes.iter().filter(|n| n.note_type == "case").collect();
+    assert_eq!(
+        dedup_notes.len(),
+        1,
+        "semantic duplicate should not create a second duplicate note row"
+    );
+
+    let updated_existing = note_repo
+        .get(&existing.id)
+        .await
+        .expect("get existing after run")
+        .expect("existing note after run");
+    assert!(
+        updated_existing.confidence > starting_confidence,
+        "matched existing note confidence should increase observably"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 1,
+        errors: 0,
+        git_ops: 1,
+        tools_used: 2,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+    };
+
+    let provider = Arc::new(FakeProvider::script(vec![
+        vec![
+            djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
+                text: r#"{"cases":[{"title":"Fallback Novel Note","content":"Should still be written when novelty check output is invalid."}],"patterns":[],"pitfalls":[]}"#.to_string(),
+            }),
+            djinn_provider::provider::StreamEvent::Done,
+        ],
+        vec![
+            djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
+                text: "not-json".to_string(),
+            }),
+            djinn_provider::provider::StreamEvent::Done,
+        ],
+    ]));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
@@ -578,16 +660,12 @@ async fn llm_extraction_repeated_sessions_produce_no_duplicate_notes() {
         .await
         .expect("list notes");
 
-    // Only 1 note should exist despite running extraction twice
-    let dedup_notes: Vec<_> = notes
-        .iter()
-        .filter(|n| n.title == "Duplicate Note Title")
-        .collect();
     assert_eq!(
-        dedup_notes.len(),
+        notes.len(),
         1,
-        "duplicate note should not be created on repeated extraction runs"
+        "fallback path should still create the extracted note"
     );
+    assert_eq!(notes[0].title, "Fallback Novel Note");
 }
 
 // ─── AC1: Full pipeline integration ──────────────────────────────────────────

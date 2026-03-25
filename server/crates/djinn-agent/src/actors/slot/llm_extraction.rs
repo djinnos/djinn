@@ -30,13 +30,15 @@ use crate::context::AgentContext;
 const SYSTEM_PROMPT: &str = "You are a knowledge extractor. Given a completed agent session \
 summary, extract reusable knowledge as structured notes. Respond with valid JSON only.";
 
-/// Maximum dedup candidates to check before creating a new note.
-const DEDUP_CANDIDATE_LIMIT: usize = 3;
+/// Maximum novelty candidates to check before creating a new note.
+const NOVELTY_CANDIDATE_LIMIT: usize = 3;
 
-/// BM25 score threshold above which we consider a candidate a near-duplicate
-/// and skip creation. The `dedup_candidates` query already filters to > -3.0;
-/// we raise the bar here to avoid false merges from loosely related notes.
-const DEDUP_SKIP_SCORE_THRESHOLD: f64 = 2.0;
+/// Confidence signal applied to an existing note when a new extraction is
+/// semantically judged to be already known.
+const DUPLICATE_CONFIDENCE_SIGNAL: f64 = 0.65;
+
+const EXTRACTION_SYSTEM_PROMPT: &str = SYSTEM_PROMPT;
+const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extracted knowledge notes. Compare a proposed note summary against an existing note summary. Respond with valid JSON only.";
 
 // ── JSON response shape ───────────────────────────────────────────────────────
 
@@ -55,6 +57,30 @@ struct ExtractionResponse {
     #[serde(default)]
     pitfalls: Vec<ExtractedNote>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoveltyDecisionKind {
+    AlreadyKnown,
+    Novel,
+}
+
+#[derive(Debug, Deserialize)]
+struct NoveltyDecision {
+    decision: NoveltyDecisionKind,
+    existing_note_id: Option<String>,
+}
+
+#[cfg(test)]
+type CandidateLookup = fn(&NoteRepository, &str, &str, &str, &str) -> CandidateLookupFuture;
+
+#[cfg(test)]
+type CandidateLookupFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>>>
+            + Send,
+    >,
+>;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -248,7 +274,7 @@ async fn run_llm_extraction_inner(
     let response = match complete(
         provider.as_ref(),
         CompletionRequest {
-            system: SYSTEM_PROMPT.to_string(),
+            system: EXTRACTION_SYSTEM_PROMPT.to_string(),
             prompt,
             max_tokens: 1024,
         },
@@ -311,86 +337,239 @@ async fn run_llm_extraction_inner(
 
     for (note_type, notes) in note_pairs {
         for note in notes {
-            // ── Dedup check: skip if a near-duplicate already exists ─────
-            let folder = folder_for_type(note_type);
-            let skip = match note_repo
-                .dedup_candidates(
-                    &project.id,
-                    folder,
-                    note_type,
-                    &note.content,
-                    DEDUP_CANDIDATE_LIMIT,
-                )
+            process_extracted_note(
+                &note_repo,
+                provider.as_ref(),
+                &project.id,
+                &session_id,
+                note_type,
+                note,
+                &provenance,
+                #[cfg(test)]
+                None,
+            )
+            .await;
+        }
+    }
+}
+
+async fn process_extracted_note(
+    note_repo: &NoteRepository,
+    provider: &dyn LlmProvider,
+    project_id: &str,
+    session_id: &str,
+    note_type: &str,
+    note: &ExtractedNote,
+    provenance: &str,
+    #[cfg(test)] candidate_lookup_override: Option<CandidateLookup>,
+) {
+    match novelty_decision(
+        note_repo,
+        provider,
+        project_id,
+        session_id,
+        note_type,
+        note,
+        #[cfg(test)]
+        candidate_lookup_override,
+    )
+    .await
+    {
+        Ok(Some(candidate_id)) => {
+            match note_repo
+                .update_confidence(&candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
                 .await
             {
-                Ok(candidates) => candidates
-                    .first()
-                    .is_some_and(|c| c.score >= DEDUP_SKIP_SCORE_THRESHOLD),
-                Err(e) => {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        error = %e,
-                        "llm_extraction: dedup candidate lookup failed; proceeding with create"
-                    );
-                    false
-                }
-            };
-            if skip {
-                tracing::debug!(
+                Ok(updated_confidence) => tracing::debug!(
                     session_id = %session_id,
                     note_type = %note_type,
                     title = %note.title,
-                    "llm_extraction: skipping near-duplicate note"
-                );
-                continue;
+                    existing_note_id = %candidate_id,
+                    updated_confidence,
+                    "llm_extraction: semantic duplicate detected; boosted existing note confidence"
+                ),
+                Err(e) => tracing::warn!(
+                    session_id = %session_id,
+                    note_type = %note_type,
+                    title = %note.title,
+                    existing_note_id = %candidate_id,
+                    error = %e,
+                    "llm_extraction: semantic duplicate detected but failed to update existing confidence"
+                ),
             }
+            return;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::debug!(
+            session_id = %session_id,
+            note_type = %note_type,
+            title = %note.title,
+            error = %e,
+            "llm_extraction: novelty check failed; falling back to create"
+        ),
+    }
 
-            let content_with_provenance = format!("{}{}", note.content, provenance);
-            match note_repo
-                .create_db_note(
-                    &project.id,
-                    &note.title,
-                    &content_with_provenance,
-                    note_type,
-                    "[]",
-                )
-                .await
-            {
-                Ok(created) => {
-                    // Set confidence directly to 0.5 (session-extracted, below the
-                    // human-written default of 1.0). Notes are created with the
-                    // schema default of 1.0; we override that here. We use
-                    // `set_confidence` (absolute set) rather than `update_confidence`
-                    // (Bayesian signal update) because we want the value to be
-                    // exactly 0.5, not the result of a Bayesian update from 1.0.
-                    if let Err(e) = note_repo.set_confidence(&created.id, 0.5).await {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            note_id = %created.id,
-                            error = %e,
-                            "llm_extraction: failed to set confidence on extracted note"
-                        );
-                    }
-                    tracing::debug!(
-                        session_id = %session_id,
-                        note_id = %created.id,
-                        note_type = %note_type,
-                        title = %note.title,
-                        "llm_extraction: note created"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        note_type = %note_type,
-                        title = %note.title,
-                        error = %e,
-                        "llm_extraction: failed to create note; skipping"
-                    );
-                }
+    let content_with_provenance = format!("{}{}", note.content, provenance);
+    match note_repo
+        .create_db_note(
+            project_id,
+            &note.title,
+            &content_with_provenance,
+            note_type,
+            "[]",
+        )
+        .await
+    {
+        Ok(created) => {
+            if let Err(e) = note_repo.set_confidence(&created.id, 0.5).await {
+                tracing::warn!(
+                    session_id = %session_id,
+                    note_id = %created.id,
+                    error = %e,
+                    "llm_extraction: failed to set confidence on extracted note"
+                );
             }
+            tracing::debug!(
+                session_id = %session_id,
+                note_id = %created.id,
+                note_type = %note_type,
+                title = %note.title,
+                "llm_extraction: note created"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                note_type = %note_type,
+                title = %note.title,
+                error = %e,
+                "llm_extraction: failed to create note; skipping"
+            );
         }
     }
+}
+
+async fn novelty_decision(
+    note_repo: &NoteRepository,
+    provider: &dyn LlmProvider,
+    project_id: &str,
+    session_id: &str,
+    note_type: &str,
+    note: &ExtractedNote,
+    #[cfg(test)] candidate_lookup_override: Option<CandidateLookup>,
+) -> Result<Option<String>, String> {
+    let candidate_abstract = summarize_candidate_note(note);
+    let folder = folder_for_type(note_type);
+    let candidates = lookup_candidates(
+        note_repo,
+        project_id,
+        folder,
+        note_type,
+        &candidate_abstract,
+        #[cfg(test)]
+        candidate_lookup_override,
+    )
+    .await
+    .map_err(|e| format!("candidate lookup failed: {e}"))?;
+
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let response = complete(
+        provider,
+        CompletionRequest {
+            system: NOVELTY_SYSTEM_PROMPT.to_string(),
+            prompt: build_novelty_prompt(note_type, note, &candidate_abstract, &candidates),
+            max_tokens: 300,
+        },
+    )
+    .await
+    .map_err(|e| format!("semantic compare failed: {e}"))?;
+
+    let decision: NoveltyDecision = serde_json::from_str(response.text.trim())
+        .map_err(|e| format!("invalid novelty decision json: {e}"))?;
+
+    match decision.decision {
+        NoveltyDecisionKind::Novel => Ok(None),
+        NoveltyDecisionKind::AlreadyKnown => {
+            let existing_note_id = decision
+                .existing_note_id
+                .filter(|id| candidates.iter().any(|candidate| candidate.id == *id))
+                .ok_or_else(|| {
+                    "already_known decision missing valid existing_note_id".to_string()
+                })?;
+            tracing::debug!(
+                session_id = %session_id,
+                note_type = %note_type,
+                title = %note.title,
+                existing_note_id = %existing_note_id,
+                "llm_extraction: semantic duplicate decision returned already_known"
+            );
+            Ok(Some(existing_note_id))
+        }
+    }
+}
+
+async fn lookup_candidates(
+    note_repo: &NoteRepository,
+    project_id: &str,
+    folder: &str,
+    note_type: &str,
+    candidate_abstract: &str,
+    #[cfg(test)] candidate_lookup_override: Option<CandidateLookup>,
+) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
+    #[cfg(test)]
+    if let Some(lookup) = candidate_lookup_override {
+        return lookup(note_repo, project_id, folder, note_type, candidate_abstract).await;
+    }
+
+    note_repo
+        .dedup_candidates(
+            project_id,
+            folder,
+            note_type,
+            candidate_abstract,
+            NOVELTY_CANDIDATE_LIMIT,
+        )
+        .await
+}
+
+fn summarize_candidate_note(note: &ExtractedNote) -> String {
+    let trimmed = note.content.trim();
+    if trimmed.is_empty() {
+        note.title.trim().to_string()
+    } else {
+        format!("{}\n\n{}", note.title.trim(), trimmed)
+    }
+}
+
+fn build_novelty_prompt(
+    note_type: &str,
+    note: &ExtractedNote,
+    candidate_abstract: &str,
+    candidates: &[djinn_db::NoteDedupCandidate],
+) -> String {
+    let candidate_lines = candidates
+        .iter()
+        .map(|candidate| {
+            let summary = candidate
+                .abstract_
+                .as_deref()
+                .or(candidate.overview.as_deref())
+                .unwrap_or("");
+            format!(
+                "- id: {}\n  title: {}\n  summary: {}",
+                candidate.id, candidate.title, summary
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "Note type: {note_type}\nProposed extracted note title: {title}\nProposed extracted note summary:\n{candidate_abstract}\n\nExisting candidates:\n{candidate_lines}\n\nReturn JSON only in this schema:\n{{\"decision\":\"already_known\"|\"novel\",\"existing_note_id\":\"candidate-id-or-null\"}}\nChoose already_known only when the proposed note is semantically the same knowledge as one existing candidate. Otherwise choose novel.",
+        title = note.title,
+    )
 }
 
 // ── JSON parsing helpers ──────────────────────────────────────────────────────
