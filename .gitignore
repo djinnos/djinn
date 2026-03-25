@@ -3,6 +3,9 @@
 .djinn/.obsidian/
 .planning/
 .claude/
+.djinn/cases/
+.djinn/patterns/
+.djinn/pitfalls/
 
 # Build / test artifacts
 target/

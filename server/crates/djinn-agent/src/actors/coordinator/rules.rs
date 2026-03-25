@@ -7,8 +7,8 @@
 // All rules are deterministic — zero LLM calls.
 
 use super::*;
-use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_core::models::IssueType;
+use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_db::EpicRepository;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
