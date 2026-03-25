@@ -311,11 +311,14 @@ pub fn parse_openai_line(
                     }
                 } else {
                     // New entry for this index
-                    tool_acc.insert(idx, (
-                        tc.id.unwrap_or_default(),
-                        func.name.unwrap_or_default(),
-                        func.arguments.unwrap_or_default(),
-                    ));
+                    tool_acc.insert(
+                        idx,
+                        (
+                            tc.id.unwrap_or_default(),
+                            func.name.unwrap_or_default(),
+                            func.arguments.unwrap_or_default(),
+                        ),
+                    );
                 }
             }
         }
