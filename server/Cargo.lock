@@ -830,6 +830,7 @@ dependencies = [
  "opentelemetry_sdk",
  "petgraph",
  "proptest",
+ "protobuf",
  "refinery",
  "regex",
  "reqwest 0.13.2",

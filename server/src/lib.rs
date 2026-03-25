@@ -9,6 +9,7 @@ pub mod logging;
 pub mod mcp_bridge;
 pub mod process;
 pub mod repo_map;
+pub mod scip_parser;
 pub mod server;
 pub mod sse;
 pub mod sync;
