@@ -96,6 +96,20 @@ pub struct LearnedPromptHistoryEntry {
     pub created_at: String,
 }
 
+/// Standard column list for Agent queries.  `learned_prompt` is derived from
+/// active `learned_prompt_history` rows rather than the stale text column.
+const AGENT_COLUMNS: &str = "\
+    id, project_id, name, base_role, description, \
+    system_prompt_extensions, model_preference, verification_command, \
+    mcp_servers, skills, is_default, \
+    (SELECT GROUP_CONCAT(h.proposed_text, char(10)||char(10)||'---'||char(10)||char(10)) \
+     FROM learned_prompt_history h \
+     WHERE h.agent_id = agents.id \
+       AND h.action IN ('keep','confirmed') \
+     ORDER BY h.created_at ASC \
+    ) AS learned_prompt, \
+    created_at, updated_at";
+
 pub struct AgentRepository {
     db: Database,
     events: EventBus,
@@ -109,13 +123,9 @@ impl AgentRepository {
     /// Return all roles across all projects, ordered by project_id, base_role, name.
     pub async fn list_all(&self) -> Result<Vec<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Agent>(
-            "SELECT id, project_id, name, base_role, description,
-                    system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agents
-             ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC",
-        )
+        let sql = format!("SELECT {AGENT_COLUMNS} FROM agents \
+             ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC");
+        Ok(sqlx::query_as::<_, Agent>(&sql)
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -181,12 +191,8 @@ impl AgentRepository {
 
     pub async fn get(&self, id: &str) -> Result<Option<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Agent>(
-            "SELECT id, project_id, name, base_role, description,
-                    system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agents WHERE id = ?1",
-        )
+        let sql = format!("SELECT {AGENT_COLUMNS} FROM agents WHERE id = ?1");
+        Ok(sqlx::query_as::<_, Agent>(&sql)
         .bind(id)
         .fetch_optional(self.db.pool())
         .await?)
@@ -200,13 +206,9 @@ impl AgentRepository {
         base_role: &str,
     ) -> Result<Option<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Agent>(
-            "SELECT id, project_id, name, base_role, description,
-                    system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agents
-             WHERE project_id = ?1 AND base_role = ?2 AND is_default = 1
-             LIMIT 1",
+        let sql = format!("SELECT {AGENT_COLUMNS} FROM agents \
+             WHERE project_id = ?1 AND base_role = ?2 AND is_default = 1 LIMIT 1");
+        Ok(sqlx::query_as::<_, Agent>(&sql
         )
         .bind(project_id)
         .bind(base_role)
@@ -224,12 +226,8 @@ impl AgentRepository {
         name: &str,
     ) -> Result<Option<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Agent>(
-            "SELECT id, project_id, name, base_role, description,
-                    system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agents WHERE project_id = ?1 AND name = ?2",
-        )
+        let sql = format!("SELECT {AGENT_COLUMNS} FROM agents WHERE project_id = ?1 AND name = ?2");
+        Ok(sqlx::query_as::<_, Agent>(&sql)
         .bind(project_id)
         .bind(name)
         .fetch_optional(self.db.pool())
@@ -240,13 +238,9 @@ impl AgentRepository {
     /// specialist roster where a complete list is always needed.
     pub async fn all_for_project(&self, project_id: &str) -> Result<Vec<Agent>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Agent>(
-            "SELECT id, project_id, name, base_role, description,
-                    system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agents
-             WHERE project_id = ?1
-             ORDER BY is_default DESC, base_role ASC, name ASC",
+        let sql = format!("SELECT {AGENT_COLUMNS} FROM agents \
+             WHERE project_id = ?1 ORDER BY is_default DESC, base_role ASC, name ASC");
+        Ok(sqlx::query_as::<_, Agent>(&sql
         )
         .bind(project_id)
         .fetch_all(self.db.pool())
@@ -383,11 +377,8 @@ impl AgentRepository {
         let total = total_q.fetch_one(self.db.pool()).await?;
 
         let sql = format!(
-            "SELECT id, project_id, name, base_role, description,
-                    system_prompt_extensions, model_preference, verification_command,
-                    mcp_servers, skills, is_default, learned_prompt, created_at, updated_at
-             FROM agents WHERE {where_sql}
-             ORDER BY is_default DESC, base_role ASC, name ASC
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE {where_sql} \
+             ORDER BY is_default DESC, base_role ASC, name ASC \
              LIMIT ? OFFSET ?"
         );
         let mut role_q = sqlx::query_as::<_, Agent>(&sql);
@@ -634,60 +625,19 @@ impl AgentRepository {
         Ok(())
     }
 
-    /// Revert a role's `learned_prompt` to the state it had before the given
-    /// amendment was appended.
-    ///
-    /// If the amendment appears in `learned_prompt` it is removed (along with its
-    /// separator).  If the amendment was the only content the field is set to NULL.
-    pub async fn revert_learned_prompt(
-        &self,
-        role_id: &str,
-        amendment_text: &str,
-    ) -> Result<Agent> {
+    /// Mark all active amendments for an agent as discarded, effectively clearing
+    /// the derived learned_prompt.
+    pub async fn clear_amendments(&self, agent_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-
-        let role = self
-            .get(role_id)
-            .await?
-            .ok_or_else(|| Error::InvalidData(format!("agent not found: {role_id}")))?;
-
-        let current = role.learned_prompt.as_deref().unwrap_or("").trim();
-        let amendment = amendment_text.trim();
-
-        // Build new learned_prompt by stripping the amendment.
-        let new_learned_prompt: Option<String> = if current == amendment {
-            // Entire learned_prompt was this one amendment — clear it.
-            None
-        } else if let Some(prefix) = current.strip_suffix(amendment) {
-            // Amendment is at the end; also strip the separator that preceded it.
-            let trimmed = prefix.trim_end_matches('\n').trim_end_matches("---").trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        } else {
-            // Fallback: leave unchanged (we can't safely strip from mid-string).
-            role.learned_prompt.clone()
-        };
-
         sqlx::query(
-            "UPDATE agents
-             SET learned_prompt = ?2,
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            "UPDATE learned_prompt_history
+             SET action = 'discard'
+             WHERE agent_id = ?1 AND action IN ('keep','confirmed')",
         )
-        .bind(role_id)
-        .bind(new_learned_prompt.as_deref())
+        .bind(agent_id)
         .execute(self.db.pool())
         .await?;
-
-        let updated = self.get(role_id).await?.ok_or_else(|| {
-            Error::InvalidData(format!("agent not found after revert: {role_id}"))
-        })?;
-        self.events
-            .send(DjinnEventEnvelope::agent_updated(&updated));
-        Ok(updated)
+        Ok(())
     }
 
     /// Append an amendment to a role's `learned_prompt` and log the proposal to
@@ -703,33 +653,13 @@ impl AgentRepository {
     ) -> Result<Agent> {
         self.db.ensure_initialized().await?;
 
-        // Load current role.
-        let role = self
-            .get(role_id)
+        // Verify the agent exists.
+        self.get(role_id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("agent not found: {role_id}")))?;
 
-        // Build the new learned_prompt by appending the amendment.
-        let new_learned_prompt = match role.learned_prompt.as_deref() {
-            Some(existing) if !existing.trim().is_empty() => {
-                format!("{}\n\n---\n\n{}", existing.trim(), amendment.trim())
-            }
-            _ => amendment.trim().to_string(),
-        };
-
-        // Persist the updated learned_prompt.
-        sqlx::query(
-            "UPDATE agents
-             SET learned_prompt = ?2,
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
-        )
-        .bind(role_id)
-        .bind(&new_learned_prompt)
-        .execute(self.db.pool())
-        .await?;
-
-        // Log to learned_prompt_history.
+        // Insert into learned_prompt_history with action='keep' (pending eval).
+        // The derived AGENT_COLUMNS query will pick it up automatically.
         let history_id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO learned_prompt_history
@@ -740,6 +670,14 @@ impl AgentRepository {
         .bind(role_id)
         .bind(amendment.trim())
         .bind(metrics_snapshot)
+        .execute(self.db.pool())
+        .await?;
+
+        // Touch updated_at so consumers see the change.
+        sqlx::query(
+            "UPDATE agents SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+        )
+        .bind(role_id)
         .execute(self.db.pool())
         .await?;
 

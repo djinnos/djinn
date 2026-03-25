@@ -303,6 +303,16 @@ impl DjinnMcpServer {
             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
             .unwrap_or_else(|| role.skills.clone());
         // Resolve learned_prompt: clear wins over set; otherwise keep existing.
+        // Since learned_prompt is now derived from history rows, clearing means
+        // marking all active amendments as discarded.
+        if p.clear_learned_prompt.unwrap_or(false)
+            && let Err(e) = repo.clear_amendments(&role.id).await
+        {
+            return Json(AgentSingleResponse {
+                agent: None,
+                error: Some(format!("failed to clear amendments: {e}")),
+            });
+        }
         let learned_prompt_value: Option<&str> = if p.clear_learned_prompt.unwrap_or(false) {
             None
         } else if let Some(ref lp) = p.learned_prompt {
