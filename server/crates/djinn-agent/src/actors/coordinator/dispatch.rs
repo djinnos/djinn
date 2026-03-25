@@ -145,7 +145,7 @@ impl CoordinatorActor {
         };
 
         for status in ["needs_task_review", "needs_lead_intervention"] {
-            match repo.list_by_status(status).await {
+            match repo.list_by_status_filtered(status, true).await {
                 Ok(mut tasks) => ready.append(&mut tasks),
                 Err(e) => {
                     tracing::warn!(error = %e, status, "CoordinatorActor: list_by_status failed");

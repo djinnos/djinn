@@ -39,8 +39,23 @@ impl TaskRepository {
     }
 
     pub async fn list_by_status(&self, status: &str) -> Result<Vec<Task>> {
+        self.list_by_status_filtered(status, false).await
+    }
+
+    /// Like `list_by_status`, but when `exclude_blocked` is true, omits tasks
+    /// that have unresolved blockers (blocking tasks not yet closed).
+    pub async fn list_by_status_filtered(
+        &self,
+        status: &str,
+        exclude_blocked: bool,
+    ) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Task>(
+        let blocker_filter = if exclude_blocked {
+            "AND NOT EXISTS (SELECT 1 FROM blockers b JOIN tasks bt ON b.blocking_task_id = bt.id WHERE b.task_id = tasks.id AND bt.status != 'closed')"
+        } else {
+            ""
+        };
+        let sql = format!(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     status, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
@@ -48,11 +63,12 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-             FROM tasks WHERE status = ?1 ORDER BY priority, created_at",
-        )
-        .bind(status)
-        .fetch_all(self.db.pool())
-        .await?)
+             FROM tasks WHERE status = ?1 {blocker_filter} ORDER BY priority, created_at"
+        );
+        Ok(sqlx::query_as::<_, Task>(&sql)
+            .bind(status)
+            .fetch_all(self.db.pool())
+            .await?)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Task>> {
