@@ -1950,17 +1950,60 @@ mod tests {
         branch: &str,
     ) -> String {
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO sessions (id, project_id, task_id, branch, status, started_at)
-             VALUES (?1, ?2, ?3, ?4, 'completed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        let has_branch: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'branch'",
         )
-        .bind(&id)
-        .bind(project_id)
-        .bind(task_id)
-        .bind(branch)
-        .execute(db.pool())
+        .fetch_one(db.pool())
         .await
         .unwrap();
+
+        if has_branch > 0 {
+            sqlx::query(
+                "INSERT INTO sessions (id, project_id, task_id, branch, status, started_at)
+                 VALUES (?1, ?2, ?3, ?4, 'completed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            )
+            .bind(&id)
+            .bind(project_id)
+            .bind(task_id)
+            .bind(branch)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        } else {
+            sqlx::query(
+                "INSERT INTO sessions (
+                    id,
+                    project_id,
+                    task_id,
+                    model_id,
+                    agent_type,
+                    started_at,
+                    status,
+                    tokens_in,
+                    tokens_out,
+                    worktree_path
+                )
+                VALUES (
+                    ?1,
+                    ?2,
+                    ?3,
+                    'test-model',
+                    ?4,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    'completed',
+                    0,
+                    0,
+                    NULL
+                )",
+            )
+            .bind(&id)
+            .bind(project_id)
+            .bind(task_id)
+            .bind(branch)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
         id
     }
 
