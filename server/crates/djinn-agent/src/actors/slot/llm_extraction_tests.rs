@@ -325,6 +325,7 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
         notes_read: 1,
         notes_written: 2,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
 
     let provider = fake_extraction_provider();
@@ -405,6 +406,7 @@ async fn llm_extracted_notes_have_confidence_0_5() {
         notes_read: 0,
         notes_written: 1,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
 
     let provider = fake_extraction_provider();
@@ -425,6 +427,19 @@ async fn llm_extracted_notes_have_confidence_0_5() {
             note.confidence
         );
     }
+
+    let stored_json: Option<String> =
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+            .bind(&fixture.session_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .expect("query session event_taxonomy after llm extraction");
+    let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
+        .expect("deserialize stored taxonomy after llm extraction");
+    assert_eq!(stored_taxonomy.extraction_quality.extracted, 3);
+    assert_eq!(stored_taxonomy.extraction_quality.dedup_skipped, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.novelty_skipped, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.written, 3);
 }
 
 /// AC4 part 2: note content contains the session_id as provenance.
@@ -483,9 +498,8 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
         notes_read: 1,
         notes_written: 2,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
-
-    // FailingProvider always returns an error from stream()
     let provider = Arc::new(FailingProvider::new("injected LLM failure for test"));
     // Should complete without panicking
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -518,9 +532,8 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         notes_read: 0,
         notes_written: 1,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
-
-    // No credentials configured — resolve_memory_provider will fail → graceful skip
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
@@ -555,9 +568,8 @@ async fn llm_extraction_repeated_sessions_produce_no_duplicate_notes() {
         notes_read: 0,
         notes_written: 1,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
-
-    // Both sessions return the same title → same permalink → second insert fails.
     // The FakeProvider must be created fresh for each call (scripted turns = 1).
     for _ in 0..2_u32 {
         let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());

@@ -90,7 +90,7 @@ pub(crate) async fn run_llm_extraction_with_provider(
 /// instead of calling `resolve_memory_provider`.
 async fn run_llm_extraction_inner(
     session_id: String,
-    taxonomy: SessionTaxonomy,
+    mut taxonomy: SessionTaxonomy,
     app_state: AgentContext,
     provider_override: Option<Arc<dyn LlmProvider>>,
 ) {
@@ -281,7 +281,9 @@ async fn run_llm_extraction_inner(
     };
 
     let total = extracted.cases.len() + extracted.patterns.len() + extracted.pitfalls.len();
+    taxonomy.extraction_quality.extracted = total as u32;
     if total == 0 {
+        persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
         tracing::debug!(
             session_id = %session_id,
             "llm_extraction: no notes extracted"
@@ -336,6 +338,7 @@ async fn run_llm_extraction_inner(
                 }
             };
             if skip {
+                taxonomy.extraction_quality.dedup_skipped += 1;
                 tracing::debug!(
                     session_id = %session_id,
                     note_type = %note_type,
@@ -378,6 +381,7 @@ async fn run_llm_extraction_inner(
                         title = %note.title,
                         "llm_extraction: note created"
                     );
+                    taxonomy.extraction_quality.written += 1;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -390,6 +394,37 @@ async fn run_llm_extraction_inner(
                 }
             }
         }
+    }
+
+    persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
+}
+
+async fn persist_extraction_quality(
+    session_repo: &SessionRepository,
+    session_id: &str,
+    taxonomy: &SessionTaxonomy,
+) {
+    let taxonomy_json = match serde_json::to_string(taxonomy) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "llm_extraction: failed to serialize taxonomy with extraction quality"
+            );
+            return;
+        }
+    };
+
+    if let Err(error) = session_repo
+        .set_event_taxonomy(session_id, &taxonomy_json)
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %error,
+            "llm_extraction: failed to persist extraction quality taxonomy"
+        );
     }
 }
 
@@ -428,6 +463,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::actors::slot::session_extraction::ExtractionQuality;
     use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
 
     #[test]
@@ -467,6 +503,11 @@ mod tests {
     fn parse_extraction_response_returns_error_on_invalid_json() {
         let result = parse_extraction_response("not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn extraction_quality_defaults_to_zero() {
+        assert_eq!(ExtractionQuality::default().novelty_skipped, 0);
     }
 
     #[tokio::test]
@@ -583,6 +624,7 @@ mod tests {
             notes_read: 1,
             notes_written: 2,
             tasks_transitioned: 1,
+            extraction_quality: ExtractionQuality::default(),
         };
 
         // No credentials configured → resolve_memory_provider will fail → graceful skip

@@ -91,6 +91,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_read_ops_updates_access_tracking() {
         let (server, tmp, permalink, _folder) = setup_server().await;
+        let project_id =
+            ProjectRepository::new(server.state.db().clone(), server.state.event_bus())
+                .resolve(tmp.path().to_str().unwrap())
+                .await
+                .unwrap()
+                .expect("project id");
+        let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+        let before = repo
+            .get_by_permalink(&project_id, &permalink)
+            .await
+            .unwrap()
+            .expect("seed note before read");
 
         let response = ops::memory_read(
             &server,
@@ -107,6 +119,14 @@ mod tests {
             response.error
         );
         assert!(response.id.is_some());
+        let after = repo
+            .get(response.id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .expect("seed note after read");
+        assert_eq!(after.access_count, before.access_count + 1);
+        assert_eq!(response.title.as_deref(), Some(before.title.as_str()));
+        assert_eq!(response.content.as_deref(), Some(before.content.as_str()));
         assert_eq!(server.recorded_note_ids().await.len(), 1);
     }
 
