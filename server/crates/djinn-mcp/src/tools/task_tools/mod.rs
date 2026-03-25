@@ -74,7 +74,8 @@ pub(crate) fn validate_create_request(request: &CreateTaskRequest) -> Result<(),
             .unwrap_or(true);
         if ac_empty {
             return Err(ErrorResponse::new(
-                "acceptance_criteria is required for task/feature/bug issue types",
+                "acceptance_criteria is required for task/feature/bug issue types — \
+                 provide an array of strings, e.g. [\"criterion 1\", \"criterion 2\"]",
             ));
         }
     }
