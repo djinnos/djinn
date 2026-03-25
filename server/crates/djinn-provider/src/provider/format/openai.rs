@@ -296,15 +296,15 @@ pub fn parse_openai_line(
                 let func = tc.function.unwrap_or_default();
                 if let Some(entry) = tool_acc.get_mut(&idx) {
                     // Existing entry — append fragments
-                    if let Some(id) = tc.id {
-                        if !id.is_empty() {
-                            entry.0 = id;
-                        }
+                    if let Some(id) = tc.id
+                        && !id.is_empty()
+                    {
+                        entry.0 = id;
                     }
-                    if let Some(name) = func.name {
-                        if !name.is_empty() {
-                            entry.1 = name;
-                        }
+                    if let Some(name) = func.name
+                        && !name.is_empty()
+                    {
+                        entry.1 = name;
                     }
                     if let Some(frag) = func.arguments {
                         entry.2.push_str(&frag);
