@@ -330,7 +330,7 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
-    // Verify notes were written to DB
+    // Verify notes were written to DB and are DB-backed only (no markdown artifacts)
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
@@ -354,6 +354,39 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
     assert_eq!(cases[0].title, "Test Case Note");
     assert_eq!(patterns[0].title, "Test Pattern Note");
     assert_eq!(pitfalls[0].title, "Test Pitfall Note");
+
+    for note in [cases[0], patterns[0], pitfalls[0]] {
+        assert_eq!(note.storage, "db");
+        assert!(
+            note.file_path.is_empty(),
+            "db-backed extracted notes should not keep file paths"
+        );
+    }
+
+    assert!(
+        !fixture
+            .tmpdir
+            .path()
+            .join(".djinn/cases/test-case-note.md")
+            .exists(),
+        "case extraction should not create a markdown file"
+    );
+    assert!(
+        !fixture
+            .tmpdir
+            .path()
+            .join(".djinn/patterns/test-pattern-note.md")
+            .exists(),
+        "pattern extraction should not create a markdown file"
+    );
+    assert!(
+        !fixture
+            .tmpdir
+            .path()
+            .join(".djinn/pitfalls/test-pitfall-note.md")
+            .exists(),
+        "pitfall extraction should not create a markdown file"
+    );
 }
 
 // ─── AC4: Confidence 0.5 and session provenance ───────────────────────────────

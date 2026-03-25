@@ -1312,6 +1312,94 @@ mod tests {
         assert!(repo.get(&db_note.id).await.unwrap().is_some());
         assert!(repo.get(&file_note.id).await.unwrap().is_none());
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reindex_from_disk_backfill_can_normalize_extracted_notes_to_db_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let legacy_case = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Legacy Extracted Case",
+                "legacy db migration body",
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let legacy_pattern = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Legacy Extracted Pattern",
+                "legacy pattern body",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let legacy_pitfall = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Legacy Extracted Pitfall",
+                "legacy pitfall body",
+                "pitfall",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        for note in [&legacy_case, &legacy_pattern, &legacy_pitfall] {
+            assert!(
+                Path::new(&note.file_path).exists(),
+                "legacy extracted note should start on disk"
+            );
+        }
+
+        sqlx::query(
+            "UPDATE notes
+             SET storage = 'db',
+                 file_path = ''
+             WHERE project_id = ?1 AND note_type IN ('case', 'pattern', 'pitfall')",
+        )
+        .bind(&project.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        for note in [&legacy_case, &legacy_pattern, &legacy_pitfall] {
+            let path = Path::new(&note.file_path);
+            if path.exists() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+
+        let summary = repo
+            .reindex_from_disk(&project.id, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.deleted, 0,
+            "db-backed migrated notes should survive reindex"
+        );
+
+        let notes = repo.list(&project.id, None).await.unwrap();
+        let migrated: Vec<_> = notes
+            .iter()
+            .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
+            .collect();
+        assert_eq!(migrated.len(), 3);
+        for note in migrated {
+            assert_eq!(note.storage, "db");
+            assert!(note.file_path.is_empty());
+        }
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_affinity_scores_task_epic_blocker_and_max() {
         let tmp = tempfile::tempdir().unwrap();

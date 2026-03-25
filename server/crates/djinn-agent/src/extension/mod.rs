@@ -164,8 +164,13 @@ where
         "epic_close" => call_epic_close(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments, &worktree_project_path).await,
         "memory_search" => {
-            call_memory_search(state, &call.arguments, session_task_id, &worktree_project_path)
-                .await
+            call_memory_search(
+                state,
+                &call.arguments,
+                session_task_id,
+                &worktree_project_path,
+            )
+            .await
         }
         "memory_list" => call_memory_list(state, &call.arguments, &worktree_project_path).await,
         "memory_build_context" => {
@@ -177,15 +182,11 @@ where
             )
             .await
         }
-        "agent_metrics" => {
-            call_agent_metrics(state, &call.arguments, &worktree_project_path).await
-        }
+        "agent_metrics" => call_agent_metrics(state, &call.arguments, &worktree_project_path).await,
         "agent_amend_prompt" => {
             call_agent_amend_prompt(state, &call.arguments, &worktree_project_path).await
         }
-        "agent_create" => {
-            call_agent_create(state, &call.arguments, &worktree_project_path).await
-        }
+        "agent_create" => call_agent_create(state, &call.arguments, &worktree_project_path).await,
         "ci_job_log" => call_ci_job_log(state, &call.arguments, session_task_id).await,
         "shell" => call_shell(&call.arguments, worktree_path).await,
         "read" => call_read(state, &call.arguments, worktree_path).await,
@@ -407,8 +408,6 @@ async fn resolve_project_id_for_agent_tools(
         _ => Err("project is required when multiple projects are configured".to_string()),
     }
 }
-
-
 
 async fn call_task_list(
     state: &AgentContext,
@@ -1070,9 +1069,7 @@ async fn call_agent_metrics(
             .get("agent_id")
             .and_then(|v| v.as_str())
             .map(ToOwned::to_owned),
-        window_days: raw
-            .get("window_days")
-            .and_then(|v| v.as_i64()),
+        window_days: raw.get("window_days").and_then(|v| v.as_i64()),
     };
 
     let response = shared_metrics_for_agents(
@@ -1165,9 +1162,8 @@ async fn call_agent_create(
     // Inject project so the shared params struct deserialises.
     raw.entry("project")
         .or_insert_with(|| serde_json::json!(project_path));
-    let params: SharedAgentCreateParams =
-        serde_json::from_value(serde_json::Value::Object(raw))
-            .map_err(|e| format!("invalid arguments: {e}"))?;
+    let params: SharedAgentCreateParams = serde_json::from_value(serde_json::Value::Object(raw))
+        .map_err(|e| format!("invalid arguments: {e}"))?;
 
     let response = shared_create_agent(
         &AgentRepository::new(state.db.clone(), state.event_bus.clone()),
@@ -2199,7 +2195,6 @@ fn merge_acceptance_criteria(existing_json: &str, incoming: &[serde_json::Value]
 
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
-
 
 fn task_to_value(t: &Task) -> serde_json::Value {
     let labels = djinn_core::models::parse_json_array(&t.labels);
