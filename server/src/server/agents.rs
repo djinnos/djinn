@@ -12,7 +12,7 @@ use crate::server::AppState;
 use djinn_core::models::Agent;
 use djinn_db::{
     AgentCreateInput, AgentListQuery, AgentMetrics as DbAgentMetrics, AgentRepository,
-    AgentUpdateInput,
+    AgentUpdateInput, ExtractionQualityMetrics as DbExtractionQualityMetrics,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -299,6 +299,7 @@ async fn agent_metrics(
                 completed_task_count: 0,
                 avg_tokens: 0.0,
                 avg_time_seconds: 0.0,
+                extraction_quality: DbExtractionQualityMetrics::default(),
             });
         let has_data = m.completed_task_count > 0;
         metrics.push(AgentMetricsItem {
