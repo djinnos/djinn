@@ -74,6 +74,16 @@ struct NoveltyDecision {
 #[cfg(test)]
 type CandidateLookup = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
 
+struct ExtractionContext<'a> {
+    note_repo: &'a NoteRepository,
+    provider: &'a dyn LlmProvider,
+    project_id: &'a str,
+    session_id: &'a str,
+    provenance: &'a str,
+    #[cfg(test)]
+    candidate_lookup_override: Option<CandidateLookup>,
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Run LLM-based knowledge extraction for a completed session.
@@ -354,53 +364,37 @@ async fn run_llm_extraction_inner(
         ("pitfall", extracted.pitfalls.as_slice()),
     ];
 
+    let extraction_context = ExtractionContext {
+        note_repo: &note_repo,
+        provider: provider.as_ref(),
+        project_id: &project.id,
+        session_id: &session_id,
+        provenance: &provenance,
+        #[cfg(test)]
+        candidate_lookup_override,
+    };
+
     for (note_type, notes) in note_pairs {
         for note in notes {
-            process_extracted_note(
-                &note_repo,
-                provider.as_ref(),
-                &project.id,
-                &session_id,
-                note_type,
-                note,
-                &provenance,
-                #[cfg(test)]
-                candidate_lookup_override,
-            )
-            .await;
+            process_extracted_note(&extraction_context, note_type, note).await;
         }
     }
 }
 
 async fn process_extracted_note(
-    note_repo: &NoteRepository,
-    provider: &dyn LlmProvider,
-    project_id: &str,
-    session_id: &str,
+    extraction_context: &ExtractionContext<'_>,
     note_type: &str,
     note: &ExtractedNote,
-    provenance: &str,
-    #[cfg(test)] candidate_lookup_override: Option<CandidateLookup>,
 ) {
-    match novelty_decision(
-        note_repo,
-        provider,
-        project_id,
-        session_id,
-        note_type,
-        note,
-        #[cfg(test)]
-        candidate_lookup_override,
-    )
-    .await
-    {
+    match novelty_decision(extraction_context, note_type, note).await {
         Ok(Some(candidate_id)) => {
-            match note_repo
+            match extraction_context
+                .note_repo
                 .update_confidence(&candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
                 .await
             {
                 Ok(updated_confidence) => tracing::debug!(
-                    session_id = %session_id,
+                    session_id = %extraction_context.session_id,
                     note_type = %note_type,
                     title = %note.title,
                     existing_note_id = %candidate_id,
@@ -408,7 +402,7 @@ async fn process_extracted_note(
                     "llm_extraction: semantic duplicate detected; boosted existing note confidence"
                 ),
                 Err(e) => tracing::warn!(
-                    session_id = %session_id,
+                    session_id = %extraction_context.session_id,
                     note_type = %note_type,
                     title = %note.title,
                     existing_note_id = %candidate_id,
@@ -420,7 +414,7 @@ async fn process_extracted_note(
         }
         Ok(None) => {}
         Err(e) => tracing::debug!(
-            session_id = %session_id,
+            session_id = %extraction_context.session_id,
             note_type = %note_type,
             title = %note.title,
             error = %e,
@@ -428,10 +422,11 @@ async fn process_extracted_note(
         ),
     }
 
-    let content_with_provenance = format!("{}{}", note.content, provenance);
-    match note_repo
+    let content_with_provenance = format!("{}{}", note.content, extraction_context.provenance);
+    match extraction_context
+        .note_repo
         .create_db_note(
-            project_id,
+            extraction_context.project_id,
             &note.title,
             &content_with_provenance,
             note_type,
@@ -440,16 +435,20 @@ async fn process_extracted_note(
         .await
     {
         Ok(created) => {
-            if let Err(e) = note_repo.set_confidence(&created.id, 0.5).await {
+            if let Err(e) = extraction_context
+                .note_repo
+                .set_confidence(&created.id, 0.5)
+                .await
+            {
                 tracing::warn!(
-                    session_id = %session_id,
+                    session_id = %extraction_context.session_id,
                     note_id = %created.id,
                     error = %e,
                     "llm_extraction: failed to set confidence on extracted note"
                 );
             }
             tracing::debug!(
-                session_id = %session_id,
+                session_id = %extraction_context.session_id,
                 note_id = %created.id,
                 note_type = %note_type,
                 title = %note.title,
@@ -458,7 +457,7 @@ async fn process_extracted_note(
         }
         Err(e) => {
             tracing::warn!(
-                session_id = %session_id,
+                session_id = %extraction_context.session_id,
                 note_type = %note_type,
                 title = %note.title,
                 error = %e,
@@ -469,34 +468,22 @@ async fn process_extracted_note(
 }
 
 async fn novelty_decision(
-    note_repo: &NoteRepository,
-    provider: &dyn LlmProvider,
-    project_id: &str,
-    session_id: &str,
+    extraction_context: &ExtractionContext<'_>,
     note_type: &str,
     note: &ExtractedNote,
-    #[cfg(test)] candidate_lookup_override: Option<CandidateLookup>,
 ) -> Result<Option<String>, String> {
     let candidate_abstract = summarize_candidate_note(note);
     let folder = folder_for_type(note_type);
-    let candidates = lookup_candidates(
-        note_repo,
-        project_id,
-        folder,
-        note_type,
-        &candidate_abstract,
-        #[cfg(test)]
-        candidate_lookup_override,
-    )
-    .await
-    .map_err(|e| format!("candidate lookup failed: {e}"))?;
+    let candidates = lookup_candidates(extraction_context, folder, note_type, &candidate_abstract)
+        .await
+        .map_err(|e| format!("candidate lookup failed: {e}"))?;
 
     if candidates.is_empty() {
         return Ok(None);
     }
 
     let response = complete(
-        provider,
+        extraction_context.provider,
         CompletionRequest {
             system: NOVELTY_SYSTEM_PROMPT.to_string(),
             prompt: build_novelty_prompt(note_type, note, &candidate_abstract, &candidates),
@@ -519,7 +506,7 @@ async fn novelty_decision(
                     "already_known decision missing valid existing_note_id".to_string()
                 })?;
             tracing::debug!(
-                session_id = %session_id,
+                session_id = %extraction_context.session_id,
                 note_type = %note_type,
                 title = %note.title,
                 existing_note_id = %existing_note_id,
@@ -531,21 +518,25 @@ async fn novelty_decision(
 }
 
 async fn lookup_candidates(
-    note_repo: &NoteRepository,
-    project_id: &str,
+    extraction_context: &ExtractionContext<'_>,
     folder: &str,
     note_type: &str,
     candidate_abstract: &str,
-    #[cfg(test)] candidate_lookup_override: Option<CandidateLookup>,
 ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
     #[cfg(test)]
-    if let Some(lookup) = candidate_lookup_override {
-        return Ok(lookup(project_id, folder, note_type, candidate_abstract));
+    if let Some(lookup) = extraction_context.candidate_lookup_override {
+        return Ok(lookup(
+            extraction_context.project_id,
+            folder,
+            note_type,
+            candidate_abstract,
+        ));
     }
 
-    note_repo
+    extraction_context
+        .note_repo
         .dedup_candidates(
-            project_id,
+            extraction_context.project_id,
             folder,
             note_type,
             candidate_abstract,
