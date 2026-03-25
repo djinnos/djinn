@@ -497,10 +497,6 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/main
     let provider = Arc::new(FailingProvider::new("injected LLM failure for test"));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
@@ -528,10 +524,6 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/main
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
@@ -588,7 +580,6 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-<<<<<<< HEAD
 
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
@@ -647,6 +638,7 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
         notes_read: 0,
         notes_written: 1,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
 
     let provider = Arc::new(FakeProvider::script(vec![
@@ -672,21 +664,6 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
         novelty_failure_candidate_lookup,
     )
     .await;
-=======
-    // The FakeProvider must be created fresh for each call (scripted turns = 1).
-    for _ in 0..2_u32 {
-        let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-        let json = r#"{"cases":[{"title":"Duplicate Note Title","content":"Content for dedup test."}],"patterns":[],"pitfalls":[]}"#;
-        let provider = Arc::new(FakeProvider::text(json));
-        run_llm_extraction_with_provider(
-            fixture.session_id.clone(),
-            taxonomy.clone(),
-            ctx,
-            provider,
-        )
-        .await;
-    }
->>>>>>> origin/main
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo

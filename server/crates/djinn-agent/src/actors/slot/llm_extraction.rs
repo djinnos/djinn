@@ -366,6 +366,7 @@ async fn run_llm_extraction_inner(
         ("pitfall", extracted.pitfalls.as_slice()),
     ];
 
+    let mut extraction_quality = taxonomy.extraction_quality.clone();
     let extraction_context = ExtractionContext {
         note_repo: &note_repo,
         provider: provider.as_ref(),
@@ -378,92 +379,17 @@ async fn run_llm_extraction_inner(
 
     for (note_type, notes) in note_pairs {
         for note in notes {
-<<<<<<< HEAD
-            process_extracted_note(&extraction_context, note_type, note).await;
-=======
-            // ── Dedup check: skip if a near-duplicate already exists ─────
-            let folder = folder_for_type(note_type);
-            let skip = match note_repo
-                .dedup_candidates(
-                    &project.id,
-                    folder,
-                    note_type,
-                    &note.content,
-                    DEDUP_CANDIDATE_LIMIT,
-                )
-                .await
-            {
-                Ok(candidates) => candidates
-                    .first()
-                    .is_some_and(|c| c.score >= DEDUP_SKIP_SCORE_THRESHOLD),
-                Err(e) => {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        error = %e,
-                        "llm_extraction: dedup candidate lookup failed; proceeding with create"
-                    );
-                    false
-                }
-            };
-            if skip {
-                taxonomy.extraction_quality.dedup_skipped += 1;
-                tracing::debug!(
-                    session_id = %session_id,
-                    note_type = %note_type,
-                    title = %note.title,
-                    "llm_extraction: skipping near-duplicate note"
-                );
-                continue;
-            }
-
-            let content_with_provenance = format!("{}{}", note.content, provenance);
-            match note_repo
-                .create_db_note(
-                    &project.id,
-                    &note.title,
-                    &content_with_provenance,
-                    note_type,
-                    "[]",
-                )
-                .await
-            {
-                Ok(created) => {
-                    // Set confidence directly to 0.5 (session-extracted, below the
-                    // human-written default of 1.0). Notes are created with the
-                    // schema default of 1.0; we override that here. We use
-                    // `set_confidence` (absolute set) rather than `update_confidence`
-                    // (Bayesian signal update) because we want the value to be
-                    // exactly 0.5, not the result of a Bayesian update from 1.0.
-                    if let Err(e) = note_repo.set_confidence(&created.id, 0.5).await {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            note_id = %created.id,
-                            error = %e,
-                            "llm_extraction: failed to set confidence on extracted note"
-                        );
-                    }
-                    tracing::debug!(
-                        session_id = %session_id,
-                        note_id = %created.id,
-                        note_type = %note_type,
-                        title = %note.title,
-                        "llm_extraction: note created"
-                    );
-                    taxonomy.extraction_quality.written += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        note_type = %note_type,
-                        title = %note.title,
-                        error = %e,
-                        "llm_extraction: failed to create note; skipping"
-                    );
-                }
-            }
->>>>>>> origin/main
+            process_extracted_note(
+                &extraction_context,
+                note_type,
+                note,
+                &mut extraction_quality,
+            )
+            .await;
         }
     }
+
+    taxonomy.extraction_quality = extraction_quality;
 
     persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
 }
@@ -501,6 +427,7 @@ async fn process_extracted_note(
     extraction_context: &ExtractionContext<'_>,
     note_type: &str,
     note: &ExtractedNote,
+    extraction_quality: &mut super::session_extraction::ExtractionQuality,
 ) {
     match novelty_decision(extraction_context, note_type, note).await {
         Ok(Some(candidate_id)) => {
@@ -526,6 +453,7 @@ async fn process_extracted_note(
                     "llm_extraction: semantic duplicate detected but failed to update existing confidence"
                 ),
             }
+            extraction_quality.novelty_skipped += 1;
             return;
         }
         Ok(None) => {}
@@ -570,6 +498,7 @@ async fn process_extracted_note(
                 title = %note.title,
                 "llm_extraction: note created"
             );
+            extraction_quality.written += 1;
         }
         Err(e) => {
             tracing::warn!(
