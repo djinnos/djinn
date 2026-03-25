@@ -13,7 +13,6 @@
 //!
 //! All errors are logged as warnings; nothing propagates to the caller.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use djinn_db::{
@@ -300,7 +299,6 @@ async fn run_llm_extraction_inner(
 
     // ── Write notes ────────────────────────────────────────────────────────
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let project_path = Path::new(&project.path);
     let provenance = format!(
         "\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*"
     );
@@ -349,9 +347,8 @@ async fn run_llm_extraction_inner(
 
             let content_with_provenance = format!("{}{}", note.content, provenance);
             match note_repo
-                .create(
+                .create_db_note(
                     &project.id,
-                    project_path,
                     &note.title,
                     &content_with_provenance,
                     note_type,

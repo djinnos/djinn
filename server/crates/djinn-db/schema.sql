@@ -81,6 +81,7 @@ CREATE TABLE notes (
     permalink     TEXT NOT NULL,
     title         TEXT NOT NULL,
     file_path     TEXT NOT NULL,
+    storage       TEXT NOT NULL DEFAULT 'file',
     note_type     TEXT NOT NULL,
     folder        TEXT NOT NULL,
     tags          TEXT NOT NULL,

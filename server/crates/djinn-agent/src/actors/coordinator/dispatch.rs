@@ -1,7 +1,6 @@
 use super::*;
 use crate::roles::DispatchContext;
 use crate::task_merge::{self, MergeActions};
-use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
@@ -1008,7 +1007,7 @@ impl CoordinatorActor {
                 "Automated patrol session to review board health, epic progress, and approach viability.",
                 "Review open epics and tasks for stuck work, missing blockers, and strategic issues.",
                 "review",
-                PRIORITY_CRITICAL,
+                0,
                 "system",
                 Some("open"),
                 None,

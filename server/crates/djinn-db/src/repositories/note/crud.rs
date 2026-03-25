@@ -1,6 +1,69 @@
 use super::*;
 
+struct CreateNoteParams<'a> {
+    project_id: &'a str,
+    project_path: Option<&'a Path>,
+    title: &'a str,
+    content: &'a str,
+    note_type: &'a str,
+    tags: &'a str,
+    storage: &'a str,
+}
+
+impl<'a> CreateNoteParams<'a> {
+    fn file(
+        project_id: &'a str,
+        project_path: Option<&'a Path>,
+        title: &'a str,
+        content: &'a str,
+        note_type: &'a str,
+        tags: &'a str,
+    ) -> Self {
+        Self {
+            project_id,
+            project_path,
+            title,
+            content,
+            note_type,
+            tags,
+            storage: "file",
+        }
+    }
+
+    fn db(
+        project_id: &'a str,
+        title: &'a str,
+        content: &'a str,
+        note_type: &'a str,
+        tags: &'a str,
+    ) -> Self {
+        Self {
+            project_id,
+            project_path: None,
+            title,
+            content,
+            note_type,
+            tags,
+            storage: "db",
+        }
+    }
+}
+
 impl NoteRepository {
+    pub async fn create_db_note(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+    ) -> Result<Note> {
+        self.create_internal(CreateNoteParams::db(
+            project_id, title, content, note_type, tags,
+        ))
+        .await
+    }
+
     fn note_file_path(&self, project_path: &Path, note_type: &str, title: &str) -> PathBuf {
         let root = self.worktree_root.as_deref().unwrap_or(project_path);
         file_path_for(root, note_type, title)
@@ -33,14 +96,41 @@ impl NoteRepository {
         note_type: &str,
         tags: &str,
     ) -> Result<Note> {
+        self.create_internal(CreateNoteParams::file(
+            project_id,
+            Some(project_path),
+            title,
+            content,
+            note_type,
+            tags,
+        ))
+        .await
+    }
+
+    async fn create_internal(&self, params: CreateNoteParams<'_>) -> Result<Note> {
         self.db.ensure_initialized().await?;
+
+        let CreateNoteParams {
+            project_id,
+            project_path,
+            title,
+            content,
+            note_type,
+            tags,
+            storage,
+        } = params;
 
         let id = uuid::Uuid::now_v7().to_string();
         let permalink = permalink_for(note_type, title);
-        let file_path = self.note_file_path(project_path, note_type, title);
-        let file_path_str = file_path_for(project_path, note_type, title)
-            .to_string_lossy()
-            .to_string();
+        let file_path =
+            project_path.map(|project_path| self.note_file_path(project_path, note_type, title));
+        let file_path_str = project_path
+            .map(|project_path| {
+                file_path_for(project_path, note_type, title)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .unwrap_or_default();
 
         let project_id = project_id.to_owned();
         let title = title.to_owned();
@@ -48,10 +138,14 @@ impl NoteRepository {
         let note_type = note_type.to_owned();
         let folder = folder_for_type(&note_type).to_owned();
         let tags = tags.to_owned();
+        let storage = storage.to_owned();
 
-        // Write file to disk before inserting into DB. Directory creation is
-        // attempted here; a failure returns an error before touching the DB.
-        write_note_file(&file_path, &title, &note_type, &tags, &content)?;
+        if storage == "file" {
+            let file_path = file_path.as_ref().ok_or_else(|| {
+                Error::InvalidData("file-backed notes require a project path".to_string())
+            })?;
+            write_note_file(file_path, &title, &note_type, &tags, &content)?;
+        }
 
         let note_result: Result<Note> = async {
             let mut tx = self.db.pool().begin().await?;
@@ -59,14 +153,15 @@ impl NoteRepository {
             sqlx::query(
                 "INSERT INTO notes
                     (id, project_id, permalink, title, file_path,
-                     note_type, folder, tags, content)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     storage, note_type, folder, tags, content)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )
             .bind(&id)
             .bind(&project_id)
             .bind(&permalink)
             .bind(&title)
             .bind(&file_path_str)
+            .bind(&storage)
             .bind(&note_type)
             .bind(&folder)
             .bind(&tags)
@@ -88,8 +183,9 @@ impl NoteRepository {
         .await;
 
         let note = note_result.inspect_err(|_e| {
-            // Best-effort cleanup: remove file if DB insert failed.
-            let _ = std::fs::remove_file(&file_path);
+            if let Some(file_path) = file_path.as_ref() {
+                let _ = std::fs::remove_file(file_path);
+            }
         })?;
 
         self.events.send(DjinnEventEnvelope::note_created(&note));
@@ -112,7 +208,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Note>(
             "SELECT id, project_id, permalink, title, file_path,
-                        note_type, folder, tags, content,
+                        storage, note_type, folder, tags, content,
                         created_at, updated_at, last_accessed,
                         access_count, confidence, abstract as abstract_, overview
                  FROM notes WHERE project_id = ?1 AND permalink = ?2",
@@ -140,7 +236,6 @@ impl NoteRepository {
         if let Some(n) = self.get_by_permalink(project_id, identifier).await? {
             return Ok(Some(n));
         }
-        // Fallback: title search, take best match.
         let results = self
             .search(project_id, identifier, None, None, None, 1)
             .await?;
@@ -150,13 +245,12 @@ impl NoteRepository {
         Ok(None)
     }
 
-    /// List notes for a project, optionally filtered by folder.
     pub async fn list(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<Note>> {
         self.db.ensure_initialized().await?;
         if let Some(folder) = folder {
             Ok(sqlx::query_as::<_, Note>(
                 "SELECT id, project_id, permalink, title, file_path,
-                            note_type, folder, tags, content,
+                            storage, note_type, folder, tags, content,
                             created_at, updated_at, last_accessed,
                             access_count, confidence, abstract as abstract_, overview
                      FROM notes WHERE project_id = ?1 AND folder = ?2
@@ -169,7 +263,7 @@ impl NoteRepository {
         } else {
             Ok(sqlx::query_as::<_, Note>(
                 "SELECT id, project_id, permalink, title, file_path,
-                            note_type, folder, tags, content,
+                            storage, note_type, folder, tags, content,
                             created_at, updated_at, last_accessed,
                             access_count, confidence, abstract as abstract_, overview
                      FROM notes WHERE project_id = ?1
@@ -181,25 +275,23 @@ impl NoteRepository {
         }
     }
 
-    /// Update a note's title, content, and tags. The file is overwritten
-    /// in-place (file_path and permalink stay fixed after creation).
     pub async fn update(&self, id: &str, title: &str, content: &str, tags: &str) -> Result<Note> {
         self.db.ensure_initialized().await?;
 
-        // Fetch current note to get file_path and note_type.
         let current = self
             .get(id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
-        let file_path = self.existing_note_file_path(&current);
-        write_note_file(&file_path, title, &current.note_type, tags, content)?;
+        if current.storage == "file" {
+            let file_path = self.existing_note_file_path(&current);
+            write_note_file(&file_path, title, &current.note_type, tags, content)?;
+        }
 
         let id = id.to_owned();
         let title = title.to_owned();
         let content = content.to_owned();
         let tags = tags.to_owned();
-
         let permalink = current.permalink.clone();
 
         let mut tx = self.db.pool().begin().await?;
@@ -233,9 +325,6 @@ impl NoteRepository {
         Ok(note)
     }
 
-    /// Update only abstract and overview summary fields for a note.
-    ///
-    /// This is used by the MCP-owned summary generation worker.
     pub async fn update_summaries(
         &self,
         id: &str,
@@ -243,10 +332,7 @@ impl NoteRepository {
         overview: Option<&str>,
     ) -> Result<Note> {
         self.db.ensure_initialized().await?;
-
-        // Ensure note exists first; this also guards against accidental no-op updates.
         let id = id.to_owned();
-
         let mut tx = self.db.pool().begin().await?;
 
         sqlx::query(
@@ -268,17 +354,13 @@ impl NoteRepository {
             .await?;
 
         tx.commit().await?;
-
         self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
     }
 
-    /// Delete a note. Removes the DB row (and FTS5 index via trigger) first,
-    /// then attempts to remove the file from disk.
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
 
-        // Fetch file_path before deleting from DB.
         let current = self
             .get(id)
             .await?
@@ -292,17 +374,16 @@ impl NoteRepository {
             .execute(self.db.pool())
             .await?;
 
-        // Best-effort file removal — don't fail if file is already gone.
-        let file_path = self.existing_note_file_path(&current);
-        let _ = std::fs::remove_file(file_path);
+        if current.storage == "file" {
+            let file_path = self.existing_note_file_path(&current);
+            let _ = std::fs::remove_file(file_path);
+        }
 
         self.events
             .send(DjinnEventEnvelope::note_deleted(&id_for_event));
         Ok(())
     }
 
-    /// Update `last_accessed` without emitting a change event (read-access
-    /// tracking should not flood the SSE stream).
     pub async fn touch_accessed(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         let note = self
@@ -328,11 +409,6 @@ impl NoteRepository {
         Ok(())
     }
 
-    /// Move a note to a new location (rename file, update permalink and folder).
-    ///
-    /// The new position is described by `new_note_type` + `new_title`. If the type
-    /// changes the file moves to the new type's folder. The content and tags are
-    /// preserved unchanged.
     pub async fn move_note(
         &self,
         id: &str,
@@ -347,6 +423,12 @@ impl NoteRepository {
             .await?
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
+        if current.storage != "file" {
+            return Err(Error::InvalidData(
+                "db-backed notes cannot be moved on disk".to_string(),
+            ));
+        }
+
         let current_file_path = self.existing_note_file_path(&current);
         let new_file_path = self.note_file_path(project_path, new_note_type, new_title);
         let new_permalink = permalink_for(new_note_type, new_title);
@@ -355,7 +437,6 @@ impl NoteRepository {
             .to_string_lossy()
             .to_string();
 
-        // Create destination directory and rename the file.
         if let Some(parent) = new_file_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 Error::InvalidData(format!("create_dir_all {}: {e}", parent.display()))
@@ -368,7 +449,6 @@ impl NoteRepository {
                 new_file_path.display()
             ))
         })?;
-        // Rewrite frontmatter to reflect new title/type.
         write_note_file(
             &new_file_path,
             new_title,
@@ -398,7 +478,7 @@ impl NoteRepository {
         .execute(&mut *tx)
         .await?;
 
-        // Re-resolve previously-broken links that match the new title/permalink.
+        index_links_for_note(&mut tx, id, &current.project_id, &current.content).await?;
         resolve_links_for_note(&mut tx, id, new_title, &new_permalink, &current.project_id).await?;
 
         let note: Note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)

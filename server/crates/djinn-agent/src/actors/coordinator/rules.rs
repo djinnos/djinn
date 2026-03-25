@@ -7,7 +7,6 @@
 // All rules are deterministic — zero LLM calls.
 
 use super::*;
-use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_core::models::IssueType;
 use djinn_db::EpicRepository;
 
@@ -80,8 +79,10 @@ impl CoordinatorActor {
 
         // Rule 2: Batch completion — all non-planning/review tasks closed.
         // (Planning tasks themselves don't trigger further planning.)
-        let is_planning_or_review =
-            matches!(task.issue_type.as_str(), "planning" | "decomposition" | "review");
+        let is_planning_or_review = matches!(
+            task.issue_type.as_str(),
+            "planning" | "decomposition" | "review"
+        );
         if is_planning_or_review {
             return;
         }
@@ -102,7 +103,12 @@ impl CoordinatorActor {
         // Worker tasks = not planning / review.
         let worker_tasks: Vec<_> = all_tasks
             .iter()
-            .filter(|t| !matches!(t.issue_type.as_str(), "planning" | "decomposition" | "review"))
+            .filter(|t| {
+                !matches!(
+                    t.issue_type.as_str(),
+                    "planning" | "decomposition" | "review"
+                )
+            })
             .collect();
 
         if worker_tasks.is_empty() {
@@ -144,9 +150,10 @@ impl CoordinatorActor {
         epic_id: &str,
     ) -> bool {
         match task_repo.list_by_epic(epic_id).await {
-            Ok(tasks) => tasks
-                .iter()
-                .any(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition") && t.status != "closed"),
+            Ok(tasks) => tasks.iter().any(|t| {
+                matches!(t.issue_type.as_str(), "planning" | "decomposition")
+                    && t.status != "closed"
+            }),
             Err(_) => false,
         }
     }
@@ -169,7 +176,7 @@ impl CoordinatorActor {
                 "Plan the next wave of work for this epic. Review completed work, update the roadmap, and create 3–5 tasks.",
                 "",
                 IssueType::Planning.as_str(),
-                PRIORITY_CRITICAL,
+                0,
                 "system",
                 Some("open"),
                 None,
@@ -343,7 +350,10 @@ mod tests {
     fn planning_count(tasks: &[djinn_core::models::Task]) -> usize {
         tasks
             .iter()
-            .filter(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition") && t.status != "closed")
+            .filter(|t| {
+                matches!(t.issue_type.as_str(), "planning" | "decomposition")
+                    && t.status != "closed"
+            })
             .count()
     }
 
@@ -408,15 +418,7 @@ mod tests {
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
         // Pre-create an open planning task.
-        create_task(
-            &db,
-            &epic.id,
-            &project.id,
-            "Existing plan",
-            "planning",
-            &tx,
-        )
-        .await;
+        create_task(&db, &epic.id, &project.id, "Existing plan", "planning", &tx).await;
 
         let spike = create_task(&db, &epic.id, &project.id, "Spike", "spike", &tx).await;
 
@@ -480,15 +482,7 @@ mod tests {
 
         let t1 = create_task(&db, &epic.id, &project.id, "Task 1", "task", &tx).await;
         // Pre-existing open planning task.
-        create_task(
-            &db,
-            &epic.id,
-            &project.id,
-            "Existing plan",
-            "planning",
-            &tx,
-        )
-        .await;
+        create_task(&db, &epic.id, &project.id, "Existing plan", "planning", &tx).await;
 
         let _handle = spawn_coordinator(&db, &tx);
         close_task(&db, &t1.id, &tx).await;

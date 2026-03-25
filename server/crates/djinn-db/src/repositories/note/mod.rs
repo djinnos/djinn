@@ -39,7 +39,7 @@ use indexing::{index_links_for_note, resolve_links_for_note};
 // ── SQL constant ─────────────────────────────────────────────────────────────
 
 const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, file_path,
-            note_type, folder, tags, content,
+            storage, note_type, folder, tags, content,
             created_at, updated_at, last_accessed,
             access_count, confidence, abstract as abstract_, overview
      FROM notes WHERE id = ?1";
@@ -130,6 +130,7 @@ mod tests {
 
         assert_eq!(note.title, "My ADR");
         assert_eq!(note.note_type, "adr");
+        assert_eq!(note.storage, "file");
         assert_eq!(note.folder, "decisions");
         assert_eq!(note.permalink, "decisions/my-adr");
         assert!(note.file_path.ends_with("decisions/my-adr.md"));
@@ -265,6 +266,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_backed_notes_skip_filesystem_and_round_trip_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note = repo
+            .create_db_note(&project.id, "Extracted Pattern", "body", "pattern", "[]")
+            .await
+            .unwrap();
+
+        assert_eq!(note.storage, "db");
+        assert_eq!(note.file_path, "");
+        assert!(
+            !tmp.path()
+                .join(".djinn/patterns/extracted-pattern.md")
+                .exists()
+        );
+
+        let fetched = repo.get(&note.id).await.unwrap().unwrap();
+        assert_eq!(fetched.storage, "db");
+        assert_eq!(fetched.file_path, "");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_note() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
@@ -300,6 +327,29 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_db_backed_note_skips_filesystem_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note = repo
+            .create_db_note(&project.id, "DB Note", "old content", "case", "[]")
+            .await
+            .unwrap();
+
+        let updated = repo
+            .update(&note.id, "DB Note", "new content", r#"["updated"]"#)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.storage, "db");
+        assert_eq!(updated.content, "new content");
+        assert!(!tmp.path().join(".djinn/cases/db-note.md").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_note() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
@@ -329,6 +379,24 @@ mod tests {
         assert_eq!(envelope.entity_type, "note");
         assert_eq!(envelope.action, "deleted");
         assert_eq!(envelope.payload["id"].as_str().unwrap(), note.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_db_backed_note_keeps_missing_files_irrelevant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let note = repo
+            .create_db_note(&project.id, "DB Delete", "body", "pitfall", "[]")
+            .await
+            .unwrap();
+
+        repo.delete(&note.id).await.unwrap();
+        assert!(repo.get(&note.id).await.unwrap().is_none());
+        assert!(!tmp.path().join(".djinn/pitfalls/db-delete.md").exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1208,6 +1276,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(third.deleted, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reindex_from_disk_keeps_db_backed_notes_when_files_are_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let db_note = repo
+            .create_db_note(&project.id, "Extracted Case", "db body", "case", "[]")
+            .await
+            .unwrap();
+        let file_note = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "File Note",
+                "file body",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        std::fs::remove_file(&file_note.file_path).unwrap();
+
+        let summary = repo
+            .reindex_from_disk(&project.id, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(summary.deleted, 1);
+        assert!(repo.get(&db_note.id).await.unwrap().is_some());
+        assert!(repo.get(&file_note.id).await.unwrap().is_none());
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_affinity_scores_task_epic_blocker_and_max() {

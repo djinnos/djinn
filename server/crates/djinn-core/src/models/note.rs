@@ -1,8 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A knowledge base note. Source of truth is the markdown file on disk;
-/// this struct represents the SQLite index row.
+/// A knowledge base note persisted in the SQLite index, optionally backed by a
+/// markdown file on disk.
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Note {
@@ -13,6 +13,9 @@ pub struct Note {
     pub title: String,
     /// Absolute path to the markdown file on disk.
     pub file_path: String,
+    /// Storage backing discriminator: `file` for filesystem-backed notes, `db`
+    /// for database-only notes.
+    pub storage: String,
     pub note_type: String,
     pub folder: String,
     pub tags: String,    // JSON array string, e.g. '["rust","db"]'
@@ -40,6 +43,7 @@ impl Note {
             "permalink": self.permalink,
             "title": self.title,
             "file_path": self.file_path,
+            "storage": self.storage,
             "note_type": self.note_type,
             "folder": self.folder,
             "tags": self.parsed_tags(),
