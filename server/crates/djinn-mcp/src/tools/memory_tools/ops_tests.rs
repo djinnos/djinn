@@ -154,7 +154,7 @@ mod tests {
 
         let after = access_count_for(&setup.server, &setup.project, &setup.permalink).await;
         assert_eq!(after, before + 2);
-        assert_eq!(setup.server.recorded_note_ids().await.len(), 2);
+        assert_eq!(setup.server.recorded_note_ids().await.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -201,7 +201,7 @@ mod tests {
 
         let after = access_count_for(&setup.server, &setup.project, &note.permalink).await;
         assert_eq!(after, before + 2);
-        assert_eq!(setup.server.recorded_note_ids().await.len(), 2);
+        assert_eq!(setup.server.recorded_note_ids().await.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -73,7 +73,8 @@ impl Database {
     /// Uses a temp file so that both rusqlite (for refinery migrations) and
     /// sqlx can access the same database.
     pub fn open_in_memory() -> DbResult<Self> {
-        let tmp = std::env::temp_dir().join(format!("djinn-test-{}.db", uuid::Uuid::now_v7()));
+        let base = workspace_test_tmp_dir()?;
+        let tmp = base.join(format!("djinn-test-{}.db", uuid::Uuid::now_v7()));
         let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", tmp.display()))?
             .create_if_missing(true)
             .foreign_keys(true);
@@ -118,6 +119,29 @@ impl Database {
 
         Ok(())
     }
+}
+
+fn workspace_test_tmp_dir() -> DbResult<PathBuf> {
+    let mut current = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    loop {
+        let candidate = current.join("target").join("test-tmp");
+        if candidate.parent().is_some_and(Path::exists) {
+            std::fs::create_dir_all(&candidate).map_err(|e| DbError::InvalidData(e.to_string()))?;
+            return Ok(candidate);
+        }
+
+        if !current.pop() {
+            break;
+        }
+    }
+
+    let fallback = std::env::current_dir()
+        .map_err(|e| DbError::InvalidData(e.to_string()))?
+        .join("target")
+        .join("test-tmp");
+    std::fs::create_dir_all(&fallback).map_err(|e| DbError::InvalidData(e.to_string()))?;
+    Ok(fallback)
 }
 
 async fn apply_pragmas(conn: &mut sqlx::sqlite::SqliteConnection) -> sqlx::Result<()> {
