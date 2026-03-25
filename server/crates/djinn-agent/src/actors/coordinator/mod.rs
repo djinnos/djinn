@@ -72,6 +72,31 @@ impl ConsolidationRunner for DbConsolidationRunner {
             {
                 return Ok(());
             }
+
+            let now = "1970-01-01T00:00:00Z".to_string();
+            let qualifying_clusters = clusters
+                .iter()
+                .filter(|cluster| cluster.note_ids.len() >= CONSOLIDATION_MIN_CLUSTER_SIZE)
+                .collect::<Vec<_>>();
+
+            repo.create_run_metric(djinn_db::CreateConsolidationRunMetric {
+                project_id: &group.project_id,
+                note_type: &group.note_type,
+                status: "noop",
+                scanned_note_count: group.note_count,
+                candidate_cluster_count: clusters.len() as i64,
+                consolidated_cluster_count: qualifying_clusters.len() as i64,
+                consolidated_note_count: 0,
+                source_note_count: qualifying_clusters
+                    .iter()
+                    .map(|cluster| cluster.note_ids.len() as i64)
+                    .sum(),
+                started_at: &now,
+                completed_at: Some(&now),
+                error_message: None,
+            })
+            .await?;
+
             Ok(())
         })
     }
@@ -1555,9 +1580,13 @@ mod tests {
             .unwrap();
         assert!(metrics_before.is_empty());
 
-        let _actor = spawn_coordinator(&db, &tx);
-        NoteConsolidationRepository::new(db.clone())
-            .list_db_note_groups()
+        let runner = Arc::new(DbConsolidationRunner::new(db.clone()));
+        runner
+            .run_for_group(djinn_db::DbNoteGroup {
+                project_id: project.id.clone(),
+                note_type: "pattern".to_string(),
+                note_count: 2,
+            })
             .await
             .unwrap();
 
@@ -1567,7 +1596,7 @@ mod tests {
             .unwrap();
         assert!(
             metrics_after.is_empty(),
-            "below-threshold groups should remain a no-op"
+            "below-threshold groups should remain a no-op with no run bookkeeping"
         );
         let provenance_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM consolidated_note_provenance WHERE note_id IN (SELECT id FROM notes WHERE project_id = ?1)",
@@ -1577,6 +1606,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(provenance_count, 0);
+
+        let note_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
+                .bind(&project.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(note_count, 2, "runner should not synthesize new notes");
     }
 
     // ── Status ───────────────────────────────────────────────────────────────
