@@ -80,24 +80,24 @@ struct ExtractionContext<'a> {
     project_id: &'a str,
     session_id: &'a str,
     provenance: &'a str,
+    #[cfg(test)]
     candidate_lookup: CandidateLookup,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct CandidateLookup {
-    #[cfg(test)]
     override_lookup: Option<CandidateLookupOverride>,
 }
 
+#[cfg(test)]
 impl CandidateLookup {
     const fn production() -> Self {
         Self {
-            #[cfg(test)]
             override_lookup: None,
         }
     }
 
-    #[cfg(test)]
     const fn with_override(override_lookup: CandidateLookupOverride) -> Self {
         Self {
             override_lookup: Some(override_lookup),
@@ -394,18 +394,10 @@ async fn run_llm_extraction_inner(
         project_id: &project.id,
         session_id: &session_id,
         provenance: &provenance,
-        candidate_lookup: {
-            #[cfg(test)]
-            {
-                candidate_lookup_override
-                    .map(|lookup| CandidateLookup::with_override(lookup))
-                    .unwrap_or_else(CandidateLookup::production)
-            }
-            #[cfg(not(test))]
-            {
-                CandidateLookup::production()
-            }
-        },
+        #[cfg(test)]
+        candidate_lookup: candidate_lookup_override
+            .map(|lookup| CandidateLookup::with_override(lookup))
+            .unwrap_or_else(CandidateLookup::production),
     };
 
     for (note_type, notes) in note_pairs {
