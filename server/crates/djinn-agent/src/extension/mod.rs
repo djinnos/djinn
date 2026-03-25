@@ -161,6 +161,7 @@ where
         "epic_show" => call_epic_show(state, &call.arguments).await,
         "epic_update" => call_epic_update(state, &call.arguments).await,
         "epic_tasks" => call_epic_tasks(state, &call.arguments).await,
+        "epic_close" => call_epic_close(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments).await,
         "memory_search" => call_memory_search(state, &call.arguments, session_task_id).await,
         "memory_list" => call_memory_list(state, &call.arguments).await,
@@ -635,6 +636,33 @@ async fn call_epic_tasks(
         map.insert("total".to_string(), total_count);
     }
     Ok(value)
+}
+
+async fn call_epic_close(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: EpicShowParams = parse_args(arguments)?;
+    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
+    let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
+    let epic = repo
+        .resolve_in_project(&project_id, &p.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("epic not found: {}", p.id))?;
+    if epic.status == "closed" {
+        return Err("epic is already closed".to_string());
+    }
+    let closed = repo.close(&epic.id).await.map_err(|e| e.to_string())?;
+    serde_json::to_value(serde_json::json!({
+        "epic": {
+            "id": closed.id,
+            "short_id": closed.short_id,
+            "title": closed.title,
+            "status": closed.status,
+        }
+    }))
+    .map_err(|e| e.to_string())
 }
 
 async fn call_task_create(

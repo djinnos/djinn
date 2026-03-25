@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3765
 expression: names
 ---
 [
@@ -22,6 +21,7 @@ expression: names
   "epic_show",
   "epic_update",
   "epic_tasks",
+  "epic_close",
   "task_transition",
   "task_delete_branch",
   "task_archive_activity",
