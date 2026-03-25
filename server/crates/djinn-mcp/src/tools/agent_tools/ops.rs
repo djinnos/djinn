@@ -1,8 +1,9 @@
 use crate::tools::json_object::AnyJson;
 use djinn_core::models::Agent;
-use djinn_db::{AgentCreateInput, AgentListQuery, AgentRepository, VALID_BASE_ROLES};
+use djinn_db::repositories::agent::ExtractionQualityMetrics as DbExtractionQualityMetrics;
 use djinn_db::{
-    AgentMetrics as DbAgentMetrics, ExtractionQualityMetrics as DbExtractionQualityMetrics,
+    AgentCreateInput, AgentListQuery, AgentMetrics as DbAgentMetrics, AgentRepository,
+    VALID_BASE_ROLES,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

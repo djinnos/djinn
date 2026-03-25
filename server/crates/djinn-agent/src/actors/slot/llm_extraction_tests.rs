@@ -20,9 +20,7 @@ use djinn_db::{
 };
 
 use crate::actors::slot::llm_extraction::{run_llm_extraction, run_llm_extraction_with_provider};
-use crate::actors::slot::session_extraction::{
-    ExtractionQuality, SessionTaxonomy, extract_session_signals,
-};
+use crate::actors::slot::session_extraction::{SessionTaxonomy, extract_session_signals};
 use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, create_test_db};
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -327,6 +325,7 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
         notes_read: 1,
         notes_written: 2,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
 
     let provider = fake_extraction_provider();
@@ -407,6 +406,7 @@ async fn llm_extracted_notes_have_confidence_0_5() {
         notes_read: 0,
         notes_written: 1,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
 
     let provider = fake_extraction_provider();
@@ -498,9 +498,8 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
         notes_read: 1,
         notes_written: 2,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
-
-    // FailingProvider always returns an error from stream()
     let provider = Arc::new(FailingProvider::new("injected LLM failure for test"));
     // Should complete without panicking
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -533,9 +532,8 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         notes_read: 0,
         notes_written: 1,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
-
-    // No credentials configured — resolve_memory_provider will fail → graceful skip
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
@@ -570,9 +568,8 @@ async fn llm_extraction_repeated_sessions_produce_no_duplicate_notes() {
         notes_read: 0,
         notes_written: 1,
         tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
     };
-
-    // Both sessions return the same title → same permalink → second insert fails.
     // The FakeProvider must be created fresh for each call (scripted turns = 1).
     for _ in 0..2_u32 {
         let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
