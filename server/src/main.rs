@@ -261,9 +261,8 @@ fn init_logging() -> (WorkerGuard, WorkerGuard) {
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
     let (stderr_writer, stderr_guard) = tracing_appender::non_blocking(std::io::stderr());
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,opentelemetry_sdk=warn")
-    });
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,opentelemetry_sdk=warn"));
     let format = tracing_subscriber::fmt::format()
         .compact()
         .with_target(true);
