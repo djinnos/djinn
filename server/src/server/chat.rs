@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::path::Path;
 use std::time::Instant;
 
 use axum::Json;
@@ -16,25 +17,73 @@ use djinn_agent::actors::slot::{
 };
 use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
 use djinn_agent::provider::{StreamEvent, create_provider};
-use djinn_db::{EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, TaskRepository};
+use djinn_db::{
+    EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, RepoMapCacheKey,
+    RepoMapCacheRepository, TaskRepository,
+};
 use djinn_mcp::server::DjinnMcpServer;
 
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
+const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
 
 fn compose_system_prompt(
     base_prompt: &str,
     project_context: Option<&str>,
+    repo_map_context: Option<&str>,
     client_system: Option<&str>,
 ) -> String {
     let mut system_prompt = base_prompt.trim().to_string();
     if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
         system_prompt = format!("{system_prompt}\n\n{project_context}");
     }
+    if let Some(repo_map_context) = repo_map_context.filter(|s| !s.trim().is_empty()) {
+        system_prompt = format!("{system_prompt}\n\n{repo_map_context}");
+    }
     if let Some(client_system) = client_system.filter(|s| !s.trim().is_empty()) {
         system_prompt = format!("{system_prompt}\n\n{client_system}");
     }
     system_prompt
+}
+
+fn format_repo_map_block(rendered: &str) -> String {
+    format!("{REPO_MAP_SYSTEM_HEADER}\n{rendered}")
+}
+
+async fn repo_commit_sha(state: &AppState, repo_path: &Path) -> Option<String> {
+    let git = state.git_actor(repo_path).await.ok()?;
+    let head = git.head_commit().await.ok()?;
+    Some(head.sha)
+}
+
+async fn build_repo_map_context_block(state: &AppState, project_ref: &str) -> Option<String> {
+    let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let project_id = match project_repo.resolve(project_ref).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return None,
+        Err(_) => return None,
+    };
+
+    let project = match project_repo.get(&project_id).await {
+        Ok(Some(project)) => project,
+        Ok(None) => return None,
+        Err(_) => return None,
+    };
+
+    let commit_sha = repo_commit_sha(state, Path::new(&project.path)).await?;
+    let repo_map_repo = RepoMapCacheRepository::new(state.db().clone());
+    let cached = repo_map_repo
+        .get(RepoMapCacheKey {
+            project_id: &project.id,
+            project_path: &project.path,
+            worktree_path: None,
+            commit_sha: &commit_sha,
+        })
+        .await
+        .ok()
+        .flatten()?;
+
+    Some(format_repo_map_block(&cached.rendered_map))
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,9 +327,15 @@ pub(super) async fn completions_handler(
     } else {
         None
     };
+    let repo_map_context = if let Some(project_ref) = req.project.as_deref() {
+        build_repo_map_context_block(&state, project_ref).await
+    } else {
+        None
+    };
     let system_prompt = compose_system_prompt(
         DJINN_CHAT_SYSTEM_PROMPT,
         project_context.as_deref(),
+        repo_map_context.as_deref(),
         req.system.as_deref(),
     );
     conversation.push(Message::system(system_prompt));
@@ -483,7 +538,10 @@ pub(super) async fn completions_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{DJINN_CHAT_SYSTEM_PROMPT, ToolCallPayload, compose_system_prompt, sse_json_event};
+    use super::{
+        DJINN_CHAT_SYSTEM_PROMPT, REPO_MAP_SYSTEM_HEADER, ToolCallPayload, compose_system_prompt,
+        format_repo_map_block, sse_json_event,
+    };
     use crate::server::AppState;
     use crate::test_helpers;
     use djinn_mcp::server::DjinnMcpServer;
@@ -566,12 +624,15 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_contains_base_prompt_first_and_project_block_before_client_system() {
+    fn system_prompt_contains_base_prompt_first_and_project_block_before_repo_map_and_client_system()
+     {
         let project_context = "## Current Project\n**Name**: Demo  **Path**: /tmp/demo\n**Open epics**: 1  **Open tasks**: 2\n**Brief**: hello";
+        let repo_map = format_repo_map_block("src/main.rs\n  fn main()");
         let client_system = "client system message";
         let prompt = compose_system_prompt(
             DJINN_CHAT_SYSTEM_PROMPT,
             Some(project_context),
+            Some(&repo_map),
             Some(client_system),
         );
 
@@ -579,17 +640,28 @@ mod tests {
         assert!(prompt.starts_with(base));
         let base_pos = prompt.find(base).unwrap();
         let project_pos = prompt.find("## Current Project").unwrap();
+        let repo_map_pos = prompt.find(REPO_MAP_SYSTEM_HEADER).unwrap();
         let client_pos = prompt.find(client_system).unwrap();
         assert!(base_pos <= project_pos);
-        assert!(project_pos < client_pos);
+        assert!(project_pos < repo_map_pos);
+        assert!(repo_map_pos < client_pos);
     }
 
     #[test]
     fn system_prompt_appends_client_system_after_internal_content() {
         let client_system = "be concise";
-        let prompt = compose_system_prompt(DJINN_CHAT_SYSTEM_PROMPT, None, Some(client_system));
+        let prompt =
+            compose_system_prompt(DJINN_CHAT_SYSTEM_PROMPT, None, None, Some(client_system));
         assert!(prompt.starts_with(DJINN_CHAT_SYSTEM_PROMPT.trim()));
         assert!(prompt.ends_with(client_system));
+    }
+
+    #[test]
+    fn system_prompt_includes_repo_map_block_when_available() {
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run");
+        let prompt = compose_system_prompt(DJINN_CHAT_SYSTEM_PROMPT, None, Some(&repo_map), None);
+        assert!(prompt.contains(REPO_MAP_SYSTEM_HEADER));
+        assert!(prompt.contains("src/lib.rs"));
     }
 
     #[test]

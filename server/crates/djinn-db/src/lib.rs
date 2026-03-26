@@ -28,6 +28,7 @@ pub use repositories::{
         slugify,
     },
     project::{ProjectConfig, ProjectRepository, VerificationRule, validate_verification_rules},
+    repo_map_cache::{CachedRepoMap, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository},
     session::{CreateSessionParams, SessionRepository},
     session_message::SessionMessageRepository,
     settings::SettingsRepository,

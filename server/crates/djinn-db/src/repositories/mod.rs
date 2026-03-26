@@ -5,6 +5,7 @@ pub mod git_settings;
 pub mod models;
 pub mod note;
 pub mod project;
+pub mod repo_map_cache;
 pub mod session;
 pub mod session_message;
 pub mod settings;
