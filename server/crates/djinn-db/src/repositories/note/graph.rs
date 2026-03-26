@@ -182,6 +182,65 @@ impl NoteRepository {
             stale_notes_by_folder,
         })
     }
+    async fn note_id_by_permalink(
+        &self,
+        project_id: &str,
+        permalink: &str,
+    ) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT id FROM notes WHERE project_id = ?1 AND permalink = ?2 LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(permalink)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    async fn repo_map_file_affinity_scores(
+        &self,
+        project_id: &str,
+        memory_refs: &[String],
+    ) -> Result<Vec<(String, f64)>> {
+        if memory_refs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut seeds = Vec::new();
+        for permalink in memory_refs {
+            if let Some(id) = self.note_id_by_permalink(project_id, permalink).await? {
+                seeds.push(id);
+            }
+        }
+
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let candidate_scores = self.graph_proximity_scores(&seeds, 1).await?;
+        let mut filtered = Vec::new();
+
+        for (id, score) in candidate_scores {
+            let note_type = sqlx::query_scalar::<_, String>(
+                "SELECT note_type FROM notes WHERE id = ?1 AND project_id = ?2 LIMIT 1",
+            )
+            .bind(&id)
+            .bind(project_id)
+            .fetch_optional(self.db.pool())
+            .await?;
+
+            if matches!(note_type.as_deref(), Some("repo_map")) {
+                filtered.push((id, score * 0.35));
+            }
+        }
+
+        filtered.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        Ok(filtered)
+    }
+
     pub async fn task_affinity_scores(
         &self,
         project_id: &str,
@@ -205,13 +264,23 @@ impl NoteRepository {
                 .await?;
 
         if let Some(refs_json) = task_refs
-            && let Ok(note_ids) = serde_json::from_str::<Vec<String>>(&refs_json)
+            && let Ok(memory_refs) = serde_json::from_str::<Vec<String>>(&refs_json)
         {
-            for note_id in note_ids {
+            for note_id in &memory_refs {
                 scores
-                    .entry(note_id)
+                    .entry(note_id.clone())
                     .and_modify(|score| *score = score.max(1.0_f64))
                     .or_insert(1.0);
+            }
+
+            for (note_id, score) in self
+                .repo_map_file_affinity_scores(project_id, &memory_refs)
+                .await?
+            {
+                scores
+                    .entry(note_id)
+                    .and_modify(|existing| *existing = existing.max(score))
+                    .or_insert(score);
             }
         }
 

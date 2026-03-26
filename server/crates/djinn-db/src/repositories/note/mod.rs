@@ -1749,6 +1749,114 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let adr = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Repository Map ADR",
+                "See [[reference/repo-maps/repository-map-head]] and keep structural layout current.",
+                "adr",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let repo_map = repo
+            .upsert_db_note_by_permalink(
+                &project.id,
+                "reference/repo-maps/repository-map-head",
+                "Repository Map head",
+                "server/src/repo_map.rs\nserver/crates/djinn-db/src/repositories/note/search.rs",
+                "repo_map",
+                r#"["repo-map"]"#,
+            )
+            .await
+            .unwrap();
+
+        let task_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        )
+        .bind(&task_id)
+        .bind(&project.id)
+        .bind("T-RM")
+        .bind("Task")
+        .bind("")
+        .bind("")
+        .bind("task")
+        .bind(0_i64)
+        .bind("")
+        .bind("open")
+        .bind(0_i64)
+        .bind(serde_json::json!([adr.id.clone()]).to_string())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let scores = repo
+            .task_affinity_scores(&project.id, Some(&task_id))
+            .await
+            .unwrap();
+
+        let score_map: std::collections::HashMap<String, f64> = scores.into_iter().collect();
+        assert_eq!(score_map.get(&adr.id), Some(&1.0));
+        assert_eq!(score_map.get(&repo_map.id), Some(&0.245));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unrelated_search_query_does_not_return_repo_map_notes() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Decision Log",
+            "ordinary product planning note",
+            "adr",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.upsert_db_note_by_permalink(
+            &project.id,
+            "reference/repo-maps/repository-map-head",
+            "Repository Map head",
+            "server/src/repo_map.rs\nserver/crates/djinn-db/src/repositories/note/search.rs",
+            "repo_map",
+            r#"["repo-map"]"#,
+        )
+        .await
+        .unwrap();
+
+        let results = repo
+            .search(
+                &project.id,
+                "ordinary product planning",
+                None,
+                None,
+                None,
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].note_type, "adr");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_proximity_empty_for_seed_without_links() {
         let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
