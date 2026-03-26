@@ -24,7 +24,10 @@ mod scoring;
 mod search;
 
 pub use association::NoteAssociationEntry;
-pub use consolidation::{CreateConsolidationRunMetric, NoteConsolidationRepository};
+pub use consolidation::{
+    CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
+    CreatedCanonicalConsolidatedNote, NoteConsolidationRepository,
+};
 pub use context::BuildContextResponse;
 pub use djinn_core::models::{
     ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
@@ -2170,6 +2173,79 @@ mod tests {
             .await
             .unwrap();
         assert!(clusters.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consolidation_create_canonical_note_persists_db_note_confidence_and_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let _source_note_a = note_repo
+            .create_db_note(
+                &project.id,
+                "Source Pattern A",
+                "source body a",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _source_note_b = note_repo
+            .create_db_note(
+                &project.id,
+                "Source Pattern B",
+                "source body b",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let session_a = make_session(&db, &project.id, None, "worker/source-a").await;
+        let session_b = make_session(&db, &project.id, None, "worker/source-b").await;
+
+        let created = consolidation_repo
+            .create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
+                project_id: &project.id,
+                note_type: "pattern",
+                title: "Canonical Consolidated Pattern",
+                content: "synthesized canonical content",
+                tags: "[\"canonical\",\"consolidated\"]",
+                abstract_: Some("short abstract"),
+                overview: Some("overview summary"),
+                confidence: 1.2,
+                source_session_ids: &[&session_a, &session_b],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(created.note.storage, "db");
+        assert_eq!(created.note.note_type, "pattern");
+        assert_eq!(created.note.title, "Canonical Consolidated Pattern");
+        assert_eq!(created.note.content, "synthesized canonical content");
+        assert_eq!(created.note.abstract_.as_deref(), Some("short abstract"));
+        assert_eq!(created.note.overview.as_deref(), Some("overview summary"));
+        assert_eq!(created.note.confidence, CONFIDENCE_CEILING);
+        assert_eq!(created.provenance.len(), 2);
+        assert_eq!(created.provenance[0].session_id, session_a);
+        assert_eq!(created.provenance[1].session_id, session_b);
+
+        let fetched = note_repo.get(&created.note.id).await.unwrap().unwrap();
+        assert_eq!(fetched.storage, "db");
+        assert_eq!(fetched.confidence, CONFIDENCE_CEILING);
+        assert_eq!(fetched.abstract_.as_deref(), Some("short abstract"));
+        assert_eq!(fetched.overview.as_deref(), Some("overview summary"));
+
+        let provenance = consolidation_repo
+            .list_provenance(&created.note.id)
+            .await
+            .unwrap();
+        assert_eq!(provenance.len(), 2);
+        assert_eq!(provenance[0].session_id, session_a);
+        assert_eq!(provenance[1].session_id, session_b);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
