@@ -2437,6 +2437,116 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consolidation_resolve_source_session_ids_returns_deduped_sorted_recursive_provenance()
+    {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let direct_source = note_repo
+            .create_db_note(&project.id, "Direct source", "body", "pattern", "[]")
+            .await
+            .unwrap();
+        let canonical_source = note_repo
+            .create_db_note(&project.id, "Canonical source", "body", "pattern", "[]")
+            .await
+            .unwrap();
+
+        let session_a = make_session(&db, &project.id, None, "worker/source-a").await;
+        let session_b = make_session(&db, &project.id, None, "worker/source-b").await;
+        let session_c = make_session(&db, &project.id, None, "worker/source-c").await;
+
+        consolidation_repo
+            .add_provenance(&direct_source.id, &session_b)
+            .await
+            .unwrap();
+        consolidation_repo
+            .add_provenance(&canonical_source.id, &session_c)
+            .await
+            .unwrap();
+        consolidation_repo
+            .add_provenance(&canonical_source.id, &session_a)
+            .await
+            .unwrap();
+        consolidation_repo
+            .add_provenance(&canonical_source.id, &session_b)
+            .await
+            .unwrap();
+
+        let resolved = consolidation_repo
+            .resolve_source_session_ids(
+                &project.id,
+                &[
+                    canonical_source.id.clone(),
+                    direct_source.id.clone(),
+                    canonical_source.id.clone(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, vec![session_a, session_b, session_c]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consolidation_resolve_source_session_ids_returns_empty_when_notes_have_no_provenance()
+    {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let source_a = note_repo
+            .create_db_note(&project.id, "Source A", "body", "pattern", "[]")
+            .await
+            .unwrap();
+        let source_b = note_repo
+            .create_db_note(&project.id, "Source B", "body", "pattern", "[]")
+            .await
+            .unwrap();
+
+        let resolved = consolidation_repo
+            .resolve_source_session_ids(&project.id, &[source_b.id.clone(), source_a.id.clone()])
+            .await
+            .unwrap();
+
+        assert!(resolved.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consolidation_resolve_source_session_ids_validates_project_scope() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let other_root = crate::database::test_tempdir().unwrap();
+        let other_project = make_project(&db, other_root.path()).await;
+        let note_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let foreign_note = note_repo
+            .create_db_note(&other_project.id, "Foreign source", "body", "pattern", "[]")
+            .await
+            .unwrap();
+
+        let err = consolidation_repo
+            .resolve_source_session_ids(&project.id, &[foreign_note.id])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidData(_)));
+        assert!(err.to_string().contains(&format!(
+            "one or more source notes not found in project {}",
+            project.id
+        )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consolidation_provenance_round_trips_in_stable_order() {
         let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();

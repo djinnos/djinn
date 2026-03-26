@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use djinn_core::events::EventBus;
 use djinn_core::models::{
     ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
@@ -158,6 +160,51 @@ impl NoteConsolidationRepository {
             .await?;
 
         Ok(CreatedCanonicalConsolidatedNote { note, provenance })
+    }
+
+    pub async fn resolve_source_session_ids(
+        &self,
+        project_id: &str,
+        source_note_ids: &[String],
+    ) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+
+        if source_note_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = sql_placeholders(source_note_ids.len(), 2);
+        let note_count_query =
+            format!("SELECT COUNT(*) FROM notes WHERE project_id = ?1 AND id IN ({placeholders})");
+        let mut note_count = sqlx::query_scalar::<_, i64>(&note_count_query).bind(project_id);
+        for note_id in source_note_ids {
+            note_count = note_count.bind(note_id);
+        }
+        let note_count = note_count.fetch_one(self.db.pool()).await? as usize;
+        let unique_note_count = source_note_ids.iter().collect::<BTreeSet<_>>().len();
+        if note_count != unique_note_count {
+            return Err(Error::InvalidData(format!(
+                "one or more source notes not found in project {project_id}"
+            )));
+        }
+
+        let session_query = format!(
+            "SELECT DISTINCT cnp.session_id
+             FROM consolidated_note_provenance cnp
+             JOIN notes n ON n.id = cnp.note_id
+             WHERE n.project_id = ?1
+               AND cnp.note_id IN ({placeholders})
+             ORDER BY cnp.session_id ASC"
+        );
+        let mut session_ids = sqlx::query_scalar::<_, String>(&session_query).bind(project_id);
+        for note_id in source_note_ids {
+            session_ids = session_ids.bind(note_id);
+        }
+
+        session_ids
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(Into::into)
     }
 
     async fn clusters_from_notes(
@@ -487,6 +534,13 @@ fn canonical_pair(left: &str, right: &str) -> (String, String) {
     } else {
         (right.to_string(), left.to_string())
     }
+}
+
+fn sql_placeholders(count: usize, start_index: usize) -> String {
+    (0..count)
+        .map(|offset| format!("?{}", start_index + offset))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn sanitize_fts5_query(query: &str) -> Option<String> {
