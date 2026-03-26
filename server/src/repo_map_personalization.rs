@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 
 use djinn_core::models::{NoteSearchResult, Task};
 
+use crate::task_confidence::parse_task_memory_refs;
+
 const MIN_IDENTIFIER_LEN: usize = 3;
 const MAX_IDENTIFIER_LEN: usize = 64;
 const MAX_IDENTIFIERS: usize = 64;
@@ -145,10 +147,6 @@ pub fn extract_identifier_candidates(input: &RepoMapPersonalizationInput<'_>) ->
     }
 
     seen.into_iter().take(MAX_IDENTIFIERS).collect()
-}
-
-pub fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(memory_refs).unwrap_or_else(|_| Vec::new())
 }
 
 pub fn note_search_inputs_from_memory_refs(memory_refs: &str) -> Vec<RepoMapNoteSearchInput> {

@@ -4,6 +4,23 @@ use djinn_core::models::Task;
 use djinn_db::{ActivityQuery, NoteRepository, TaskRepository};
 use serde::{Deserialize, Serialize};
 
+#[allow(unreachable_pub)]
+#[cfg(test)]
+pub fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(memory_refs).unwrap_or_else(|_| {
+        tracing::warn!(memory_refs = %memory_refs, "invalid memory_refs JSON for task completion signal");
+        Vec::new()
+    })
+}
+
+#[cfg(not(test))]
+pub(crate) fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(memory_refs).unwrap_or_else(|_| {
+        tracing::warn!(memory_refs = %memory_refs, "invalid memory_refs JSON for task completion signal");
+        Vec::new()
+    })
+}
+
 const TASK_SUCCESS_SIGNAL: f64 = 0.65;
 const COMPLETED_STATUS: &str = "closed";
 const COMPLETED_REASON: &str = "completed";
@@ -108,7 +125,7 @@ async fn handle_successful_task_completion(
         return;
     }
 
-    let memory_refs = parse_memory_refs(&payload.task.memory_refs);
+    let memory_refs = parse_task_memory_refs(&payload.task.memory_refs);
     if memory_refs.is_empty() {
         if let Err(error) = record_confidence_signal(
             task_repo,
@@ -188,13 +205,6 @@ async fn handle_successful_task_completion(
             "failed to record confidence signal activity for task completion"
         );
     }
-}
-
-fn parse_memory_refs(memory_refs: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(memory_refs).unwrap_or_else(|_| {
-        tracing::warn!(memory_refs = %memory_refs, "invalid memory_refs JSON for task completion signal");
-        Vec::new()
-    })
 }
 
 async fn record_confidence_signal(
