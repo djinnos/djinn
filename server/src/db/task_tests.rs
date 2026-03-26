@@ -1169,9 +1169,10 @@ async fn board_health_flags_repeated_reopen_role_tool_mismatch_candidates() {
     let _session = test_helpers::create_test_session(&db, &project.id, &task.id).await;
 
     let report = repo.board_health(24).await.unwrap();
-    let mismatches = report["repeated_reopen_role_tool_mismatches"]
-        .as_array()
-        .unwrap();
+    let mismatches = report
+        .get("repeated_reopen_role_tool_mismatches")
+        .and_then(|v| v.as_array())
+        .expect("repeated_reopen_role_tool_mismatches field should exist");
     assert_eq!(mismatches.len(), 1);
     assert_eq!(mismatches[0]["short_id"], task.short_id.as_str());
     assert_eq!(mismatches[0]["dispatched_role"], "worker");
@@ -1208,9 +1209,10 @@ async fn board_health_ignores_repeated_reopen_tasks_without_role_tool_mismatch()
         .unwrap();
 
     let report = repo.board_health(24).await.unwrap();
-    let mismatches = report["repeated_reopen_role_tool_mismatches"]
-        .as_array()
-        .unwrap();
+    let mismatches = report
+        .get("repeated_reopen_role_tool_mismatches")
+        .and_then(|v| v.as_array())
+        .expect("repeated_reopen_role_tool_mismatches field should exist");
     assert!(mismatches.is_empty());
 }
 
