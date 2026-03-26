@@ -1,5 +1,7 @@
 // MCP tools for epic operations (CRUD, listing, queries).
 
+use std::borrow::Cow;
+
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
@@ -8,26 +10,57 @@ use crate::tools::epic_ops::{
     EpicModel, EpicShowRequest, EpicShowResponse, EpicSingleResponse, EpicTasksRequest,
     EpicTasksResponse, EpicUpdateRequest,
 };
+use crate::tools::list_response::{
+    self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
+};
 use crate::tools::validation::{
     validate_color, validate_description, validate_emoji, validate_limit, validate_offset,
     validate_owner, validate_sort, validate_title,
 };
 use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository};
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Clone)]
 pub struct EpicListResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub epics: Option<Vec<EpicModel>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_count: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub offset: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub has_more: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub meta: ListMeta,
+}
+
+impl NamedListResponse for EpicListResponse {
+    type Item = EpicModel;
+
+    const FIELD_NAME: &'static str = "epics";
+    const TITLE: &'static str = "EpicListResponse";
+
+    fn from_parts(items: Option<Vec<Self::Item>>, meta: ListMeta) -> Self {
+        Self { epics: items, meta }
+    }
+
+    fn items(&self) -> Option<&Vec<Self::Item>> {
+        self.epics.as_ref()
+    }
+
+    fn meta(&self) -> &ListMeta {
+        &self.meta
+    }
+}
+
+impl Serialize for EpicListResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serialize_named_list_response(self, serializer)
+    }
+}
+
+impl schemars::JsonSchema for EpicListResponse {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed(Self::TITLE)
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        named_list_response_schema::<EpicModel>(generator, Self::TITLE, Self::FIELD_NAME)
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -296,14 +329,7 @@ impl DjinnMcpServer {
             sort,
             &["created", "created_desc", "updated", "updated_desc"],
         ) {
-            return Json(EpicListResponse {
-                epics: None,
-                total_count: None,
-                limit: None,
-                offset: None,
-                has_more: None,
-                error: Some(e),
-            });
+            return Json(list_response::error::<EpicListResponse>(e));
         }
         let limit = validate_limit(p.limit.unwrap_or(25));
         let offset = validate_offset(p.offset.unwrap_or(0));
@@ -311,14 +337,7 @@ impl DjinnMcpServer {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
-                return Json(EpicListResponse {
-                    epics: None,
-                    total_count: None,
-                    limit: None,
-                    offset: None,
-                    has_more: None,
-                    error: Some(e),
-                });
+                return Json(list_response::error::<EpicListResponse>(e));
             }
         };
         let query = EpicListQuery {
@@ -331,22 +350,13 @@ impl DjinnMcpServer {
         };
         let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.list_filtered(query).await {
-            Ok(result) => Json(EpicListResponse {
-                epics: Some(result.epics.iter().map(EpicModel::from).collect()),
-                total_count: Some(result.total_count),
-                limit: Some(limit),
-                offset: Some(offset),
-                has_more: Some(offset + limit < result.total_count),
-                error: None,
-            }),
-            Err(e) => Json(EpicListResponse {
-                epics: None,
-                total_count: None,
-                limit: None,
-                offset: None,
-                has_more: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(result) => Json(list_response::success::<EpicListResponse>(
+                result.epics.iter().map(EpicModel::from).collect(),
+                result.total_count,
+                limit,
+                offset,
+            )),
+            Err(e) => Json(list_response::error::<EpicListResponse>(e.to_string())),
         }
     }
 
