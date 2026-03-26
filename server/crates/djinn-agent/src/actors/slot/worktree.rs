@@ -235,10 +235,8 @@ pub(crate) async fn prepare_worktree(
         // is needed for an in-flight or upcoming PR push.  Deleting the branch
         // in these states causes `process_approved_tasks` to fail with
         // "src refspec does not match any" because the local ref is gone.
-        let branch_needed_for_pr = matches!(
-            task.status.as_str(),
-            "approved" | "pr_draft" | "pr_review"
-        );
+        let branch_needed_for_pr =
+            matches!(task.status.as_str(), "approved" | "pr_draft" | "pr_review");
         if branch_needed_for_pr {
             tracing::info!(
                 task_id = %task.short_id,
