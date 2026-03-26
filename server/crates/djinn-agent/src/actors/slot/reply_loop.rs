@@ -1787,8 +1787,6 @@ mod tests {
         assert!(output.finalize_payload.is_some(), "finalize payload set");
     }
 
-    /// ToolChoice::Required is passed for providers known to support it (e.g. OpenAI).
-    /// Verified by recording the tool_choice values received by the mock provider.
     #[tokio::test]
     async fn tool_choice_required_for_supported_providers() {
         use std::sync::Mutex;
