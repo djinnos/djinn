@@ -276,13 +276,8 @@ pub struct TaskClaimParams {
 // ── Response structs ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct TaskListResponse {
-    pub tasks: Vec<TaskListItem>,
-    pub total_count: i64,
-    pub limit: i64,
-    pub offset: i64,
-    pub has_more: bool,
-}
+#[serde(transparent)]
+pub struct TaskListResult(pub ListResponse<TaskListItem>);
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ErrorResponse {

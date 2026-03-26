@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::AnyJson;
+use crate::tools::list_response::ListResponse;
 use crate::tools::validation::{
     validate_ac_count, validate_actor_id, validate_actor_role, validate_body, validate_description,
     validate_design, validate_issue_type, validate_label, validate_labels_count, validate_limit,
@@ -266,19 +267,13 @@ impl DjinnMcpServer {
     pub async fn task_list(
         &self,
         Parameters(p): Parameters<TaskListParams>,
-    ) -> Json<TaskListResponse> {
+    ) -> Json<TaskListResult> {
         let project_id = match self.require_project_id(&p.project).await {
             Ok(id) => id,
             Err(_) => {
                 let limit = validate_limit(p.limit.unwrap_or(25));
                 let offset = validate_offset(p.offset.unwrap_or(0));
-                return Json(TaskListResponse {
-                    tasks: vec![],
-                    total_count: 0,
-                    limit,
-                    offset,
-                    has_more: false,
-                });
+                return Json(TaskListResult(ListResponse::empty(limit, offset)));
             }
         };
         let sort = p.sort.as_deref().unwrap_or("priority");
@@ -296,13 +291,7 @@ impl DjinnMcpServer {
             let limit = validate_limit(p.limit.unwrap_or(25));
             let offset = validate_offset(p.offset.unwrap_or(0));
             tracing::error!(error = %e, "task_list: invalid sort");
-            return Json(TaskListResponse {
-                tasks: vec![],
-                total_count: 0,
-                limit,
-                offset,
-                has_more: false,
-            });
+            return Json(TaskListResult(TaskListResponse::empty(limit, offset)));
         }
         if let Some(prio) = p.priority
             && let Err(e) = validate_priority(prio)
@@ -310,13 +299,7 @@ impl DjinnMcpServer {
             let limit = validate_limit(p.limit.unwrap_or(25));
             let offset = validate_offset(p.offset.unwrap_or(0));
             tracing::error!(error = %e, "task_list: invalid priority");
-            return Json(TaskListResponse {
-                tasks: vec![],
-                total_count: 0,
-                limit,
-                offset,
-                has_more: false,
-            });
+            return Json(TaskListResult(TaskListResponse::empty(limit, offset)));
         }
 
         let limit = validate_limit(p.limit.unwrap_or(25));
@@ -339,7 +322,6 @@ impl DjinnMcpServer {
         let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         match repo.list_filtered(query).await {
             Ok(result) => {
-                // Batch-fetch active sessions and session counts for the project
                 let active_sessions = session_repo
                     .list_active_in_project(&project_id)
                     .await
@@ -372,23 +354,16 @@ impl DjinnMcpServer {
                         task_to_list_item(t, active, count)
                     })
                     .collect();
-                Json(TaskListResponse {
-                    has_more: offset + limit < result.total_count,
+                Json(TaskListResult(ListResponse::new(
                     tasks,
-                    total_count: result.total_count,
+                    result.total_count,
                     limit,
                     offset,
-                })
+                )))
             }
             Err(e) => {
                 tracing::error!(error = %e, "task_list failed");
-                Json(TaskListResponse {
-                    tasks: vec![],
-                    total_count: 0,
-                    limit,
-                    offset,
-                    has_more: false,
-                })
+                Json(TaskListResult(ListResponse::empty(limit, offset)))
             }
         }
     }

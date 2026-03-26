@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::AnyJson;
+use crate::tools::list_response::ErrorListResponse;
 use crate::tools::validation::{validate_limit, validate_offset};
 use djinn_db::{AgentListQuery, AgentRepository, AgentUpdateInput};
 
@@ -20,20 +21,8 @@ use self::ops::{agent_not_found_error, resolve_agent, validate_agent_name, valid
 // ── Response types ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct AgentListResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agents: Option<Vec<AgentModel>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_count: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub offset: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub has_more: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
+#[serde(transparent)]
+pub struct AgentListResponse(pub ErrorListResponse<AgentModel>);
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct AgentShowParams {
@@ -154,28 +143,14 @@ impl DjinnMcpServer {
         if let Some(ref br) = p.base_role
             && let Err(e) = validate_base_role(br)
         {
-            return Json(AgentListResponse {
-                agents: None,
-                total_count: None,
-                limit: None,
-                offset: None,
-                has_more: None,
-                error: Some(e),
-            });
+            return Json(AgentListResponse(ErrorListResponse::error(e)));
         }
         let limit = validate_limit(p.limit.unwrap_or(25));
         let offset = validate_offset(p.offset.unwrap_or(0));
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
-                return Json(AgentListResponse {
-                    agents: None,
-                    total_count: None,
-                    limit: None,
-                    offset: None,
-                    has_more: None,
-                    error: Some(e),
-                });
+                return Json(AgentListResponse(ErrorListResponse::error(e)));
             }
         };
         let repo = AgentRepository::new(self.state.db().clone(), self.state.event_bus());
@@ -188,22 +163,13 @@ impl DjinnMcpServer {
             })
             .await
         {
-            Ok(result) => Json(AgentListResponse {
-                agents: Some(result.agents.iter().map(AgentModel::from).collect()),
-                total_count: Some(result.total_count),
-                limit: Some(limit),
-                offset: Some(offset),
-                has_more: Some(offset + limit < result.total_count),
-                error: None,
-            }),
-            Err(e) => Json(AgentListResponse {
-                agents: None,
-                total_count: None,
-                limit: None,
-                offset: None,
-                has_more: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(result) => Json(AgentListResponse(ErrorListResponse::ok(
+                result.agents.iter().map(AgentModel::from).collect(),
+                result.total_count,
+                limit,
+                offset,
+            ))),
+            Err(e) => Json(AgentListResponse(ErrorListResponse::error(e.to_string()))),
         }
     }
 
