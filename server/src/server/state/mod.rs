@@ -321,6 +321,12 @@ impl AppState {
             self.cancel().clone(),
         );
 
+        crate::watchers::spawn_repo_map_refresh_watchers(
+            self.db().clone(),
+            self.events().clone(),
+            self.cancel().clone(),
+        );
+
         crate::task_confidence::spawn_task_outcome_listener(self.clone());
     }
 
