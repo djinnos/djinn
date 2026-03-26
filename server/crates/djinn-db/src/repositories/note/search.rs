@@ -430,7 +430,7 @@ mod contradiction_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn detect_candidates_same_type_and_folder_is_high_risk() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let (repo, project_id) = make_repo_and_project(&tmp).await;
 
         // Add unrelated noise notes to boost IDF so the matching pair scores > 5.0
@@ -502,7 +502,7 @@ mod contradiction_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn detect_candidates_excludes_self() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let (repo, project_id) = make_repo_and_project(&tmp).await;
 
         let note = repo
@@ -535,7 +535,7 @@ mod contradiction_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn detect_candidates_filters_out_different_type() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let (repo, project_id) = make_repo_and_project(&tmp).await;
 
         // Note of a DIFFERENT type — should be filtered (Low risk)

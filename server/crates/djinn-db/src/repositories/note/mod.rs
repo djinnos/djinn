@@ -119,7 +119,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_and_get_note() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn singleton_brief() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -178,7 +178,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_by_permalink() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -235,7 +235,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_supports_case_and_pitfall_note_types() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -276,7 +276,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn db_backed_notes_skip_filesystem_and_round_trip_storage() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -302,7 +302,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_note() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -337,7 +337,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_db_backed_note_skips_filesystem_writes() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -360,7 +360,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_note() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -392,7 +392,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_db_backed_note_keeps_missing_files_irrelevant() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -410,8 +410,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_update_delete_use_worktree_disk_path_but_keep_canonical_db_path() {
-        let project_tmp = tempfile::tempdir().unwrap();
-        let worktree_tmp = tempfile::tempdir().unwrap();
+        let project_tmp = crate::database::test_tempdir().unwrap();
+        let worktree_tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, project_tmp.path()).await;
@@ -452,7 +452,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fts5_search() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -491,7 +491,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fts5_search_folder_filter() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -528,7 +528,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fts5_search_prefers_title_over_content() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -566,7 +566,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fts5_search_prefers_tags_over_content() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -604,7 +604,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dedup_candidates_returns_empty_for_empty_project() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -620,7 +620,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dedup_candidates_returns_no_matches_when_query_has_no_hits() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -653,7 +653,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dedup_candidates_filter_by_folder_and_note_type() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -716,7 +716,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn search_rrf_prefers_higher_access_count_for_equivalent_matches() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -767,7 +767,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_confidence_reads_updates_and_persists() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -807,7 +807,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn search_rrf_confidence_lowers_equivalent_match_ranking() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -859,7 +859,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn catalog_generation() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -889,7 +889,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_emits_event() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -923,7 +923,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn touch_accessed_does_not_emit_event() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -955,7 +955,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn touch_accessed_increments_access_count() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -983,7 +983,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn touch_accessed_emits_missing_summary_signal_when_summaries_are_missing() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1020,7 +1020,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_summaries_persists_summary_fields() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1090,7 +1090,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wikilink_resolves_on_create() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1129,7 +1129,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn broken_link_detection() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1154,7 +1154,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn orphan_detection() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1205,7 +1205,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_previously_broken_links_on_create() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1234,7 +1234,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reindex_from_disk_detects_created_updated_and_deleted() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1289,7 +1289,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reindex_from_disk_keeps_db_backed_notes_when_files_are_missing() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1324,7 +1324,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reindex_from_disk_backfill_can_normalize_extracted_notes_to_db_storage() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1411,7 +1411,7 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_affinity_scores_task_epic_blocker_and_max() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1549,7 +1549,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_proximity_empty_for_seed_without_links() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1573,7 +1573,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_proximity_linear_chain_hop_decay() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1608,7 +1608,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_proximity_diamond_keeps_max_path_score_not_sum() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1648,7 +1648,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_proximity_excludes_beyond_max_hops() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1683,7 +1683,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_proximity_association_applies_weighted_decay() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1725,7 +1725,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_proximity_ignores_low_weight_association_noise() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1763,7 +1763,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn temporal_scores_empty_candidates_returns_empty() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1775,7 +1775,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn temporal_scores_higher_access_count_wins_same_age() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1838,7 +1838,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn temporal_scores_recent_update_wins_same_access_count() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -1891,7 +1891,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn temporal_scores_edge_cases_are_finite() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -2014,12 +2014,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consolidation_lists_db_note_groups_and_clusters_deterministically() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
         let project_a = make_project(&db, tmp.path()).await;
-        let project_b_root = tempfile::tempdir().unwrap();
+        let project_b_root = crate::database::test_tempdir().unwrap();
         let project_b = make_project(&db, project_b_root.path()).await;
         let consolidation_repo = NoteConsolidationRepository::new(db.clone());
 
@@ -2143,7 +2143,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consolidation_clusters_ignore_below_threshold_inputs() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
@@ -2192,7 +2192,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consolidation_create_canonical_note_persists_db_note_confidence_and_provenance() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -2265,7 +2265,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consolidation_provenance_round_trips_in_stable_order() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -2301,10 +2301,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consolidation_run_metrics_round_trip_and_filter() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let project = make_project(&db, tmp.path()).await;
-        let other_root = tempfile::tempdir().unwrap();
+        let other_root = crate::database::test_tempdir().unwrap();
         let other_project = make_project(&db, other_root.path()).await;
         let consolidation_repo = NoteConsolidationRepository::new(db.clone());
 

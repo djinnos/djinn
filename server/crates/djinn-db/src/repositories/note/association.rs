@@ -305,7 +305,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_association_creates_new() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -326,7 +326,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_association_updates_existing() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -346,7 +346,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_association_many_individual_updates_approaches_one_without_exceeding() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -367,7 +367,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upsert_association_bulk_update_caps_weight_at_one() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -394,7 +394,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn canonical_ordering_enforced() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -417,7 +417,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_associations_for_note() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -450,7 +450,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_associations_above_weight() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -478,7 +478,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn on_delete_cascade_removes_associations() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -509,7 +509,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn check_constraint_blocks_reversed_pair() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -539,7 +539,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prune_associations_removes_stale_low_weight() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -633,7 +633,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prune_associations_scoped_to_project() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
 
