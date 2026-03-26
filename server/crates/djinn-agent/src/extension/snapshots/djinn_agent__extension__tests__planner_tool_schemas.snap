@@ -330,6 +330,7 @@ expression: tool_schemas_planner()
           "type": "string"
         },
         "issue_type": {
+          "description": "Task type: 'task' (default for worker-routed code work), 'planning' for epic metadata operations (epic_update, epic_close, memory_refs management, roadmap/AC changes, or other metadata-only maintenance), 'spike' for research, 'review' for code review. Use 'planning' when the work requires epic management tools or primarily updates epic metadata instead of code.",
           "type": "string"
         },
         "labels": {

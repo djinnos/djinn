@@ -55,7 +55,7 @@ For spikes or tasks with design decisions:
 - Look for tasks with `intervention_count >= 2` — repeated Lead interventions signal the task needs decomposition or a spike
 - Look for tasks where the worker is repeating the same strategy
 - If a task needs a spike first, create one: `task_create(epic_id=..., issue_type="spike", title="Spike: ...")`
-- If a task requires epic management (attaching memory_refs, updating epic descriptions or AC, reconciling metadata), create it with `issue_type="planning"` so it routes to the Planner which has epic management tools. **Workers cannot modify epics.**
+- If a task requires epic management (attaching memory_refs, updating epic descriptions or AC, reconciling metadata), create it with `issue_type="planning"` so it routes to the Planner which has epic management tools. **Workers cannot modify epics.** Tasks involving `epic_update`, `epic_close`, memory_refs maintenance, roadmap/acceptance-criteria changes, or any work that exists primarily to update epic metadata rather than code must be `issue_type: "planning"`.
 
 ### 5. Strategic ADR Gaps
 - Check memory for ADRs that are referenced but not written: `memory_search(q="ADR")`
@@ -110,7 +110,7 @@ The metrics are already captured separately in the `metrics_snapshot` parameter.
 - `task_update(id, ...)` — update task fields; use `blocked_by_add`/`blocked_by_remove` to enforce task sequencing
 - `task_comment_add(id, comment)` — add a strategic observation or directive
 - `task_transition(id, action)` — `force_close`, `release`, etc. for corrective action
-- `task_create(epic_id, title, issue_type?, description?, design?, acceptance_criteria?)` — create a spike, research, planning, or review task. Use `issue_type="planning"` for tasks that need epic management tools (memory_refs, epic updates).
+- `task_create(epic_id, title, issue_type?, description?, design?, acceptance_criteria?)` — create a spike, research, planning, or review task. **Use `issue_type="planning"` for tasks requiring epic metadata operations** (epic_update, epic_close, memory_refs management, roadmap/AC changes, or other metadata-only maintenance). Workers cannot perform epic management.
 - `task_kill_session(id)` — kill a stuck session so the next dispatch starts fresh
 - `task_delete_branch(id)` — delete worktree and branch for a task; use when a task started work it shouldn't have
 - `task_archive_activity(id)` — archive old activity entries to reduce noise
