@@ -1267,6 +1267,7 @@ mod tests {
     use djinn_db::NoteConsolidationRepository;
     use djinn_db::NoteRepository;
     use djinn_db::TaskRepository;
+    use djinn_db::{CreateSessionParams, SessionRepository};
     use djinn_provider::catalog::health::HealthTracker;
 
     use super::consolidation::{self, ConsolidationRunner, DbConsolidationRunner};
@@ -1563,6 +1564,181 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(note_count, 2, "runner should not synthesize new notes");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qualifying_clusters_create_canonical_note_provenance_and_completed_metric() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let note_a = note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Storm A",
+                "Repeated retry storm during incident recovery.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let note_b = note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Storm B",
+                "Repeated retry storm during incident recovery.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let note_c = note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Storm C",
+                "Repeated retry storm during incident recovery.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET abstract = ?1, overview = ?2 WHERE id = ?3")
+            .bind("Retry storms amplify duplicate work during recovery.")
+            .bind("Prefer backoff and idempotent recovery steps.")
+            .bind(&note_a.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE notes SET abstract = ?1, overview = ?2 WHERE id = ?3")
+            .bind("Retry storms amplify duplicate work during recovery.")
+            .bind("Throttle retries before cache warmup completes.")
+            .bind(&note_b.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE notes SET abstract = ?1, overview = ?2 WHERE id = ?3")
+            .bind("Retry storms amplify duplicate work during recovery.")
+            .bind("Use idempotent jobs plus exponential backoff.")
+            .bind(&note_c.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let session_a = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: None,
+                model: "test-model",
+                agent_type: "worker",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let session_b = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: None,
+                model: "test-model",
+                agent_type: "worker",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let session_c = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: None,
+                model: "test-model",
+                agent_type: "worker",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        consolidation_repo
+            .add_provenance(&note_a.id, &session_a.id)
+            .await
+            .unwrap();
+        consolidation_repo
+            .add_provenance(&note_b.id, &session_b.id)
+            .await
+            .unwrap();
+        consolidation_repo
+            .add_provenance(&note_c.id, &session_c.id)
+            .await
+            .unwrap();
+
+        let runner = Arc::new(DbConsolidationRunner::new(db.clone()));
+        runner
+            .run_for_group(djinn_db::DbNoteGroup {
+                project_id: project.id.clone(),
+                note_type: "pattern".to_string(),
+                note_count: 3,
+            })
+            .await
+            .unwrap();
+
+        let notes = consolidation_repo
+            .list_db_notes_in_group(&project.id, "pattern")
+            .await
+            .unwrap();
+        assert_eq!(
+            notes.len(),
+            4,
+            "runner should synthesize exactly one canonical note"
+        );
+        let canonical = notes
+            .iter()
+            .find(|note| note.id != note_a.id && note.id != note_b.id && note.id != note_c.id)
+            .unwrap();
+        assert!(
+            canonical
+                .title
+                .starts_with("Canonical pattern: Retry Storm")
+        );
+        assert!(canonical.content.contains("## Source notes"));
+        assert!(canonical.content.contains(&note_a.permalink));
+        assert_eq!(
+            canonical.abstract_.as_deref(),
+            Some("Retry storms amplify duplicate work during recovery.")
+        );
+        assert!(canonical.confidence >= 0.65 && canonical.confidence <= 0.8);
+
+        let provenance = consolidation_repo
+            .list_provenance(&canonical.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            provenance
+                .iter()
+                .map(|entry| entry.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                session_a.id.as_str(),
+                session_b.id.as_str(),
+                session_c.id.as_str()
+            ]
+        );
+
+        let metrics = consolidation_repo
+            .list_run_metrics(&project.id, Some("pattern"), 20)
+            .await
+            .unwrap();
+        assert_eq!(metrics.len(), 1);
+        let metric = &metrics[0];
+        assert_eq!(metric.status, "completed");
+        assert_eq!(metric.scanned_note_count, 3);
+        assert_eq!(metric.candidate_cluster_count, 1);
+        assert_eq!(metric.consolidated_cluster_count, 1);
+        assert_eq!(metric.consolidated_note_count, 1);
+        assert_eq!(metric.source_note_count, 3);
+        assert!(metric.completed_at.is_some());
     }
 
     // ── Status ───────────────────────────────────────────────────────────────
