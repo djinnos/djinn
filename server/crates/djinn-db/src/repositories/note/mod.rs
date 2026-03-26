@@ -86,6 +86,7 @@ mod tests {
     use djinn_core::models::{Note, Project};
     use tokio::sync::broadcast;
 
+    use crate::TaskRepository;
     use crate::database::Database;
 
     use super::*;
@@ -115,6 +116,28 @@ mod tests {
         .fetch_one(db.pool())
         .await
         .unwrap()
+    }
+
+    async fn make_epic(db: &Database, project_id: &str) -> String {
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        let short_id = format!("ep-{}", epic_id);
+        sqlx::query(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&epic_id)
+        .bind(project_id)
+        .bind(short_id)
+        .bind("Epic")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind("[]")
+        .execute(db.pool())
+        .await
+        .unwrap();
+        epic_id
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2082,6 +2105,29 @@ mod tests {
         branch: &str,
     ) -> String {
         let id = uuid::Uuid::now_v7().to_string();
+        let task_id = match task_id {
+            Some(task_id) => Some(task_id.to_string()),
+            None => {
+                let epic_id = make_epic(db, project_id).await;
+                Some(
+                    TaskRepository::new(db.clone(), EventBus::noop())
+                        .create_with_ac(
+                            &epic_id,
+                            "Session Task",
+                            "session task",
+                            "session task design",
+                            "task",
+                            1,
+                            "worker",
+                            None,
+                            Some(r#"[{"title":"session-ac"}]"#),
+                        )
+                        .await
+                        .unwrap()
+                        .id,
+                )
+            }
+        };
         let has_branch: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'branch'",
         )
@@ -2096,7 +2142,7 @@ mod tests {
             )
             .bind(&id)
             .bind(project_id)
-            .bind(task_id)
+            .bind(task_id.as_deref())
             .bind(branch)
             .execute(db.pool())
             .await
@@ -2130,7 +2176,7 @@ mod tests {
             )
             .bind(&id)
             .bind(project_id)
-            .bind(task_id)
+            .bind(task_id.as_deref())
             .bind(branch)
             .execute(db.pool())
             .await
