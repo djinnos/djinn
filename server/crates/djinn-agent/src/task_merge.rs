@@ -143,6 +143,27 @@ async fn try_create_github_pr(
     )
     .await;
 
+    // Verify the local branch exists before pushing — the branch can be lost
+    // if prepare_worktree runs between the reviewer's teardown and this push
+    // (it deletes "stale" branches whose worktree is gone).
+    let branch_check = djinn_git::run_git_command(
+        project_dir.to_path_buf(),
+        vec![
+            "show-ref".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("refs/heads/{base_branch}"),
+        ],
+    )
+    .await;
+    if branch_check.is_err() {
+        return Err(format!(
+            "local branch {base_branch} does not exist — it may have been deleted \
+             by a concurrent prepare_worktree or intervention between approval and \
+             PR push. The task should be reopened so a worker can redo the work."
+        ));
+    }
+
     // Push the branch to origin before opening the PR.
     djinn_git::run_git_command(
         project_dir.to_path_buf(),

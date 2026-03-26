@@ -230,11 +230,34 @@ pub(crate) async fn prepare_worktree(
     };
 
     if branch_exists {
-        // The worktree is gone but the branch still exists — this is a stale
-        // leftover from a previous session (killed, failed, or intervention
-        // reset).  Rebasing it would carry forward dirty commits from the old
-        // attempt, contaminating the new session's diff.  Delete it so the
-        // worker starts from a clean target branch.
+        // The worktree is gone but the branch still exists.  Before deleting,
+        // check whether the task is in a post-approval state where the branch
+        // is needed for an in-flight or upcoming PR push.  Deleting the branch
+        // in these states causes `process_approved_tasks` to fail with
+        // "src refspec does not match any" because the local ref is gone.
+        let branch_needed_for_pr = matches!(
+            task.status.as_str(),
+            "approved" | "pr_draft" | "pr_review"
+        );
+        if branch_needed_for_pr {
+            tracing::info!(
+                task_id = %task.short_id,
+                branch = %branch,
+                status = %task.status,
+                "Lifecycle: preserving task branch needed for PR (worktree gone, recreating worktree only)"
+            );
+            // Recreate the worktree from the existing branch without deleting it.
+            let path = git
+                .create_worktree(&task.short_id, &branch, false)
+                .await
+                .map_err(|e| anyhow::anyhow!("create worktree from existing branch: {e}"))?;
+            return Ok((path, None));
+        }
+        // For other statuses this is a stale leftover from a previous session
+        // (killed, failed, or intervention reset).  Rebasing it would carry
+        // forward dirty commits from the old attempt, contaminating the new
+        // session's diff.  Delete it so the worker starts from a clean target
+        // branch.
         tracing::info!(
             task_id = %task.short_id,
             branch = %branch,
