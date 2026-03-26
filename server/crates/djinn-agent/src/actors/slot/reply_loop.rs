@@ -585,6 +585,7 @@ pub(super) async fn run_reply_loop(
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(0),
                     ),
+                    provider_data: None,
                 }),
             };
 

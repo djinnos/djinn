@@ -1,4 +1,4 @@
-use djinn_core::message::{Conversation, Message};
+use djinn_core::message::{CacheBreakpoint, Conversation, Message};
 use djinn_provider::provider::client::ApiClient;
 use djinn_provider::provider::format::anthropic::AnthropicProvider;
 use djinn_provider::provider::format::openai::OpenAIProvider;
@@ -66,6 +66,25 @@ fn tool_definition() -> Vec<Value> {
 fn conversation() -> Conversation {
     let mut conversation = Conversation::new();
     conversation.push(Message::system("You are a helpful assistant."));
+    conversation.push(Message::user("List files"));
+    conversation
+}
+
+fn anthropic_cached_conversation() -> Conversation {
+    let mut conversation = Conversation::new();
+    conversation.push(Message::system_with_metadata(
+        "Stable system prefix",
+        djinn_core::message::MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(json!({
+                "anthropic_cache_breakpoint": CacheBreakpoint {
+                    kind: Some("stable_prefix".to_string()),
+                }
+            })),
+        },
+    ));
     conversation.push(Message::user("List files"));
     conversation
 }
@@ -358,6 +377,34 @@ async fn anthropic_provider_serializes_required_tool_choice_and_headers() {
     assert_eq!(body["tool_choice"]["type"], "any");
     assert_eq!(body["tools"][0]["name"], "shell");
     assert_eq!(body["tools"][0]["description"], "Run a shell command");
+}
+
+#[tokio::test]
+async fn anthropic_provider_serializes_cache_control_for_stable_system_prefix() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(anthropic_sse_template())
+        .mount(&server)
+        .await;
+
+    let provider = AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth));
+    let tools = tool_definition();
+    let conversation = anthropic_cached_conversation();
+    let mut stream = provider
+        .stream(&conversation, &tools, Some(ToolChoice::Required))
+        .await
+        .expect("provider stream should start");
+    while let Some(item) = stream.next().await {
+        item.expect("stream item should succeed");
+    }
+
+    let requests = server.received_requests().await.expect("captured requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    assert_eq!(body["system"][0]["type"], "text");
+    assert_eq!(body["system"][0]["text"], "Stable system prefix");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["system"][0]["cache_control"]["kind"], "stable_prefix");
 }
 
 #[tokio::test]

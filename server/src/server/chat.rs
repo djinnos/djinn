@@ -15,7 +15,9 @@ use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
-use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
+use djinn_agent::message::{
+    CacheBreakpoint, ContentBlock, Conversation, Message, MessageMeta, Role,
+};
 use djinn_agent::provider::{StreamEvent, create_provider};
 use djinn_db::{
     EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, RepoMapCacheKey,
@@ -28,24 +30,102 @@ use crate::repo_map::persist_repo_map_note;
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
 const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
+const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptSegment {
+    text: String,
+    cache_breakpoint: bool,
+}
+
+fn prompt_segment(text: impl Into<String>) -> PromptSegment {
+    PromptSegment {
+        text: text.into(),
+        cache_breakpoint: false,
+    }
+}
+
+fn cached_prompt_segment(text: impl Into<String>) -> PromptSegment {
+    PromptSegment {
+        text: text.into(),
+        cache_breakpoint: true,
+    }
+}
+
+fn compose_system_prompt_segments(
+    base_prompt: &str,
+    project_context: Option<&str>,
+    repo_map_context: Option<&str>,
+    client_system: Option<&str>,
+) -> Vec<PromptSegment> {
+    let mut segments = vec![cached_prompt_segment(base_prompt.trim())];
+    if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
+        segments.push(cached_prompt_segment(project_context));
+    }
+    if let Some(repo_map_context) = repo_map_context.filter(|s| !s.trim().is_empty()) {
+        segments.push(cached_prompt_segment(repo_map_context));
+    }
+    if let Some(client_system) = client_system.filter(|s| !s.trim().is_empty()) {
+        segments.push(prompt_segment(client_system));
+    }
+    segments
+}
+
+#[cfg(test)]
 fn compose_system_prompt(
     base_prompt: &str,
     project_context: Option<&str>,
     repo_map_context: Option<&str>,
     client_system: Option<&str>,
 ) -> String {
-    let mut system_prompt = base_prompt.trim().to_string();
-    if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
-        system_prompt = format!("{system_prompt}\n\n{project_context}");
+    compose_system_prompt_segments(
+        base_prompt,
+        project_context,
+        repo_map_context,
+        client_system,
+    )
+    .into_iter()
+    .map(|segment| segment.text)
+    .collect::<Vec<_>>()
+    .join("\n\n")
+}
+
+fn build_system_message(
+    base_prompt: &str,
+    project_context: Option<&str>,
+    repo_map_context: Option<&str>,
+    client_system: Option<&str>,
+    model: &str,
+) -> Message {
+    let segments = compose_system_prompt_segments(
+        base_prompt,
+        project_context,
+        repo_map_context,
+        client_system,
+    );
+    let text = segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if model.starts_with("anthropic/") && segments.iter().any(|segment| segment.cache_breakpoint) {
+        return Message::system_with_metadata(
+            text,
+            MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(serde_json::json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                        kind: Some("stable_prefix".to_string()),
+                    }
+                })),
+            },
+        );
     }
-    if let Some(repo_map_context) = repo_map_context.filter(|s| !s.trim().is_empty()) {
-        system_prompt = format!("{system_prompt}\n\n{repo_map_context}");
-    }
-    if let Some(client_system) = client_system.filter(|s| !s.trim().is_empty()) {
-        system_prompt = format!("{system_prompt}\n\n{client_system}");
-    }
-    system_prompt
+
+    Message::system(text)
 }
 
 fn format_repo_map_block(rendered: &str, permalink: Option<&str>) -> String {
@@ -356,13 +436,14 @@ pub(super) async fn completions_handler(
     } else {
         None
     };
-    let system_prompt = compose_system_prompt(
+    let system_message = build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
         project_context.as_deref(),
         repo_map_context.as_deref(),
         req.system.as_deref(),
+        &req.model,
     );
-    conversation.push(Message::system(system_prompt));
+    conversation.push(system_message);
 
     for m in req.messages {
         let role = match m.role.as_str() {
@@ -563,8 +644,9 @@ pub(super) async fn completions_handler(
 #[cfg(test)]
 mod tests {
     use super::{
-        DJINN_CHAT_SYSTEM_PROMPT, REPO_MAP_SYSTEM_HEADER, ToolCallPayload, compose_system_prompt,
-        format_repo_map_block, sse_json_event,
+        ANTHROPIC_CACHE_BREAKPOINT_KEY, DJINN_CHAT_SYSTEM_PROMPT, REPO_MAP_SYSTEM_HEADER,
+        ToolCallPayload, build_system_message, compose_system_prompt,
+        compose_system_prompt_segments, format_repo_map_block, sse_json_event,
     };
     use crate::server::AppState;
     use crate::test_helpers;
@@ -672,12 +754,74 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_appends_client_system_after_internal_content() {
+    fn system_prompt_segments_mark_stable_project_and_repo_map_context_for_caching() {
+        let project_context = "## Current Project\nproject";
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
         let client_system = "be concise";
-        let prompt =
-            compose_system_prompt(DJINN_CHAT_SYSTEM_PROMPT, None, None, Some(client_system));
-        assert!(prompt.starts_with(DJINN_CHAT_SYSTEM_PROMPT.trim()));
-        assert!(prompt.ends_with(client_system));
+
+        let segments = compose_system_prompt_segments(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some(project_context),
+            Some(&repo_map),
+            Some(client_system),
+        );
+
+        assert_eq!(segments.len(), 4);
+        assert!(segments[0].cache_breakpoint);
+        assert_eq!(segments[1].text, project_context);
+        assert!(segments[1].cache_breakpoint);
+        assert_eq!(segments[2].text, repo_map);
+        assert!(segments[2].cache_breakpoint);
+        assert_eq!(segments[3].text, client_system);
+        assert!(!segments[3].cache_breakpoint);
+    }
+
+    #[test]
+    fn build_system_message_adds_anthropic_cache_breakpoint_for_stable_prefix() {
+        let project_context = "## Current Project\nproject";
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
+        let message = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some(project_context),
+            Some(&repo_map),
+            Some("volatile client system"),
+            "anthropic/claude-3-5-sonnet",
+        );
+
+        let provider_data = message
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.provider_data.as_ref())
+            .expect("anthropic message should include provider metadata");
+        assert!(provider_data.get(ANTHROPIC_CACHE_BREAKPOINT_KEY).is_some());
+        assert!(message.text_content().contains(REPO_MAP_SYSTEM_HEADER));
+        assert!(message.text_content().contains("volatile client system"));
+    }
+
+    #[test]
+    fn build_system_message_skips_cache_breakpoint_for_non_anthropic_or_without_repo_map() {
+        let openai_message = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some("## Current Project\nproject"),
+            Some(&format_repo_map_block("src/lib.rs", None)),
+            None,
+            "openai/gpt-4o",
+        );
+        assert!(openai_message.metadata.is_none());
+
+        let anthropic_without_project_or_repo = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            None,
+            None,
+            Some("volatile client system"),
+            "anthropic/claude-3-5-sonnet",
+        );
+        assert!(anthropic_without_project_or_repo.metadata.is_some());
+        assert!(
+            anthropic_without_project_or_repo
+                .text_content()
+                .contains("volatile client system")
+        );
     }
 
     #[test]
