@@ -1,12 +1,21 @@
+pub use diagnostics::{Diagnostic, format_diagnostics_xml};
+
+mod client;
+mod diagnostics;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
+use client::{
+    ClientStdin, LspClient, OpenedFiles, PendingResponses, clone_client_refs,
+    clone_client_request_refs, ensure_did_open, kill_client, send_request, spawn_client,
+    write_lsp_message,
+};
+use diagnostics::{clear_uri, collect_for_worktree};
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 
@@ -16,15 +25,6 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Timeout for regular LSP requests (hover, definition, references, symbols).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[derive(Debug, Clone)]
-pub struct Diagnostic {
-    pub file: String,
-    pub line: u32,
-    pub character: u32,
-    pub severity: u32,
-    pub message: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct LspWarning {
@@ -45,25 +45,6 @@ struct LspInner {
     /// Warnings for missing LSP servers, surfaced to the user via board_health.
     warnings: Vec<LspWarning>,
 }
-
-/// Pending response channels keyed by JSON-RPC request id.
-type PendingResponses = Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
-
-/// Tracks per-file open state: version counter for didChange notifications.
-type OpenedFiles = Arc<Mutex<HashMap<String, i32>>>;
-
-struct LspClient {
-    stdin: Arc<Mutex<ChildStdin>>,
-    pid: u32,
-    reader_handle: tokio::task::JoinHandle<()>,
-    diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
-    pending: PendingResponses,
-    seq: Arc<AtomicU64>,
-    opened: OpenedFiles,
-}
-
-type ClientStdin = Arc<Mutex<ChildStdin>>;
-type DiagnosticsMap = Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>;
 
 impl Default for LspManager {
     fn default() -> Self {
@@ -184,7 +165,7 @@ impl LspManager {
             tracing::info!(uri = %uri, version = next, "lsp: sending didChange");
 
             // Clear stale diagnostics so the debounce loop waits for fresh ones.
-            diagnostics.lock().await.remove(&uri);
+            clear_uri(&diagnostics, &uri).await;
 
             let watched = json!({
                 "jsonrpc": "2.0",
@@ -213,7 +194,7 @@ impl LspManager {
             tracing::info!(uri = %uri, lang = lang, "lsp: sending didOpen (first touch)");
 
             // Clear any stale diagnostics from a previous session.
-            diagnostics.lock().await.remove(&uri);
+            clear_uri(&diagnostics, &uri).await;
 
             let watched = json!({
                 "jsonrpc": "2.0",
@@ -312,8 +293,6 @@ impl LspManager {
     /// Only returns diagnostics whose file URI starts with the worktree prefix,
     /// preventing cross-project leakage since LspManager is a singleton.
     pub async fn diagnostics(&self, worktree: &Path) -> Vec<Diagnostic> {
-        let prefix = format!("file://{}", worktree.display());
-
         let (client_count, clients) = {
             let inner = self.inner.lock().await;
             let count = inner.clients.len();
@@ -325,17 +304,7 @@ impl LspManager {
             (count, maps)
         };
 
-        let mut out = Vec::new();
-        for d in clients {
-            let map = d.lock().await;
-            for values in map.values() {
-                for diag in values {
-                    if diag.file.starts_with(&prefix) {
-                        out.push(diag.clone());
-                    }
-                }
-            }
-        }
+        let out = collect_for_worktree(&clients, worktree).await;
         let errors = out.iter().filter(|d| d.severity == 1).count();
         tracing::info!(
             clients = client_count,
@@ -352,14 +321,6 @@ impl LspManager {
     pub async fn warnings(&self) -> Vec<LspWarning> {
         self.inner.lock().await.warnings.clone()
     }
-}
-
-fn clone_client_refs(c: &LspClient) -> (ClientStdin, DiagnosticsMap, OpenedFiles) {
-    (c.stdin.clone(), c.diagnostics.clone(), c.opened.clone())
-}
-
-fn clone_client_request_refs(c: &LspClient) -> (ClientStdin, PendingResponses, Arc<AtomicU64>) {
-    (c.stdin.clone(), c.pending.clone(), c.seq.clone())
 }
 
 struct ServerDef {
@@ -625,311 +586,6 @@ fn find_root(path: &Path, worktree: &Path, sentinels: &[&str]) -> Option<PathBuf
             return Some(worktree.to_path_buf());
         }
     }
-}
-
-/// Abort the reader task and SIGTERM the LSP process.
-fn kill_client(client: LspClient) {
-    client.reader_handle.abort();
-    // SAFETY: pid is a valid process id obtained from the child at spawn time.
-    unsafe {
-        libc::kill(client.pid as libc::pid_t, libc::SIGTERM);
-    }
-}
-
-async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, String> {
-    let binary_path = resolve_binary(server).await?;
-    tracing::info!(server = server.id, binary = %binary_path.display(), "lsp: spawning server");
-
-    let mut cmd = Command::new(&binary_path);
-    for arg in server.cmd.iter().skip(1) {
-        cmd.arg(arg);
-    }
-
-    // Ensure our managed bin dir is on PATH for the LSP process too
-    // (e.g. typescript-language-server needs to find tsserver).
-    let bin_dir = djinn_bin_dir();
-    let system_path = std::env::var("PATH").unwrap_or_default();
-    let augmented_path = format!(
-        "{}:{}:{}",
-        bin_dir.display(),
-        bin_dir.join("bin").display(),
-        system_path
-    );
-
-    cmd.current_dir(root)
-        .env("PATH", &augmented_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| {
-            tracing::error!(server = server.id, binary = %binary_path.display(), error = %e, "lsp: spawn failed");
-            format!("failed to spawn {}: {e}", server.id)
-        })?;
-
-    let pid = child
-        .id()
-        .ok_or_else(|| "could not get child PID".to_string())?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "missing stdin".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "missing stdout".to_string())?;
-
-    let diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let diagnostics_reader = diagnostics.clone();
-
-    let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
-    let pending_reader = pending.clone();
-
-    let reader_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout);
-        let mut content_length: usize = 0;
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    if line == "\r\n" {
-                        if content_length == 0 {
-                            continue;
-                        }
-                        let mut buf = vec![0u8; content_length];
-                        if reader.read_exact(&mut buf).await.is_err() {
-                            break;
-                        }
-                        content_length = 0;
-                        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) else {
-                            continue;
-                        };
-
-                        // Route responses (messages with an id and result/error) to
-                        // pending request channels.
-                        if let Some(id) = v.get("id").and_then(|i| i.as_u64())
-                            && (v.get("result").is_some() || v.get("error").is_some())
-                        {
-                            let sender = pending_reader.lock().await.remove(&id);
-                            if let Some(tx) = sender {
-                                let _ = tx.send(v);
-                            }
-                            continue;
-                        }
-
-                        let method = v.get("method").and_then(|m| m.as_str());
-                        if method == Some("textDocument/publishDiagnostics") {
-                            let params = v.get("params").cloned().unwrap_or_default();
-                            let uri = params
-                                .get("uri")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let ds = params
-                                .get("diagnostics")
-                                .and_then(|x| x.as_array())
-                                .cloned()
-                                .unwrap_or_default();
-                            let error_count = ds
-                                .iter()
-                                .filter(|d| d.get("severity").and_then(|s| s.as_u64()) == Some(1))
-                                .count();
-                            tracing::info!(
-                                uri = %uri,
-                                total = ds.len(),
-                                errors = error_count,
-                                "lsp: received publishDiagnostics"
-                            );
-                            let mut out = Vec::new();
-                            for d in ds {
-                                let sev =
-                                    d.get("severity").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                                let msg = d
-                                    .get("message")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let diag_line =
-                                    d.get("range")
-                                        .and_then(|r| r.get("start"))
-                                        .and_then(|s| s.get("line"))
-                                        .and_then(|x| x.as_u64())
-                                        .unwrap_or(0) as u32
-                                        + 1;
-                                let character =
-                                    d.get("range")
-                                        .and_then(|r| r.get("start"))
-                                        .and_then(|s| s.get("character"))
-                                        .and_then(|x| x.as_u64())
-                                        .unwrap_or(0) as u32
-                                        + 1;
-                                out.push(Diagnostic {
-                                    file: uri.clone(),
-                                    line: diag_line,
-                                    character,
-                                    severity: sev,
-                                    message: msg,
-                                });
-                            }
-                            diagnostics_reader.lock().await.insert(uri, out);
-                        } else if let Some(m) = method {
-                            tracing::debug!(method = m, "lsp: received server notification");
-                        }
-                    } else if let Some(v) = line.strip_prefix("Content-Length:") {
-                        content_length = v.trim().parse::<usize>().unwrap_or(0);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    let stdin = Arc::new(Mutex::new(stdin));
-    let seq = Arc::new(AtomicU64::new(2));
-
-    // Send initialize and wait for the response — the LSP spec requires the
-    // client to wait before sending `initialized` or any other notification.
-    let init_result = send_request(
-        &stdin,
-        &pending,
-        &seq,
-        "initialize",
-        json!({
-            "processId": null,
-            "rootUri": format!("file://{}", root.display()),
-            "capabilities": {
-                "textDocument": {
-                    "synchronization": {
-                        "didOpen": true,
-                        "didChange": true,
-                        "willSave": false,
-                        "didSave": true,
-                    },
-                    "publishDiagnostics": {
-                        "versionSupport": true,
-                    },
-                },
-            },
-        }),
-        INIT_TIMEOUT,
-    )
-    .await
-    .map_err(|e| format!("LSP initialize failed for {}: {e}", server.id))?;
-
-    // Log server name for debugging
-    if let Some(name) = init_result
-        .get("serverInfo")
-        .and_then(|s| s.get("name"))
-        .and_then(|n| n.as_str())
-    {
-        tracing::debug!("LSP server initialized: {name}");
-    }
-
-    let inited = json!({"jsonrpc":"2.0","method":"initialized","params":{}});
-    write_lsp_message(&stdin, &inited.to_string()).await?;
-
-    Ok(LspClient {
-        stdin,
-        pid,
-        reader_handle,
-        diagnostics,
-        pending,
-        seq,
-        opened: Arc::new(Mutex::new(HashMap::new())),
-    })
-}
-
-async fn write_lsp_message(stdin: &Arc<Mutex<ChildStdin>>, payload: &str) -> Result<(), String> {
-    let mut guard = stdin.lock().await;
-    let message = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
-    guard
-        .write_all(message.as_bytes())
-        .await
-        .map_err(|e| format!("lsp write failed: {e}"))
-}
-
-/// Send a JSON-RPC request and wait for the response.
-///
-/// `timeout` controls how long to wait — use `INIT_TIMEOUT` for initialize
-/// (rust-analyzer can take 30-45s on first run) and `REQUEST_TIMEOUT` for
-/// regular requests.
-async fn send_request(
-    stdin: &ClientStdin,
-    pending: &PendingResponses,
-    seq: &AtomicU64,
-    method: &str,
-    params: serde_json::Value,
-    timeout: Duration,
-) -> Result<serde_json::Value, String> {
-    let id = seq.fetch_add(1, Ordering::SeqCst);
-    let msg = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    pending.lock().await.insert(id, tx);
-
-    write_lsp_message(stdin, &msg.to_string()).await?;
-
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(v)) => {
-            if let Some(err) = v.get("error") {
-                Err(format!("LSP error: {err}"))
-            } else {
-                Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
-            }
-        }
-        Ok(Err(_)) => Err("LSP response channel closed".to_string()),
-        Err(_) => {
-            pending.lock().await.remove(&id);
-            Err(format!("LSP request timed out ({}s)", timeout.as_secs()))
-        }
-    }
-}
-
-/// Ensure the file is opened in the LSP server so queries work.
-async fn ensure_did_open(
-    stdin: &ClientStdin,
-    path: &Path,
-    opened: &OpenedFiles,
-) -> Result<String, String> {
-    let uri = format!("file://{}", path.display());
-    let text = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-
-    let mut opened_guard = opened.lock().await;
-    if opened_guard.contains_key(&uri) {
-        // Already opened — no need to re-open for query purposes.
-        drop(opened_guard);
-    } else {
-        opened_guard.insert(uri.clone(), 0);
-        drop(opened_guard);
-
-        let open = json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didOpen",
-            "params": {
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": language_id_for_path(path).unwrap_or("plaintext"),
-                    "version": 0,
-                    "text": text,
-                }
-            }
-        });
-        write_lsp_message(stdin, &open.to_string()).await?;
-        // Give the server a moment to index after open
-        sleep(Duration::from_millis(100)).await;
-    }
-    Ok(uri)
 }
 
 /// Format an LSP Location or LocationLink into a human-readable string.
@@ -1230,34 +886,10 @@ impl LspManager {
     }
 }
 
-pub fn format_diagnostics_xml(diags: Vec<Diagnostic>) -> String {
-    let mut by_file: HashMap<String, Vec<Diagnostic>> = HashMap::new();
-    for d in diags.into_iter().filter(|d| d.severity == 1) {
-        by_file.entry(d.file.clone()).or_default().push(d);
-    }
-
-    let mut files: Vec<_> = by_file.into_iter().collect();
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    files.truncate(5);
-
-    let mut out = String::new();
-    for (file, mut items) in files {
-        items.truncate(20);
-        out.push_str(&format!("<diagnostics file=\"{}\">\n", file));
-        for d in items {
-            out.push_str(&format!(
-                "ERROR [{}:{}] {}\n",
-                d.line, d.character, d.message
-            ));
-        }
-        out.push_str("</diagnostics>\n");
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lsp::diagnostics::DiagnosticsMap;
     use std::path::PathBuf;
 
     fn make_diag(file: &str, line: u32, character: u32, severity: u32, msg: &str) -> Diagnostic {
@@ -1636,7 +1268,7 @@ mod tests {
         assert_eq!(diagnostics.lock().await.get(&uri).unwrap().len(), 1);
 
         // Simulate clearing before re-touch (what touch_file now does)
-        diagnostics.lock().await.remove(&uri);
+        clear_uri(&diagnostics, &uri).await;
         assert!(diagnostics.lock().await.get(&uri).is_none());
     }
 
