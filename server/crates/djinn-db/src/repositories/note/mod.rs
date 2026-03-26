@@ -1796,7 +1796,7 @@ mod tests {
         .bind("")
         .bind("open")
         .bind(0_i64)
-        .bind(serde_json::json!([adr.id.clone()]).to_string())
+        .bind(serde_json::json!([adr.permalink.clone()]).to_string())
         .execute(db.pool())
         .await
         .unwrap();
@@ -1808,7 +1808,11 @@ mod tests {
 
         let score_map: std::collections::HashMap<String, f64> = scores.into_iter().collect();
         assert_eq!(score_map.get(&adr.id), Some(&1.0));
-        assert_eq!(score_map.get(&repo_map.id), Some(&0.245));
+        assert!(
+            (score_map.get(&repo_map.id).copied().unwrap() - 0.245).abs() < 1e-9,
+            "expected repo-map affinity score of 0.245, got {:?}",
+            score_map.get(&repo_map.id)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

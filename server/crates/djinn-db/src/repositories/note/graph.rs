@@ -266,7 +266,16 @@ impl NoteRepository {
         if let Some(refs_json) = task_refs
             && let Ok(memory_refs) = serde_json::from_str::<Vec<String>>(&refs_json)
         {
-            for note_id in &memory_refs {
+            let mut direct_note_ids = Vec::new();
+            for memory_ref in &memory_refs {
+                let note_id = self
+                    .note_id_by_permalink(project_id, memory_ref)
+                    .await?
+                    .unwrap_or_else(|| memory_ref.clone());
+                direct_note_ids.push(note_id);
+            }
+
+            for note_id in &direct_note_ids {
                 scores
                     .entry(note_id.clone())
                     .and_modify(|score| *score = score.max(1.0_f64))
