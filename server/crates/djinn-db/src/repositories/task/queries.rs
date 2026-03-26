@@ -1,4 +1,137 @@
 use super::*;
+use crate::SessionRepository;
+use djinn_core::models::IssueType;
+
+const REPEATED_REOPEN_MISMATCH_THRESHOLD: i64 = 3;
+
+fn toolset_for_role(role: &str) -> &'static [&'static str] {
+    match role {
+        "planner" => &[
+            "task_create",
+            "epic_update",
+            "memory_ref_update",
+            "reprioritization",
+        ],
+        "lead" => &[
+            "lead_intervention",
+            "force_close",
+            "replacement_tasks",
+            "decomposition",
+        ],
+        "reviewer" => &["task_review"],
+        "architect" => &["board_health_review", "stuck_task_review"],
+        _ => &["code_changes", "tests", "verification_fix"],
+    }
+}
+
+fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String>)> {
+    let mut planner_signals = Vec::new();
+
+    if matches!(task.issue_type.as_str(), "planning" | "decomposition") {
+        planner_signals.push("issue_type:planning".to_string());
+        return Some(("planner", planner_signals));
+    }
+
+    let haystack = format!(
+        "{}\n{}\n{}\n{}",
+        task.title.to_lowercase(),
+        task.description.to_lowercase(),
+        task.design.to_lowercase(),
+        task.acceptance_criteria.to_lowercase()
+    );
+
+    let add_signal_once = |signals: &mut Vec<String>, signal: &str| {
+        if !signals.iter().any(|existing| existing == signal) {
+            signals.push(signal.to_string());
+        }
+    };
+
+    for (needle, signal) in [
+        ("task_create", "requires:task_create"),
+        ("epic_update", "requires:epic_update"),
+        ("memory_ref", "requires:memory_ref_update"),
+        ("memory refs", "requires:memory_ref_update"),
+        ("re-priorit", "requires:reprioritization"),
+        ("repriorit", "requires:reprioritization"),
+        ("decompos", "requires:decomposition"),
+        ("plan next wave", "requires:planning"),
+        ("planning task", "requires:planning"),
+    ] {
+        if haystack.contains(needle) {
+            add_signal_once(&mut planner_signals, signal);
+        }
+    }
+
+    let mut lead_signals = Vec::new();
+    for (needle, signal) in [
+        ("lead intervention", "requires:lead_intervention"),
+        ("force_close", "requires:force_close"),
+        ("replacement task", "requires:replacement_tasks"),
+        ("decompose into subtasks", "requires:decomposition"),
+    ] {
+        if haystack.contains(needle) {
+            add_signal_once(&mut lead_signals, signal);
+        }
+    }
+
+    if !planner_signals.is_empty() {
+        return Some(("planner", planner_signals));
+    }
+    if !lead_signals.is_empty() {
+        return Some(("lead", lead_signals));
+    }
+
+    if IssueType::parse(&task.issue_type)
+        .map(|issue_type| issue_type.uses_simple_lifecycle())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    None
+}
+
+fn dispatched_role_for_task(task: &Task) -> &'static str {
+    match task.status.as_str() {
+        "needs_task_review" | "in_task_review" => "reviewer",
+        "needs_lead_intervention" | "in_lead_intervention" => "lead",
+        _ => match task.issue_type.as_str() {
+            "planning" | "decomposition" => "planner",
+            "spike" | "review" => "architect",
+            _ => "worker",
+        },
+    }
+}
+
+fn role_tool_mismatch_reason(
+    total_reopen_count: i64,
+    expected_role: &str,
+    dispatched_role: &str,
+) -> String {
+    let expected_tools = toolset_for_role(expected_role).join(", ");
+    let dispatched_tools = toolset_for_role(dispatched_role).join(", ");
+    format!(
+        "Repeated reopen churn ({total_reopen_count} reopens) suggests this task needs the {expected_role} toolset ({expected_tools}) rather than the currently routed {dispatched_role} toolset ({dispatched_tools})."
+    )
+}
+
+async fn list_board_health_mismatch_candidates(repo: &TaskRepository) -> Result<Vec<Task>> {
+    let list = repo
+        .list_filtered(ListQuery {
+            project_id: None,
+            status: None,
+            issue_type: None,
+            priority: None,
+            label: None,
+            text: None,
+            parent: None,
+            sort: "updated_desc".to_string(),
+            limit: 10_000,
+            offset: 0,
+        })
+        .await?;
+    Ok(list.tasks)
+}
 
 impl TaskRepository {
     /// List tasks ready to start: status='open' with no unresolved blockers.
@@ -418,10 +551,60 @@ impl TaskRepository {
             })
             .collect();
 
+        let session_repo = SessionRepository::new(self.db.clone(), self.events.clone());
+        let mismatch_candidates = list_board_health_mismatch_candidates(self).await?;
+        let mut repeated_reopen_role_tool_mismatches = Vec::new();
+
+        for task in mismatch_candidates {
+            if task.total_reopen_count < REPEATED_REOPEN_MISMATCH_THRESHOLD {
+                continue;
+            }
+
+            let Some((expected_role, mismatch_signals)) = infer_expected_role_for_task(&task)
+            else {
+                continue;
+            };
+            let dispatched_role = dispatched_role_for_task(&task);
+            if expected_role == dispatched_role {
+                continue;
+            }
+
+            let session_count = session_repo.count_for_task(&task.id).await.unwrap_or(0);
+            let epic_short_id = if let Some(epic_id) = &task.epic_id {
+                sqlx::query_scalar::<_, String>("SELECT short_id FROM epics WHERE id = ?1")
+                    .bind(epic_id)
+                    .fetch_optional(self.db.pool())
+                    .await?
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            repeated_reopen_role_tool_mismatches.push(serde_json::json!({
+                "id": task.id,
+                "short_id": task.short_id,
+                "title": task.title,
+                "status": task.status,
+                "issue_type": task.issue_type,
+                "dispatched_role": dispatched_role,
+                "expected_role": expected_role,
+                "total_reopen_count": task.total_reopen_count,
+                "session_count": session_count,
+                "mismatch_signals": mismatch_signals,
+                "reason": role_tool_mismatch_reason(
+                    task.total_reopen_count,
+                    expected_role,
+                    dispatched_role,
+                ),
+                "epic_short_id": epic_short_id,
+            }));
+        }
+
         Ok(serde_json::json!({
             "epic_stats":            epic_stats,
             "stale_tasks":           stale_tasks,
             "review_queue":          review_queue,
+            "repeated_reopen_role_tool_mismatches": repeated_reopen_role_tool_mismatches,
             "stale_threshold_hours": stale_hours,
         }))
     }

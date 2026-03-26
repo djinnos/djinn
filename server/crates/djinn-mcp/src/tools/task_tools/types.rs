@@ -528,10 +528,28 @@ pub struct BoardHealthReviewItem {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BoardHealthRoleToolMismatchItem {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+    pub issue_type: String,
+    pub dispatched_role: String,
+    pub expected_role: String,
+    pub total_reopen_count: i64,
+    pub session_count: i64,
+    pub mismatch_signals: Vec<String>,
+    pub reason: String,
+    pub epic_short_id: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoardHealthResponse {
     pub epic_stats: Vec<BoardHealthEpicStat>,
     pub stale_tasks: Vec<BoardHealthTaskItem>,
     pub review_queue: Vec<BoardHealthReviewItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub repeated_reopen_role_tool_mismatches: Vec<BoardHealthRoleToolMismatchItem>,
     pub stale_threshold_hours: i64,
     /// Per-project health issues blocking execution (project_id -> error message).
     #[serde(skip_serializing_if = "Option::is_none")]

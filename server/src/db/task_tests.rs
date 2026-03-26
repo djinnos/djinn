@@ -1140,6 +1140,95 @@ async fn board_health_report() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_flags_repeated_reopen_role_tool_mismatch_candidates() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Plan next wave after repeated worker churn",
+            "Repeated reopen churn suggests this should create planning tasks instead of more worker implementation.",
+            "Use task_create to split work and epic_update to refresh epic metadata.",
+            "task",
+            1,
+            "planner",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET total_reopen_count = 3 WHERE id = ?1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let _session = test_helpers::create_test_session(&db, &project.id, &task.id).await;
+
+    let report = repo.board_health(24).await.unwrap();
+    let mismatches = report
+        .get("repeated_reopen_role_tool_mismatches")
+        .and_then(|v| v.as_array())
+        .expect("repeated_reopen_role_tool_mismatches field should exist");
+    assert_eq!(mismatches.len(), 1);
+    assert_eq!(mismatches[0]["short_id"], task.short_id.as_str());
+    assert_eq!(mismatches[0]["dispatched_role"], "worker");
+    assert_eq!(mismatches[0]["expected_role"], "planner");
+    assert_eq!(mismatches[0]["total_reopen_count"], 3);
+    assert_eq!(mismatches[0]["session_count"], 1);
+    assert_eq!(
+        mismatches[0]["mismatch_signals"],
+        serde_json::json!([
+            "requires:task_create",
+            "requires:epic_update",
+            "requires:planning"
+        ])
+    );
+    assert_eq!(
+        mismatches[0]["reason"],
+        "Repeated reopen churn (3 reopens) suggests this task needs the planner toolset (task_create, epic_update, memory_ref_update, reprioritization) rather than the currently routed worker toolset (code_changes, tests, verification_fix)."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_ignores_repeated_reopen_tasks_without_role_tool_mismatch() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let epic = make_epic(&db, event_bus_for(&tx)).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let task = repo
+        .create_in_project(
+            &epic.project_id,
+            Some(&epic.id),
+            "Implement worker-safe fix",
+            "A normal implementation task with code changes only.",
+            "Edit Rust code and update tests in the existing module.",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET total_reopen_count = 4 WHERE id = ?1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let report = repo.board_health(24).await.unwrap();
+    let mismatches = report
+        .get("repeated_reopen_role_tool_mismatches")
+        .and_then(|v| v.as_array())
+        .expect("repeated_reopen_role_tool_mismatches field should exist");
+    assert!(mismatches.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconcile_heals_stale_tasks() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
