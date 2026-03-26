@@ -263,7 +263,7 @@ struct TaskCreateParams {
     priority: Option<i64>,
     owner: Option<String>,
     status: Option<String>,
-    acceptance_criteria: Option<Vec<String>>,
+    acceptance_criteria: Option<Vec<serde_json::Value>>,
     blocked_by: Option<Vec<String>>,
     memory_refs: Option<Vec<String>>,
     /// Specialist role name to route this task (e.g. "rust-expert").
@@ -702,7 +702,12 @@ async fn call_task_create(
             priority: p.priority.unwrap_or(0),
             owner: p.owner.unwrap_or_default(),
             status: status.map(str::to_string),
-            acceptance_criteria: p.acceptance_criteria,
+            acceptance_criteria: p.acceptance_criteria.map(|criteria| {
+                criteria
+                    .into_iter()
+                    .map(|item| acceptance_criterion_to_string(&item))
+                    .collect()
+            }),
             labels: Vec::new(),
             memory_refs: p.memory_refs.unwrap_or_default(),
             blocked_by_refs: p.blocked_by.unwrap_or_default(),

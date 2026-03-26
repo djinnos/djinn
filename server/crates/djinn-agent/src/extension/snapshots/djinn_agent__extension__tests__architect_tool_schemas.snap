@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/mod.rs
-assertion_line: 3847
 expression: tool_schemas_architect()
 ---
 [
@@ -308,10 +307,8 @@ expression: tool_schemas_architect()
     "inputSchema": {
       "properties": {
         "acceptance_criteria": {
-          "description": "Required. At least one criterion object with 'criterion' (string) and 'met' (bool) fields. Tasks without acceptance criteria cannot be dispatched.",
-          "items": {
-            "type": "object"
-          },
+          "description": "Required. Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields. Tasks without acceptance criteria cannot be dispatched.",
+          "items": {},
           "minItems": 1,
           "type": "array"
         },
@@ -371,9 +368,8 @@ expression: tool_schemas_architect()
     "inputSchema": {
       "properties": {
         "acceptance_criteria": {
-          "items": {
-            "type": "object"
-          },
+          "description": "Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields.",
+          "items": {},
           "type": "array"
         },
         "blocked_by_add": {
