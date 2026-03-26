@@ -131,18 +131,21 @@ pub(crate) fn test_tempdir() -> DbResult<tempfile::TempDir> {
 }
 
 fn workspace_test_tmp_dir() -> DbResult<PathBuf> {
+    // Prefer an explicit override for constrained CI/dev environments.
     if let Some(override_dir) = std::env::var_os("DJINN_TEST_TMPDIR") {
         let path = PathBuf::from(override_dir);
         std::fs::create_dir_all(&path).map_err(|e| DbError::InvalidData(e.to_string()))?;
         return Ok(path);
     }
 
+    // Otherwise place test tempdirs under the workspace root when discoverable.
     if let Some(base) = workspace_root_from_current_dir() {
         let candidate = base.join("target").join("test-tmp");
         std::fs::create_dir_all(&candidate).map_err(|e| DbError::InvalidData(e.to_string()))?;
         return Ok(candidate);
     }
 
+    // Final fallback: root under the current crate's target directory.
     let current_dir = std::env::current_dir().map_err(|e| DbError::InvalidData(e.to_string()))?;
     let fallback = current_dir.join("target").join("test-tmp");
     std::fs::create_dir_all(&fallback).map_err(|e| DbError::InvalidData(e.to_string()))?;
