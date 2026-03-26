@@ -21,6 +21,7 @@ pub fn folder_for_type(note_type: &str) -> &'static str {
         "design_spec" => "design/specs",
         "competitive" => "research/competitive",
         "tech_spike" => "research/technical",
+        "repo_map" => "reference/repo-maps",
         // Singletons live at the .djinn/ root, no subfolder.
         "brief" | "roadmap" => "",
         // Unknown types fall back to reference.
@@ -160,16 +161,25 @@ pub(super) fn infer_note_type(permalink: &str) -> String {
         return "roadmap".to_string();
     }
 
-    let folder = permalink.split('/').next().unwrap_or_default();
-    match folder {
+    match permalink
+        .rsplit_once('/')
+        .map(|(folder, _)| folder)
+        .unwrap_or_default()
+    {
         "decisions" => "adr",
         "patterns" => "pattern",
         "cases" => "case",
         "pitfalls" => "pitfall",
         "research" => "research",
+        "research/competitive" => "competitive",
+        "research/technical" => "tech_spike",
         "requirements" => "requirement",
         "reference" => "reference",
         "design" => "design",
+        "design/personas" => "persona",
+        "design/journeys" => "journey",
+        "design/specs" => "design_spec",
+        "reference/repo-maps" => "repo_map",
         _ => "reference",
     }
     .to_string()

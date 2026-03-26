@@ -50,6 +50,23 @@ impl<'a> CreateNoteParams<'a> {
 }
 
 impl NoteRepository {
+    pub async fn upsert_db_note_by_permalink(
+        &self,
+        project_id: &str,
+        permalink: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+    ) -> Result<Note> {
+        if let Some(existing) = self.get_by_permalink(project_id, permalink).await? {
+            return self.update(&existing.id, title, content, tags).await;
+        }
+
+        self.create_db_note_with_permalink(project_id, permalink, title, content, note_type, tags)
+            .await
+    }
+
     pub async fn create_db_note(
         &self,
         project_id: &str,
@@ -62,6 +79,58 @@ impl NoteRepository {
             project_id, title, content, note_type, tags,
         ))
         .await
+    }
+
+    pub async fn create_db_note_with_permalink(
+        &self,
+        project_id: &str,
+        permalink: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+    ) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let project_id = project_id.to_owned();
+        let permalink = permalink.to_owned();
+        let title = title.to_owned();
+        let content = content.to_owned();
+        let note_type = note_type.to_owned();
+        let folder = folder_for_type(&note_type).to_owned();
+        let tags = tags.to_owned();
+
+        let mut tx = self.db.pool().begin().await?;
+
+        sqlx::query(
+            "INSERT INTO notes
+                (id, project_id, permalink, title, file_path,
+                 storage, note_type, folder, tags, content)
+             VALUES (?1, ?2, ?3, ?4, '', 'db', ?5, ?6, ?7, ?8)",
+        )
+        .bind(&id)
+        .bind(&project_id)
+        .bind(&permalink)
+        .bind(&title)
+        .bind(&note_type)
+        .bind(&folder)
+        .bind(&tags)
+        .bind(&content)
+        .execute(&mut *tx)
+        .await?;
+
+        index_links_for_note(&mut tx, &id, &project_id, &content).await?;
+        resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
+
+        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        self.events.send(DjinnEventEnvelope::note_created(&note));
+        Ok(note)
     }
 
     fn note_file_path(&self, project_path: &Path, note_type: &str, title: &str) -> PathBuf {
