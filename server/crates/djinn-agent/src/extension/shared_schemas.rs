@@ -261,7 +261,7 @@ pub(crate) fn tool_task_create() -> RmcpTool {
                 "description": {"type": "string"},
                 "design": {"type": "string"},
                 "acceptance_criteria": {"type": "array", "items": {}, "description": "Required. Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields. Tasks without acceptance criteria cannot be dispatched.", "minItems": 1},
-                "issue_type": {"type": "string"},
+                "issue_type": {"type": "string", "description": "Task type: 'task' (default for worker-routed work), 'planning' for epic metadata operations (epic_update, memory_refs management, roadmap/AC changes), 'spike' for research, 'review' for code review. Use 'planning' when the work requires epic management tools."},
                 "priority": {"type": "integer"},
                 "owner": {"type": "string"},
                 "status": {"type": "string"},
