@@ -1,60 +1,25 @@
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use tokio_util::sync::CancellationToken;
 
-use crate::context::AgentContext;
 use crate::extension;
 use crate::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::output_parser::ParsedAgentOutput;
 use crate::output_stash::OutputStash;
 use crate::provider::telemetry;
-use crate::provider::{LlmProvider, StreamEvent, ToolChoice};
+use crate::provider::{LlmProvider, StreamEvent};
 use djinn_core::events::DjinnEventEnvelope;
 
 use super::*;
+mod error_handling;
+use error_handling::{
+    MAX_COMPACTION_RETRIES, is_context_length_error, is_orphaned_tool_call_error,
+    next_nudge_message, should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
+    should_retry_empty_stream, tool_choice_for_turn,
+};
 
 const MAX_TURNS: u32 = 1000;
-/// Maximum retries for empty assistant turns before treating as a hard failure.
-const MAX_EMPTY_TURN_RETRIES: u32 = 2;
-/// Maximum consecutive text-only turns before treating as a session failure.
-/// Each text-only turn without a finalize tool call triggers a nudge message.
-const MAX_NUDGE_ATTEMPTS: u32 = 3;
-
-fn is_context_length_error(e: &anyhow::Error) -> bool {
-    let msg = e.to_string().to_lowercase();
-    msg.contains("context_length")
-        || msg.contains("context limit")
-        || msg.contains("too many tokens")
-        || msg.contains("maximum context")
-        || msg.contains("context window")
-        || msg.contains("prompt is too long")
-        || msg.contains("max_tokens")
-        || msg.contains("token limit")
-}
-
-/// Detect "No tool call found for function call output" errors from the OpenAI
-/// Responses API. These happen when a `tool` role message references a
-/// `tool_call_id` that doesn't exist in any preceding assistant message —
-/// typically after compaction removed the assistant message but left orphaned
-/// tool results.
-fn is_orphaned_tool_call_error(e: &anyhow::Error) -> bool {
-    let msg = e.to_string().to_lowercase();
-    msg.contains("no tool call found for function call output")
-        || msg.contains("no function call found")
-}
-
-/// Providers confirmed to handle `tool_choice: "required"` correctly,
-/// even with reasoning/thinking enabled.
-fn supports_tool_choice_required(model_id: &str) -> bool {
-    let provider = model_id.split('/').next().unwrap_or("").to_lowercase();
-    matches!(
-        provider.as_str(),
-        "openai" | "anthropic" | "chatgpt_codex" | "github_copilot"
-    )
-}
 
 fn serialize_message(msg: &Message) -> serde_json::Value {
     serde_json::to_value(msg).unwrap_or_else(|e| {
@@ -127,9 +92,6 @@ fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Option<S
     Some(out)
 }
 
-/// Maximum reactive compaction attempts before giving up.
-const MAX_COMPACTION_RETRIES: u32 = 2;
-
 pub(crate) struct ReplyLoopContext<'a> {
     pub provider: &'a dyn LlmProvider,
     pub tools: &'a [serde_json::Value],
@@ -137,7 +99,7 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub task_short_id: &'a str,
     pub session_id: &'a str,
     pub project_path: &'a str,
-    pub worktree_path: &'a Path,
+    pub worktree_path: &'a std::path::Path,
     pub role_name: &'a str,
     /// Tool names that signal session completion (ADR-036).
     /// The first entry is the primary finalize tool; additional entries are
@@ -145,9 +107,9 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub finalize_tool_names: &'a [&'a str],
     pub context_window: i64,
     pub model_id: &'a str,
-    pub cancel: &'a CancellationToken,
-    pub global_cancel: &'a CancellationToken,
-    pub app_state: &'a AgentContext,
+    pub cancel: &'a tokio_util::sync::CancellationToken,
+    pub global_cancel: &'a tokio_util::sync::CancellationToken,
+    pub app_state: &'a crate::context::AgentContext,
 }
 
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
@@ -303,13 +265,7 @@ pub(super) async fn run_reply_loop(
             // Only force tool_choice=required for providers known to handle it
             // well.  Many reasoning models (Kimi K2.5, GLM-4.7, Qwen 3.5)
             // reject or mishandle "required" when thinking mode is active.
-            let tool_choice = if tools.is_empty() {
-                None
-            } else if supports_tool_choice_required(model_id) {
-                Some(ToolChoice::Required)
-            } else {
-                Some(ToolChoice::Auto)
-            };
+            let tool_choice = tool_choice_for_turn(model_id, tools);
             let stream_result = provider.stream(conversation, tools, tool_choice).await;
             let mut stream = match stream_result {
                 Ok(s) => s,
@@ -523,8 +479,8 @@ pub(super) async fn run_reply_loop(
             }
 
             if !saw_round_event {
-                if empty_turn_retries < MAX_EMPTY_TURN_RETRIES {
-                    empty_turn_retries += 1;
+                if let Some(next_retry) = should_retry_empty_stream(saw_round_event, empty_turn_retries) {
+                    empty_turn_retries = next_retry;
                     tracing::warn!(
                         task_id = %task_id,
                         retry = empty_turn_retries,
@@ -555,8 +511,10 @@ pub(super) async fn run_reply_loop(
             }
 
             if assistant_content.is_empty() {
-                if empty_turn_retries < MAX_EMPTY_TURN_RETRIES {
-                    empty_turn_retries += 1;
+                if let Some(next_retry) =
+                    should_retry_empty_assistant_turn(assistant_content.is_empty(), empty_turn_retries)
+                {
+                    empty_turn_retries = next_retry;
                     tracing::warn!(
                         task_id = %task_id,
                         retry = empty_turn_retries,
@@ -638,7 +596,7 @@ pub(super) async fn run_reply_loop(
                     //
                     // Skip tool dispatch and let the LLM produce a fresh
                     // response against the compacted conversation.
-                    if !turn_tool_calls.is_empty() {
+                    if should_retry_after_tool_call_compaction(compacted, !turn_tool_calls.is_empty()) {
                         compaction_attempts += 1;
                         conversation.push(Message::user(
                             "Continue with the task.",
@@ -693,40 +651,33 @@ pub(super) async fn run_reply_loop(
                 });
 
             // ── Nudge loop: text-only without finalize ────────────────────────
-            if turn_tool_calls.is_empty() {
-                if tools.is_empty() {
-                    // No tools registered at all → text-only is a valid session end.
-                    tracing::info!(
-                        task_id = %task_id,
-                        agent_type = %role_name,
-                        turns,
-                        assistant_message_count,
-                        "ReplyLoop: text-only turn (no tools) — session complete"
-                    );
-                    break;
-                }
-                let finalize_list = finalize_tool_names.join("` or `");
-                consecutive_nudge_count += 1;
-                if consecutive_nudge_count >= MAX_NUDGE_ATTEMPTS {
-                    return Err(anyhow::anyhow!(
-                        "session failed: {} consecutive text-only responses without calling {}",
-                        consecutive_nudge_count,
-                        finalize_list
-                    ));
-                }
+            if let Some((next_nudge_count, nudge_message)) = next_nudge_message(
+                !turn_tool_calls.is_empty(),
+                !tools.is_empty(),
+                consecutive_nudge_count,
+                finalize_tool_names,
+            )? {
+                consecutive_nudge_count = next_nudge_count;
                 tracing::warn!(
                     task_id = %task_id,
                     agent_type = %role_name,
                     nudge = consecutive_nudge_count,
-                    finalize_tools = %finalize_list,
+                    finalize_tools = %finalize_tool_names.join("` or `"),
                     "ReplyLoop: text-only turn without finalize — injecting nudge"
                 );
-                conversation.push(Message::user(format!(
-                    "You have not completed your session. You MUST call `{finalize_list}` \
-                     when you are done. If you still have work to do, use the appropriate tools \
-                     to continue. If you are done, call one of these tools now."
-                )));
+                conversation.push(nudge_message);
                 continue;
+            }
+            if turn_tool_calls.is_empty() && tools.is_empty() {
+                // No tools registered at all → text-only is a valid session end.
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    turns,
+                    assistant_message_count,
+                    "ReplyLoop: text-only turn (no tools) — session complete"
+                );
+                break;
             }
 
             // Non-finalize tool calls: reset nudge counter and dispatch normally.
@@ -1041,11 +992,13 @@ pub(super) async fn run_reply_loop(
 mod tests {
     use super::*;
     use crate::message::{ContentBlock, Conversation, Message};
+    use crate::provider::ToolChoice;
     use crate::provider::{LlmProvider, StreamEvent, TokenUsage};
     use crate::test_helpers;
     use djinn_core::message::Role;
     use djinn_db::repositories::session::CreateSessionParams;
     use djinn_db::{SessionMessageRepository, SessionRepository};
+    use error_handling::supports_tool_choice_required;
     use futures::stream;
     use std::collections::VecDeque;
     use std::pin::Pin;
@@ -1834,8 +1787,6 @@ mod tests {
         assert!(output.finalize_payload.is_some(), "finalize payload set");
     }
 
-    /// ToolChoice::Required is passed for providers known to support it (e.g. OpenAI).
-    /// Verified by recording the tool_choice values received by the mock provider.
     #[tokio::test]
     async fn tool_choice_required_for_supported_providers() {
         use std::sync::Mutex;
