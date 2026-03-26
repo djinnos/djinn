@@ -4,12 +4,32 @@ use djinn_core::models::IssueType;
 
 const REPEATED_REOPEN_MISMATCH_THRESHOLD: i64 = 3;
 
+fn toolset_for_role(role: &str) -> &'static [&'static str] {
+    match role {
+        "planner" => &[
+            "task_create",
+            "epic_update",
+            "memory_ref_update",
+            "reprioritization",
+        ],
+        "lead" => &[
+            "lead_intervention",
+            "force_close",
+            "replacement_tasks",
+            "decomposition",
+        ],
+        "reviewer" => &["task_review"],
+        "architect" => &["board_health_review", "stuck_task_review"],
+        _ => &["code_changes", "tests", "verification_fix"],
+    }
+}
+
 fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String>)> {
-    let mut signals = Vec::new();
+    let mut planner_signals = Vec::new();
 
     if matches!(task.issue_type.as_str(), "planning" | "decomposition") {
-        signals.push("issue_type:planning".to_string());
-        return Some(("planner", signals));
+        planner_signals.push("issue_type:planning".to_string());
+        return Some(("planner", planner_signals));
     }
 
     let haystack = format!(
@@ -32,7 +52,7 @@ fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String
         ("planning task", "requires:planning"),
     ] {
         if haystack.contains(needle) {
-            signals.push(signal.to_string());
+            planner_signals.push(signal.to_string());
         }
     }
 
@@ -48,8 +68,8 @@ fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String
         }
     }
 
-    if !signals.is_empty() {
-        return Some(("planner", signals));
+    if !planner_signals.is_empty() {
+        return Some(("planner", planner_signals));
     }
     if !lead_signals.is_empty() {
         return Some(("lead", lead_signals));
@@ -75,6 +95,18 @@ fn dispatched_role_for_task(task: &Task) -> &'static str {
             _ => "worker",
         },
     }
+}
+
+fn role_tool_mismatch_reason(
+    total_reopen_count: i64,
+    expected_role: &str,
+    dispatched_role: &str,
+) -> String {
+    let expected_tools = toolset_for_role(expected_role).join(", ");
+    let dispatched_tools = toolset_for_role(dispatched_role).join(", ");
+    format!(
+        "Repeated reopen churn ({total_reopen_count} reopens) suggests this task needs the {expected_role} toolset ({expected_tools}) rather than the currently routed {dispatched_role} toolset ({dispatched_tools})."
+    )
 }
 
 async fn list_board_health_mismatch_candidates(repo: &TaskRepository) -> Result<Vec<Task>> {
@@ -553,9 +585,10 @@ impl TaskRepository {
                 "total_reopen_count": task.total_reopen_count,
                 "session_count": session_count,
                 "mismatch_signals": mismatch_signals,
-                "reason": format!(
-                    "Repeated reopen churn ({} reopens) suggests this task needs {}-only tools rather than the currently routed {} role.",
-                    task.total_reopen_count, expected_role, dispatched_role
+                "reason": role_tool_mismatch_reason(
+                    task.total_reopen_count,
+                    expected_role,
+                    dispatched_role,
                 ),
                 "epic_short_id": epic_short_id,
             }));
