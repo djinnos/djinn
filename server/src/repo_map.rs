@@ -8,9 +8,18 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+use petgraph::visit::EdgeRef;
+
 use crate::process;
+use crate::repo_graph::{
+    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoGraphRanking,
+};
+use crate::scip_parser::ScipSymbolKind;
 
 const SCIP_ARTIFACT_EXTENSION: &str = "scip";
+const DEFAULT_MAX_FILES: usize = 12;
+const DEFAULT_MAX_SYMBOLS_PER_FILE: usize = 4;
+const DEFAULT_MAX_RELATIONSHIPS_PER_FILE: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -124,6 +133,56 @@ pub struct IndexingRun {
     pub output_root: PathBuf,
     pub commands: Vec<ExecutedIndexerCommand>,
     pub artifacts: Vec<ScipArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoMapRenderOptions {
+    pub token_budget: usize,
+    pub max_files: usize,
+    pub max_symbols_per_file: usize,
+    pub max_relationships_per_file: usize,
+}
+
+impl RepoMapRenderOptions {
+    pub fn new(token_budget: usize) -> Self {
+        Self {
+            token_budget,
+            max_files: DEFAULT_MAX_FILES,
+            max_symbols_per_file: DEFAULT_MAX_SYMBOLS_PER_FILE,
+            max_relationships_per_file: DEFAULT_MAX_RELATIONSHIPS_PER_FILE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedRepoMap {
+    pub content: String,
+    pub token_estimate: usize,
+    pub included_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoMapRenderError {
+    MinimalRepresentationExceedsBudget {
+        budget: usize,
+        required_tokens: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoMapEntry {
+    file_path: PathBuf,
+    language: Option<String>,
+    score_milli: i64,
+    symbols: Vec<RepoMapSymbol>,
+    relationships: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoMapSymbol {
+    name: String,
+    kind: Option<ScipSymbolKind>,
+    score_milli: i64,
 }
 
 pub fn detect_indexers() -> Vec<IndexerAvailability> {
@@ -240,6 +299,240 @@ pub fn collect_scip_artifacts(
     Ok(artifacts)
 }
 
+pub fn render_repo_map(
+    graph: &RepoDependencyGraph,
+    ranking: &RepoGraphRanking,
+    options: &RepoMapRenderOptions,
+) -> Result<RenderedRepoMap, RepoMapRenderError> {
+    let entries = build_repo_map_entries(graph, ranking, options);
+
+    let minimal_content = render_repo_map_slice(&entries, 1, options);
+    let minimal_tokens = estimate_tokens(&minimal_content);
+    if minimal_tokens > options.token_budget {
+        return Err(RepoMapRenderError::MinimalRepresentationExceedsBudget {
+            budget: options.token_budget,
+            required_tokens: minimal_tokens,
+        });
+    }
+
+    let mut low = 1usize;
+    let mut high = entries.len();
+    let mut best = RenderedRepoMap {
+        content: minimal_content,
+        token_estimate: minimal_tokens,
+        included_entries: 1,
+    };
+
+    while low <= high {
+        let mid = low + ((high - low) / 2);
+        let content = render_repo_map_slice(&entries, mid, options);
+        let token_estimate = estimate_tokens(&content);
+
+        if token_estimate <= options.token_budget {
+            best = RenderedRepoMap {
+                content,
+                token_estimate,
+                included_entries: mid,
+            };
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    Ok(best)
+}
+
+fn build_repo_map_entries(
+    graph: &RepoDependencyGraph,
+    ranking: &RepoGraphRanking,
+    options: &RepoMapRenderOptions,
+) -> Vec<RepoMapEntry> {
+    let mut files = Vec::new();
+
+    for ranked in ranking
+        .nodes
+        .iter()
+        .filter(|node| node.kind == RepoGraphNodeKind::File)
+    {
+        if files.len() >= options.max_files {
+            break;
+        }
+
+        let file_node = graph.node(ranked.node_index);
+        let Some(file_path) = file_node.file_path.clone() else {
+            continue;
+        };
+
+        let mut symbols = graph
+            .graph()
+            .neighbors(ranked.node_index)
+            .filter_map(|neighbor| {
+                let node = graph.node(neighbor);
+                if node.kind != RepoGraphNodeKind::Symbol || node.is_external {
+                    return None;
+                }
+                if node.file_path.as_ref() != Some(&file_path) {
+                    return None;
+                }
+                ranking
+                    .nodes
+                    .iter()
+                    .find(|ranked_symbol| ranked_symbol.node_index == neighbor)
+                    .map(|ranked_symbol| RepoMapSymbol {
+                        name: node.display_name.clone(),
+                        kind: node.symbol_kind.clone(),
+                        score_milli: score_to_milli(ranked_symbol.score),
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        symbols.sort_by(|left, right| {
+            right
+                .score_milli
+                .cmp(&left.score_milli)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| {
+                    format_symbol_kind(left.kind.as_ref())
+                        .cmp(format_symbol_kind(right.kind.as_ref()))
+                })
+        });
+        symbols.truncate(options.max_symbols_per_file);
+
+        let mut relationships = graph
+            .graph()
+            .edges(ranked.node_index)
+            .filter_map(|edge| {
+                let target = graph.node(edge.target());
+                if target.is_external || target.kind != RepoGraphNodeKind::File {
+                    return None;
+                }
+                let target_path = target.file_path.as_ref()?;
+                Some(format!(
+                    "{} {}",
+                    format_edge_kind(edge.weight().kind),
+                    target_path.display()
+                ))
+            })
+            .collect::<Vec<_>>();
+        relationships.sort();
+        relationships.dedup();
+        relationships.truncate(options.max_relationships_per_file);
+
+        files.push(RepoMapEntry {
+            file_path,
+            language: file_node.language.clone(),
+            score_milli: score_to_milli(ranked.score),
+            symbols,
+            relationships,
+        });
+    }
+
+    files.sort_by(|left, right| {
+        right
+            .score_milli
+            .cmp(&left.score_milli)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+    });
+    files
+}
+
+fn render_repo_map_slice(
+    entries: &[RepoMapEntry],
+    included_entries: usize,
+    options: &RepoMapRenderOptions,
+) -> String {
+    let included_entries = included_entries.min(entries.len());
+    let mut lines = vec![
+        "# Repository Map".to_string(),
+        format!(
+            "Showing {} ranked files under ~{} token budget.",
+            included_entries, options.token_budget
+        ),
+    ];
+
+    for entry in entries.iter().take(included_entries) {
+        let language = entry.language.as_deref().unwrap_or("unknown");
+        lines.push(format!(
+            "- file: {} [{}] score={}",
+            entry.file_path.display(),
+            language,
+            format_score(entry.score_milli)
+        ));
+
+        if !entry.symbols.is_empty() {
+            let rendered = entry
+                .symbols
+                .iter()
+                .map(|symbol| {
+                    format!(
+                        "{}{} ({})",
+                        symbol.name,
+                        format_symbol_kind_suffix(symbol.kind.as_ref()),
+                        format_score(symbol.score_milli)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("  symbols: {rendered}"));
+        }
+
+        if !entry.relationships.is_empty() {
+            lines.push(format!("  links: {}", entry.relationships.join(", ")));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn estimate_tokens(content: &str) -> usize {
+    let chars = content.chars().count();
+    if chars == 0 { 0 } else { chars.div_ceil(4) }
+}
+
+fn score_to_milli(score: f64) -> i64 {
+    (score * 1000.0).round() as i64
+}
+
+fn format_score(score_milli: i64) -> String {
+    format!("{:.3}", score_milli as f64 / 1000.0)
+}
+
+fn format_symbol_kind(kind: Option<&ScipSymbolKind>) -> &'static str {
+    match kind {
+        Some(ScipSymbolKind::Type) | Some(ScipSymbolKind::Struct) => "type",
+        Some(ScipSymbolKind::Enum) => "enum",
+        Some(ScipSymbolKind::Interface) => "interface",
+        Some(ScipSymbolKind::Method) | Some(ScipSymbolKind::Constructor) => "method",
+        Some(ScipSymbolKind::Function) => "function",
+        Some(ScipSymbolKind::Variable) => "variable",
+        Some(ScipSymbolKind::Field) => "field",
+        Some(ScipSymbolKind::Property) => "property",
+        Some(ScipSymbolKind::Constant) => "constant",
+        Some(_) => "symbol",
+        None => "symbol",
+    }
+}
+
+fn format_symbol_kind_suffix(kind: Option<&ScipSymbolKind>) -> String {
+    format!(":{}", format_symbol_kind(kind))
+}
+
+fn format_edge_kind(kind: RepoGraphEdgeKind) -> &'static str {
+    match kind {
+        RepoGraphEdgeKind::ContainsDefinition => "contains",
+        RepoGraphEdgeKind::DeclaredInFile => "declares",
+        RepoGraphEdgeKind::FileReference => "references",
+        RepoGraphEdgeKind::SymbolReference => "symbol-ref",
+        RepoGraphEdgeKind::SymbolRelationshipReference => "rel-ref",
+        RepoGraphEdgeKind::SymbolRelationshipImplementation => "implements",
+        RepoGraphEdgeKind::SymbolRelationshipTypeDefinition => "type-def",
+        RepoGraphEdgeKind::SymbolRelationshipDefinition => "definition",
+    }
+}
+
 fn discover_scip_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut artifacts = Vec::new();
     visit_dirs(root, &mut |path| {
@@ -319,13 +612,19 @@ fn is_executable(_metadata: fs::Metadata) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+    use crate::scip_parser::{
+        ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
+        ScipRelationshipKind, ScipSymbol, ScipSymbolRole,
+    };
     use tempfile::TempDir;
 
     fn tempdir_in_tmp() -> TempDir {
         tempfile::Builder::new()
             .prefix("djinn-repo-map-")
-            .tempdir_in(std::env::temp_dir())
+            .tempdir_in(".")
             .expect("create test tempdir")
     }
 
@@ -487,5 +786,151 @@ mod tests {
         let missing = PathBuf::from("/tmp/does-not-exist-djinn-scip");
         let artifacts = collect_scip_artifacts(&missing, &[]).expect("collect artifacts");
         assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn render_repo_map_is_deterministic_and_budget_aware() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let ranking = graph.rank();
+        let options = RepoMapRenderOptions::new(120);
+
+        let first = render_repo_map(&graph, &ranking, &options).expect("render succeeds");
+        let second = render_repo_map(&graph, &ranking, &options).expect("render succeeds");
+
+        assert_eq!(first, second);
+        assert!(first.token_estimate <= options.token_budget);
+        assert!(first.content.contains("# Repository Map"));
+        assert!(first.content.contains("src/helper.rs") || first.content.contains("src/app.rs"));
+    }
+
+    #[test]
+    fn render_repo_map_shrinks_with_budget_using_bounded_search() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let ranking = graph.rank();
+
+        let roomy = render_repo_map(&graph, &ranking, &RepoMapRenderOptions::new(300))
+            .expect("roomy render succeeds");
+        let tight = render_repo_map(
+            &graph,
+            &ranking,
+            &RepoMapRenderOptions {
+                token_budget: 90,
+                max_files: 1,
+                max_symbols_per_file: 1,
+                max_relationships_per_file: 1,
+            },
+        )
+        .expect("tight render succeeds");
+
+        assert!(roomy.included_entries > tight.included_entries);
+        assert!(tight.token_estimate <= 90);
+    }
+
+    #[test]
+    fn render_repo_map_reports_when_minimal_representation_cannot_fit() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let ranking = graph.rank();
+
+        let err = render_repo_map(&graph, &ranking, &RepoMapRenderOptions::new(10))
+            .expect_err("budget should be too small");
+
+        assert!(matches!(
+            err,
+            RepoMapRenderError::MinimalRepresentationExceedsBudget { .. }
+        ));
+    }
+
+    fn fixture_index() -> ParsedScipIndex {
+        let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
+        let helper_symbol = ScipSymbol {
+            symbol: helper_symbol_name.clone(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("helper".to_string()),
+            signature: Some("fn helper()".to_string()),
+            documentation: vec!["returns a value".to_string()],
+            relationships: vec![],
+        };
+        let trait_symbol = ScipSymbol {
+            symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
+            kind: Some(ScipSymbolKind::Type),
+            display_name: Some("HelperTrait".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+        };
+        let main_symbol = ScipSymbol {
+            symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("main".to_string()),
+            signature: Some("fn main()".to_string()),
+            documentation: vec![],
+            relationships: vec![ScipRelationship {
+                source_symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
+                target_symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
+                kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
+            }],
+        };
+
+        ParsedScipIndex {
+            metadata: ScipMetadata {
+                project_root: Some("file:///workspace/repo".to_string()),
+                tool_name: Some("rust-analyzer".to_string()),
+                tool_version: Some("1.0.0".to_string()),
+            },
+            files: vec![
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/helper.rs"),
+                    definitions: vec![definition_occurrence(&helper_symbol_name)],
+                    references: vec![],
+                    occurrences: vec![definition_occurrence(&helper_symbol_name)],
+                    symbols: vec![helper_symbol],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/app.rs"),
+                    definitions: vec![definition_occurrence(&main_symbol.symbol)],
+                    references: vec![reference_occurrence(&helper_symbol_name)],
+                    occurrences: vec![
+                        definition_occurrence(&main_symbol.symbol),
+                        reference_occurrence(&helper_symbol_name),
+                    ],
+                    symbols: vec![main_symbol, trait_symbol],
+                },
+            ],
+            external_symbols: vec![],
+        }
+    }
+
+    fn definition_occurrence(symbol: &str) -> ScipOccurrence {
+        ScipOccurrence {
+            symbol: symbol.to_string(),
+            range: ScipRange {
+                start_line: 0,
+                start_character: 0,
+                end_line: 0,
+                end_character: 6,
+            },
+            enclosing_range: None,
+            roles: BTreeSet::from([ScipSymbolRole::Definition]),
+            syntax_kind: None,
+            override_documentation: vec![],
+        }
+    }
+
+    fn reference_occurrence(symbol: &str) -> ScipOccurrence {
+        ScipOccurrence {
+            symbol: symbol.to_string(),
+            range: ScipRange {
+                start_line: 1,
+                start_character: 4,
+                end_line: 1,
+                end_character: 10,
+            },
+            enclosing_range: None,
+            roles: BTreeSet::from([ScipSymbolRole::ReadAccess]),
+            syntax_kind: None,
+            override_documentation: vec![],
+        }
     }
 }
