@@ -18,13 +18,13 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{self, Interval};
 use tokio_util::sync::CancellationToken;
 
+use crate::actors::coordinator::consolidation::{ConsolidationRunner, DbConsolidationRunner};
 use crate::actors::slot::{PoolError, SlotPoolHandle};
 use crate::roles::RoleRegistry;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
 use djinn_db::Database;
 use djinn_db::GitSettingsRepository;
-use djinn_db::NoteConsolidationRepository;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
@@ -37,70 +37,6 @@ use djinn_provider::catalog::health::HealthTracker;
 /// spawner registers task IDs here; the coordinator checks it during stuck
 /// detection so it can distinguish live pipelines from orphans after restart.
 pub type VerificationTracker = Arc<std::sync::Mutex<HashSet<String>>>;
-
-trait ConsolidationRunner: Send + Sync {
-    fn run_for_group<'a>(
-        &'a self,
-        group: djinn_db::DbNoteGroup,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = djinn_db::Result<()>> + Send + 'a>>;
-}
-
-struct DbConsolidationRunner {
-    db: Database,
-}
-
-impl DbConsolidationRunner {
-    fn new(db: Database) -> Self {
-        Self { db }
-    }
-}
-
-impl ConsolidationRunner for DbConsolidationRunner {
-    fn run_for_group<'a>(
-        &'a self,
-        group: djinn_db::DbNoteGroup,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = djinn_db::Result<()>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let repo = NoteConsolidationRepository::new(self.db.clone());
-            let clusters = repo
-                .likely_duplicate_clusters(&group.project_id, &group.note_type)
-                .await?;
-            if clusters
-                .iter()
-                .all(|cluster| cluster.note_ids.len() < CONSOLIDATION_MIN_CLUSTER_SIZE)
-            {
-                return Ok(());
-            }
-
-            let now = "1970-01-01T00:00:00Z".to_string();
-            let qualifying_clusters = clusters
-                .iter()
-                .filter(|cluster| cluster.note_ids.len() >= CONSOLIDATION_MIN_CLUSTER_SIZE)
-                .collect::<Vec<_>>();
-
-            repo.create_run_metric(djinn_db::CreateConsolidationRunMetric {
-                project_id: &group.project_id,
-                note_type: &group.note_type,
-                status: "noop",
-                scanned_note_count: group.note_count,
-                candidate_cluster_count: clusters.len() as i64,
-                consolidated_cluster_count: qualifying_clusters.len() as i64,
-                consolidated_note_count: 0,
-                source_note_count: qualifying_clusters
-                    .iter()
-                    .map(|cluster| cluster.note_ids.len() as i64)
-                    .sum(),
-                started_at: &now,
-                completed_at: Some(&now),
-                error_message: None,
-            })
-            .await?;
-
-            Ok(())
-        })
-    }
-}
 
 pub struct CoordinatorDeps {
     pub events_tx: broadcast::Sender<DjinnEventEnvelope>,
@@ -147,6 +83,7 @@ impl CoordinatorDeps {
     }
 }
 
+mod consolidation;
 mod dispatch;
 mod health;
 pub(crate) mod pr_poller;
@@ -157,7 +94,6 @@ mod wave;
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
 const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const CONSOLIDATION_MIN_CLUSTER_SIZE: usize = 3;
 const TASK_OUTCOME_CONFIDENCE_ACTIVITY: &str = "task_outcome_confidence";
 const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
 const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
@@ -533,7 +469,7 @@ impl CoordinatorActor {
                     if self.prune_tick_counter >= 120 {
                         self.prune_tick_counter = 0;
                         self.prune_note_associations().await;
-                        self.run_note_consolidation().await;
+                        consolidation::run_note_consolidation(&self.db, &self.consolidation_runner).await;
                         self.evict_throughput_events();
                         self.evaluate_prompt_amendments().await;
                     }
@@ -1065,28 +1001,6 @@ impl CoordinatorActor {
         );
         repo.get_path(project_id).await.ok().flatten()
     }
-
-    async fn run_note_consolidation(&self) {
-        let repo = NoteConsolidationRepository::new(self.db.clone());
-        let groups = match repo.list_db_note_groups().await {
-            Ok(groups) => groups,
-            Err(error) => {
-                tracing::warn!(error = %error, "CoordinatorActor: failed to list DB note groups for consolidation");
-                return;
-            }
-        };
-
-        for group in groups {
-            if let Err(error) = self.consolidation_runner.run_for_group(group.clone()).await {
-                tracing::warn!(
-                    project_id = %group.project_id,
-                    note_type = %group.note_type,
-                    error = %error,
-                    "CoordinatorActor: failed to run DB note consolidation"
-                );
-            }
-        }
-    }
 }
 
 // ─── Handle ───────────────────────────────────────────────────────────────────
@@ -1350,9 +1264,12 @@ mod tests {
     use crate::test_helpers;
     use djinn_core::models::TransitionAction;
     use djinn_db::EpicRepository;
+    use djinn_db::NoteConsolidationRepository;
     use djinn_db::NoteRepository;
     use djinn_db::TaskRepository;
     use djinn_provider::catalog::health::HealthTracker;
+
+    use super::consolidation::{self, ConsolidationRunner, DbConsolidationRunner};
 
     struct RecordingConsolidationRunner {
         calls: Arc<Mutex<Vec<djinn_db::DbNoteGroup>>>,
@@ -1571,7 +1488,7 @@ mod tests {
             dispatched: 0,
             recovered: 0,
         };
-        actor.run_note_consolidation().await;
+        consolidation::run_note_consolidation(&actor.db, &actor.consolidation_runner).await;
 
         let groups = runner.groups();
         assert_eq!(groups.len(), 1);
