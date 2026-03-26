@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
+use djinn_db::NoteRepository;
 use serde::{Deserialize, Serialize};
 
 use petgraph::visit::EdgeRef;
@@ -15,7 +16,9 @@ use crate::repo_graph::{
     RankedRepoGraphNode, RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind,
     RepoGraphRanking,
 };
-use crate::repo_map_personalization::RepoMapPersonalizationInput;
+use crate::repo_map_personalization::{
+    RepoMapNoteHint, RepoMapNoteSearcher, RepoMapPersonalizationInput,
+};
 use crate::scip_parser::ScipSymbolKind;
 
 const SCIP_ARTIFACT_EXTENSION: &str = "scip";
@@ -195,6 +198,21 @@ pub struct RepoMapPersonalizationRequest<'a> {
     pub description: Option<&'a str>,
     pub design: Option<&'a str>,
     pub memory_refs: &'a [String],
+    pub note_hints: &'a [RepoMapNoteHint],
+}
+
+impl RepoMapNoteSearcher for NoteRepository {
+    type Error = djinn_db::Error;
+
+    async fn search<'a>(
+        &'a self,
+        project_id: &'a str,
+        query: &'a str,
+        task_id: Option<&'a str>,
+        limit: usize,
+    ) -> Result<Vec<djinn_core::models::NoteSearchResult>, Self::Error> {
+        NoteRepository::search(self, project_id, query, task_id, None, None, limit).await
+    }
 }
 
 pub fn detect_indexers() -> Vec<IndexerAvailability> {
@@ -324,7 +342,7 @@ pub fn personalized_repo_map_ranking(
     graph: &RepoDependencyGraph,
     request: &RepoMapPersonalizationRequest<'_>,
 ) -> Vec<RankedRepoGraphNode> {
-    let identifiers = crate::repo_map_personalization::extract_identifier_candidates(
+    let mut identifiers = crate::repo_map_personalization::extract_identifier_candidates(
         &RepoMapPersonalizationInput {
             title: request.title,
             description: request.description,
@@ -332,6 +350,15 @@ pub fn personalized_repo_map_ranking(
             memory_refs: request.memory_refs,
         },
     );
+
+    identifiers.extend(
+        request
+            .note_hints
+            .iter()
+            .flat_map(|hint| hint.normalized_tokens.iter().cloned()),
+    );
+    identifiers.sort();
+    identifiers.dedup();
 
     let mut ranked = request.ranked_nodes.to_vec();
     ranked.sort_by(|left, right| {
@@ -978,6 +1005,7 @@ mod tests {
                 description: Some("Need HelperTrait and helper references"),
                 design: Some("Prioritize references src/helper.rs relationship display text"),
                 memory_refs: &memory_refs,
+                note_hints: &[],
             },
         );
 
