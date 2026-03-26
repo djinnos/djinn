@@ -121,7 +121,32 @@ impl Database {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> DbResult<tempfile::TempDir> {
+    let base = workspace_test_tmp_dir()?;
+    tempfile::Builder::new()
+        .prefix("djinn-test-")
+        .tempdir_in(base)
+        .map_err(|e| DbError::InvalidData(e.to_string()))
+}
+
 fn workspace_test_tmp_dir() -> DbResult<PathBuf> {
+    if let Some(override_dir) = std::env::var_os("DJINN_TEST_TMPDIR") {
+        let path = PathBuf::from(override_dir);
+        std::fs::create_dir_all(&path).map_err(|e| DbError::InvalidData(e.to_string()))?;
+        return Ok(path);
+    }
+
+    let current_dir = std::env::current_dir().map_err(|e| DbError::InvalidData(e.to_string()))?;
+    let current_candidate = current_dir.join("target").join("test-tmp");
+    if let Some(parent) = current_candidate.parent()
+        && parent.exists()
+    {
+        std::fs::create_dir_all(&current_candidate)
+            .map_err(|e| DbError::InvalidData(e.to_string()))?;
+        return Ok(current_candidate);
+    }
+
     let mut current = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     loop {
@@ -136,10 +161,7 @@ fn workspace_test_tmp_dir() -> DbResult<PathBuf> {
         }
     }
 
-    let fallback = std::env::current_dir()
-        .map_err(|e| DbError::InvalidData(e.to_string()))?
-        .join("target")
-        .join("test-tmp");
+    let fallback = current_dir.join("target").join("test-tmp");
     std::fs::create_dir_all(&fallback).map_err(|e| DbError::InvalidData(e.to_string()))?;
     Ok(fallback)
 }
@@ -210,7 +232,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_file_db_and_readonly_reader() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::database::test_tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let writer = Database::open(&db_path).unwrap();

@@ -22,7 +22,8 @@ pub use repositories::{
     note::{
         CONTRADICTION, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
         ConsolidationCluster, ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate,
-        CreateConsolidationRunMetric, DbNoteGroup, NoteAssociationEntry,
+        CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
+        CreatedCanonicalConsolidatedNote, DbNoteGroup, NoteAssociationEntry,
         NoteConsolidationRepository, NoteDedupCandidate, NoteRepository, STALE_CITATION,
         UpdateNoteIndexParams, file_path_for, folder_for_type, is_singleton, permalink_for,
         slugify,

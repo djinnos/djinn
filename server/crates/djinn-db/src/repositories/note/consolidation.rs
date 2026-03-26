@@ -1,8 +1,10 @@
+use djinn_core::events::EventBus;
 use djinn_core::models::{
     ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
-    ConsolidationNote, ConsolidationRunMetric, DbNoteGroup, NoteDedupCandidate,
+    ConsolidationNote, ConsolidationRunMetric, DbNoteGroup, Note, NoteDedupCandidate,
 };
 
+use super::{NOTE_SELECT_WHERE_ID, NoteRepository};
 use crate::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
@@ -21,6 +23,23 @@ pub struct CreateConsolidationRunMetric<'a> {
     pub started_at: &'a str,
     pub completed_at: Option<&'a str>,
     pub error_message: Option<&'a str>,
+}
+
+pub struct CreateCanonicalConsolidatedNote<'a> {
+    pub project_id: &'a str,
+    pub note_type: &'a str,
+    pub title: &'a str,
+    pub content: &'a str,
+    pub tags: &'a str,
+    pub abstract_: Option<&'a str>,
+    pub overview: Option<&'a str>,
+    pub confidence: f64,
+    pub source_session_ids: &'a [&'a str],
+}
+
+pub struct CreatedCanonicalConsolidatedNote {
+    pub note: Note,
+    pub provenance: Vec<ConsolidatedNoteProvenance>,
 }
 
 pub struct NoteConsolidationRepository {
@@ -78,6 +97,67 @@ impl NoteConsolidationRepository {
     ) -> Result<Vec<ConsolidationCluster>> {
         let notes = self.list_db_notes_in_group(project_id, note_type).await?;
         self.clusters_from_notes(project_id, &notes).await
+    }
+
+    pub async fn create_canonical_consolidated_note(
+        &self,
+        params: CreateCanonicalConsolidatedNote<'_>,
+    ) -> Result<CreatedCanonicalConsolidatedNote> {
+        self.db.ensure_initialized().await?;
+
+        let CreateCanonicalConsolidatedNote {
+            project_id,
+            note_type,
+            title,
+            content,
+            tags,
+            abstract_,
+            overview,
+            confidence,
+            source_session_ids,
+        } = params;
+
+        for session_id in source_session_ids {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sessions WHERE id = ?1 AND project_id = ?2",
+            )
+            .bind(session_id)
+            .bind(project_id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+            if exists == 0 {
+                return Err(Error::InvalidData(format!(
+                    "source session not found in project {project_id}: {session_id}"
+                )));
+            }
+        }
+
+        let note_repo = NoteRepository::new(self.db.clone(), EventBus::noop());
+        let created = note_repo
+            .create_db_note(project_id, title, content, note_type, tags)
+            .await?;
+
+        note_repo.set_confidence(&created.id, confidence).await?;
+
+        sqlx::query("UPDATE notes SET abstract = ?1, overview = ?2 WHERE id = ?3")
+            .bind(abstract_)
+            .bind(overview)
+            .bind(&created.id)
+            .execute(self.db.pool())
+            .await?;
+
+        let mut provenance = Vec::with_capacity(source_session_ids.len());
+        for session_id in source_session_ids {
+            provenance.push(self.add_provenance(&created.id, session_id).await?);
+        }
+
+        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&created.id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        Ok(CreatedCanonicalConsolidatedNote { note, provenance })
     }
 
     async fn clusters_from_notes(
@@ -409,22 +489,21 @@ fn canonical_pair(left: &str, right: &str) -> (String, String) {
     }
 }
 
-fn sanitize_fts5_query(raw: &str) -> Option<String> {
-    let tokens: Vec<&str> = raw
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| {
-            let t = t.to_uppercase();
-            !t.is_empty() && t != "AND" && t != "OR" && t != "NOT" && t != "NEAR"
+fn sanitize_fts5_query(query: &str) -> Option<String> {
+    let terms = query
+        .split_whitespace()
+        .map(|term| {
+            term.chars()
+                .filter(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-'))
+                .collect::<String>()
         })
-        .collect();
-    if tokens.is_empty() {
-        return None;
+        .filter(|term| term.len() >= 2)
+        .take(8)
+        .collect::<Vec<_>>();
+
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
     }
-    Some(
-        tokens
-            .into_iter()
-            .map(|t| format!("\"{t}\""))
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
 }
