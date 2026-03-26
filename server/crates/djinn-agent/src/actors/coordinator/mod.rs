@@ -1503,6 +1503,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let project = test_helpers::create_test_project(&db).await;
         let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
         note_repo
             .create_db_note(
                 &project.id,
@@ -1524,7 +1525,7 @@ mod tests {
             .await
             .unwrap();
 
-        let metrics_before = NoteConsolidationRepository::new(db.clone())
+        let metrics_before = consolidation_repo
             .list_run_metrics(&project.id, Some("pattern"), 20)
             .await
             .unwrap();
@@ -1540,7 +1541,7 @@ mod tests {
             .await
             .unwrap();
 
-        let metrics_after = NoteConsolidationRepository::new(db.clone())
+        let metrics_after = consolidation_repo
             .list_run_metrics(&project.id, Some("pattern"), 20)
             .await
             .unwrap();
@@ -1548,22 +1549,21 @@ mod tests {
             metrics_after.is_empty(),
             "below-threshold groups should remain a no-op with no run bookkeeping"
         );
-        let provenance_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM consolidated_note_provenance WHERE note_id IN (SELECT id FROM notes WHERE project_id = ?1)",
-        )
-        .bind(&project.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(provenance_count, 0);
 
-        let note_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
-                .bind(&project.id)
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-        assert_eq!(note_count, 2, "runner should not synthesize new notes");
+        let notes = consolidation_repo
+            .list_db_notes_in_group(&project.id, "pattern")
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 2, "runner should not synthesize new notes");
+
+        for note in &notes {
+            let provenance = consolidation_repo.list_provenance(&note.id).await.unwrap();
+            assert!(
+                provenance.is_empty(),
+                "below-threshold groups should not persist provenance for note {}",
+                note.id
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
