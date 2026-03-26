@@ -17,7 +17,7 @@ use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository};
 
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
-pub struct EpicListResponse(pub ErrorNamedListResponse<EpicModel>);
+pub struct EpicListResponse(pub ErrorListResponse<EpicModel>);
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct EpicDeleteResponse {

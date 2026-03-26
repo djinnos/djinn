@@ -1,6 +1,5 @@
 use super::*;
-
-// ── Param structs ─────────────────────────────────────────────────────────────
+use crate::tools::list_response::NamedListResponse as ListResponse;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskCreateParams {
@@ -277,7 +276,7 @@ pub struct TaskClaimParams {
 
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
-pub struct TaskListResult(pub NamedListResponse<TaskListItem>);
+pub struct TaskListResult(pub ListResponse<TaskListItem>);
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ErrorResponse {

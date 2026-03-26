@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::AnyJson;
-use crate::tools::list_response::NamedListResponse;
+use crate::tools::list_response::NamedListResponse as ListResponse;
 use crate::tools::validation::{
     validate_ac_count, validate_actor_id, validate_actor_role, validate_body, validate_description,
     validate_design, validate_issue_type, validate_label, validate_labels_count, validate_limit,
