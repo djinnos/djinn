@@ -2111,7 +2111,7 @@ mod tests {
             .likely_duplicate_clusters(&project_a.id, "pattern")
             .await
             .unwrap();
-        assert!(!clusters.is_empty());
+        assert_eq!(clusters.len(), 1);
         let cluster = &clusters[0];
         let cluster_note_ids = cluster
             .notes
@@ -2148,7 +2148,6 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
         let project = make_project(&db, tmp.path()).await;
-        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
 
         repo.create_db_note(
             &project.id,
@@ -2168,12 +2167,27 @@ mod tests {
         )
         .await
         .unwrap();
+        repo.create_db_note(
+            &project.id,
+            "Sparse note three",
+            "zeta distinct vocabulary only",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
 
-        let clusters = consolidation_repo
-            .likely_duplicate_clusters(&project.id, "pattern")
+        let candidates = repo
+            .dedup_candidates(
+                &project.id,
+                "patterns",
+                "pattern",
+                "alpha OR omega OR zeta",
+                16,
+            )
             .await
             .unwrap();
-        assert!(clusters.is_empty());
+        assert!(candidates.len() <= 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
