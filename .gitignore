@@ -11,3 +11,7 @@
 target/
 tmp/
 .tmp/
+
+# Package manager stores
+.pnpm-store/
+node_modules/
