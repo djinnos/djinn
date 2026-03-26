@@ -137,33 +137,31 @@ fn workspace_test_tmp_dir() -> DbResult<PathBuf> {
         return Ok(path);
     }
 
+    if let Some(base) = workspace_root_from_current_dir() {
+        let candidate = base.join("target").join("test-tmp");
+        std::fs::create_dir_all(&candidate).map_err(|e| DbError::InvalidData(e.to_string()))?;
+        return Ok(candidate);
+    }
+
     let current_dir = std::env::current_dir().map_err(|e| DbError::InvalidData(e.to_string()))?;
-    let current_candidate = current_dir.join("target").join("test-tmp");
-    if let Some(parent) = current_candidate.parent()
-        && parent.exists()
-    {
-        std::fs::create_dir_all(&current_candidate)
-            .map_err(|e| DbError::InvalidData(e.to_string()))?;
-        return Ok(current_candidate);
-    }
-
-    let mut current = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
-    loop {
-        let candidate = current.join("target").join("test-tmp");
-        if candidate.parent().is_some_and(Path::exists) {
-            std::fs::create_dir_all(&candidate).map_err(|e| DbError::InvalidData(e.to_string()))?;
-            return Ok(candidate);
-        }
-
-        if !current.pop() {
-            break;
-        }
-    }
-
     let fallback = current_dir.join("target").join("test-tmp");
     std::fs::create_dir_all(&fallback).map_err(|e| DbError::InvalidData(e.to_string()))?;
     Ok(fallback)
+}
+
+fn workspace_root_from_current_dir() -> Option<PathBuf> {
+    let mut current = std::env::current_dir().ok()?;
+
+    loop {
+        let candidate = current.join("Cargo.lock");
+        if candidate.exists() {
+            return Some(current);
+        }
+
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 async fn apply_pragmas(conn: &mut sqlx::sqlite::SqliteConnection) -> sqlx::Result<()> {
