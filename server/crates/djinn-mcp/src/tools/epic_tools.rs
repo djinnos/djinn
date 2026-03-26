@@ -8,7 +8,7 @@ use crate::tools::epic_ops::{
     EpicModel, EpicShowRequest, EpicShowResponse, EpicSingleResponse, EpicTasksRequest,
     EpicTasksResponse, EpicUpdateRequest,
 };
-use crate::tools::list_response::ErrorNamedListResponse;
+use crate::tools::list_response::ErrorNamedListResponse as ErrorListResponse;
 use crate::tools::validation::{
     validate_color, validate_description, validate_emoji, validate_limit, validate_offset,
     validate_owner, validate_sort, validate_title,

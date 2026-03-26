@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::AnyJson;
-use crate::tools::list_response::ErrorNamedListResponse;
+use crate::tools::list_response::ErrorNamedListResponse as ErrorListResponse;
 use crate::tools::validation::{validate_limit, validate_offset};
 use djinn_db::{AgentListQuery, AgentRepository, AgentUpdateInput};
 
@@ -169,7 +169,9 @@ impl DjinnMcpServer {
                 limit,
                 offset,
             ))),
-            Err(e) => Json(AgentListResponse(ErrorNamedListResponse::error(e.to_string()))),
+            Err(e) => Json(AgentListResponse(ErrorNamedListResponse::error(
+                e.to_string(),
+            ))),
         }
     }
 
