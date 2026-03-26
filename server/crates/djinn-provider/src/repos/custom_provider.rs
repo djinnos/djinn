@@ -1,6 +1,6 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{CustomProvider, SeedModel};
-use djinn_db::{Database, Result};
+use djinn_db::{Database, Result, ensure_db};
 
 pub struct CustomProviderRepository {
     db: Database,
@@ -14,7 +14,7 @@ impl CustomProviderRepository {
 
     /// Return all custom providers, ordered by `created_at`.
     pub async fn list(&self) -> Result<Vec<CustomProvider>> {
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
             "SELECT id, name, base_url, env_var, seed_models, created_at
              FROM custom_providers
@@ -49,7 +49,7 @@ impl CustomProviderRepository {
         let seed_json =
             serde_json::to_string(&provider.seed_models).unwrap_or_else(|_| "[]".into());
 
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         sqlx::query(
             "INSERT INTO custom_providers (id, name, base_url, env_var, seed_models)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -73,7 +73,7 @@ impl CustomProviderRepository {
 
     /// Delete a custom provider by ID. Returns true if a row was removed.
     pub async fn delete(&self, id: &str) -> Result<bool> {
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         let result = sqlx::query("DELETE FROM custom_providers WHERE id = ?1")
             .bind(id)
             .execute(self.db.pool())
@@ -88,7 +88,7 @@ impl CustomProviderRepository {
 
     /// Return a single provider by ID, or `None`.
     pub async fn get(&self, id: &str) -> Result<Option<CustomProvider>> {
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         let row = sqlx::query_as::<_, (String, String, String, String, String, String)>(
             "SELECT id, name, base_url, env_var, seed_models, created_at
              FROM custom_providers WHERE id = ?1",

@@ -3,7 +3,7 @@ use uuid::Uuid;
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Credential;
 use djinn_db::crypto;
-use djinn_db::{Database, Result};
+use djinn_db::{Database, Result, ensure_db};
 
 pub struct CredentialRepository {
     db: Database,
@@ -26,7 +26,7 @@ impl CredentialRepository {
         raw_value: &str,
     ) -> Result<Credential> {
         let encrypted = crypto::encrypt(raw_value)?;
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         let existing_id: Option<String> =
             sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
                 .bind(key_name)
@@ -76,7 +76,7 @@ impl CredentialRepository {
 
     /// List all credentials. Never returns raw key values.
     pub async fn list(&self) -> Result<Vec<Credential>> {
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         Ok(sqlx::query_as::<_, Credential>(
             "SELECT id, provider_id, key_name, created_at, updated_at
                  FROM credentials
@@ -88,7 +88,7 @@ impl CredentialRepository {
 
     /// Delete a credential by `key_name`. Emits `CredentialDeleted` with the ID.
     pub async fn delete(&self, key_name: &str) -> Result<bool> {
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         let deleted_id: Option<String> =
             sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
                 .bind(key_name)
@@ -114,7 +114,7 @@ impl CredentialRepository {
     /// Delete all credentials for a given `provider_id`.
     /// Returns the number of rows deleted. Emits `CredentialDeleted` for each.
     pub async fn delete_by_provider(&self, provider_id: &str) -> Result<u64> {
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         let ids: Vec<String> =
             sqlx::query_scalar("SELECT id FROM credentials WHERE provider_id = ?1")
                 .bind(provider_id)
@@ -140,7 +140,7 @@ impl CredentialRepository {
 
     /// Check whether a credential with the given `key_name` exists (without decrypting).
     pub async fn exists(&self, key_name: &str) -> Result<bool> {
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         let found: Option<String> =
             sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
                 .bind(key_name)
@@ -154,7 +154,7 @@ impl CredentialRepository {
     /// Called by `AgentSupervisor` at dispatch time to obtain the key for
     /// provider creation. Never exposed via MCP tools.
     pub async fn get_decrypted(&self, key_name: &str) -> Result<Option<String>> {
-        self.db.ensure_initialized().await?;
+        ensure_db!(self.db);
         let blob: Option<Vec<u8>> =
             sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?1")
                 .bind(key_name)
