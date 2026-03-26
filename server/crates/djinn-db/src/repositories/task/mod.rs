@@ -250,11 +250,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transition_rejects_invalid_repository_state_transition_and_does_not_persist_changes() {
         let db = Database::open_in_memory().unwrap();
-        let (bus, _captured) = capturing_bus();
+        let (bus, captured) = capturing_bus();
         let repo = TaskRepository::new(db.clone(), bus);
         let project = make_project(&db).await;
         let epic_id = make_epic(&db, &project.id).await;
         let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        let original = sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
+            .bind(&task.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
 
         let err = repo
             .transition(
@@ -275,9 +281,13 @@ mod tests {
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(persisted.status, TaskStatus::Open.as_str());
-        assert_eq!(persisted.reopen_count, 0);
+        assert_eq!(persisted.status, original.status);
+        assert_eq!(persisted.reopen_count, original.reopen_count);
+        assert_eq!(persisted.continuation_count, original.continuation_count);
+        assert_eq!(persisted.total_reopen_count, original.total_reopen_count);
+        assert_eq!(persisted.closed_at, original.closed_at);
         assert!(repo.list_activity(&task.id).await.unwrap().is_empty());
+        assert_eq!(captured.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

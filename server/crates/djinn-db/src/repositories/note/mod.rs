@@ -431,6 +431,8 @@ mod tests {
         let persisted_created = repo.get(&created.id).await.unwrap().unwrap();
         assert_eq!(persisted_created.content, "created body");
         assert_eq!(persisted_created.tags, r#"["initial"]"#);
+        assert_eq!(persisted_created.storage, "file");
+        assert_eq!(persisted_created.file_path, created.file_path);
         assert!(Path::new(&persisted_created.file_path).exists());
         let created_disk = std::fs::read_to_string(&persisted_created.file_path).unwrap();
         assert!(created_disk.contains("created body"));
@@ -454,6 +456,7 @@ mod tests {
             .unwrap();
         assert_eq!(persisted_updated.content, "updated body");
         assert_eq!(persisted_updated.tags, r#"["updated"]"#);
+        assert_eq!(persisted_updated.updated_at, updated.updated_at);
         let updated_disk = std::fs::read_to_string(&persisted_updated.file_path).unwrap();
         assert!(updated_disk.contains("updated body"));
         assert!(!updated_disk.contains("created body"));
