@@ -139,8 +139,10 @@ fn workspace_test_tmp_dir() -> DbResult<PathBuf> {
 
     let current_dir = std::env::current_dir().map_err(|e| DbError::InvalidData(e.to_string()))?;
     let current_candidate = current_dir.join("target").join("test-tmp");
-    if let Some(parent) = current_candidate.parent()
-        && parent.exists()
+    if current_candidate
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "worktrees"))
+        .is_some()
     {
         std::fs::create_dir_all(&current_candidate)
             .map_err(|e| DbError::InvalidData(e.to_string()))?;

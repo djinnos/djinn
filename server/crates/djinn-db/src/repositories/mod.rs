@@ -2,6 +2,7 @@ pub mod agent;
 pub mod epic;
 pub mod events;
 pub mod git_settings;
+pub mod init;
 pub mod models;
 pub mod note;
 pub mod project;
