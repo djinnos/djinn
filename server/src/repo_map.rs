@@ -12,8 +12,10 @@ use petgraph::visit::EdgeRef;
 
 use crate::process;
 use crate::repo_graph::{
-    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoGraphRanking,
+    RankedRepoGraphNode, RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind,
+    RepoGraphRanking,
 };
+use crate::repo_map_personalization::RepoMapPersonalizationInput;
 use crate::scip_parser::ScipSymbolKind;
 
 const SCIP_ARTIFACT_EXTENSION: &str = "scip";
@@ -174,6 +176,7 @@ struct RepoMapEntry {
     file_path: PathBuf,
     language: Option<String>,
     score_milli: i64,
+    boost_score: u32,
     symbols: Vec<RepoMapSymbol>,
     relationships: Vec<String>,
 }
@@ -183,6 +186,15 @@ struct RepoMapSymbol {
     name: String,
     kind: Option<ScipSymbolKind>,
     score_milli: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RepoMapPersonalizationRequest<'a> {
+    pub ranked_nodes: &'a [RankedRepoGraphNode],
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub design: Option<&'a str>,
+    pub memory_refs: &'a [String],
 }
 
 pub fn detect_indexers() -> Vec<IndexerAvailability> {
@@ -304,56 +316,43 @@ pub fn render_repo_map(
     ranking: &RepoGraphRanking,
     options: &RepoMapRenderOptions,
 ) -> Result<RenderedRepoMap, RepoMapRenderError> {
-    let entries = build_repo_map_entries(graph, ranking, options);
+    let entries = build_repo_map_entries(graph, &ranking.nodes, options);
+    render_repo_map_from_entries(&entries, options)
+}
 
-    let minimal_content = render_repo_map_slice(&entries, 1, options);
-    let minimal_tokens = estimate_tokens(&minimal_content);
-    if minimal_tokens > options.token_budget {
-        return Err(RepoMapRenderError::MinimalRepresentationExceedsBudget {
-            budget: options.token_budget,
-            required_tokens: minimal_tokens,
-        });
-    }
+pub fn personalized_repo_map_ranking(
+    graph: &RepoDependencyGraph,
+    request: &RepoMapPersonalizationRequest<'_>,
+) -> Vec<RankedRepoGraphNode> {
+    let identifiers = crate::repo_map_personalization::extract_identifier_candidates(
+        &RepoMapPersonalizationInput {
+            title: request.title,
+            description: request.description,
+            design: request.design,
+            memory_refs: request.memory_refs,
+        },
+    );
 
-    let mut low = 1usize;
-    let mut high = entries.len();
-    let mut best = RenderedRepoMap {
-        content: minimal_content,
-        token_estimate: minimal_tokens,
-        included_entries: 1,
-    };
-
-    while low <= high {
-        let mid = low + ((high - low) / 2);
-        let content = render_repo_map_slice(&entries, mid, options);
-        let token_estimate = estimate_tokens(&content);
-
-        if token_estimate <= options.token_budget {
-            best = RenderedRepoMap {
-                content,
-                token_estimate,
-                included_entries: mid,
-            };
-            low = mid.saturating_add(1);
-        } else if mid == 0 {
-            break;
-        } else {
-            high = mid - 1;
-        }
-    }
-
-    Ok(best)
+    let mut ranked = request.ranked_nodes.to_vec();
+    ranked.sort_by(|left, right| {
+        let left_boost = repo_map_entry_boost(graph, left, &identifiers);
+        let right_boost = repo_map_entry_boost(graph, right, &identifiers);
+        right_boost
+            .cmp(&left_boost)
+            .then_with(|| right.score.total_cmp(&left.score))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    ranked
 }
 
 fn build_repo_map_entries(
     graph: &RepoDependencyGraph,
-    ranking: &RepoGraphRanking,
+    ranked_nodes: &[RankedRepoGraphNode],
     options: &RepoMapRenderOptions,
 ) -> Vec<RepoMapEntry> {
     let mut files = Vec::new();
 
-    for ranked in ranking
-        .nodes
+    for ranked in ranked_nodes
         .iter()
         .filter(|node| node.kind == RepoGraphNodeKind::File)
     {
@@ -377,8 +376,7 @@ fn build_repo_map_entries(
                 if node.file_path.as_ref() != Some(&file_path) {
                     return None;
                 }
-                ranking
-                    .nodes
+                ranked_nodes
                     .iter()
                     .find(|ranked_symbol| ranked_symbol.node_index == neighbor)
                     .map(|ranked_symbol| RepoMapSymbol {
@@ -425,6 +423,7 @@ fn build_repo_map_entries(
             file_path,
             language: file_node.language.clone(),
             score_milli: score_to_milli(ranked.score),
+            boost_score: 0,
             symbols,
             relationships,
         });
@@ -432,11 +431,107 @@ fn build_repo_map_entries(
 
     files.sort_by(|left, right| {
         right
-            .score_milli
-            .cmp(&left.score_milli)
+            .boost_score
+            .cmp(&left.boost_score)
+            .then_with(|| right.score_milli.cmp(&left.score_milli))
             .then_with(|| left.file_path.cmp(&right.file_path))
     });
     files
+}
+
+fn render_repo_map_from_entries(
+    entries: &[RepoMapEntry],
+    options: &RepoMapRenderOptions,
+) -> Result<RenderedRepoMap, RepoMapRenderError> {
+    let minimal_content = render_repo_map_slice(entries, 1, options);
+    let minimal_tokens = estimate_tokens(&minimal_content);
+    if minimal_tokens > options.token_budget {
+        return Err(RepoMapRenderError::MinimalRepresentationExceedsBudget {
+            budget: options.token_budget,
+            required_tokens: minimal_tokens,
+        });
+    }
+
+    let mut low = 1usize;
+    let mut high = entries.len();
+    let mut best = RenderedRepoMap {
+        content: minimal_content,
+        token_estimate: minimal_tokens,
+        included_entries: 1,
+    };
+
+    while low <= high {
+        let mid = low + ((high - low) / 2);
+        let content = render_repo_map_slice(entries, mid, options);
+        let token_estimate = estimate_tokens(&content);
+
+        if token_estimate <= options.token_budget {
+            best = RenderedRepoMap {
+                content,
+                token_estimate,
+                included_entries: mid,
+            };
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    Ok(best)
+}
+
+fn repo_map_entry_boost(
+    graph: &RepoDependencyGraph,
+    ranked: &RankedRepoGraphNode,
+    identifiers: &[String],
+) -> u32 {
+    if identifiers.is_empty() {
+        return 0;
+    }
+
+    let node = graph.node(ranked.node_index);
+    let mut haystacks = Vec::new();
+    haystacks.push(node.display_name.to_ascii_lowercase());
+    if let Some(file_path) = &node.file_path {
+        haystacks.push(file_path.display().to_string().to_ascii_lowercase());
+    }
+    if let Some(symbol) = &node.symbol {
+        haystacks.push(symbol.to_ascii_lowercase());
+    }
+
+    for neighbor in graph.graph().neighbors(ranked.node_index) {
+        let neighbor_node = graph.node(neighbor);
+        haystacks.push(neighbor_node.display_name.to_ascii_lowercase());
+        if let Some(file_path) = &neighbor_node.file_path {
+            haystacks.push(file_path.display().to_string().to_ascii_lowercase());
+        }
+    }
+
+    for edge in graph.graph().edges(ranked.node_index) {
+        let target = graph.node(edge.target());
+        if let Some(file_path) = &target.file_path {
+            haystacks.push(
+                format!(
+                    "{} {}",
+                    format_edge_kind(edge.weight().kind),
+                    file_path.display()
+                )
+                .to_ascii_lowercase(),
+            );
+        }
+        haystacks.push(target.display_name.to_ascii_lowercase());
+    }
+
+    identifiers
+        .iter()
+        .filter(|identifier| {
+            haystacks
+                .iter()
+                .any(|haystack| haystack.contains(identifier.as_str()))
+        })
+        .count() as u32
 }
 
 fn render_repo_map_slice(
@@ -615,6 +710,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::repo_map_personalization::{
+        RepoMapPersonalizationInput, extract_identifier_candidates,
+    };
     use crate::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
         ScipRelationshipKind, ScipSymbol, ScipSymbolRole,
@@ -838,6 +936,63 @@ mod tests {
             err,
             RepoMapRenderError::MinimalRepresentationExceedsBudget { .. }
         ));
+    }
+
+    #[test]
+    fn personalized_identifier_extraction_filters_low_signal_tokens() {
+        let memory_refs = vec![
+            "decisions/adr-043-repository-map-scip-powered-structural-context-for-agent-sessions"
+                .to_string(),
+            "notes/RepoMapQueryHelper".to_string(),
+        ];
+        let identifiers = extract_identifier_candidates(&RepoMapPersonalizationInput {
+            title: Some("Phase 2: Extract task-aware identifiers for RepoMapQueryHelper"),
+            description: Some(
+                "Parse session title/description/design text and prefer repo_map.rs plus TaskSession42.",
+            ),
+            design: Some(
+                "Bias selection toward repo_map_personalization.rs and relationship display text like symbol-ref repo_map.rs",
+            ),
+            memory_refs: &memory_refs,
+        });
+
+        assert!(identifiers.contains(&"repomapqueryhelper".to_string()));
+        assert!(identifiers.contains(&"tasksession42".to_string()));
+        assert!(identifiers.contains(&"repository".to_string()));
+        assert!(identifiers.contains(&"scip".to_string()));
+        assert!(!identifiers.contains(&"task".to_string()));
+        assert!(!identifiers.contains(&"map".to_string()));
+        assert!(!identifiers.contains(&"043".to_string()));
+    }
+
+    #[test]
+    fn personalized_repo_map_ranking_boosts_matching_file_symbol_and_relationship_entries() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let ranking = graph.rank();
+        let memory_refs = vec!["docs/helpertrait".to_string()];
+        let personalized = personalized_repo_map_ranking(
+            &graph,
+            &RepoMapPersonalizationRequest {
+                ranked_nodes: &ranking.nodes,
+                title: Some("Investigate helper implementation in src/app.rs"),
+                description: Some("Need HelperTrait and helper references"),
+                design: Some("Prioritize references src/helper.rs relationship display text"),
+                memory_refs: &memory_refs,
+            },
+        );
+
+        let personalized_files = personalized
+            .iter()
+            .filter(|node| node.kind == RepoGraphNodeKind::File)
+            .map(|node| graph.node(node.node_index).display_name.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(personalized_files[0], "src/app.rs");
+        assert!(
+            personalized_files
+                .iter()
+                .any(|path| path == "src/helper.rs")
+        );
     }
 
     fn fixture_index() -> ParsedScipIndex {
