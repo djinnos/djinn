@@ -75,6 +75,33 @@ impl TaskRepository {
             &current.issue_type,
         )?;
 
+        // For non-merge closes: reject if this task still blocks other non-closed tasks.
+        // The lead/architect must reassign blockers to replacement tasks before closing.
+        // PrMerge is exempt because the work actually landed.
+        if apply.set_closed_at && action != TransitionAction::PrMerge {
+            let downstream = sqlx::query_as::<_, BlockerRef>(
+                "SELECT t.id AS task_id, t.short_id, t.title, t.status
+                 FROM blockers b
+                 JOIN tasks t ON t.id = b.task_id
+                 WHERE b.blocking_task_id = ?1
+                   AND t.status != 'closed'",
+            )
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+            if !downstream.is_empty() {
+                let names: Vec<String> = downstream
+                    .iter()
+                    .map(|b| format!("{} ({})", b.short_id, b.title))
+                    .collect();
+                return Err(Error::InvalidTransition(format!(
+                    "task blocks {} other task(s): {}. Remove or reassign these blockers before closing.",
+                    downstream.len(),
+                    names.join(", ")
+                )));
+            }
+        }
+
         // For Start: block if any unresolved blockers exist.
         // A blocker is unresolved if its blocking task has not reached post-merge states.
         if action == TransitionAction::Start {

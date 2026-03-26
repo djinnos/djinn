@@ -361,25 +361,6 @@ pub async fn transition_task(
         return Json(ErrorOr::Error(not_found(&request.id)));
     };
 
-    let downstream_warning = if request.action == TransitionAction::ForceClose {
-        let downstream = repo.list_blocked_by(&task.id).await.unwrap_or_default();
-        if downstream.is_empty() {
-            None
-        } else {
-            let names: Vec<String> = downstream
-                .iter()
-                .map(|blocked| format!("{} ({})", blocked.short_id, blocked.title))
-                .collect();
-            Some(format!(
-                "WARNING: {} task(s) were blocked by this task and are now unblocked: {}. If replacement work exists, add blockers to these tasks to prevent premature dispatch.",
-                downstream.len(),
-                names.join(", ")
-            ))
-        }
-    } else {
-        None
-    };
-
     match repo
         .transition(
             &task.id,
@@ -391,11 +372,7 @@ pub async fn transition_task(
         )
         .await
     {
-        Ok(updated) => {
-            let mut response = task_to_response(&updated);
-            response.warning = downstream_warning;
-            Json(ErrorOr::Ok(response))
-        }
+        Ok(updated) => Json(ErrorOr::Ok(task_to_response(&updated))),
         Err(e) => Json(ErrorOr::Error(ErrorResponse::new(e.to_string()))),
     }
 }
