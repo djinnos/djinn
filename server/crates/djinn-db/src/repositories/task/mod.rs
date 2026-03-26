@@ -33,6 +33,375 @@ pub struct ListQuery {
     pub offset: i64,
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::models::{Project, Task, TaskStatus, TransitionAction};
+
+    use crate::database::Database;
+
+    use super::*;
+
+    fn capturing_bus() -> (EventBus, Arc<Mutex<Vec<DjinnEventEnvelope>>>) {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let bus = EventBus::new({
+            let captured = captured.clone();
+            move |ev| captured.lock().unwrap().push(ev)
+        });
+        (bus, captured)
+    }
+
+    async fn make_project(db: &Database) -> Project {
+        db.ensure_initialized().await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+            .bind(&id)
+            .bind("task-project")
+            .bind("/tmp/task-project")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote \
+             FROM projects WHERE id = ?1",
+        )
+        .bind(&id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn make_epic(db: &Database, project_id: &str) -> String {
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&epic_id)
+        .bind(project_id)
+        .bind("ep01")
+        .bind("Epic")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind("[]")
+        .execute(db.pool())
+        .await
+        .unwrap();
+        epic_id
+    }
+
+    async fn make_task(
+        repo: &TaskRepository,
+        epic_id: &str,
+        issue_type: &str,
+        acceptance_criteria: Option<&str>,
+    ) -> Task {
+        repo.create_with_ac(
+            epic_id,
+            "Task title",
+            "desc",
+            "design",
+            issue_type,
+            1,
+            "worker",
+            None,
+            acceptance_criteria,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_persists_valid_full_lifecycle_and_activity() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        let in_progress = repo
+            .transition(
+                &task.id,
+                TransitionAction::Start,
+                "worker-1",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(in_progress.status, TaskStatus::InProgress.as_str());
+
+        let verifying = repo
+            .transition(
+                &task.id,
+                TransitionAction::SubmitVerification,
+                "worker-1",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(verifying.status, TaskStatus::Verifying.as_str());
+
+        let needs_review = repo
+            .transition(
+                &task.id,
+                TransitionAction::VerificationPass,
+                "verification-1",
+                "verification",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(needs_review.status, TaskStatus::NeedsTaskReview.as_str());
+
+        let in_review = repo
+            .transition(
+                &task.id,
+                TransitionAction::TaskReviewStart,
+                "reviewer-1",
+                "reviewer",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(in_review.status, TaskStatus::InTaskReview.as_str());
+
+        let approved = repo
+            .transition(
+                &task.id,
+                TransitionAction::TaskReviewApprove,
+                "reviewer-1",
+                "reviewer",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved.status, TaskStatus::Approved.as_str());
+
+        let persisted = sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
+            .bind(&task.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(persisted.status, TaskStatus::Approved.as_str());
+        assert_eq!(persisted.reopen_count, 0);
+        assert_eq!(persisted.continuation_count, 0);
+        assert!(persisted.closed_at.is_none());
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        assert_eq!(activity.len(), 5);
+        let last_payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert_eq!(last_payload["from_status"], "in_task_review");
+        assert_eq!(last_payload["to_status"], "approved");
+        assert!(activity.iter().any(|entry| {
+            serde_json::from_str::<serde_json::Value>(&entry.payload)
+                .unwrap()
+                .get("ac_snapshot")
+                .is_some()
+        }));
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 6);
+        assert_eq!(events.last().unwrap().entity_type, "task");
+        assert_eq!(events.last().unwrap().action, "updated");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_rejects_invalid_start_without_acceptance_criteria_and_keeps_state() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some("[]")).await;
+
+        let err = repo
+            .transition(
+                &task.id,
+                TransitionAction::Start,
+                "worker-1",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidTransition(_)));
+        assert!(err.to_string().contains("acceptance criteria"));
+
+        let persisted = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(persisted.status, TaskStatus::Open.as_str());
+        assert!(repo.list_activity(&task.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_rejects_invalid_repository_state_transition_and_does_not_persist_changes() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        let original = sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
+            .bind(&task.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        let err = repo
+            .transition(
+                &task.id,
+                TransitionAction::VerificationPass,
+                "verification-1",
+                "verification",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidTransition(_)));
+
+        let persisted = sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
+            .bind(&task.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(persisted.status, original.status);
+        assert_eq!(persisted.reopen_count, original.reopen_count);
+        assert_eq!(persisted.continuation_count, original.continuation_count);
+        assert_eq!(persisted.total_reopen_count, original.total_reopen_count);
+        assert_eq!(persisted.closed_at, original.closed_at);
+        assert!(repo.list_activity(&task.id).await.unwrap().is_empty());
+        assert_eq!(captured.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_persists_invalid_outcome_side_effects_for_rejection_and_reason_validation()
+    {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        repo.transition(
+            &task.id,
+            TransitionAction::Start,
+            "worker",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::SubmitTaskReview,
+            "worker",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewStart,
+            "reviewer",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let missing_reason = repo
+            .transition(
+                &task.id,
+                TransitionAction::TaskReviewRejectStale,
+                "reviewer",
+                "reviewer",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(missing_reason, Error::InvalidTransition(_)));
+        assert!(
+            missing_reason
+                .to_string()
+                .contains("requires a non-empty reason")
+        );
+
+        let reopened = repo
+            .transition(
+                &task.id,
+                TransitionAction::TaskReviewRejectStale,
+                "reviewer",
+                "reviewer",
+                Some("stale implementation"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open.as_str());
+        assert_eq!(reopened.reopen_count, 1);
+        assert_eq!(reopened.continuation_count, 1);
+
+        let payload: serde_json::Value = serde_json::from_str(
+            &repo
+                .list_activity(&task.id)
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .payload,
+        )
+        .unwrap();
+        assert_eq!(payload["reason"], "stale implementation");
+        assert_eq!(payload["to_status"], "open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_allows_simple_lifecycle_start_without_acceptance_criteria() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db, bus);
+        let project = make_project(&repo.db).await;
+        let epic_id = make_epic(&repo.db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "research", Some("[]")).await;
+
+        let started = repo
+            .transition(
+                &task.id,
+                TransitionAction::Start,
+                "worker",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status, TaskStatus::InProgress.as_str());
+    }
+}
+
 pub struct CreateTaskParams<'a> {
     pub epic_id: &'a str,
     pub title: &'a str,

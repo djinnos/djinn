@@ -86,6 +86,7 @@ mod tests {
     use djinn_core::models::{Note, Project};
     use tokio::sync::broadcast;
 
+    use crate::TaskRepository;
     use crate::database::Database;
 
     use super::*;
@@ -115,6 +116,28 @@ mod tests {
         .fetch_one(db.pool())
         .await
         .unwrap()
+    }
+
+    async fn make_epic(db: &Database, project_id: &str) -> String {
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        let short_id = format!("ep-{}", epic_id);
+        sqlx::query(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&epic_id)
+        .bind(project_id)
+        .bind(short_id)
+        .bind("Epic")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind("")
+        .bind("[]")
+        .execute(db.pool())
+        .await
+        .unwrap();
+        epic_id
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -406,6 +429,133 @@ mod tests {
         repo.delete(&note.id).await.unwrap();
         assert!(repo.get(&note.id).await.unwrap().is_none());
         assert!(!tmp.path().join(".djinn/pitfalls/db-delete.md").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_backed_note_crud_persists_db_and_filesystem_state_changes() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let created = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Persistence Note",
+                "created body",
+                "reference",
+                r#"["initial"]"#,
+            )
+            .await
+            .unwrap();
+
+        let persisted_created = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(persisted_created.content, "created body");
+        assert_eq!(persisted_created.tags, r#"["initial"]"#);
+        assert_eq!(persisted_created.storage, "file");
+        assert_eq!(persisted_created.file_path, created.file_path);
+        assert!(Path::new(&persisted_created.file_path).exists());
+        let created_disk = std::fs::read_to_string(&persisted_created.file_path).unwrap();
+        assert!(created_disk.contains("created body"));
+
+        let updated = repo
+            .update(
+                &created.id,
+                "Persistence Note",
+                "updated body",
+                r#"["updated"]"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.content, "updated body");
+        assert_eq!(updated.tags, r#"["updated"]"#);
+
+        let persisted_updated = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&created.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(persisted_updated.content, "updated body");
+        assert_eq!(persisted_updated.tags, r#"["updated"]"#);
+        assert_eq!(persisted_updated.updated_at, updated.updated_at);
+        let updated_disk = std::fs::read_to_string(&persisted_updated.file_path).unwrap();
+        assert!(updated_disk.contains("updated body"));
+        assert!(!updated_disk.contains("created body"));
+
+        repo.delete(&created.id).await.unwrap();
+        assert!(repo.get(&created.id).await.unwrap().is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notes WHERE id = ?1")
+                .bind(&created.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(!Path::new(&persisted_updated.file_path).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_backed_note_crud_persists_state_without_filesystem_side_effects() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let created = repo
+            .create_db_note(
+                &project.id,
+                "DB Persistence",
+                "db body",
+                "case",
+                r#"["tagged"]"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.storage, "db");
+        assert_eq!(created.file_path, "");
+
+        let persisted_created = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&created.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(persisted_created.content, "db body");
+        assert_eq!(persisted_created.tags, r#"["tagged"]"#);
+        assert!(!tmp.path().join(".djinn/cases/db-persistence.md").exists());
+
+        let updated = repo
+            .update(
+                &created.id,
+                "DB Persistence",
+                "db body updated",
+                r#"["retagged"]"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.content, "db body updated");
+        assert_eq!(updated.tags, r#"["retagged"]"#);
+
+        let fetched = repo
+            .get_by_permalink(&project.id, &created.permalink)
+            .await
+            .unwrap();
+        assert_eq!(fetched.unwrap().content, "db body updated");
+
+        repo.delete(&created.id).await.unwrap();
+        assert!(repo.get(&created.id).await.unwrap().is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notes WHERE id = ?1")
+                .bind(&created.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(!tmp.path().join(".djinn/cases/db-persistence.md").exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1955,6 +2105,29 @@ mod tests {
         branch: &str,
     ) -> String {
         let id = uuid::Uuid::now_v7().to_string();
+        let task_id = match task_id {
+            Some(task_id) => Some(task_id.to_string()),
+            None => {
+                let epic_id = make_epic(db, project_id).await;
+                Some(
+                    TaskRepository::new(db.clone(), EventBus::noop())
+                        .create_with_ac(
+                            &epic_id,
+                            "Session Task",
+                            "session task",
+                            "session task design",
+                            "task",
+                            1,
+                            "worker",
+                            None,
+                            Some(r#"[{"title":"session-ac"}]"#),
+                        )
+                        .await
+                        .unwrap()
+                        .id,
+                )
+            }
+        };
         let has_branch: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'branch'",
         )
@@ -1969,7 +2142,7 @@ mod tests {
             )
             .bind(&id)
             .bind(project_id)
-            .bind(task_id)
+            .bind(task_id.as_deref())
             .bind(branch)
             .execute(db.pool())
             .await
@@ -2003,7 +2176,7 @@ mod tests {
             )
             .bind(&id)
             .bind(project_id)
-            .bind(task_id)
+            .bind(task_id.as_deref())
             .bind(branch)
             .execute(db.pool())
             .await
