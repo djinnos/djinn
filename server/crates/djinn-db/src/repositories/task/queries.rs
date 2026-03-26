@@ -40,6 +40,12 @@ fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String
         task.acceptance_criteria.to_lowercase()
     );
 
+    let add_signal_once = |signals: &mut Vec<String>, signal: &str| {
+        if !signals.iter().any(|existing| existing == signal) {
+            signals.push(signal.to_string());
+        }
+    };
+
     for (needle, signal) in [
         ("task_create", "requires:task_create"),
         ("epic_update", "requires:epic_update"),
@@ -52,7 +58,7 @@ fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String
         ("planning task", "requires:planning"),
     ] {
         if haystack.contains(needle) {
-            planner_signals.push(signal.to_string());
+            add_signal_once(&mut planner_signals, signal);
         }
     }
 
@@ -64,7 +70,7 @@ fn infer_expected_role_for_task(task: &Task) -> Option<(&'static str, Vec<String
         ("decompose into subtasks", "requires:decomposition"),
     ] {
         if haystack.contains(needle) {
-            lead_signals.push(signal.to_string());
+            add_signal_once(&mut lead_signals, signal);
         }
     }
 
