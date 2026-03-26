@@ -8,7 +8,7 @@ use super::{NOTE_SELECT_WHERE_ID, NoteRepository};
 use crate::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
-const DEDUP_SCORE_THRESHOLD: f64 = -3.0;
+const DEDUP_SCORE_THRESHOLD: f64 = 8.0;
 const DEDUP_LIMIT: i64 = 16;
 
 pub struct CreateConsolidationRunMetric<'a> {

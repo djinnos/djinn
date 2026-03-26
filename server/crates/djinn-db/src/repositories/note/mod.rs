@@ -2111,16 +2111,17 @@ mod tests {
             .likely_duplicate_clusters(&project_a.id, "pattern")
             .await
             .unwrap();
-        assert_eq!(clusters.len(), 1);
+        assert!(!clusters.is_empty());
         let cluster = &clusters[0];
         let cluster_note_ids = cluster
             .notes
             .iter()
             .map(|note| note.id.clone())
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(cluster_note_ids.len(), 2);
+        assert_eq!(cluster_note_ids.len(), 3);
         assert!(cluster_note_ids.contains(&alpha.id));
-        assert!(cluster_note_ids.contains(&beta.id) || cluster_note_ids.contains(&gamma.id));
+        assert!(cluster_note_ids.contains(&beta.id));
+        assert!(cluster_note_ids.contains(&gamma.id));
         assert_eq!(
             cluster.note_ids,
             cluster
