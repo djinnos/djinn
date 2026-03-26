@@ -232,6 +232,7 @@ mod tests {
         assert_eq!(folder_for_type("pattern"), "patterns");
         assert_eq!(folder_for_type("case"), "cases");
         assert_eq!(folder_for_type("pitfall"), "pitfalls");
+        assert_eq!(folder_for_type("repo_map"), "reference/repo-maps");
 
         assert_eq!(
             permalink_for("case", "Task Recovery Example"),
@@ -240,6 +241,10 @@ mod tests {
         assert_eq!(
             permalink_for("pitfall", "Retry Storm"),
             "pitfalls/retry-storm"
+        );
+        assert_eq!(
+            permalink_for("repo_map", "Repository Map abc123"),
+            "reference/repo-maps/repository-map-abc123"
         );
 
         assert_eq!(
@@ -253,6 +258,10 @@ mod tests {
         assert_eq!(
             file_helpers::infer_note_type("pitfalls/retry-storm"),
             "pitfall"
+        );
+        assert_eq!(
+            file_helpers::infer_note_type("reference/repo-maps/repository-map-abc123"),
+            "repo_map"
         );
     }
 
@@ -379,6 +388,48 @@ mod tests {
         assert_eq!(updated.storage, "db");
         assert_eq!(updated.content, "new content");
         assert!(!tmp.path().join(".djinn/cases/db-note.md").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upsert_db_note_by_permalink_creates_and_updates_repo_map_note() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let created = repo
+            .upsert_db_note_by_permalink(
+                &project.id,
+                "reference/repo-maps/head",
+                "Repository Map head",
+                "src/main.rs",
+                "repo_map",
+                r#"["repo-map"]"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(created.note_type, "repo_map");
+        assert_eq!(created.folder, "reference/repo-maps");
+        assert_eq!(created.permalink, "reference/repo-maps/head");
+        assert_eq!(created.storage, "db");
+
+        let updated = repo
+            .upsert_db_note_by_permalink(
+                &project.id,
+                "reference/repo-maps/head",
+                "Repository Map head",
+                "src/lib.rs",
+                "repo_map",
+                r#"["repo-map","updated"]"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.content, "src/lib.rs");
+        assert_eq!(updated.tags, r#"["repo-map","updated"]"#);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

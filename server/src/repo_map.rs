@@ -25,6 +25,9 @@ const SCIP_ARTIFACT_EXTENSION: &str = "scip";
 const DEFAULT_MAX_FILES: usize = 12;
 const DEFAULT_MAX_SYMBOLS_PER_FILE: usize = 4;
 const DEFAULT_MAX_RELATIONSHIPS_PER_FILE: usize = 3;
+pub const REPO_MAP_NOTE_TYPE: &str = "repo_map";
+pub const REPO_MAP_NOTE_FOLDER: &str = "reference/repo-maps";
+pub const REPO_MAP_NOTE_TAG: &str = "repo-map";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -164,6 +167,46 @@ pub struct RenderedRepoMap {
     pub content: String,
     pub token_estimate: usize,
     pub included_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoMapNoteSpec {
+    pub title: String,
+    pub permalink: String,
+    pub tags_json: String,
+}
+
+pub fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
+    let short_sha: String = commit_sha.chars().take(12).collect();
+    let title = format!("Repository Map {short_sha}");
+    let permalink = format!("{REPO_MAP_NOTE_FOLDER}/{short_sha}");
+    let tags_json = serde_json::to_string(&vec![REPO_MAP_NOTE_TAG.to_string(), short_sha.clone()])
+        .unwrap_or_else(|_| "[]".to_string());
+
+    RepoMapNoteSpec {
+        title,
+        permalink,
+        tags_json,
+    }
+}
+
+pub async fn persist_repo_map_note(
+    note_repo: &NoteRepository,
+    project_id: &str,
+    commit_sha: &str,
+    rendered: &RenderedRepoMap,
+) -> Result<djinn_core::models::Note, djinn_db::Error> {
+    let spec = repo_map_note_spec(commit_sha);
+    note_repo
+        .upsert_db_note_by_permalink(
+            project_id,
+            &spec.permalink,
+            &spec.title,
+            &rendered.content,
+            REPO_MAP_NOTE_TYPE,
+            &spec.tags_json,
+        )
+        .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -963,6 +1006,15 @@ mod tests {
             err,
             RepoMapRenderError::MinimalRepresentationExceedsBudget { .. }
         ));
+    }
+
+    #[test]
+    fn repo_map_note_spec_uses_repo_map_folder_and_stable_permalink() {
+        let spec = repo_map_note_spec("abcdef1234567890");
+        assert_eq!(spec.title, "Repository Map abcdef123456");
+        assert_eq!(spec.permalink, "reference/repo-maps/abcdef123456");
+        assert!(spec.tags_json.contains("repo-map"));
+        assert!(spec.tags_json.contains("abcdef123456"));
     }
 
     #[test]

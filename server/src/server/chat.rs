@@ -23,6 +23,8 @@ use djinn_db::{
 };
 use djinn_mcp::server::DjinnMcpServer;
 
+use crate::repo_map::persist_repo_map_note;
+
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
 const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
@@ -46,8 +48,13 @@ fn compose_system_prompt(
     system_prompt
 }
 
-fn format_repo_map_block(rendered: &str) -> String {
-    format!("{REPO_MAP_SYSTEM_HEADER}\n{rendered}")
+fn format_repo_map_block(rendered: &str, permalink: Option<&str>) -> String {
+    match permalink {
+        Some(permalink) => {
+            format!("{REPO_MAP_SYSTEM_HEADER}\nSource note: memory://{permalink}\n{rendered}")
+        }
+        None => format!("{REPO_MAP_SYSTEM_HEADER}\n{rendered}"),
+    }
 }
 
 async fn repo_commit_sha(state: &AppState, repo_path: &Path) -> Option<String> {
@@ -83,7 +90,24 @@ async fn build_repo_map_context_block(state: &AppState, project_ref: &str) -> Op
         .ok()
         .flatten()?;
 
-    Some(format_repo_map_block(&cached.rendered_map))
+    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    let note = persist_repo_map_note(
+        &note_repo,
+        &project.id,
+        &commit_sha,
+        &crate::repo_map::RenderedRepoMap {
+            content: cached.rendered_map.clone(),
+            token_estimate: cached.token_estimate as usize,
+            included_entries: cached.included_entries as usize,
+        },
+    )
+    .await
+    .ok();
+
+    Some(format_repo_map_block(
+        &cached.rendered_map,
+        note.as_ref().map(|note| note.permalink.as_str()),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -627,7 +651,7 @@ mod tests {
     fn system_prompt_contains_base_prompt_first_and_project_block_before_repo_map_and_client_system()
      {
         let project_context = "## Current Project\n**Name**: Demo  **Path**: /tmp/demo\n**Open epics**: 1  **Open tasks**: 2\n**Brief**: hello";
-        let repo_map = format_repo_map_block("src/main.rs\n  fn main()");
+        let repo_map = format_repo_map_block("src/main.rs\n  fn main()", None);
         let client_system = "client system message";
         let prompt = compose_system_prompt(
             DJINN_CHAT_SYSTEM_PROMPT,
@@ -658,7 +682,7 @@ mod tests {
 
     #[test]
     fn system_prompt_includes_repo_map_block_when_available() {
-        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run");
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
         let prompt = compose_system_prompt(DJINN_CHAT_SYSTEM_PROMPT, None, Some(&repo_map), None);
         assert!(prompt.contains(REPO_MAP_SYSTEM_HEADER));
         assert!(prompt.contains("src/lib.rs"));
