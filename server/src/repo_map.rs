@@ -996,16 +996,27 @@ mod tests {
     fn personalized_repo_map_ranking_boosts_matching_file_symbol_and_relationship_entries() {
         let graph = RepoDependencyGraph::build(&[fixture_index()]);
         let ranking = graph.rank();
-        let memory_refs = vec!["docs/helpertrait".to_string()];
+        let memory_refs = vec!["docs/other-note".to_string()];
+        let note_hints = vec![RepoMapNoteHint {
+            permalink: "docs/helpertrait".to_string(),
+            title: "HelperTrait notes".to_string(),
+            snippet: "src/helper.rs helper HelperTrait symbol-ref src/helper.rs".to_string(),
+            normalized_tokens: vec![
+                "helpertrait".to_string(),
+                "helper".to_string(),
+                "src".to_string(),
+            ],
+        }];
+
         let personalized = personalized_repo_map_ranking(
             &graph,
             &RepoMapPersonalizationRequest {
                 ranked_nodes: &ranking.nodes,
-                title: Some("Investigate helper implementation in src/app.rs"),
-                description: Some("Need HelperTrait and helper references"),
-                design: Some("Prioritize references src/helper.rs relationship display text"),
+                title: Some("Investigate implementation details"),
+                description: Some("Need note-linked helper concepts"),
+                design: Some("Prefer note-linked relationship display text"),
                 memory_refs: &memory_refs,
-                note_hints: &[],
+                note_hints: &note_hints,
             },
         );
 
@@ -1016,11 +1027,27 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(personalized_files[0], "src/app.rs");
-        assert!(
-            personalized_files
-                .iter()
-                .any(|path| path == "src/helper.rs")
+        assert_eq!(personalized_files[1], "src/helper.rs");
+    }
+
+    #[test]
+    fn personalized_repo_map_ranking_preserves_baseline_order_without_note_hints() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let ranking = graph.rank();
+
+        let personalized = personalized_repo_map_ranking(
+            &graph,
+            &RepoMapPersonalizationRequest {
+                ranked_nodes: &ranking.nodes,
+                title: None,
+                description: None,
+                design: None,
+                memory_refs: &[],
+                note_hints: &[],
+            },
         );
+
+        assert_eq!(personalized, ranking.nodes);
     }
 
     fn fixture_index() -> ParsedScipIndex {
