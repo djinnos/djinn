@@ -277,7 +277,7 @@ pub struct TaskClaimParams {
 
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
-pub struct TaskListResult(pub ListResponse<TaskListItem>);
+pub struct TaskListResult(pub NamedListResponse<TaskListItem>);
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ErrorResponse {

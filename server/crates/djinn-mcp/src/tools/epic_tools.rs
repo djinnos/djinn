@@ -8,7 +8,7 @@ use crate::tools::epic_ops::{
     EpicModel, EpicShowRequest, EpicShowResponse, EpicSingleResponse, EpicTasksRequest,
     EpicTasksResponse, EpicUpdateRequest,
 };
-use crate::tools::list_response::ErrorListResponse;
+use crate::tools::list_response::ErrorNamedListResponse;
 use crate::tools::validation::{
     validate_color, validate_description, validate_emoji, validate_limit, validate_offset,
     validate_owner, validate_sort, validate_title,
@@ -17,7 +17,7 @@ use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository};
 
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
-pub struct EpicListResponse(pub ErrorListResponse<EpicModel>);
+pub struct EpicListResponse(pub ErrorNamedListResponse<EpicModel>);
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct EpicDeleteResponse {

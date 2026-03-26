@@ -16,4 +16,4 @@ pub mod task_tools;
 pub mod validation;
 
 pub use json_object::{AnyJson, ObjectJson, json_object};
-pub use list_response::{ErrorListResponse, ListResponse};
+pub use list_response::{ErrorNamedListResponse, NamedListResponse};

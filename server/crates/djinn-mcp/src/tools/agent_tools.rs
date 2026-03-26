@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::AnyJson;
-use crate::tools::list_response::ErrorListResponse;
+use crate::tools::list_response::ErrorNamedListResponse;
 use crate::tools::validation::{validate_limit, validate_offset};
 use djinn_db::{AgentListQuery, AgentRepository, AgentUpdateInput};
 
@@ -22,7 +22,7 @@ use self::ops::{agent_not_found_error, resolve_agent, validate_agent_name, valid
 
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
-pub struct AgentListResponse(pub ErrorListResponse<AgentModel>);
+pub struct AgentListResponse(pub ErrorNamedListResponse<AgentModel>);
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct AgentShowParams {
@@ -150,7 +150,7 @@ impl DjinnMcpServer {
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
-                return Json(AgentListResponse(ErrorListResponse::error(e)));
+                return Json(AgentListResponse(ErrorNamedListResponse::error(e)));
             }
         };
         let repo = AgentRepository::new(self.state.db().clone(), self.state.event_bus());
@@ -163,13 +163,13 @@ impl DjinnMcpServer {
             })
             .await
         {
-            Ok(result) => Json(AgentListResponse(ErrorListResponse::ok(
+            Ok(result) => Json(AgentListResponse(ErrorNamedListResponse::ok(
                 result.agents.iter().map(AgentModel::from).collect(),
                 result.total_count,
                 limit,
                 offset,
             ))),
-            Err(e) => Json(AgentListResponse(ErrorListResponse::error(e.to_string()))),
+            Err(e) => Json(AgentListResponse(ErrorNamedListResponse::error(e.to_string()))),
         }
     }
 

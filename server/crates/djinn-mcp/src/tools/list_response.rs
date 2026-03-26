@@ -1,7 +1,8 @@
 use serde::Serialize;
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct ListResponse<T> {
+pub struct NamedListResponse<T> {
+    #[schemars(rename = "tasks")]
     pub items: Vec<T>,
     pub total_count: i64,
     pub limit: i64,
@@ -9,7 +10,7 @@ pub struct ListResponse<T> {
     pub has_more: bool,
 }
 
-impl<T> ListResponse<T> {
+impl<T> NamedListResponse<T> {
     pub fn empty(limit: i64, offset: i64) -> Self {
         Self {
             items: Vec::new(),
@@ -32,8 +33,9 @@ impl<T> ListResponse<T> {
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct ErrorListResponse<T> {
+pub struct ErrorNamedListResponse<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(rename = "tasks")]
     pub items: Option<Vec<T>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_count: Option<i64>,
@@ -47,7 +49,7 @@ pub struct ErrorListResponse<T> {
     pub error: Option<String>,
 }
 
-impl<T> ErrorListResponse<T> {
+impl<T> ErrorNamedListResponse<T> {
     pub fn ok(items: Vec<T>, total_count: i64, limit: i64, offset: i64) -> Self {
         Self {
             items: Some(items),
