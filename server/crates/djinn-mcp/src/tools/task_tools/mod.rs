@@ -291,7 +291,7 @@ impl DjinnMcpServer {
             let limit = validate_limit(p.limit.unwrap_or(25));
             let offset = validate_offset(p.offset.unwrap_or(0));
             tracing::error!(error = %e, "task_list: invalid sort");
-            return Json(TaskListResult(TaskListResponse::empty(limit, offset)));
+            return Json(TaskListResult(ListResponse::empty(limit, offset)));
         }
         if let Some(prio) = p.priority
             && let Err(e) = validate_priority(prio)
@@ -299,7 +299,7 @@ impl DjinnMcpServer {
             let limit = validate_limit(p.limit.unwrap_or(25));
             let offset = validate_offset(p.offset.unwrap_or(0));
             tracing::error!(error = %e, "task_list: invalid priority");
-            return Json(TaskListResult(TaskListResponse::empty(limit, offset)));
+            return Json(TaskListResult(ListResponse::empty(limit, offset)));
         }
 
         let limit = validate_limit(p.limit.unwrap_or(25));
