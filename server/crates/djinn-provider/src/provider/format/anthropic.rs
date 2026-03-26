@@ -4,7 +4,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use std::pin::Pin;
 
-use crate::message::{ContentBlock, Conversation};
+use crate::message::{CacheBreakpoint, ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
@@ -21,6 +21,23 @@ impl AnthropicProvider {
         }
     }
 
+    fn maybe_cache_control(message: &djinn_core::message::Message) -> Option<Value> {
+        message
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.provider_data.as_ref())
+            .and_then(|data| data.get("anthropic_cache_breakpoint"))
+            .and_then(|value| serde_json::from_value::<CacheBreakpoint>(value.clone()).ok())
+            .map(|breakpoint| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("type".to_string(), json!("ephemeral"));
+                if let Some(kind) = breakpoint.kind {
+                    obj.insert("kind".to_string(), json!(kind));
+                }
+                Value::Object(obj)
+            })
+    }
+
     fn build_request(
         &self,
         conversation: &Conversation,
@@ -28,15 +45,28 @@ impl AnthropicProvider {
         tool_choice: Option<ToolChoice>,
     ) -> Value {
         let (system, messages) = conversation.to_anthropic_messages();
+        let system_text = system.unwrap_or_default();
 
         let max_tokens = self.config.capabilities.max_tokens_default.unwrap_or(8192);
 
         let mut body = json!({
             "model": self.config.model_id,
-            "system": system.unwrap_or_default(),
+            "system": system_text,
             "messages": messages,
             "max_tokens": max_tokens
         });
+
+        if let Some(system_message) = conversation.messages.iter().find(|message| {
+            message.role == djinn_core::message::Role::System
+                && !message.text_content().trim().is_empty()
+        }) && let Some(cache_control) = Self::maybe_cache_control(system_message)
+        {
+            body["system"] = json!([{
+                "type": "text",
+                "text": system_text,
+                "cache_control": cache_control,
+            }]);
+        }
 
         if self.config.capabilities.streaming {
             body["stream"] = json!(true);

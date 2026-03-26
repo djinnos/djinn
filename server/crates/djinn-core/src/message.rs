@@ -5,6 +5,7 @@
 //! be serialized into OpenAI or Anthropic wire formats as needed.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 // ─── Role ─────────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,12 @@ impl ContentBlock {
 
 // ─── MessageMeta ──────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheBreakpoint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
 /// Optional metadata attached to a single message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageMeta {
@@ -70,6 +77,9 @@ pub struct MessageMeta {
     pub output_tokens: Option<u32>,
     /// Unix timestamp (seconds) when the message was created.
     pub timestamp: Option<i64>,
+    /// Provider-specific message-level metadata used during request serialization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_data: Option<Value>,
 }
 
 // ─── Message ──────────────────────────────────────────────────────────────────
@@ -108,6 +118,15 @@ impl Message {
             role: Role::System,
             content: vec![ContentBlock::text(text)],
             metadata: None,
+        }
+    }
+
+    /// Create a system message containing a single text block with metadata.
+    pub fn system_with_metadata(text: impl Into<String>, metadata: MessageMeta) -> Self {
+        Message {
+            role: Role::System,
+            content: vec![ContentBlock::text(text)],
+            metadata: Some(metadata),
         }
     }
 
