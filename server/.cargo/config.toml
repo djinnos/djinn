@@ -1,6 +1,21 @@
 [build]
 rustc-wrapper = "sccache"
 
+# Use mold for faster linking
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[profile.dev]
+incremental = false          # required for sccache effectiveness
+
+[profile.test]
+incremental = false
+
+# Release keeps default LLVM backend for optimized output
+[profile.release]
+incremental = false
+
 [net]
 git-fetch-with-cli = true
 

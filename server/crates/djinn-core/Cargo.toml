@@ -18,3 +18,4 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tracing = "0.1"
+workspace-hack.workspace = true

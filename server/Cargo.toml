@@ -2,6 +2,9 @@
 members = ["crates/*"]
 resolver = "2"
 
+[workspace.dependencies]
+workspace-hack = { version = "0.1.0", path = "crates/workspace-hack" }
+
 [package]
 name = "djinn-server"
 version = "0.1.0"
@@ -61,6 +64,7 @@ opentelemetry-otlp = { version = "0.31", features = ["reqwest-rustls"] }
 opentelemetry-semantic-conventions = "0.31"
 petgraph = "0.8"
 scip = "0.7"
+workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
