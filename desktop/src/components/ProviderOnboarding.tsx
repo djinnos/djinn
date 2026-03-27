@@ -76,7 +76,7 @@ function ChatGPTCard({ onDone }: { onDone: () => void }) {
       </p>
 
       <span className="inline-flex self-start rounded-full bg-green-500/15 px-3 py-1 text-xs font-medium text-green-400">
-        Flat-rate pricing
+        No API key needed
       </span>
 
       {error && (
