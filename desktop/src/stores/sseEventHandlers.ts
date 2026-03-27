@@ -9,7 +9,11 @@ import { sseStore, type SSEEvent } from "./sseStore";
 import { taskStore } from "./taskStore";
 import { epicStore } from "./epicStore";
 import { projectStore } from "./projectStore";
-import { queryClient } from "@/lib/queryClient";
+import {
+  debounceInvalidateQueries,
+  flushDebouncedInvalidations,
+  queryClient,
+} from "@/lib/queryClient";
 import { fetchProjects } from "@/api/server";
 import { verificationStore, type StepEntry } from "./verificationStore";
 import type { Task, Epic } from "@/api/types";
@@ -249,14 +253,14 @@ export function initSSEEventHandlers(): () => void {
     };
     // Only refresh on successful imports that actually changed data.
     if (payload.direction === "import" && (payload.count ?? 0) > 0) {
-      queryClient.invalidateQueries({ queryKey: ["tasks"] });
-      queryClient.invalidateQueries({ queryKey: ["epics"] });
+      debounceInvalidateQueries({ queryKey: ["tasks"] });
+      debounceInvalidateQueries({ queryKey: ["epics"] });
     }
   });
 
   const projectChangedUnsub = subscribe("project_changed", () => {
-    queryClient.invalidateQueries({ queryKey: ["providers"] });
-    queryClient.invalidateQueries({ queryKey: ["settings"] });
+    debounceInvalidateQueries({ queryKey: ["providers"] });
+    debounceInvalidateQueries({ queryKey: ["settings"] });
     fetchProjects()
       .then((projects) => projectStore.getState().setProjects(projects))
       .catch((err) => console.error("Failed to refetch projects after SSE event:", err));
@@ -362,6 +366,7 @@ export function initSSEEventHandlers(): () => void {
     syncCompletedUnsub?.();
     verificationStepUnsub?.();
     lifecycleStepUnsub?.();
+    flushDebouncedInvalidations();
   };
 }
 
@@ -382,4 +387,5 @@ export function cleanupSSEEventHandlers(): void {
   epicCreatedUnsub = null;
   epicUpdatedUnsub = null;
   epicDeletedUnsub = null;
+  flushDebouncedInvalidations();
 }
