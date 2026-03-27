@@ -617,12 +617,37 @@ pub struct SymbolQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct StablePosition {
+    line: u32,
+    character: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SymbolEntry {
+    kind: u64,
     kind_name: &'static str,
+    name: String,
     name_path: String,
+    depth: usize,
     line: Option<u64>,
     location: Option<String>,
     child_count: usize,
+    stable_position: Option<StablePosition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolLookupQuery {
+    raw: String,
+    suffix_segments: Vec<String>,
+    kind_hint: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSymbol {
+    name_path: String,
+    kind_name: &'static str,
+    location: String,
+    position: StablePosition,
 }
 
 fn parse_symbol_tree(symbols: &[serde_json::Value], query: &SymbolQuery) -> Vec<SymbolEntry> {
@@ -634,11 +659,10 @@ fn parse_symbol_tree(symbols: &[serde_json::Value], query: &SymbolQuery) -> Vec<
             0,
             &mut Vec::new(),
             &normalized_name_filter,
-            query,
             &mut entries,
         );
     }
-    entries
+    filter_symbol_entries(entries, query)
 }
 
 fn collect_symbol_entries(
@@ -646,7 +670,6 @@ fn collect_symbol_entries(
     depth: usize,
     parent_path: &mut Vec<String>,
     normalized_name_filter: &Option<String>,
-    query: &SymbolQuery,
     entries: &mut Vec<SymbolEntry>,
 ) {
     let name = symbol
@@ -654,7 +677,7 @@ fn collect_symbol_entries(
         .and_then(|value| value.as_str())
         .unwrap_or("?")
         .to_string();
-    let kind_num = symbol
+    let kind = symbol
         .get("kind")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
@@ -662,36 +685,35 @@ fn collect_symbol_entries(
     parent_path.push(name.clone());
     let name_path = parent_path.join("/");
 
-    let matches_depth = query.depth.is_none_or(|max_depth| depth <= max_depth);
-    let matches_kind = query
-        .kinds
-        .as_ref()
-        .is_none_or(|kinds| kinds.contains(&kind_num));
     let matches_name = normalized_name_filter.as_ref().is_none_or(|needle| {
         let lowered_name = name.to_lowercase();
         let lowered_path = name_path.to_lowercase();
         lowered_name.contains(needle) || lowered_path.contains(needle)
     });
 
-    if matches_depth && matches_kind && matches_name {
+    if matches_name {
         let line = symbol
             .get("range")
             .and_then(|range| range.get("start"))
             .and_then(|start| start.get("line"))
             .and_then(|line| line.as_u64())
             .map(|line| line + 1);
-        let location = symbol.get("location").map(format_location);
+        let location = symbol_location(symbol);
         let child_count = symbol
             .get("children")
             .and_then(|value| value.as_array())
             .map(Vec::len)
             .unwrap_or(0);
         entries.push(SymbolEntry {
-            kind_name: symbol_kind_name(kind_num),
+            kind,
+            kind_name: symbol_kind_name(kind),
+            name,
             name_path,
+            depth,
             line,
             location,
             child_count,
+            stable_position: symbol_stable_position(symbol),
         });
     }
 
@@ -702,13 +724,189 @@ fn collect_symbol_entries(
                 depth + 1,
                 parent_path,
                 normalized_name_filter,
-                query,
                 entries,
             );
         }
     }
 
     parent_path.pop();
+}
+
+fn filter_symbol_entries(entries: Vec<SymbolEntry>, query: &SymbolQuery) -> Vec<SymbolEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| query.depth.is_none_or(|max_depth| entry.depth <= max_depth))
+        .filter(|entry| {
+            query
+                .kinds
+                .as_ref()
+                .is_none_or(|kinds| kinds.contains(&entry.kind))
+        })
+        .collect()
+}
+
+fn symbol_location(symbol: &serde_json::Value) -> Option<String> {
+    symbol.get("location").map(format_location).or_else(|| {
+        symbol_stable_position(symbol).map(|position| {
+            if position.character == 0 {
+                format!("line {}", position.line + 1)
+            } else {
+                format!("line {}:{}", position.line + 1, position.character + 1)
+            }
+        })
+    })
+}
+
+fn symbol_stable_position(symbol: &serde_json::Value) -> Option<StablePosition> {
+    let selection = symbol
+        .get("selectionRange")
+        .and_then(|value| value.as_object())
+        .or_else(|| symbol.get("range").and_then(|value| value.as_object()))?;
+    let start = selection.get("start")?.as_object()?;
+    Some(StablePosition {
+        line: start.get("line")?.as_u64()? as u32,
+        character: start.get("character")?.as_u64()? as u32,
+    })
+}
+
+fn parse_symbol_lookup_query(query: &str) -> Result<SymbolLookupQuery, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err("symbol query must not be empty".to_string());
+    }
+
+    let (kind_hint, name_query) = if let Some((raw_kind, raw_name)) = trimmed.split_once(':') {
+        if raw_kind.contains('/') || raw_name.trim().is_empty() {
+            (None, trimmed)
+        } else {
+            (
+                Some(parse_single_symbol_kind(raw_kind.trim())?),
+                raw_name.trim(),
+            )
+        }
+    } else {
+        (None, trimmed)
+    };
+
+    let suffix_segments: Vec<String> = name_query
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if suffix_segments.is_empty() {
+        return Err("symbol query must not be empty".to_string());
+    }
+
+    Ok(SymbolLookupQuery {
+        raw: trimmed.to_string(),
+        suffix_segments,
+        kind_hint,
+    })
+}
+
+fn resolve_symbol_entries(
+    entries: &[SymbolEntry],
+    query: &SymbolLookupQuery,
+) -> Result<ResolvedSymbol, String> {
+    let mut matches: Vec<&SymbolEntry> = entries
+        .iter()
+        .filter(|entry| query.kind_hint.is_none_or(|kind| entry.kind == kind))
+        .filter(|entry| name_path_has_suffix(&entry.name_path, &query.suffix_segments))
+        .collect();
+
+    matches.sort_by(|a, b| {
+        a.name_path
+            .cmp(&b.name_path)
+            .then(a.location.cmp(&b.location))
+            .then(a.kind.cmp(&b.kind))
+    });
+
+    if matches.len() == 1 {
+        let entry = matches[0];
+        let position = entry.stable_position.clone().ok_or_else(|| {
+            format!(
+                "Symbol `{}` was found at {} but does not expose a stable position.",
+                entry.name_path,
+                entry.location.as_deref().unwrap_or("unknown location")
+            )
+        })?;
+        return Ok(ResolvedSymbol {
+            name_path: entry.name_path.clone(),
+            kind_name: entry.kind_name,
+            location: entry.location.clone().unwrap_or_else(|| {
+                format!("line {}:{}", position.line + 1, position.character + 1)
+            }),
+            position,
+        });
+    }
+
+    if matches.is_empty() {
+        let needle = query
+            .suffix_segments
+            .last()
+            .map(|segment| segment.to_lowercase())
+            .unwrap_or_default();
+        let mut suggestions: Vec<&SymbolEntry> = entries
+            .iter()
+            .filter(|entry| query.kind_hint.is_none_or(|kind| entry.kind == kind))
+            .filter(|entry| {
+                entry.name.to_lowercase().contains(&needle)
+                    || entry.name_path.to_lowercase().contains(&needle)
+            })
+            .collect();
+        suggestions.sort_by(|a, b| {
+            a.name_path
+                .cmp(&b.name_path)
+                .then(a.location.cmp(&b.location))
+        });
+        suggestions.truncate(5);
+
+        let mut message = format!(
+            "No symbol found matching `{}`. Use `lsp symbols` to inspect available name paths.",
+            query.raw
+        );
+        if !suggestions.is_empty() {
+            let rendered = suggestions
+                .into_iter()
+                .map(|entry| {
+                    format!(
+                        "- {} ({}, {})",
+                        entry.name_path,
+                        entry.kind_name,
+                        entry.location.as_deref().unwrap_or("unknown location")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            message.push_str("\nClosest matches:\n");
+            message.push_str(&rendered);
+        }
+        return Err(message);
+    }
+
+    let rendered = matches
+        .into_iter()
+        .map(|entry| {
+            format!(
+                "- {} ({}, {})",
+                entry.name_path,
+                entry.kind_name,
+                entry.location.as_deref().unwrap_or("unknown location")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!(
+        "Symbol query `{}` is ambiguous. Matching candidates:\n{}",
+        query.raw, rendered
+    ))
+}
+
+fn name_path_has_suffix(name_path: &str, suffix_segments: &[String]) -> bool {
+    let name_segments: Vec<&str> = name_path.split('/').collect();
+    let suffix: Vec<&str> = suffix_segments.iter().map(String::as_str).collect();
+    name_segments.ends_with(&suffix)
 }
 
 fn format_symbol_entries(entries: &[SymbolEntry]) -> String {
@@ -789,35 +987,7 @@ pub fn parse_symbol_kind_filter(value: &str) -> Result<HashSet<u64>, String> {
         if normalized.is_empty() {
             continue;
         }
-        let kind_num = match normalized.as_str() {
-            "file" => 1,
-            "module" => 2,
-            "namespace" => 3,
-            "package" => 4,
-            "class" => 5,
-            "method" => 6,
-            "property" => 7,
-            "field" => 8,
-            "constructor" => 9,
-            "enum" => 10,
-            "interface" => 11,
-            "function" | "fn" => 12,
-            "variable" | "var" => 13,
-            "constant" | "const" => 14,
-            "string" => 15,
-            "number" => 16,
-            "boolean" | "bool" => 17,
-            "array" => 18,
-            "object" => 19,
-            "key" => 20,
-            "null" => 21,
-            "enummember" | "enum_member" | "enum-member" => 22,
-            "struct" => 23,
-            "event" => 24,
-            "operator" => 25,
-            "typeparameter" | "type_parameter" | "type-parameter" => 26,
-            other => return Err(format!("unknown symbol kind filter: {other}")),
-        };
+        let kind_num = parse_single_symbol_kind(&normalized)?;
         kinds.insert(kind_num);
     }
 
@@ -826,6 +996,38 @@ pub fn parse_symbol_kind_filter(value: &str) -> Result<HashSet<u64>, String> {
     }
 
     Ok(kinds)
+}
+
+fn parse_single_symbol_kind(value: &str) -> Result<u64, String> {
+    match value.trim().to_lowercase().as_str() {
+        "file" => Ok(1),
+        "module" => Ok(2),
+        "namespace" => Ok(3),
+        "package" => Ok(4),
+        "class" => Ok(5),
+        "method" => Ok(6),
+        "property" => Ok(7),
+        "field" => Ok(8),
+        "constructor" => Ok(9),
+        "enum" => Ok(10),
+        "interface" => Ok(11),
+        "function" | "fn" => Ok(12),
+        "variable" | "var" => Ok(13),
+        "constant" | "const" => Ok(14),
+        "string" => Ok(15),
+        "number" => Ok(16),
+        "boolean" | "bool" => Ok(17),
+        "array" => Ok(18),
+        "object" => Ok(19),
+        "key" => Ok(20),
+        "null" => Ok(21),
+        "enummember" | "enum_member" | "enum-member" => Ok(22),
+        "struct" => Ok(23),
+        "event" => Ok(24),
+        "operator" => Ok(25),
+        "typeparameter" | "type_parameter" | "type-parameter" => Ok(26),
+        other => Err(format!("unknown symbol kind filter: {other}")),
+    }
 }
 
 fn symbol_kind_name(kind: u64) -> &'static str {
@@ -861,6 +1063,55 @@ fn symbol_kind_name(kind: u64) -> &'static str {
 }
 
 impl LspManager {
+    async fn fetch_document_symbol_entries(
+        &self,
+        worktree: &Path,
+        path: &Path,
+    ) -> Result<Vec<SymbolEntry>, String> {
+        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
+        let uri = ensure_did_open(&stdin, path, &opened).await?;
+
+        let result = send_request(
+            &stdin,
+            &pending,
+            &seq,
+            "textDocument/documentSymbol",
+            json!({
+                "textDocument": { "uri": uri },
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await?;
+
+        if result.is_null() {
+            return Ok(Vec::new());
+        }
+
+        let symbols = result.as_array().cloned().unwrap_or_default();
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(parse_symbol_tree(&symbols, &SymbolQuery::default()))
+    }
+
+    async fn resolve_symbol_to_position(
+        &self,
+        worktree: &Path,
+        path: &Path,
+        symbol_query: &str,
+    ) -> Result<ResolvedSymbol, String> {
+        let query = parse_symbol_lookup_query(symbol_query)?;
+        let entries = self.fetch_document_symbol_entries(worktree, path).await?;
+        if entries.is_empty() {
+            return Err(
+                "No symbols found in this document. Use `lsp symbols` to inspect available name paths."
+                    .to_string(),
+            );
+        }
+        resolve_symbol_entries(&entries, &query)
+    }
+
     /// Get or spawn the LSP client for a file and return refs for making requests.
     async fn get_request_refs(
         &self,
@@ -1048,32 +1299,68 @@ impl LspManager {
         path: &Path,
         query: SymbolQuery,
     ) -> Result<String, String> {
-        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path, &opened).await?;
+        let entries = self.fetch_document_symbol_entries(worktree, path).await?;
+        if entries.is_empty() {
+            return Ok("No symbols found in this document.".to_string());
+        }
 
-        let result = send_request(
-            &stdin,
-            &pending,
-            &seq,
-            "textDocument/documentSymbol",
-            json!({
-                "textDocument": { "uri": uri },
-            }),
-            REQUEST_TIMEOUT,
+        Ok(format_symbol_entries(&filter_symbol_entries(
+            entries, &query,
+        )))
+    }
+
+    pub async fn hover_symbol(
+        &self,
+        worktree: &Path,
+        path: &Path,
+        symbol_query: &str,
+    ) -> Result<String, String> {
+        let resolved = self
+            .resolve_symbol_to_position(worktree, path, symbol_query)
+            .await?;
+        self.hover(
+            worktree,
+            path,
+            resolved.position.line,
+            resolved.position.character,
         )
-        .await?;
+        .await
+    }
 
-        if result.is_null() {
-            return Ok("No symbols found in this document.".to_string());
-        }
+    pub async fn go_to_definition_symbol(
+        &self,
+        worktree: &Path,
+        path: &Path,
+        symbol_query: &str,
+    ) -> Result<String, String> {
+        let resolved = self
+            .resolve_symbol_to_position(worktree, path, symbol_query)
+            .await?;
+        self.go_to_definition(
+            worktree,
+            path,
+            resolved.position.line,
+            resolved.position.character,
+        )
+        .await
+    }
 
-        let symbols = result.as_array().cloned().unwrap_or_default();
-        if symbols.is_empty() {
-            return Ok("No symbols found in this document.".to_string());
-        }
-
-        let entries = parse_symbol_tree(&symbols, &query);
-        Ok(format_symbol_entries(&entries))
+    pub async fn find_references_symbol(
+        &self,
+        worktree: &Path,
+        path: &Path,
+        symbol_query: &str,
+    ) -> Result<String, String> {
+        let resolved = self
+            .resolve_symbol_to_position(worktree, path, symbol_query)
+            .await?;
+        self.find_references(
+            worktree,
+            path,
+            resolved.position.line,
+            resolved.position.character,
+        )
+        .await
     }
 }
 
@@ -1270,6 +1557,144 @@ mod tests {
             }
         });
         assert_eq!(format_location(&loc), "/foo/bar.rs:1:1");
+    }
+
+    fn sample_symbols() -> Vec<serde_json::Value> {
+        vec![
+            json!({
+                "name": "Config",
+                "kind": 23,
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 10, "character": 1 }
+                },
+                "selectionRange": {
+                    "start": { "line": 0, "character": 7 },
+                    "end": { "line": 0, "character": 13 }
+                },
+                "children": [
+                    {
+                        "name": "rank",
+                        "kind": 8,
+                        "range": {
+                            "start": { "line": 1, "character": 4 },
+                            "end": { "line": 1, "character": 14 }
+                        },
+                        "selectionRange": {
+                            "start": { "line": 1, "character": 8 },
+                            "end": { "line": 1, "character": 12 }
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "name": "helpers",
+                "kind": 2,
+                "range": {
+                    "start": { "line": 20, "character": 0 },
+                    "end": { "line": 40, "character": 1 }
+                },
+                "selectionRange": {
+                    "start": { "line": 20, "character": 4 },
+                    "end": { "line": 20, "character": 11 }
+                },
+                "children": [
+                    {
+                        "name": "rank",
+                        "kind": 12,
+                        "range": {
+                            "start": { "line": 22, "character": 0 },
+                            "end": { "line": 24, "character": 1 }
+                        },
+                        "selectionRange": {
+                            "start": { "line": 22, "character": 3 },
+                            "end": { "line": 22, "character": 7 }
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "name": "rank",
+                "kind": 12,
+                "location": {
+                    "uri": "file:///tmp/example.rs",
+                    "range": {
+                        "start": { "line": 50, "character": 0 },
+                        "end": { "line": 52, "character": 1 }
+                    }
+                },
+                "range": {
+                    "start": { "line": 50, "character": 0 },
+                    "end": { "line": 52, "character": 1 }
+                },
+                "selectionRange": {
+                    "start": { "line": 50, "character": 3 },
+                    "end": { "line": 50, "character": 7 }
+                }
+            }),
+        ]
+    }
+
+    #[test]
+    fn resolves_unique_symbol_by_suffix() {
+        let entries = parse_symbol_tree(&sample_symbols(), &SymbolQuery::default());
+        let query = parse_symbol_lookup_query("helpers/rank").unwrap();
+
+        let resolved = resolve_symbol_entries(&entries, &query).unwrap();
+
+        assert_eq!(resolved.name_path, "helpers/rank");
+        assert_eq!(resolved.kind_name, "Function");
+        assert_eq!(
+            resolved.position,
+            StablePosition {
+                line: 22,
+                character: 3
+            }
+        );
+    }
+
+    #[test]
+    fn resolves_kind_hint_to_narrow_matches() {
+        let entries = parse_symbol_tree(&sample_symbols(), &SymbolQuery::default());
+        let query = parse_symbol_lookup_query("struct:Config").unwrap();
+
+        let resolved = resolve_symbol_entries(&entries, &query).unwrap();
+
+        assert_eq!(resolved.name_path, "Config");
+        assert_eq!(resolved.kind_name, "Struct");
+        assert_eq!(
+            resolved.position,
+            StablePosition {
+                line: 0,
+                character: 7
+            }
+        );
+    }
+
+    #[test]
+    fn ambiguous_symbol_lists_candidates_deterministically() {
+        let entries = parse_symbol_tree(&sample_symbols(), &SymbolQuery::default());
+        let query = parse_symbol_lookup_query("rank").unwrap();
+
+        let error = resolve_symbol_entries(&entries, &query).unwrap_err();
+
+        assert!(error.contains("Symbol query `rank` is ambiguous."));
+        assert!(error.contains("- Config/rank (Field, line 2:9)"));
+        assert!(error.contains("- helpers/rank (Function, line 23:4)"));
+        assert!(error.contains("- rank (Function, /tmp/example.rs:51:1)"));
+    }
+
+    #[test]
+    fn missing_symbol_suggests_close_matches() {
+        let entries = parse_symbol_tree(&sample_symbols(), &SymbolQuery::default());
+        let query = parse_symbol_lookup_query("ran").unwrap();
+
+        let error = resolve_symbol_entries(&entries, &query).unwrap_err();
+
+        assert!(error.contains("No symbol found matching `ran`."));
+        assert!(error.contains("Use `lsp symbols` to inspect available name paths."));
+        assert!(error.contains("Closest matches:"));
+        assert!(error.contains("- Config/rank (Field, line 2:9)"));
     }
 
     // --- LspManager unit tests (no real LSP process) ---
@@ -1810,11 +2235,15 @@ mod tests {
     fn format_symbol_entries_falls_back_for_large_outputs() {
         let entries: Vec<SymbolEntry> = (0..250)
             .map(|index| SymbolEntry {
+                kind: 12,
                 kind_name: "Function",
+                name: format!("very_long_symbol_name_{index:03}_{}", "x".repeat(40)),
                 name_path: format!("module/very_long_symbol_name_{index:03}_{}", "x".repeat(40)),
+                depth: 1,
                 line: Some(index + 1),
                 location: None,
                 child_count: 3,
+                stable_position: None,
             })
             .collect();
 
