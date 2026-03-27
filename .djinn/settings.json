@@ -52,6 +52,7 @@
     {
       "match": "desktop/src/**",
       "commands": [
+        "cd desktop && pnpm install --frozen-lockfile",
         "cd desktop && pnpm tsc --noEmit",
         "cd desktop && pnpm test"
       ]
