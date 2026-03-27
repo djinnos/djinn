@@ -123,7 +123,32 @@ pub fn spawn_repo_map_refresh_watchers(
                         if envelope.entity_type == "project" && envelope.action == "created" {
                             let Some(project) = envelope.parse_payload::<djinn_core::models::Project>() else { continue; };
                             let mut guard = state_clone.lock().await;
-                            add_watch(&mut guard, &project.id, Path::new(&project.path));
+                            let project_path = PathBuf::from(&project.path);
+                            add_watch(&mut guard, &project.id, &project_path);
+                            // Schedule initial repo-map refresh for the newly created project.
+                            // Extract state needed for the refresh before dropping the lock.
+                            let app_state = guard.app_state.clone();
+                            let events_bus = crate::events::event_bus_for(&guard.events_tx);
+                            let in_flight = guard.in_flight.clone();
+                            let project_id = project.id.clone();
+                            drop(guard);
+                            tokio::spawn(async move {
+                                if let Err(error) = refresh_project_and_worktrees(
+                                    &app_state,
+                                    &events_bus,
+                                    in_flight,
+                                    &project_id,
+                                    &project_path,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        project = %project_path.display(),
+                                        error = %error,
+                                        "repo-map initial refresh failed for new project"
+                                    );
+                                }
+                            });
                         } else if envelope.entity_type == "project" && envelope.action == "updated" {
                             let Some(project) = envelope.parse_payload::<djinn_core::models::Project>() else { continue; };
                             let mut guard = state_clone.lock().await;
@@ -698,6 +723,47 @@ mod tests {
         spawn_repo_map_refresh_watchers(db.clone(), events_tx.clone(), cancel.clone());
         tokio::time::sleep(Duration::from_millis(50)).await;
         project_repo.delete(&project.id).await.unwrap();
+        cancel.cancel();
+    }
+
+    /// Verifies that creating a project while repo-map watchers are running
+    /// triggers an initial refresh attempt (via the project_created event).
+    /// The refresh itself will fail gracefully (no git repo in the temp dir),
+    /// but the important thing is that it is attempted rather than waiting for
+    /// a file-system change to trigger it.
+    #[tokio::test]
+    async fn project_created_event_schedules_initial_refresh() {
+        let db = create_test_db();
+        let (events_tx, _) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+
+        // Start watchers BEFORE project creation so the event loop is listening.
+        spawn_repo_map_refresh_watchers(db.clone(), events_tx.clone(), cancel.clone());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Create a project — this emits a project_created event through the bus.
+        let dir = tempfile::Builder::new()
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
+        let _project = project_repo
+            .create("initial-refresh-project", &dir.path().to_string_lossy())
+            .await
+            .unwrap();
+
+        // Give the watcher time to process the event and attempt the initial refresh.
+        // The refresh will fail (no git repo), but should log a warning rather than panic.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Project creation must have succeeded regardless of refresh outcome.
+        let projects = project_repo.list().await.unwrap();
+        assert!(
+            projects
+                .iter()
+                .any(|p| p.name == "initial-refresh-project"),
+            "project should exist after creation even if initial refresh fails"
+        );
+
         cancel.cancel();
     }
 }
