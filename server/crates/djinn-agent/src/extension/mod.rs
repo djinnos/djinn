@@ -4790,6 +4790,122 @@ mod tests {
         insta::assert_json_snapshot!("architect_tool_schemas", tool_schemas_architect());
     }
 
+    #[test]
+    fn snapshot_lsp_tool_schema() {
+        insta::assert_json_snapshot!("lsp_tool_schema", serde_json::to_value(&tool_lsp()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn lsp_tool_boundary_symbols_with_depth_only() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-lsp-e2e-sym-depth-");
+        let src = worktree.path().join("src/lib.txt");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, "fn top() {}\n").unwrap();
+
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let err = lsp_tool(
+            &state,
+            serde_json::json!({
+                "operation": "symbols",
+                "file_path": "src/lib.txt",
+                "depth": 0
+            }),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("no LSP server configured for"),
+            "symbols with depth-only should reach LspManager, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_tool_boundary_symbols_with_kind_only() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-lsp-e2e-sym-kind-");
+        let src = worktree.path().join("src/lib.txt");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, "fn top() {}\n").unwrap();
+
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let err = lsp_tool(
+            &state,
+            serde_json::json!({
+                "operation": "symbols",
+                "file_path": "src/lib.txt",
+                "kind": "function,struct"
+            }),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("no LSP server configured for"),
+            "symbols with kind-only should reach LspManager, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_tool_boundary_symbols_with_name_filter_only() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-lsp-e2e-sym-name-");
+        let src = worktree.path().join("src/lib.txt");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, "fn top() {}\n").unwrap();
+
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let err = lsp_tool(
+            &state,
+            serde_json::json!({
+                "operation": "symbols",
+                "file_path": "src/lib.txt",
+                "name_filter": "top"
+            }),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("no LSP server configured for"),
+            "symbols with name_filter-only should reach LspManager, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_tool_boundary_symbols_bare_no_filters() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-lsp-e2e-sym-bare-");
+        let src = worktree.path().join("src/lib.txt");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, "fn bare() {}\n").unwrap();
+
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let err = lsp_tool(
+            &state,
+            serde_json::json!({
+                "operation": "symbols",
+                "file_path": "src/lib.txt"
+            }),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("no LSP server configured for"),
+            "symbols with no filters should reach LspManager, got: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
         let db = create_test_db();
