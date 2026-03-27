@@ -11,6 +11,7 @@
 target/
 tmp/
 .tmp/
+test-tmp/
 
 # Package manager stores
 .pnpm-store/
