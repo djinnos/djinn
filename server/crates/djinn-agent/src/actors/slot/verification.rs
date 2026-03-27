@@ -15,7 +15,7 @@ use super::*;
 const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 
 /// Minimum pipeline timeout even when no commands are configured.
-const MIN_PIPELINE_TIMEOUT_SECS: u64 = 120;
+const MIN_PIPELINE_TIMEOUT_SECS: u64 = 240;
 /// Extra headroom on top of the sum of per-command timeouts to account for
 /// worktree creation, cache lookup, and cleanup.
 const PIPELINE_TIMEOUT_OVERHEAD_SECS: u64 = 120;
