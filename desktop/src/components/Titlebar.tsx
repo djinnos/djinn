@@ -6,7 +6,6 @@ import {
   ArrowRight01Icon,
   Layers01Icon,
   GitBranchIcon,
-  Tick01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -15,6 +14,15 @@ import { useProjectRoute } from "@/hooks/useProjectRoute";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useExecutionStatus } from "@/hooks/useExecutionStatus";
 import { updateProject, fetchProjects } from "@/api/server";
+import { listGitBranches } from "@/tauri/commands";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from "@/components/ui/combobox";
 
 const appWindow = getCurrentWindow();
 
@@ -75,80 +83,106 @@ function Breadcrumb() {
 function BranchIndicator() {
   const selected = useSelectedProject();
   const isAll = useIsAllProjects();
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState("");
-  const [saving, setSaving] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [branches, setBranches] = useState<string[]>([]);
+  const [inputValue, setInputValue] = useState("");
 
   const branch = selected?.branch ?? "main";
 
-  const startEditing = useCallback(() => {
-    setValue(branch);
-    setEditing(true);
-  }, [branch]);
-
+  // Fetch branches when dropdown opens
   useEffect(() => {
-    if (editing) inputRef.current?.select();
-  }, [editing]);
+    if (!open || !selected?.path) return;
+    listGitBranches(selected.path).then(setBranches).catch(() => setBranches([]));
+  }, [open, selected?.path]);
 
-  const save = useCallback(async () => {
-    const trimmed = value.trim();
-    if (!selected || !trimmed || trimmed === branch) {
-      setEditing(false);
-      return;
-    }
-    setSaving(true);
-    try {
-      await updateProject(selected.id, { branch: trimmed });
-      const projects = await fetchProjects();
-      projectStore.getState().setProjects(projects);
-    } catch (err) {
-      console.error("Failed to update target branch:", err);
-    } finally {
-      setSaving(false);
-      setEditing(false);
-    }
-  }, [selected, value, branch]);
+  const selectBranch = useCallback(
+    async (val: string | null) => {
+      const trimmed = (val ?? inputValue).trim();
+      if (!selected || !trimmed || trimmed === branch) {
+        setOpen(false);
+        return;
+      }
+      try {
+        await updateProject(selected.id, { branch: trimmed });
+        const projects = await fetchProjects();
+        projectStore.getState().setProjects(projects);
+      } catch (err) {
+        console.error("Failed to update target branch:", err);
+      }
+      setOpen(false);
+    },
+    [selected, branch, inputValue],
+  );
 
   if (isAll || !selected) return null;
 
-  if (editing) {
+  // Check if typed value matches an existing branch
+  const trimmedInput = inputValue.trim();
+  const isNew = trimmedInput.length > 0 && !branches.some((b) => b === trimmedInput);
+
+  if (!open) {
     return (
-      <form
-        onSubmit={(e) => { e.preventDefault(); void save(); }}
-        className="flex items-center gap-1"
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        title="Target branch — click to change"
       >
-        <HugeiconsIcon icon={GitBranchIcon} size={12} className="shrink-0 text-muted-foreground" />
-        <input
-          ref={inputRef}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onBlur={() => void save()}
-          onKeyDown={(e) => { if (e.key === "Escape") setEditing(false); }}
-          disabled={saving}
-          className="h-5 w-28 rounded border border-input bg-input/30 px-1.5 text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/40"
-        />
-        <button
-          type="submit"
-          disabled={saving}
-          className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <HugeiconsIcon icon={Tick01Icon} size={10} />
-        </button>
-      </form>
+        <HugeiconsIcon icon={GitBranchIcon} size={12} className="shrink-0" />
+        <span className="max-w-[120px] truncate">{branch}</span>
+      </button>
     );
   }
 
   return (
-    <button
-      type="button"
-      onClick={startEditing}
-      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-      title="Target branch — click to change"
+    <Combobox
+      open={open}
+      onOpenChange={setOpen}
+      value={branch}
+      onValueChange={selectBranch}
+      onInputValueChange={setInputValue}
     >
-      <HugeiconsIcon icon={GitBranchIcon} size={12} className="shrink-0" />
-      <span className="max-w-[120px] truncate">{branch}</span>
-    </button>
+      <div className="flex items-center gap-1">
+        <HugeiconsIcon icon={GitBranchIcon} size={12} className="shrink-0 text-muted-foreground" />
+        <ComboboxInput
+          placeholder="Search or create branch..."
+          showClear={false}
+          showTrigger={false}
+          autoFocus
+          className="h-5 w-40 text-xs"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setOpen(false);
+            if (e.key === "Enter" && isNew) {
+              e.preventDefault();
+              void selectBranch(trimmedInput);
+            }
+          }}
+        />
+      </div>
+      <ComboboxContent sideOffset={4}>
+        <ComboboxList>
+          {branches.map((b) => (
+            <ComboboxItem key={b} value={b}>
+              {b}
+            </ComboboxItem>
+          ))}
+        </ComboboxList>
+        {isNew && (
+          <div
+            role="option"
+            className="flex cursor-pointer items-center gap-2 border-t border-border px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              void selectBranch(trimmedInput);
+            }}
+          >
+            <HugeiconsIcon icon={GitBranchIcon} size={14} className="shrink-0 text-muted-foreground" />
+            <span>Create <span className="font-medium">{trimmedInput}</span></span>
+          </div>
+        )}
+        <ComboboxEmpty>No branches found.</ComboboxEmpty>
+      </ComboboxContent>
+    </Combobox>
   );
 }
 

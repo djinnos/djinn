@@ -99,6 +99,15 @@ export async function selectDirectory(title?: string): Promise<string | null> {
 
 
 /**
+ * List local git branches for a project.
+ * @param projectPath Absolute path to the project directory
+ * @returns Array of branch names
+ */
+export async function listGitBranches(projectPath: string): Promise<string[]> {
+  return invoke<string[]>("list_git_branches", { projectPath });
+}
+
+/**
  * Check if a git repository has an 'origin' remote configured.
  * @param projectPath Absolute path to the project directory
  * @returns The remote URL if configured, null otherwise

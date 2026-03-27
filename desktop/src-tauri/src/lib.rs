@@ -143,6 +143,7 @@ pub fn run() {
             commands::logout,
             commands::select_directory,
             commands::check_git_remote,
+            commands::list_git_branches,
             commands::setup_git_remote,
             commands::sync_github_tokens,
         ])

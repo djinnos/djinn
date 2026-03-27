@@ -547,6 +547,27 @@ pub fn check_git_remote(project_path: String) -> Result<Option<String>, String> 
     }
 }
 
+/// List local git branches for a repository
+#[tauri::command]
+pub fn list_git_branches(project_path: String) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if output.status.success() {
+        let branches = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        Ok(branches)
+    } else {
+        Ok(vec![])
+    }
+}
+
 /// Set up a git remote and push the current branch
 #[tauri::command]
 pub fn setup_git_remote(project_path: String, remote_url: String) -> Result<String, String> {

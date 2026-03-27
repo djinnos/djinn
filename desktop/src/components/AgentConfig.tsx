@@ -1,11 +1,12 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Reorder, useDragControls } from "framer-motion";
 import { Delete02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ProviderModel } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cn } from "@/lib/utils";
+
 
 /** Strips provider prefix from a model id (e.g. "openai/gpt-4o" → "gpt-4o"). */
 function stripProviderPrefix(modelId: string): string {
@@ -115,6 +116,90 @@ function ModelPicker({
   );
 }
 
+function ModelRow({
+  entry,
+  index,
+  availableModels,
+  onRemoveModel,
+  onUpdateMaxSessions,
+}: {
+  entry: AgentModelEntry;
+  index: number;
+  availableModels: ProviderModel[];
+  onRemoveModel: (index: number) => void;
+  onUpdateMaxSessions: (index: number, maxConcurrent: number) => void;
+}) {
+  const controls = useDragControls();
+  const [sessionText, setSessionText] = useState(String(entry.max_concurrent));
+
+  // Sync from parent when the prop changes (e.g. after reorder)
+  useEffect(() => {
+    setSessionText(String(entry.max_concurrent));
+  }, [entry.max_concurrent]);
+
+  const commitSessions = () => {
+    const v = parseInt(sessionText, 10);
+    if (!isNaN(v) && v >= 1 && v <= 10) {
+      onUpdateMaxSessions(index, v);
+      setSessionText(String(v));
+    } else {
+      // Revert to current value on invalid input
+      setSessionText(String(entry.max_concurrent));
+    }
+  };
+
+  return (
+    <Reorder.Item
+      value={entry}
+      dragListener={false}
+      dragControls={controls}
+      className="list-none"
+    >
+      <div className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3">
+        {/* Drag handle */}
+        <div
+          className="cursor-grab active:cursor-grabbing text-muted-foreground/40 shrink-0 select-none touch-none"
+          onPointerDown={(e) => controls.start(e)}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="9" cy="5" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="9" cy="19" r="1.5" />
+            <circle cx="15" cy="5" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="15" cy="19" r="1.5" />
+          </svg>
+        </div>
+        {/* Model info */}
+        <div className="min-w-0 flex-1">
+          <div className="font-semibold truncate">
+            {(availableModels.find((m) => stripProviderPrefix(m.id) === stripProviderPrefix(entry.model) && (m.provider_id ?? m.provider) === entry.provider) ?? availableModels.find((m) => stripProviderPrefix(m.id) === stripProviderPrefix(entry.model)))?.name ?? stripProviderPrefix(entry.model)}
+          </div>
+          <div className="text-xs text-muted-foreground/60">{formatProvider(entry.provider)}</div>
+        </div>
+        {/* Max sessions */}
+        <div className="flex items-center gap-2 shrink-0">
+          <Label className="text-sm text-muted-foreground">Sessions:</Label>
+          <Input
+            type="text"
+            inputMode="numeric"
+            value={sessionText}
+            onChange={(e) => setSessionText(e.target.value)}
+            onBlur={commitSessions}
+            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+            className="w-16 h-9 text-center"
+          />
+        </div>
+        {/* Remove */}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => onRemoveModel(index)}
+          className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10 h-8 w-8 p-0"
+        >
+          <HugeiconsIcon icon={Delete02Icon} size={16} />
+        </Button>
+      </div>
+    </Reorder.Item>
+  );
+}
+
 interface AgentConfigProps {
   models: AgentModelEntry[];
   availableModels: ProviderModel[];
@@ -148,22 +233,34 @@ export function AgentConfig({
   hideHeader,
   hideEmptyState,
 }: AgentConfigProps) {
-  const [draggedItem, setDraggedItem] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  // Track reorder via framer-motion Reorder — it gives us the new array order directly.
+  const modelsRef = useRef(models);
+  modelsRef.current = models;
 
-  const handleDragOver = (e: React.DragEvent, index: number) => {
-    e.preventDefault();
-    if (draggedItem === null || draggedItem === index) return;
-    setDragOverIndex(index);
-  };
-
-  const handleDrop = (e: React.DragEvent, toIndex: number) => {
-    e.preventDefault();
-    if (draggedItem === null) return;
-    onReorderModels(draggedItem, toIndex);
-    setDraggedItem(null);
-    setDragOverIndex(null);
-  };
+  const handleReorder = useCallback(
+    (newOrder: AgentModelEntry[]) => {
+      // Find what moved: compare old vs new to derive fromIndex/toIndex
+      const old = modelsRef.current;
+      if (newOrder.length !== old.length) return;
+      let fromIndex = -1;
+      let toIndex = -1;
+      for (let i = 0; i < old.length; i++) {
+        if (old[i] !== newOrder[i]) {
+          if (fromIndex === -1) fromIndex = i;
+          toIndex = i;
+        }
+      }
+      if (fromIndex !== -1 && toIndex !== -1) {
+        // Find the original index of the item now at toIndex
+        const movedItem = newOrder[toIndex];
+        const origIndex = old.indexOf(movedItem);
+        if (origIndex !== -1) {
+          onReorderModels(origIndex, toIndex);
+        }
+      }
+    },
+    [onReorderModels],
+  );
 
   return (
     <div className="space-y-4">
@@ -206,64 +303,24 @@ export function AgentConfig({
               </div>
             )
           ) : (
-            <div className="space-y-2">
+            <Reorder.Group
+              axis="y"
+              values={models}
+              onReorder={handleReorder}
+              className="space-y-2"
+              layoutScroll
+            >
               {models.map((entry, index) => (
-                <div
-                  key={`${entry.provider}-${entry.model}-${index}`}
-                  draggable
-                  onDragStart={() => setDraggedItem(index)}
-                  onDragOver={(e) => handleDragOver(e, index)}
-                  onDrop={(e) => handleDrop(e, index)}
-                  onDragEnd={() => { setDraggedItem(null); setDragOverIndex(null); }}
-                  className={cn(
-                    "transition-all",
-                    dragOverIndex === index && "border-t-2 border-primary pt-1",
-                    draggedItem === index && "opacity-50",
-                  )}
-                >
-                  <div className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3">
-                    {/* Drag handle */}
-                    <div className="cursor-grab text-muted-foreground/40 shrink-0 select-none">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                        <circle cx="9" cy="5" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="9" cy="19" r="1.5" />
-                        <circle cx="15" cy="5" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="15" cy="19" r="1.5" />
-                      </svg>
-                    </div>
-                    {/* Model info */}
-                    <div className="min-w-0 flex-1">
-                      <div className="font-semibold truncate">
-                        {(availableModels.find((m) => stripProviderPrefix(m.id) === stripProviderPrefix(entry.model) && (m.provider_id ?? m.provider) === entry.provider) ?? availableModels.find((m) => stripProviderPrefix(m.id) === stripProviderPrefix(entry.model)))?.name ?? stripProviderPrefix(entry.model)}
-                      </div>
-                      <div className="text-xs text-muted-foreground/60">{formatProvider(entry.provider)}</div>
-                    </div>
-                    {/* Max sessions */}
-                    <div className="flex items-center gap-2 shrink-0">
-                      <Label className="text-sm text-muted-foreground">Sessions:</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        max={10}
-                        value={entry.max_concurrent}
-                        onChange={(e) => {
-                          const v = parseInt(e.target.value, 10);
-                          if (!isNaN(v) && v >= 1 && v <= 10) onUpdateMaxSessions(index, v);
-                        }}
-                        className="w-16 h-9 text-center [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                      />
-                    </div>
-                    {/* Remove */}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => onRemoveModel(index)}
-                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10 h-8 w-8 p-0"
-                    >
-                      <HugeiconsIcon icon={Delete02Icon} size={16} />
-                    </Button>
-                  </div>
-                </div>
+                <ModelRow
+                  key={`${entry.provider}-${entry.model}`}
+                  entry={entry}
+                  index={index}
+                  availableModels={availableModels}
+                  onRemoveModel={onRemoveModel}
+                  onUpdateMaxSessions={onUpdateMaxSessions}
+                />
               ))}
-            </div>
+            </Reorder.Group>
           )}
         </>
       )}
