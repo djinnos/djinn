@@ -12,7 +12,7 @@ incremental = false          # required for sccache effectiveness
 [profile.test]
 incremental = false
 
-# Release keeps default LLVM backend for optimized output
+# Release profile keeps default LLVM backend for optimized output
 [profile.release]
 incremental = false
 
