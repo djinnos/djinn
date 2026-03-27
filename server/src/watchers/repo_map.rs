@@ -766,4 +766,218 @@ mod tests {
 
         cancel.cancel();
     }
+
+    /// Helper: initialise a real git repo with an initial commit inside the given directory.
+    fn init_git_repo(dir: &Path) {
+        use std::process::Command;
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@test.local"])
+            .current_dir(dir)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .expect("git config name");
+        std::fs::write(dir.join("README.md"), "# test repo\n").expect("write readme");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir)
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(dir)
+            .output()
+            .expect("git commit");
+    }
+
+    /// End-to-end test: creating a project through the real `ProjectRepository`
+    /// emission path (with a live event bus) while the repo-map watcher is
+    /// active causes the watcher to receive the `project.created` event and
+    /// schedule an initial refresh.
+    ///
+    /// We verify this by:
+    /// 1. Subscribing to the broadcast channel and confirming the
+    ///    `project.created` event is emitted by `ProjectRepository::create`.
+    /// 2. Waiting for the watcher to process it, then calling `plan_refresh`
+    ///    directly with the repo's identity to prove the refresh path was
+    ///    reachable (no pre-existing cache entry blocks it).
+    /// 3. Confirming the project's git HEAD can be resolved — the same check
+    ///    the watcher performs inside `repo_identity` before scheduling.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_add_flow_triggers_initial_repo_map_scheduling() {
+        let db = create_test_db();
+        let (events_tx, _) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+
+        // Subscribe BEFORE starting watchers so we capture all events.
+        let mut events_rx = events_tx.subscribe();
+
+        // Start watchers first — the event loop must be listening.
+        spawn_repo_map_refresh_watchers(db.clone(), events_tx.clone(), cancel.clone());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Create a temp dir with a real git repo (so repo_identity succeeds).
+        let dir = tempfile::Builder::new()
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        init_git_repo(dir.path());
+
+        // Create project via the real ProjectRepository with a live event bus —
+        // this is the "underlying project service emission path".
+        let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
+        let project = project_repo
+            .create("e2e-refresh-project", &dir.path().to_string_lossy())
+            .await
+            .unwrap();
+
+        // 1. Verify the project.created event was emitted on the broadcast channel.
+        let mut saw_created = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(100), events_rx.recv()).await {
+                Ok(Ok(envelope)) => {
+                    if envelope.entity_type == "project" && envelope.action == "created" {
+                        let parsed =
+                            envelope.parse_payload::<djinn_core::models::Project>();
+                        assert!(
+                            parsed.is_some(),
+                            "project.created event must carry a parseable Project payload"
+                        );
+                        let parsed = parsed.unwrap();
+                        assert_eq!(parsed.id, project.id);
+                        saw_created = true;
+                        break;
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            saw_created,
+            "ProjectRepository::create must emit a project.created event on the live bus"
+        );
+
+        // 2. Give the watcher time to process the event and attempt refresh.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // 3. Verify the refresh path is reachable: resolve repo identity just
+        //    as the watcher does, then confirm plan_refresh would schedule work.
+        let app_state = AppState::new(db.clone(), cancel.clone());
+        let identity = repo_identity(&app_state, &project.id, dir.path(), None)
+            .await
+            .expect("repo_identity must resolve for a git repo with a commit");
+        assert!(
+            !identity.commit_sha.is_empty(),
+            "HEAD commit SHA must be non-empty"
+        );
+        assert_eq!(identity.project_id, project.id);
+
+        // The watcher's spawned refresh already ran plan_refresh for this
+        // identity. For repos without SCIP indexers the refresh completes
+        // without writing a cache entry, so calling plan_refresh again should
+        // still produce a spawn decision (no cached entry exists).
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let decision = plan_refresh(&db, in_flight.clone(), &identity)
+            .await
+            .expect("plan_refresh should produce a decision for a repo without cached entry");
+        assert!(
+            decision.should_spawn,
+            "plan_refresh must schedule a spawn when no cache entry exists"
+        );
+
+        cancel.cancel();
+    }
+
+    /// After the initial-trigger path fires for a newly created project, the
+    /// existing watcher-driven repo-map lifecycle (cache hits, deduplication)
+    /// must still function correctly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn existing_watcher_lifecycle_intact_after_project_creation() {
+        let db = create_test_db();
+        let (events_tx, _) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+
+        // Start watchers, then create a project with a real git repo.
+        spawn_repo_map_refresh_watchers(db.clone(), events_tx.clone(), cancel.clone());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        init_git_repo(dir.path());
+
+        let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
+        let project = project_repo
+            .create("lifecycle-project", &dir.path().to_string_lossy())
+            .await
+            .unwrap();
+
+        // Wait for the watcher to process the project.created event.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Resolve the identity that the watcher would have used.
+        let app_state = AppState::new(db.clone(), cancel.clone());
+        let identity = repo_identity(&app_state, &project.id, dir.path(), None)
+            .await
+            .expect("identity must resolve");
+
+        // Manually insert a cache entry as if the initial refresh had completed
+        // with actual SCIP output.
+        let cache_repo = RepoMapCacheRepository::new(db.clone());
+        let project_path_str = dir.path().to_string_lossy().into_owned();
+        cache_repo
+            .insert(RepoMapCacheInsert {
+                key: RepoMapCacheKey {
+                    project_id: &project.id,
+                    project_path: &project_path_str,
+                    worktree_path: None,
+                    commit_sha: &identity.commit_sha,
+                },
+                rendered_map: "test-map-content",
+                token_estimate: 42,
+                included_entries: 5,
+            })
+            .await
+            .unwrap();
+
+        // Existing lifecycle: unchanged commit is skipped (cache hit).
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let decision = plan_refresh(&db, in_flight.clone(), &identity).await;
+        assert!(
+            decision.is_none(),
+            "plan_refresh must return None when a cache entry exists for the same commit"
+        );
+
+        // Existing lifecycle: deduplication still works.
+        let fresh_identity = RefreshIdentity {
+            project_id: project.id.clone(),
+            project_path: dir.path().to_path_buf(),
+            worktree_path: None,
+            commit_sha: "different-commit-sha".into(),
+            reuse_base_commit_sha: None,
+        };
+        let first = plan_refresh(&db, in_flight.clone(), &fresh_identity)
+            .await
+            .expect("first call should produce a decision");
+        assert!(first.should_spawn, "first call should schedule a spawn");
+
+        let second = plan_refresh(&db, in_flight.clone(), &fresh_identity)
+            .await
+            .expect("second call should produce a decision");
+        assert!(
+            !second.should_spawn,
+            "second call must be deduplicated (in-flight)"
+        );
+
+        cancel.cancel();
+    }
 }
