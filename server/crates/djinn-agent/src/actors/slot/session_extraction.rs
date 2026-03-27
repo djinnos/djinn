@@ -120,13 +120,41 @@ fn collect_string_values(val: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Parse a completed session's conversation messages and return:
-/// - `SessionTaxonomy` with event counts
-/// - `notes_read_ids`: ordered list of note identifiers from `memory_read` calls
-/// - `stale_note_ids`: notes read but not mentioned in any later tool arg
-pub fn extract_session_signals(
-    messages: &[Message],
-) -> (SessionTaxonomy, Vec<String>, Vec<String>) {
+/// Result of parsing a completed session's conversation messages.
+pub struct SessionSignals {
+    pub taxonomy: SessionTaxonomy,
+    /// Ordered list of note identifiers from `memory_read` calls.
+    pub notes_read_ids: Vec<String>,
+    /// Notes read but not mentioned in any later tool argument.
+    pub stale_note_ids: Vec<String>,
+    /// Deduplicated list of canonical note permalinks created or modified during
+    /// the session via `memory_write`, `memory_edit`, or `memory_move` tool calls.
+    /// Extracted from successful (non-error) tool results.
+    pub notes_written_permalinks: Vec<String>,
+}
+
+/// Extract the canonical note permalink from a memory_write / memory_edit /
+/// memory_move tool result. The result text is JSON-serialised
+/// `MemoryNoteResponse`; we extract the `permalink` field.
+fn permalink_from_tool_result(content: &[ContentBlock]) -> Option<String> {
+    for block in content {
+        if let ContentBlock::Text { text } = block {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+                if let Some(permalink) = val.get("permalink").and_then(|v| v.as_str()) {
+                    if !permalink.is_empty() {
+                        return Some(permalink.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse a completed session's conversation messages and return a
+/// [`SessionSignals`] containing event counts, note-read identifiers,
+/// staleness signals, and note-written permalinks.
+pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
     let mut taxonomy = SessionTaxonomy::default();
     let mut unique_tools: HashSet<String> = HashSet::new();
     let mut files_changed_set: HashSet<String> = HashSet::new();
@@ -139,11 +167,18 @@ pub fn extract_session_signals(
     // Collect all subsequent tool inputs for staleness analysis
     let mut tool_inputs_after: Vec<(usize, Vec<String>)> = Vec::new(); // (call_index, string_values)
 
+    // Track tool_use_ids belonging to memory_write/edit/move calls so we can
+    // extract the canonical permalink from their corresponding ToolResult.
+    let mut memory_write_tool_use_ids: HashSet<String> = HashSet::new();
+    // Deduplicated, ordered list of note permalinks written during this session.
+    let mut notes_written_permalinks: Vec<String> = Vec::new();
+    let mut notes_written_set: HashSet<String> = HashSet::new();
+
     for msg in messages {
         match msg.role {
             Role::Assistant => {
                 for block in &msg.content {
-                    if let ContentBlock::ToolUse { name, input, .. } = block {
+                    if let ContentBlock::ToolUse { id, name, input } = block {
                         unique_tools.insert(name.clone());
                         let current_index = tool_call_index;
                         tool_call_index += 1;
@@ -158,6 +193,7 @@ pub fn extract_session_signals(
                             }
                         } else if is_memory_write_tool(name) {
                             taxonomy.notes_written += 1;
+                            memory_write_tool_use_ids.insert(id.clone());
                         } else if is_git_tool(name) {
                             taxonomy.git_ops += 1;
                         } else if name == "task_transition" {
@@ -182,12 +218,23 @@ pub fn extract_session_signals(
                 }
             }
             Role::User => {
-                // ToolResult blocks carry error signals
                 for block in &msg.content {
-                    if let ContentBlock::ToolResult { is_error, .. } = block
-                        && *is_error
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = block
                     {
-                        taxonomy.errors += 1;
+                        if *is_error {
+                            taxonomy.errors += 1;
+                        } else if memory_write_tool_use_ids.contains(tool_use_id) {
+                            // Extract canonical permalink from successful memory write result
+                            if let Some(permalink) = permalink_from_tool_result(content) {
+                                if notes_written_set.insert(permalink.clone()) {
+                                    notes_written_permalinks.push(permalink);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -212,7 +259,12 @@ pub fn extract_session_signals(
         .cloned()
         .collect();
 
-    (taxonomy, notes_read_ordered, stale_note_ids)
+    SessionSignals {
+        taxonomy,
+        notes_read_ids: notes_read_ordered,
+        stale_note_ids,
+        notes_written_permalinks,
+    }
 }
 
 // ── Top-level entry point ─────────────────────────────────────────────────────
@@ -239,10 +291,10 @@ pub(crate) async fn run_structural_extraction(
         return None;
     }
 
-    let (taxonomy, notes_read, stale_notes) = extract_session_signals(&messages);
+    let signals = extract_session_signals(&messages);
 
     // ── Log staleness signals ──────────────────────────────────────────────
-    for stale_id in &stale_notes {
+    for stale_id in &signals.stale_note_ids {
         tracing::debug!(
             session_id = %session_id,
             note_identifier = %stale_id,
@@ -252,19 +304,20 @@ pub(crate) async fn run_structural_extraction(
 
     tracing::debug!(
         session_id = %session_id,
-        notes_read = notes_read.len(),
-        stale_notes = stale_notes.len(),
-        files_changed = taxonomy.files_changed,
-        errors = taxonomy.errors,
-        git_ops = taxonomy.git_ops,
-        tools_used = taxonomy.tools_used,
-        notes_written = taxonomy.notes_written,
-        tasks_transitioned = taxonomy.tasks_transitioned,
+        notes_read = signals.notes_read_ids.len(),
+        stale_notes = signals.stale_note_ids.len(),
+        notes_written_permalinks = signals.notes_written_permalinks.len(),
+        files_changed = signals.taxonomy.files_changed,
+        errors = signals.taxonomy.errors,
+        git_ops = signals.taxonomy.git_ops,
+        tools_used = signals.taxonomy.tools_used,
+        notes_written = signals.taxonomy.notes_written,
+        tasks_transitioned = signals.taxonomy.tasks_transitioned,
         "structural_extraction: taxonomy built"
     );
 
     // ── Store taxonomy on session record ───────────────────────────────────
-    let taxonomy_json = match serde_json::to_string(&taxonomy) {
+    let taxonomy_json = match serde_json::to_string(&signals.taxonomy) {
         Ok(j) => j,
         Err(e) => {
             tracing::warn!(session_id = %session_id, error = %e, "structural_extraction: failed to serialize taxonomy");
@@ -286,18 +339,14 @@ pub(crate) async fn run_structural_extraction(
     }
 
     // ── Flush co-access pairs ──────────────────────────────────────────────
-    // We need note DB IDs, but the conversation only has the note identifiers
-    // (permalink or title strings) from memory_read. We can flush them as a
-    // batch using upsert_association once we resolve to IDs. However, the
-    // conversation does not give us project_id for the note lookup; we'll use
-    // the session's task_id → project_id. Since notes_read can span multiple
-    // projects (edge case), we do a best-effort resolution.
-    //
-    // Because we don't have project_id here (it's available on the session
-    // record), we look up the session to find project_id, then resolve notes.
-    flush_co_access(&session_id, &notes_read, &app_state).await;
+    flush_co_access(&session_id, &signals.notes_read_ids, &app_state).await;
 
-    Some(taxonomy)
+    // ── Auto-link written notes to task and epic memory_refs ───────────────
+    if !signals.notes_written_permalinks.is_empty() {
+        autolink_memory_refs(&session_id, &signals.notes_written_permalinks, &app_state).await;
+    }
+
+    Some(signals.taxonomy)
 }
 
 /// Resolve note identifiers to DB IDs via project context, then flush all
@@ -394,6 +443,158 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Ag
     );
 }
 
+/// Deduplicate-append `new_permalinks` into a JSON array string, returning the
+/// updated JSON. Preserves existing entries and only adds new ones.
+fn dedup_append_memory_refs(existing_json: &str, new_permalinks: &[String]) -> String {
+    let mut refs: Vec<String> = serde_json::from_str(existing_json).unwrap_or_default();
+    let existing_set: HashSet<String> = refs.iter().cloned().collect();
+    for permalink in new_permalinks {
+        if !existing_set.contains(permalink) {
+            refs.push(permalink.clone());
+        }
+    }
+    serde_json::to_string(&refs).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Look up the session's task, deduplicate-append written note permalinks to the
+/// task's `memory_refs`, and propagate to the parent epic's `memory_refs`.
+async fn autolink_memory_refs(
+    session_id: &str,
+    permalinks: &[String],
+    app_state: &AgentContext,
+) {
+    // Load the session to find task_id
+    let session_repo =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let session = match session_repo.get(session_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "autolink_memory_refs: session not found"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "autolink_memory_refs: failed to load session"
+            );
+            return;
+        }
+    };
+
+    let Some(task_id) = session.task_id.as_deref() else {
+        tracing::debug!(
+            session_id = %session_id,
+            "autolink_memory_refs: session has no task_id; skipping"
+        );
+        return;
+    };
+
+    // ── Update task memory_refs ───────────────────────────────────────────
+    let task_repo =
+        djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task = match task_repo.get(task_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            tracing::warn!(
+                session_id = %session_id,
+                task_id = %task_id,
+                "autolink_memory_refs: task not found"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                task_id = %task_id,
+                error = %e,
+                "autolink_memory_refs: failed to load task"
+            );
+            return;
+        }
+    };
+
+    let updated_task_refs = dedup_append_memory_refs(&task.memory_refs, permalinks);
+    if updated_task_refs != task.memory_refs {
+        if let Err(e) = task_repo
+            .update_memory_refs(task_id, &updated_task_refs)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                task_id = %task_id,
+                error = %e,
+                "autolink_memory_refs: failed to update task memory_refs"
+            );
+        } else {
+            tracing::debug!(
+                session_id = %session_id,
+                task_id = %task_id,
+                new_refs = %updated_task_refs,
+                "autolink_memory_refs: updated task memory_refs"
+            );
+        }
+    }
+
+    // ── Propagate to parent epic memory_refs ──────────────────────────────
+    let Some(epic_id) = task.epic_id.as_deref() else {
+        tracing::debug!(
+            session_id = %session_id,
+            task_id = %task_id,
+            "autolink_memory_refs: task has no epic_id; skipping epic propagation"
+        );
+        return;
+    };
+
+    let epic_repo =
+        djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let epic = match epic_repo.get(epic_id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            tracing::warn!(
+                session_id = %session_id,
+                epic_id = %epic_id,
+                "autolink_memory_refs: epic not found"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                epic_id = %epic_id,
+                error = %e,
+                "autolink_memory_refs: failed to load epic"
+            );
+            return;
+        }
+    };
+
+    let updated_epic_refs = dedup_append_memory_refs(&epic.memory_refs, permalinks);
+    if updated_epic_refs != epic.memory_refs {
+        if let Err(e) = epic_repo
+            .update_memory_refs(epic_id, &updated_epic_refs)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                epic_id = %epic_id,
+                error = %e,
+                "autolink_memory_refs: failed to update epic memory_refs"
+            );
+        } else {
+            tracing::debug!(
+                session_id = %session_id,
+                epic_id = %epic_id,
+                new_refs = %updated_epic_refs,
+                "autolink_memory_refs: updated epic memory_refs"
+            );
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -440,10 +641,11 @@ mod tests {
 
     #[test]
     fn empty_messages_returns_zero_taxonomy() {
-        let (taxonomy, notes, stale) = extract_session_signals(&[]);
-        assert_eq!(taxonomy, SessionTaxonomy::default());
-        assert!(notes.is_empty());
-        assert!(stale.is_empty());
+        let signals = extract_session_signals(&[]);
+        assert_eq!(signals.taxonomy, SessionTaxonomy::default());
+        assert!(signals.notes_read_ids.is_empty());
+        assert!(signals.stale_note_ids.is_empty());
+        assert!(signals.notes_written_permalinks.is_empty());
     }
 
     #[test]
@@ -452,9 +654,9 @@ mod tests {
             "memory_read",
             serde_json::json!({"identifier": "decisions/my-adr", "project": "/tmp/proj"}),
         )];
-        let (taxonomy, notes, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.notes_read, 1);
-        assert_eq!(notes, vec!["decisions/my-adr"]);
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.notes_read, 1);
+        assert_eq!(signals.notes_read_ids, vec!["decisions/my-adr"]);
     }
 
     #[test]
@@ -469,9 +671,9 @@ mod tests {
                 serde_json::json!({"identifier": "decisions/adr-1", "project": "/tmp/proj"}),
             ),
         ];
-        let (taxonomy, notes, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.notes_read, 1);
-        assert_eq!(notes.len(), 1);
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.notes_read, 1);
+        assert_eq!(signals.notes_read_ids.len(), 1);
     }
 
     #[test]
@@ -480,8 +682,8 @@ mod tests {
             tool_use("git_commit", serde_json::json!({"message": "fix"})),
             tool_use("git_push", serde_json::json!({})),
         ];
-        let (taxonomy, _, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.git_ops, 2);
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.git_ops, 2);
     }
 
     #[test]
@@ -490,8 +692,8 @@ mod tests {
             "task_transition",
             serde_json::json!({"task_id": "abc", "action": "done"}),
         )];
-        let (taxonomy, _, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.tasks_transitioned, 1);
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.tasks_transitioned, 1);
     }
 
     #[test]
@@ -500,8 +702,8 @@ mod tests {
             tool_use("write_file", serde_json::json!({"path": "src/main.rs"})),
             tool_result_error("test-id"),
         ];
-        let (taxonomy, _, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.errors, 1);
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.errors, 1);
     }
 
     #[test]
@@ -510,8 +712,8 @@ mod tests {
             tool_use("write_file", serde_json::json!({"path": "src/main.rs"})),
             tool_result_ok("test-id"),
         ];
-        let (taxonomy, _, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.errors, 0);
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.errors, 0);
     }
 
     #[test]
@@ -526,8 +728,8 @@ mod tests {
                 serde_json::json!({"path": "src/main.rs", "diff": "..."}),
             ),
         ];
-        let (taxonomy, _, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.files_changed, 1); // same file edited twice
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.files_changed, 1); // same file edited twice
     }
 
     #[test]
@@ -542,8 +744,8 @@ mod tests {
                 serde_json::json!({"identifier": "research/another", "project": "/tmp"}),
             ),
         ];
-        let (taxonomy, _, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.notes_written, 2);
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.notes_written, 2);
     }
 
     #[test]
@@ -560,8 +762,8 @@ mod tests {
             tool_use("git_commit", serde_json::json!({"message": "msg"})),
             tool_use("write_file", serde_json::json!({"path": "a.rs"})),
         ];
-        let (taxonomy, _, _) = extract_session_signals(&msgs);
-        assert_eq!(taxonomy.tools_used, 3); // memory_read, git_commit, write_file
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.tools_used, 3); // memory_read, git_commit, write_file
     }
 
     #[test]
@@ -573,9 +775,9 @@ mod tests {
             ),
             tool_use("git_commit", serde_json::json!({"message": "done"})),
         ];
-        let (_, notes, stale) = extract_session_signals(&msgs);
-        assert_eq!(notes, vec!["decisions/adr-unused"]);
-        assert_eq!(stale, vec!["decisions/adr-unused"]);
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.notes_read_ids, vec!["decisions/adr-unused"]);
+        assert_eq!(signals.stale_note_ids, vec!["decisions/adr-unused"]);
     }
 
     #[test]
@@ -590,8 +792,8 @@ mod tests {
                 serde_json::json!({"identifier": "decisions/adr-used", "project": "/tmp"}),
             ),
         ];
-        let (_, _, stale) = extract_session_signals(&msgs);
-        assert!(stale.is_empty(), "note was referenced in later tool call");
+        let signals = extract_session_signals(&msgs);
+        assert!(signals.stale_note_ids.is_empty(), "note was referenced in later tool call");
     }
 
     #[test]
@@ -631,5 +833,268 @@ mod tests {
 
         let parsed: SessionTaxonomy = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.extraction_quality, ExtractionQuality::default());
+    }
+
+    // ── Tool-use + tool-result helper with custom id ──────────────────────
+
+    fn tool_use_with_id(id: &str, name: &str, input: serde_json::Value) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input,
+            }],
+            metadata: None,
+        }
+    }
+
+    fn tool_result_with_json(tool_use_id: &str, json_text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: vec![ContentBlock::text(json_text)],
+                is_error: false,
+            }],
+            metadata: None,
+        }
+    }
+
+    // ── Note auto-linking extraction tests ─────────────────────────────────
+
+    #[test]
+    fn memory_write_extracts_permalink_from_result() {
+        let msgs = vec![
+            tool_use_with_id(
+                "call-1",
+                "memory_write",
+                serde_json::json!({"title": "My Research", "type": "research", "project": "/tmp", "content": "findings"}),
+            ),
+            tool_result_with_json(
+                "call-1",
+                &serde_json::json!({
+                    "id": "note-uuid-1",
+                    "permalink": "research/my-research",
+                    "title": "My Research",
+                    "note_type": "research"
+                }).to_string(),
+            ),
+        ];
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.notes_written, 1);
+        assert_eq!(
+            signals.notes_written_permalinks,
+            vec!["research/my-research"]
+        );
+    }
+
+    #[test]
+    fn memory_edit_extracts_permalink_from_result() {
+        let msgs = vec![
+            tool_use_with_id(
+                "call-2",
+                "memory_edit",
+                serde_json::json!({"identifier": "decisions/adr-1", "operation": "append", "content": "update", "project": "/tmp"}),
+            ),
+            tool_result_with_json(
+                "call-2",
+                &serde_json::json!({
+                    "id": "note-uuid-2",
+                    "permalink": "decisions/adr-1",
+                    "title": "ADR 1"
+                }).to_string(),
+            ),
+        ];
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.notes_written, 1);
+        assert_eq!(signals.notes_written_permalinks, vec!["decisions/adr-1"]);
+    }
+
+    #[test]
+    fn memory_move_extracts_canonical_permalink() {
+        let msgs = vec![
+            tool_use_with_id(
+                "call-3",
+                "memory_move",
+                serde_json::json!({"identifier": "research/old-name", "type": "decisions", "project": "/tmp"}),
+            ),
+            tool_result_with_json(
+                "call-3",
+                &serde_json::json!({
+                    "id": "note-uuid-3",
+                    "permalink": "decisions/old-name",
+                    "title": "Old Name"
+                }).to_string(),
+            ),
+        ];
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(
+            signals.notes_written_permalinks,
+            vec!["decisions/old-name"],
+            "should use canonical permalink from result, not input identifier"
+        );
+    }
+
+    #[test]
+    fn written_permalinks_deduplication() {
+        let msgs = vec![
+            // First write
+            tool_use_with_id(
+                "call-a",
+                "memory_write",
+                serde_json::json!({"title": "Note", "type": "research", "project": "/tmp", "content": "v1"}),
+            ),
+            tool_result_with_json(
+                "call-a",
+                &serde_json::json!({"permalink": "research/note"}).to_string(),
+            ),
+            // Edit same note (same permalink in result)
+            tool_use_with_id(
+                "call-b",
+                "memory_edit",
+                serde_json::json!({"identifier": "research/note", "operation": "append", "content": "v2", "project": "/tmp"}),
+            ),
+            tool_result_with_json(
+                "call-b",
+                &serde_json::json!({"permalink": "research/note"}).to_string(),
+            ),
+        ];
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.notes_written, 2);
+        assert_eq!(
+            signals.notes_written_permalinks,
+            vec!["research/note"],
+            "duplicate permalinks should be deduplicated"
+        );
+    }
+
+    #[test]
+    fn error_write_result_not_included_in_permalinks() {
+        let msgs = vec![
+            tool_use_with_id(
+                "call-err",
+                "memory_write",
+                serde_json::json!({"title": "Fail", "type": "research", "project": "/tmp", "content": "x"}),
+            ),
+            // Error result
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-err".to_string(),
+                    content: vec![ContentBlock::text(r#"{"error": "something went wrong"}"#)],
+                    is_error: true,
+                }],
+                metadata: None,
+            },
+        ];
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.notes_written, 1);
+        assert!(
+            signals.notes_written_permalinks.is_empty(),
+            "error results should not produce permalinks"
+        );
+    }
+
+    #[test]
+    fn multiple_writes_collect_all_permalinks() {
+        let msgs = vec![
+            tool_use_with_id(
+                "w1",
+                "memory_write",
+                serde_json::json!({"title": "A", "type": "research", "project": "/tmp", "content": "a"}),
+            ),
+            tool_result_with_json(
+                "w1",
+                &serde_json::json!({"permalink": "research/a"}).to_string(),
+            ),
+            tool_use_with_id(
+                "w2",
+                "memory_write",
+                serde_json::json!({"title": "B", "type": "decisions", "project": "/tmp", "content": "b"}),
+            ),
+            tool_result_with_json(
+                "w2",
+                &serde_json::json!({"permalink": "decisions/b"}).to_string(),
+            ),
+            tool_use_with_id(
+                "w3",
+                "memory_edit",
+                serde_json::json!({"identifier": "patterns/c", "operation": "append", "content": "c", "project": "/tmp"}),
+            ),
+            tool_result_with_json(
+                "w3",
+                &serde_json::json!({"permalink": "patterns/c"}).to_string(),
+            ),
+        ];
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.notes_written, 3);
+        assert_eq!(
+            signals.notes_written_permalinks,
+            vec!["research/a", "decisions/b", "patterns/c"]
+        );
+    }
+
+    #[test]
+    fn dedup_append_memory_refs_adds_new_and_skips_existing() {
+        let existing = r#"["research/old", "decisions/adr-1"]"#;
+        let new = vec![
+            "decisions/adr-1".to_string(), // duplicate
+            "research/new".to_string(),    // new
+        ];
+        let result = dedup_append_memory_refs(existing, &new);
+        let parsed: Vec<String> = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed,
+            vec!["research/old", "decisions/adr-1", "research/new"]
+        );
+    }
+
+    #[test]
+    fn dedup_append_memory_refs_empty_existing() {
+        let result = dedup_append_memory_refs("[]", &["research/a".to_string()]);
+        let parsed: Vec<String> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed, vec!["research/a"]);
+    }
+
+    #[test]
+    fn dedup_append_memory_refs_malformed_json_recovers() {
+        let result =
+            dedup_append_memory_refs("not-json", &["research/a".to_string()]);
+        let parsed: Vec<String> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed, vec!["research/a"]);
+    }
+
+    #[test]
+    fn permalink_from_tool_result_extracts_from_json_text() {
+        let content = vec![ContentBlock::text(
+            &serde_json::json!({"id": "x", "permalink": "research/note", "title": "T"}).to_string(),
+        )];
+        assert_eq!(
+            permalink_from_tool_result(&content),
+            Some("research/note".to_string())
+        );
+    }
+
+    #[test]
+    fn permalink_from_tool_result_returns_none_for_missing_field() {
+        let content = vec![ContentBlock::text(
+            &serde_json::json!({"id": "x", "title": "T"}).to_string(),
+        )];
+        assert_eq!(permalink_from_tool_result(&content), None);
+    }
+
+    #[test]
+    fn permalink_from_tool_result_returns_none_for_empty_permalink() {
+        let content = vec![ContentBlock::text(
+            &serde_json::json!({"permalink": ""}).to_string(),
+        )];
+        assert_eq!(permalink_from_tool_result(&content), None);
+    }
+
+    #[test]
+    fn permalink_from_tool_result_returns_none_for_non_json() {
+        let content = vec![ContentBlock::text("not json at all")];
+        assert_eq!(permalink_from_tool_result(&content), None);
     }
 }

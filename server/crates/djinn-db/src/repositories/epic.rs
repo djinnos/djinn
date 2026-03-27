@@ -226,6 +226,27 @@ impl EpicRepository {
         Ok(())
     }
 
+    /// Replace the `memory_refs` JSON array on an epic.
+    pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Epic> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE epics SET memory_refs = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(memory_refs_json)
+        .execute(self.db.pool())
+        .await?;
+        let epic: Epic = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?1"))
+            .bind(id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        Ok(epic)
+    }
+
     // ── New methods (ADR-003) ────────────────────────────────────────────────
 
     /// Resolve an epic by UUID or short_id.

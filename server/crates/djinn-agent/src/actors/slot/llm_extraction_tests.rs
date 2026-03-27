@@ -248,17 +248,17 @@ fn structural_extraction_produces_correct_taxonomy() {
         },
     ];
 
-    let (taxonomy, notes_read, _stale) = extract_session_signals(&messages);
+    let signals = extract_session_signals(&messages);
 
-    assert_eq!(taxonomy.notes_read, 2);
-    assert_eq!(taxonomy.git_ops, 2);
-    assert_eq!(taxonomy.errors, 1);
-    assert_eq!(taxonomy.files_changed, 1);
-    assert_eq!(taxonomy.tasks_transitioned, 1);
-    assert_eq!(taxonomy.tools_used, 5);
-    assert_eq!(notes_read.len(), 2);
-    assert!(notes_read.contains(&"decisions/adr-001".to_string()));
-    assert!(notes_read.contains(&"decisions/adr-002".to_string()));
+    assert_eq!(signals.taxonomy.notes_read, 2);
+    assert_eq!(signals.taxonomy.git_ops, 2);
+    assert_eq!(signals.taxonomy.errors, 1);
+    assert_eq!(signals.taxonomy.files_changed, 1);
+    assert_eq!(signals.taxonomy.tasks_transitioned, 1);
+    assert_eq!(signals.taxonomy.tools_used, 5);
+    assert_eq!(signals.notes_read_ids.len(), 2);
+    assert!(signals.notes_read_ids.contains(&"decisions/adr-001".to_string()));
+    assert!(signals.notes_read_ids.contains(&"decisions/adr-002".to_string()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
