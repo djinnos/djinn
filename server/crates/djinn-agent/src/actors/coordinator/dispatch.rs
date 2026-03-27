@@ -363,20 +363,23 @@ impl CoordinatorActor {
             };
 
             // Query the activity tracker for idle time.  If the task has no
-            // activity entry (e.g. session predates this feature) fall back to
-            // wall-clock elapsed from started_at.
+            // activity entry (e.g. session predates this feature, or reply loop
+            // never started) fall back to wall-clock elapsed from started_at.
             let idle = match self.pool.session_for_task(task_id).await {
                 Ok(Some(info)) => info.idle_seconds,
                 _ => {
-                    // Fallback: compute from started_at.
-                    let Ok(started_secs) = session.started_at.parse::<u64>() else {
+                    // Fallback: parse ISO-8601 started_at from the DB and compute
+                    // elapsed seconds.  The column stores datetime strings like
+                    // "2026-03-27 13:52:47" or "2026-03-27T13:52:47.231Z".
+                    let Some(elapsed) = parse_iso_elapsed(&session.started_at) else {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            started_at = %session.started_at,
+                            "CoordinatorActor: cannot parse started_at for stall check, skipping"
+                        );
                         continue;
                     };
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    now.saturating_sub(started_secs)
+                    elapsed
                 }
             };
 
@@ -1214,4 +1217,24 @@ impl CoordinatorActor {
             }
         }
     }
+}
+
+/// Parse an ISO-8601 datetime string from the DB (e.g. "2026-03-27T13:52:47.231Z"
+/// or "2026-03-27 13:52:47") and return seconds elapsed since that time.
+fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
+    use ::time::format_description::well_known::Iso8601;
+    use ::time::OffsetDateTime;
+
+    // Try ISO-8601 with offset first, then fall back to space-separated SQLite format.
+    let parsed = OffsetDateTime::parse(started_at, &Iso8601::DEFAULT).ok().or_else(|| {
+        // SQLite often stores "YYYY-MM-DD HH:MM:SS" without offset — assume UTC.
+        let fmt = ::time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
+            .ok()?;
+        let primitive = ::time::PrimitiveDateTime::parse(started_at, &fmt).ok()?;
+        Some(primitive.assume_utc())
+    })?;
+
+    let now = OffsetDateTime::now_utc();
+    let elapsed = (now - parsed).whole_seconds();
+    Some(if elapsed < 0 { 0 } else { elapsed as u64 })
 }
