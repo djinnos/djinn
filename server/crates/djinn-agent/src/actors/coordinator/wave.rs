@@ -26,7 +26,11 @@ impl CoordinatorActor {
     /// Called when an epic is created.  Creates the first planning task
     /// unless one already exists for the epic (idempotent).
     pub(super) async fn maybe_create_planning_task(&mut self, epic: &djinn_core::models::Epic) {
-        if epic.status == "closed" {
+        // Only create planning tasks for epics that are fully open.
+        // Drafting epics are still being refined by the user; closed epics
+        // are done.  The promotion from drafting→open is handled separately
+        // via the epic_updated event path.
+        if epic.status != "open" {
             return;
         }
         let task_repo = self.task_repo();
@@ -84,7 +88,7 @@ impl CoordinatorActor {
             }
         };
 
-        if epic.status == "closed" {
+        if epic.status != "open" {
             return;
         }
 

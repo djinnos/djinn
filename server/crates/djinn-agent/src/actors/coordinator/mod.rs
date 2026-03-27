@@ -688,8 +688,17 @@ impl CoordinatorActor {
                 );
                 self.publish_status();
             }
-            // Epic created → create a planning task for the Planner (wave 1).
+            // Epic created → create a planning task for the Planner (wave 1),
+            // but only if the epic is already open (not drafting).
             ("epic", "created") => {
+                let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
+                    return;
+                };
+                self.maybe_create_planning_task(&epic).await;
+            }
+            // Epic updated → if the epic is now open, create a planning task.
+            // This handles the drafting→open promotion path.
+            ("epic", "updated") => {
                 let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;
                 };
@@ -2251,7 +2260,7 @@ mod tests {
                     color: "",
                     owner: "",
                     memory_refs: None,
-                    status: None,
+                    status: Some("open"),
                 },
             )
             .await
@@ -2285,7 +2294,7 @@ mod tests {
                     color: "",
                     owner: "",
                     memory_refs: None,
-                    status: None,
+                    status: Some("open"),
                 },
             )
             .await
@@ -2335,7 +2344,7 @@ mod tests {
                     color: "",
                     owner: "",
                     memory_refs: None,
-                    status: None,
+                    status: Some("open"),
                 },
             )
             .await
@@ -2365,6 +2374,164 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drafting_epic_creation_does_not_trigger_planning_task() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        // Create a drafting epic (the new default).
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Drafting Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("drafting"),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Give coordinator time to process.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
+        let planning_count = tasks
+            .iter()
+            .filter(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition"))
+            .count();
+        assert_eq!(
+            planning_count, 0,
+            "drafting epic should not trigger planning task creation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drafting_to_open_promotion_triggers_planning_task() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        // Create a drafting epic — should NOT trigger planning.
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Promote Me Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("drafting"),
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Promote: update status to open directly and fire epic_updated event.
+        sqlx::query("UPDATE epics SET status = 'open' WHERE id = ?1")
+            .bind(&epic.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let promoted: djinn_core::models::Epic =
+            sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at FROM epics WHERE id = ?1")
+                .bind(&epic.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(&promoted));
+
+        // Wait for planning task creation.
+        let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+        assert_eq!(
+            decomp_tasks.len(),
+            1,
+            "drafting→open promotion should create exactly one planning task"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drafting_to_open_promotion_does_not_duplicate_planning_task() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        // Create a drafting epic and promote it.
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "No Dup Promote Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("drafting"),
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Promote to open.
+        sqlx::query("UPDATE epics SET status = 'open' WHERE id = ?1")
+            .bind(&epic.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let promoted: djinn_core::models::Epic =
+            sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at FROM epics WHERE id = ?1")
+                .bind(&epic.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(&promoted));
+
+        // Wait for first planning task.
+        let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+        assert_eq!(decomp_tasks.len(), 1);
+
+        // Send another epic_updated event (e.g. title change while still open).
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(&promoted));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
+        let open_planning_count = tasks
+            .iter()
+            .filter(|t| {
+                matches!(t.issue_type.as_str(), "planning" | "decomposition")
+                    && matches!(t.status.as_str(), "open" | "in_progress")
+            })
+            .count();
+        assert_eq!(
+            open_planning_count, 1,
+            "repeated epic_updated events should not duplicate planning tasks"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn patrol_creates_review_task_when_open_epic_exists() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -2381,7 +2548,7 @@ mod tests {
                     color: "",
                     owner: "",
                     memory_refs: None,
-                    status: None,
+                    status: Some("open"),
                 },
             )
             .await
@@ -2444,7 +2611,7 @@ mod tests {
                     color: "",
                     owner: "",
                     memory_refs: None,
-                    status: None,
+                    status: Some("open"),
                 },
             )
             .await
