@@ -3,6 +3,10 @@ use crate::database::Database;
 
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct CachedRepoMap {
+    pub project_id: String,
+    pub project_path: String,
+    pub worktree_path: Option<String>,
+    pub commit_sha: String,
     pub rendered_map: String,
     pub token_estimate: i64,
     pub included_entries: i64,
@@ -37,7 +41,7 @@ impl RepoMapCacheRepository {
     pub async fn get(&self, key: RepoMapCacheKey<'_>) -> Result<Option<CachedRepoMap>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, CachedRepoMap>(
-            "SELECT rendered_map, token_estimate, included_entries, created_at
+            "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, created_at
              FROM repo_map_cache
              WHERE project_id = ?1
                AND project_path = ?2
@@ -48,6 +52,29 @@ impl RepoMapCacheRepository {
         .bind(key.project_path)
         .bind(key.worktree_path)
         .bind(key.commit_sha)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    pub async fn get_by_commit_prefer_canonical(
+        &self,
+        project_id: &str,
+        project_path: &str,
+        commit_sha: &str,
+    ) -> Result<Option<CachedRepoMap>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, CachedRepoMap>(
+            "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, created_at
+             FROM repo_map_cache
+             WHERE project_id = ?1
+               AND project_path = ?2
+               AND commit_sha = ?3
+             ORDER BY CASE WHEN worktree_path IS NULL THEN 0 ELSE 1 END, created_at DESC
+             LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(project_path)
+        .bind(commit_sha)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -118,6 +145,10 @@ mod tests {
         assert_eq!(cached.rendered_map, "src/main.rs\n  fn main()");
         assert_eq!(cached.token_estimate, 24);
         assert_eq!(cached.included_entries, 2);
+        assert_eq!(cached.project_id, "p1");
+        assert_eq!(cached.project_path, "/repo");
+        assert_eq!(cached.worktree_path, None);
+        assert_eq!(cached.commit_sha, "abc123");
         assert!(!cached.created_at.is_empty());
     }
 
@@ -177,5 +208,106 @@ mod tests {
             .await
             .expect("get");
         assert!(cached.is_none());
+    }
+
+    #[tokio::test]
+    async fn commit_lookup_prefers_canonical_entry_over_worktree_entry() {
+        let repo = test_repo().await;
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: Some("/repo/.djinn/worktrees/t1"),
+                commit_sha: "abc123",
+            },
+            rendered_map: "worktree-map",
+            token_estimate: 10,
+            included_entries: 1,
+        })
+        .await
+        .expect("insert worktree entry");
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: None,
+                commit_sha: "abc123",
+            },
+            rendered_map: "canonical-map",
+            token_estimate: 12,
+            included_entries: 2,
+        })
+        .await
+        .expect("insert canonical entry");
+
+        let cached = repo
+            .get_by_commit_prefer_canonical("p1", "/repo", "abc123")
+            .await
+            .expect("lookup")
+            .expect("hit");
+
+        assert_eq!(cached.rendered_map, "canonical-map");
+        assert_eq!(cached.worktree_path, None);
+    }
+
+    #[tokio::test]
+    async fn commit_lookup_returns_worktree_entry_when_canonical_missing() {
+        let repo = test_repo().await;
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: Some("/repo/.djinn/worktrees/t1"),
+                commit_sha: "abc123",
+            },
+            rendered_map: "worktree-map",
+            token_estimate: 10,
+            included_entries: 1,
+        })
+        .await
+        .expect("insert worktree entry");
+
+        let cached = repo
+            .get_by_commit_prefer_canonical("p1", "/repo", "abc123")
+            .await
+            .expect("lookup")
+            .expect("hit");
+
+        assert_eq!(cached.rendered_map, "worktree-map");
+        assert_eq!(
+            cached.worktree_path,
+            Some("/repo/.djinn/worktrees/t1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_lookup_is_scoped_to_project_path_and_commit() {
+        let repo = test_repo().await;
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: None,
+                commit_sha: "abc123",
+            },
+            rendered_map: "canonical-map",
+            token_estimate: 12,
+            included_entries: 2,
+        })
+        .await
+        .expect("insert canonical entry");
+
+        assert!(
+            repo.get_by_commit_prefer_canonical("p1", "/repo", "other-commit")
+                .await
+                .expect("lookup other commit")
+                .is_none()
+        );
+        assert!(
+            repo.get_by_commit_prefer_canonical("p1", "/other-repo", "abc123")
+                .await
+                .expect("lookup other project path")
+                .is_none()
+        );
     }
 }

@@ -15,8 +15,8 @@ use crate::repo_map::{RepoMapRenderOptions, render_repo_map, run_indexers};
 use crate::scip_parser::parse_scip_artifacts;
 use crate::server::AppState;
 use djinn_db::{
-    Database, NoteRepository, ProjectRepository, RepoMapCacheInsert, RepoMapCacheKey,
-    RepoMapCacheRepository,
+    CachedRepoMap, Database, NoteRepository, ProjectRepository, RepoMapCacheInsert,
+    RepoMapCacheKey, RepoMapCacheRepository,
 };
 
 const DEBOUNCE: Duration = Duration::from_secs(2);
@@ -54,12 +54,14 @@ struct RefreshIdentity {
     project_path: PathBuf,
     worktree_path: Option<PathBuf>,
     commit_sha: String,
+    reuse_base_commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RefreshDecision {
     target: RefreshTarget,
     should_spawn: bool,
+    reuse_from: Option<CachedRepoMap>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,11 +247,21 @@ async fn repo_identity(
     let repo_path = worktree_path.as_deref().unwrap_or(project_path);
     let git = app_state.git_actor(repo_path).await.ok()?;
     let head = git.head_commit().await.ok()?;
+    let reuse_base_commit_sha = if worktree_path.is_some() {
+        git.run_command(vec!["merge-base".into(), "HEAD".into(), "main".into()])
+            .await
+            .ok()
+            .map(|output| output.stdout.trim().to_string())
+            .filter(|sha| !sha.is_empty() && sha != &head.sha)
+    } else {
+        None
+    };
     Some(RefreshIdentity {
         project_id: project_id.to_string(),
         project_path: project_path.to_path_buf(),
         worktree_path,
         commit_sha: head.sha,
+        reuse_base_commit_sha,
     })
 }
 
@@ -262,6 +274,14 @@ async fn maybe_refresh_identity(
     let Some(decision) = plan_refresh(db, in_flight.clone(), &identity).await else {
         return;
     };
+
+    if let Some(cached) = decision.reuse_from {
+        if let Err(error) = clone_cached_repo_map(db, events, &identity, &cached).await {
+            tracing::warn!(project = %identity.project_path.display(), commit = %identity.commit_sha, error = %error, "repo-map cache reuse failed; falling back to full refresh");
+        } else {
+            return;
+        }
+    }
 
     if !decision.should_spawn {
         return;
@@ -288,17 +308,37 @@ async fn plan_refresh(
         return None;
     }
 
+    let project_path = identity.project_path.to_string_lossy().into_owned();
+    for commit_sha in std::iter::once(identity.commit_sha.as_str())
+        .chain(identity.reuse_base_commit_sha.as_deref())
+    {
+        if let Some(cached) = repo
+            .get_by_commit_prefer_canonical(&identity.project_id, &project_path, commit_sha)
+            .await
+            .ok()
+            .flatten()
+        {
+            return Some(RefreshDecision {
+                target,
+                should_spawn: false,
+                reuse_from: Some(cached),
+            });
+        }
+    }
+
     let mut guard = in_flight.lock().await;
     if !guard.insert(target.clone()) {
         return Some(RefreshDecision {
             target,
             should_spawn: false,
+            reuse_from: None,
         });
     }
 
     Some(RefreshDecision {
         target,
         should_spawn: true,
+        reuse_from: None,
     })
 }
 
@@ -372,6 +412,48 @@ async fn generate_and_store_repo_map(
     Ok(())
 }
 
+async fn clone_cached_repo_map(
+    db: &Database,
+    events: &crate::events::EventBus,
+    identity: &RefreshIdentity,
+    cached: &CachedRepoMap,
+) -> anyhow::Result<()> {
+    let project_path = identity.project_path.to_string_lossy().into_owned();
+    let worktree_path = identity
+        .worktree_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let cache_repo = RepoMapCacheRepository::new(db.clone());
+    cache_repo
+        .insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: &identity.project_id,
+                project_path: &project_path,
+                worktree_path: worktree_path.as_deref(),
+                commit_sha: &identity.commit_sha,
+            },
+            rendered_map: &cached.rendered_map,
+            token_estimate: cached.token_estimate,
+            included_entries: cached.included_entries,
+        })
+        .await?;
+
+    let rendered = crate::repo_map::RenderedRepoMap {
+        content: cached.rendered_map.clone(),
+        token_estimate: cached.token_estimate as usize,
+        included_entries: cached.included_entries as usize,
+    };
+    let note_repo = NoteRepository::new(db.clone(), events.clone());
+    let _ = crate::repo_map::persist_repo_map_note(
+        &note_repo,
+        &identity.project_id,
+        &identity.commit_sha,
+        &rendered,
+    )
+    .await;
+    Ok(())
+}
+
 struct InFlightGuard {
     in_flight: Arc<Mutex<HashSet<RefreshTarget>>>,
     target: RefreshTarget,
@@ -429,6 +511,7 @@ mod tests {
             project_path: PathBuf::from("/tmp/project"),
             worktree_path: None,
             commit_sha: "abc".into(),
+            reuse_base_commit_sha: None,
         };
 
         let decision = plan_refresh(&db, in_flight.clone(), &identity).await;
@@ -460,6 +543,7 @@ mod tests {
             project_path: PathBuf::from("/tmp/project"),
             worktree_path: None,
             commit_sha: "new-commit".into(),
+            reuse_base_commit_sha: None,
         };
 
         let decision = plan_refresh(&db, in_flight.clone(), &identity)
@@ -467,6 +551,7 @@ mod tests {
             .expect("new commit should schedule refresh");
         assert!(decision.should_spawn);
         assert_eq!(decision.target.commit_sha, "new-commit");
+        assert!(decision.reuse_from.is_none());
         assert!(in_flight.lock().await.contains(&decision.target));
     }
 
@@ -486,14 +571,96 @@ mod tests {
             project_path: PathBuf::from("/tmp/project"),
             worktree_path: None,
             commit_sha: "new-commit".into(),
+            reuse_base_commit_sha: None,
         };
 
         let decision = plan_refresh(&db, in_flight.clone(), &identity)
             .await
             .expect("dedup should return decision");
         assert!(!decision.should_spawn);
+        assert!(decision.reuse_from.is_none());
         assert_eq!(decision.target, target);
         assert_eq!(in_flight.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn worktree_head_match_reuses_cached_map_without_spawn() {
+        let db = create_test_db();
+        let repo = RepoMapCacheRepository::new(db.clone());
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/tmp/project",
+                worktree_path: None,
+                commit_sha: "shared-commit",
+            },
+            rendered_map: "cached",
+            token_estimate: 1,
+            included_entries: 1,
+        })
+        .await
+        .unwrap();
+
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let identity = RefreshIdentity {
+            project_id: "p1".into(),
+            project_path: PathBuf::from("/tmp/project"),
+            worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
+            commit_sha: "shared-commit".into(),
+            reuse_base_commit_sha: Some("base-commit".into()),
+        };
+
+        let decision = plan_refresh(&db, in_flight.clone(), &identity)
+            .await
+            .expect("reuse decision");
+        assert!(!decision.should_spawn);
+        assert_eq!(
+            decision.target.worktree_path.as_deref(),
+            Some("/tmp/project/.djinn/worktrees/t1")
+        );
+        assert_eq!(
+            decision.reuse_from.expect("cached entry").commit_sha,
+            "shared-commit"
+        );
+        assert!(in_flight.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_base_match_reuses_cached_map_without_spawn() {
+        let db = create_test_db();
+        let repo = RepoMapCacheRepository::new(db.clone());
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/tmp/project",
+                worktree_path: None,
+                commit_sha: "base-commit",
+            },
+            rendered_map: "cached-base",
+            token_estimate: 1,
+            included_entries: 1,
+        })
+        .await
+        .unwrap();
+
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let identity = RefreshIdentity {
+            project_id: "p1".into(),
+            project_path: PathBuf::from("/tmp/project"),
+            worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
+            commit_sha: "worktree-commit".into(),
+            reuse_base_commit_sha: Some("base-commit".into()),
+        };
+
+        let decision = plan_refresh(&db, in_flight.clone(), &identity)
+            .await
+            .expect("reuse decision");
+        assert!(!decision.should_spawn);
+        assert_eq!(
+            decision.reuse_from.expect("cached entry").commit_sha,
+            "base-commit"
+        );
+        assert!(in_flight.lock().await.is_empty());
     }
 
     #[tokio::test]
