@@ -75,10 +75,15 @@ impl TaskRepository {
             &current.issue_type,
         )?;
 
-        // For non-merge closes: reject if this task still blocks other non-closed tasks.
-        // The lead/architect must reassign blockers to replacement tasks before closing.
-        // PrMerge is exempt because the work actually landed.
-        if apply.set_closed_at && action != TransitionAction::PrMerge {
+        // For pre-completion closes: reject if this task still blocks other non-closed
+        // tasks. The lead/architect must reassign blockers to replacement tasks before
+        // closing incomplete work. Closures from post-approval states (Approved, PrDraft,
+        // PrReview) and PrMerge are exempt because the work actually landed.
+        let work_landed = matches!(
+            from,
+            TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview
+        ) || action == TransitionAction::PrMerge;
+        if apply.set_closed_at && !work_landed {
             let downstream = sqlx::query_as::<_, BlockerRef>(
                 "SELECT t.id AS task_id, t.short_id, t.title, t.status
                  FROM blockers b
