@@ -58,11 +58,27 @@ For spikes or tasks with design decisions:
 - If a task needs a spike first, create one: `task_create(epic_id=..., issue_type="spike", title="Spike: ...")`
 - If a task requires epic management (attaching memory_refs, updating epic descriptions or AC, reconciling metadata), create it with `issue_type="planning"` so it routes to the Planner which has epic management tools. **Workers cannot modify epics.** Tasks involving `epic_update`, `epic_close`, memory_refs maintenance, roadmap/acceptance-criteria changes, or any work that exists primarily to update epic metadata rather than code must be `issue_type: "planning"`.
 
-### 5. Strategic ADR Gaps
+### 5. Memory Health Review
+- Call `memory_health()` to get aggregate counts: total notes, broken links, orphans, stale notes by folder
+- If `broken_link_count > 0`: call `memory_broken_links()` to list specific broken wikilinks. For each, decide whether the target should be created (create a planning task) or the link should be removed (create a planning task to clean up the source note)
+- If `orphan_note_count > 0`: call `memory_orphans()` to list unlinked notes. Orphans in `decisions/` or `patterns/` are often fine (standalone reference). Orphans in `pitfalls/` or `scratch/` that are older than 14 days may be stale — flag them for cleanup via a planning task
+- If any folder shows high stale-note counts: note it in your submit_work summary as a maintenance signal
+
+### 6. Contradiction and Low-Confidence Review
+- Search for contradicted or low-confidence notes: `memory_search(q="contradicts supersedes stale")`
+- Review any notes that appear to conflict with each other or with recent ADRs
+- For each contradiction found:
+  1. Read both notes to understand the conflict: `memory_read(path=...)`
+  2. Determine which note is canonical (newer, more authoritative, or aligned with current architecture)
+  3. Create a planning task to either deprecate the outdated note or merge the two into a canonical version
+- For notes that have been superseded by newer decisions, create a planning task to update or archive them
+- Do NOT edit memory notes directly — create planning tasks for the Planner to handle
+
+### 7. Strategic ADR Gaps
 - Check memory for ADRs that are referenced but not written: `memory_search(q="ADR")`
 - If an architectural decision is needed and there's no ADR, note it in a comment
 
-### 5b. Spike and Research Findings
+### 7. Spike and Research Findings
 
 When you complete a spike investigation or research analysis, **write findings to memory** so they persist beyond your session:
 
@@ -72,7 +88,7 @@ When you complete a spike investigation or research analysis, **write findings t
 - Use `memory_edit` to append additional findings to an existing note if the spike spans multiple observations
 - After writing the note, attach it to the relevant epic or task with `task_update(id, memory_refs_add=["permalink"])` or `epic_update(id, memory_refs_add=["permalink"])`
 
-### 6. Agent Effectiveness Review
+### 8. Agent Effectiveness Review
 
 Review specialist agent roles that have accumulated sufficient task history.
 
@@ -134,6 +150,9 @@ The metrics are already captured separately in the `metrics_snapshot` parameter.
 - `memory_build_context(url)` — build tiered context from a memory note or folder; use `url="folder/*"` for all notes in a folder
 - `memory_write(title, content, type, tags?)` — create or update a note (use for spike findings, research results, ADRs)
 - `memory_edit(identifier, operation, content, find_text?, section?, type?)` — edit an existing note (append, prepend, find_replace, replace_section)
+- `memory_health()` — aggregate health report: total notes, broken link count, orphan count, stale notes by folder
+- `memory_broken_links(folder?)` — list all broken wikilinks with source context
+- `memory_orphans(folder?)` — list notes with zero inbound links (excludes catalogs and singletons)
 - `role_metrics(role_id?, window_days?)` — get effectiveness metrics per agent role
 - `role_amend_prompt(role_id, amendment, metrics_snapshot?)` — append amendment to a specialist role's learned_prompt and log to history
 - `agent_create(name, base_role, description?, system_prompt_extensions?, model_preference?)` — create a new specialist agent when existing agents lack required capabilities

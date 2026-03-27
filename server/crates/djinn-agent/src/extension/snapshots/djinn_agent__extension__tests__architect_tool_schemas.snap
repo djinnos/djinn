@@ -676,6 +676,40 @@ expression: tool_schemas_architect()
     "name": "memory_build_context"
   },
   {
+    "description": "Returns aggregate health report: total notes, broken link count, orphan note count, stale notes by folder.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "memory_health"
+  },
+  {
+    "description": "Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).",
+    "inputSchema": {
+      "properties": {
+        "folder": {
+          "description": "Optional folder filter (e.g. \"decisions\")",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_broken_links"
+  },
+  {
+    "description": "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).",
+    "inputSchema": {
+      "properties": {
+        "folder": {
+          "description": "Optional folder filter (e.g. \"pitfalls\")",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_orphans"
+  },
+  {
     "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
     "inputSchema": {
       "properties": {

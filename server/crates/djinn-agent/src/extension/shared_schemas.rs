@@ -252,6 +252,43 @@ pub(crate) fn tool_memory_build_context() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_memory_health() -> RmcpTool {
+    RmcpTool::new(
+        "memory_health".to_string(),
+        "Returns aggregate health report: total notes, broken link count, orphan note count, stale notes by folder.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {}
+        }),
+    )
+}
+
+pub(crate) fn tool_memory_broken_links() -> RmcpTool {
+    RmcpTool::new(
+        "memory_broken_links".to_string(),
+        "Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string", "description": "Optional folder filter (e.g. \"decisions\")"}
+            }
+        }),
+    )
+}
+
+pub(crate) fn tool_memory_orphans() -> RmcpTool {
+    RmcpTool::new(
+        "memory_orphans".to_string(),
+        "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).".to_string(),
+        object!({
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string", "description": "Optional folder filter (e.g. \"pitfalls\")"}
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_role_metrics() -> RmcpTool {
     RmcpTool::new(
         "agent_metrics".to_string(),

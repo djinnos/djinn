@@ -613,4 +613,48 @@ mod tests {
             "worker prompt should mention scoped build/check commands"
         );
     }
+
+    #[test]
+    fn architect_prompt_contains_memory_health_review() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Architect, &task, &ctx);
+
+        assert!(
+            prompt.contains("Memory Health Review"),
+            "architect prompt should include memory health review section"
+        );
+        assert!(
+            prompt.contains("memory_health()"),
+            "architect prompt should reference memory_health tool"
+        );
+        assert!(
+            prompt.contains("memory_broken_links()"),
+            "architect prompt should reference memory_broken_links tool"
+        );
+        assert!(
+            prompt.contains("memory_orphans()"),
+            "architect prompt should reference memory_orphans tool"
+        );
+    }
+
+    #[test]
+    fn architect_prompt_contains_contradiction_review() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Architect, &task, &ctx);
+
+        assert!(
+            prompt.contains("Contradiction and Low-Confidence Review"),
+            "architect prompt should include contradiction review section"
+        );
+        assert!(
+            prompt.contains("contradicts supersedes stale"),
+            "architect prompt should instruct searching for contradictions"
+        );
+        assert!(
+            prompt.contains("canonical"),
+            "architect prompt should mention canonicalization of conflicting notes"
+        );
+    }
 }

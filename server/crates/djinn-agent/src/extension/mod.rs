@@ -22,9 +22,12 @@ use djinn_mcp::tools::agent_tools::{
 };
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
 use djinn_mcp::tools::memory_tools::{
+    BrokenLinksParams as SharedMemoryBrokenLinksParams,
     BuildContextParams as SharedMemoryBuildContextParams,
-    EditParams as SharedMemoryEditParams, ListParams as SharedMemoryListParams,
-    ReadParams as SharedMemoryReadParams, SearchParams as SharedMemorySearchParams,
+    EditParams as SharedMemoryEditParams,
+    HealthParams as SharedMemoryHealthParams, ListParams as SharedMemoryListParams,
+    OrphansParams as SharedMemoryOrphansParams, ReadParams as SharedMemoryReadParams,
+    SearchParams as SharedMemorySearchParams,
     WriteParams as SharedMemoryWriteParams,
 };
 use djinn_mcp::tools::task_tools::{
@@ -190,6 +193,15 @@ where
         }
         "memory_edit" => {
             call_memory_edit(state, &call.arguments, &worktree_project_path).await
+        }
+        "memory_health" => {
+            call_memory_health(state, &call.arguments, &worktree_project_path).await
+        }
+        "memory_broken_links" => {
+            call_memory_broken_links(state, &call.arguments, &worktree_project_path).await
+        }
+        "memory_orphans" => {
+            call_memory_orphans(state, &call.arguments, &worktree_project_path).await
         }
         "agent_metrics" => call_agent_metrics(state, &call.arguments, &worktree_project_path).await,
         "agent_amend_prompt" => {
@@ -365,6 +377,16 @@ struct MemoryEditParams {
     section: Option<String>,
     #[serde(rename = "type")]
     note_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MemoryBrokenLinksLocalParams {
+    folder: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MemoryOrphansLocalParams {
+    folder: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1094,6 +1116,26 @@ async fn call_memory_build_context(
     ))
 }
 
+async fn call_memory_health(
+    state: &AgentContext,
+    _arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    Ok(serde_json::to_value(
+        djinn_mcp::tools::memory_tools::ops::memory_health(
+            &server,
+            SharedMemoryHealthParams {
+                project: Some(project_path.to_owned()),
+            },
+        )
+        .await,
+    )
+    .unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_health response" }),
+    ))
+}
+
 async fn call_memory_write(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -1142,6 +1184,50 @@ async fn call_memory_edit(
         .await;
     Ok(serde_json::to_value(result.0)
         .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize memory_edit response" })))
+}
+
+async fn call_memory_broken_links(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let p: MemoryBrokenLinksLocalParams = parse_args(arguments)?;
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    Ok(serde_json::to_value(
+        djinn_mcp::tools::memory_tools::ops::memory_broken_links(
+            &server,
+            SharedMemoryBrokenLinksParams {
+                project: project_path.to_owned(),
+                folder: p.folder,
+            },
+        )
+        .await,
+    )
+    .unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_broken_links response" }),
+    ))
+}
+
+async fn call_memory_orphans(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let p: MemoryOrphansLocalParams = parse_args(arguments)?;
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    Ok(serde_json::to_value(
+        djinn_mcp::tools::memory_tools::ops::memory_orphans(
+            &server,
+            SharedMemoryOrphansParams {
+                project: project_path.to_owned(),
+                folder: p.folder,
+            },
+        )
+        .await,
+    )
+    .unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_orphans response" }),
+    ))
 }
 
 async fn call_agent_metrics(
@@ -3087,6 +3173,18 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     tool_values.push(
         serde_json::to_value(shared_schemas::tool_memory_build_context())
             .expect("serialize tool_memory_build_context"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_health())
+            .expect("serialize tool_memory_health"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_broken_links())
+            .expect("serialize tool_memory_broken_links"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_orphans())
+            .expect("serialize tool_memory_orphans"),
     );
     tool_values.push(
         serde_json::to_value(shared_schemas::tool_role_metrics())

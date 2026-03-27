@@ -3,9 +3,10 @@ use djinn_db::{NoteRepository, ProjectRepository};
 use crate::server::DjinnMcpServer;
 
 use super::{
-    BuildContextParams, ListParams, MemoryBuildContextResponse, MemoryListResponse,
-    MemoryNoteResponse, MemorySearchResponse, MemorySearchResultItem, ReadParams, SearchParams,
-    note_to_view,
+    BrokenLinksParams, BuildContextParams, HealthParams, ListParams, MemoryBrokenLinksResponse,
+    MemoryBuildContextResponse, MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse,
+    MemoryOrphansResponse, MemorySearchResponse, MemorySearchResultItem, OrphansParams,
+    ReadParams, SearchParams, note_to_view,
 };
 
 pub async fn resolve_project_id(server: &DjinnMcpServer, project: &str) -> Result<String, String> {
@@ -182,5 +183,97 @@ pub async fn memory_build_context(
             related_l0: vec![],
             error: Some(format!("build_context failed: {e}")),
         },
+    }
+}
+
+pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHealthResponse {
+    let project = match &p.project {
+        Some(path) => path.clone(),
+        None => {
+            return MemoryHealthResponse {
+                total_notes: None,
+                broken_link_count: None,
+                orphan_note_count: None,
+                stale_notes_by_folder: None,
+                error: Some("project parameter required".to_string()),
+            };
+        }
+    };
+    let project_id = match resolve_project_id(server, &project).await {
+        Ok(id) => id,
+        Err(error) => {
+            return MemoryHealthResponse {
+                total_notes: None,
+                broken_link_count: None,
+                orphan_note_count: None,
+                stale_notes_by_folder: None,
+                error: Some(error),
+            };
+        }
+    };
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    match repo.health(&project_id).await {
+        Ok(h) => MemoryHealthResponse {
+            total_notes: Some(h.total_notes),
+            broken_link_count: Some(h.broken_link_count),
+            orphan_note_count: Some(h.orphan_note_count),
+            stale_notes_by_folder: Some(h.stale_notes_by_folder),
+            error: None,
+        },
+        Err(e) => MemoryHealthResponse {
+            total_notes: None,
+            broken_link_count: None,
+            orphan_note_count: None,
+            stale_notes_by_folder: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+pub async fn memory_broken_links(
+    server: &DjinnMcpServer,
+    p: BrokenLinksParams,
+) -> MemoryBrokenLinksResponse {
+    let project_id = match resolve_project_id(server, &p.project).await {
+        Ok(id) => id,
+        Err(error) => {
+            return MemoryBrokenLinksResponse {
+                broken_links: vec![],
+                error: Some(error),
+            };
+        }
+    };
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let broken_links = repo
+        .broken_links(&project_id, p.folder.as_deref())
+        .await
+        .unwrap_or_default();
+    MemoryBrokenLinksResponse {
+        broken_links,
+        error: None,
+    }
+}
+
+pub async fn memory_orphans(
+    server: &DjinnMcpServer,
+    p: OrphansParams,
+) -> MemoryOrphansResponse {
+    let project_id = match resolve_project_id(server, &p.project).await {
+        Ok(id) => id,
+        Err(error) => {
+            return MemoryOrphansResponse {
+                orphans: vec![],
+                error: Some(error),
+            };
+        }
+    };
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let orphans = repo
+        .orphans(&project_id, p.folder.as_deref())
+        .await
+        .unwrap_or_default();
+    MemoryOrphansResponse {
+        orphans,
+        error: None,
     }
 }
