@@ -70,6 +70,17 @@ impl DjinnMcpServer {
             });
         };
 
+        // Guard: DB-only notes have no file to diff
+        if note.storage != "file" {
+            return Json(MemoryDiffResponse {
+                diff: String::new(),
+                error: Some(format!(
+                    "note '{}' is stored in database only (storage='{}'); git diff is only available for file-backed notes",
+                    p.permalink, note.storage
+                )),
+            });
+        }
+
         let diff = git_diff_for_file(&note.file_path, p.sha.as_deref()).await;
         Json(MemoryDiffResponse { diff, error: None })
     }
