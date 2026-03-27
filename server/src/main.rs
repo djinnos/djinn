@@ -102,6 +102,7 @@ async fn async_main() {
     checkpoint::spawn(db.clone(), cancel.clone());
 
     let state = AppState::new(db, cancel.clone());
+    djinn_server::housekeeping::spawn(state.clone());
     state.initialize().await;
     state.initialize_agents().await;
     let router = server::router(state);

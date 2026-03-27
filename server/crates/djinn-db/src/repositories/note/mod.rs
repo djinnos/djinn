@@ -18,6 +18,7 @@ mod context;
 mod crud;
 mod file_helpers;
 mod graph;
+mod housekeeping;
 mod indexing;
 pub(crate) mod rrf;
 mod scoring;
@@ -2823,5 +2824,235 @@ mod tests {
         assert_eq!(filtered[0].consolidated_cluster_count, 1);
         assert_eq!(filtered[0].consolidated_note_count, 1);
         assert_eq!(filtered[0].source_note_count, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn housekeeping_rebuild_missing_content_hashes_backfills_null_hashes() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let note = repo
+            .create_db_note(
+                &project.id,
+                "Hashless",
+                "Alpha\r\nBeta\n",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE notes SET content_hash = NULL WHERE id = ?1")
+            .bind(&note.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let rebuilt = repo
+            .rebuild_missing_content_hashes(&project.id)
+            .await
+            .unwrap();
+        assert_eq!(rebuilt, 1);
+
+        let stored_hash: Option<String> =
+            sqlx::query_scalar("SELECT content_hash FROM notes WHERE id = ?1")
+                .bind(&note.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            stored_hash.as_deref(),
+            Some(crate::note_hash::note_content_hash("Alpha\r\nBeta\n").as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let orphan = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Old orphan",
+                "body",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let linked = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Linked target",
+                "body",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let source = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Source",
+                &format!("links to [[{}]]", linked.title),
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _ = source;
+
+        sqlx::query(
+            "UPDATE notes
+             SET last_accessed = datetime('now', '-31 days'), access_count = 0
+             WHERE id IN (?1, ?2)",
+        )
+        .bind(&orphan.id)
+        .bind(&linked.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let flagged = repo
+            .flag_orphan_notes(&project.id, tmp.path(), "orphan")
+            .await
+            .unwrap();
+        assert_eq!(flagged, 1);
+
+        let orphan_tags: String = sqlx::query_scalar("SELECT tags FROM notes WHERE id = ?1")
+            .bind(&orphan.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let linked_tags: String = sqlx::query_scalar("SELECT tags FROM notes WHERE id = ?1")
+            .bind(&linked.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(orphan_tags, "[\"orphan\"]");
+        assert_eq!(linked_tags, "[]");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn housekeeping_repair_broken_wikilinks_does_not_force_low_confidence_matches() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let _target = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Rust Ownership Guide",
+                "Rust ownership guide. Rust ownership guide. Rust ownership guide. Rust ownership guide. Borrowing and lifetimes details.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let source = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Broken link source",
+                "Read [[Rust Ownership]] before editing.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let repaired = repo
+            .repair_broken_wikilinks(&project.id, tmp.path(), 0.0)
+            .await
+            .unwrap();
+        assert_eq!(repaired, 1);
+
+        let updated = repo.get(&source.id).await.unwrap().unwrap();
+        assert!(updated.content.contains("[[Rust Ownership Guide]]"));
+        assert!(!updated.content.contains("[[Rust Ownership]]"));
+
+        let resolved_target: Option<String> = sqlx::query_scalar(
+            "SELECT target_id FROM note_links WHERE source_id = ?1 AND target_raw = ?2",
+        )
+        .bind(&source.id)
+        .bind("Rust Ownership Guide")
+        .fetch_optional(db.pool())
+        .await
+        .unwrap();
+        assert!(resolved_target.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn housekeeping_repair_broken_wikilinks_skips_ambiguous_matches() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let _ = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Rust Ownership Guide",
+                "guide for rust ownership",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let _ = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Rust Ownership Rules",
+                "rules for rust ownership",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let source = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Ambiguous link source",
+                "Compare [[Rust Ownership]] options.",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let repaired = repo
+            .repair_broken_wikilinks(&project.id, tmp.path(), 0.1)
+            .await
+            .unwrap();
+        assert_eq!(repaired, 0);
+
+        let updated = repo.get(&source.id).await.unwrap().unwrap();
+        assert!(updated.content.contains("[[Rust Ownership]]"));
+        assert!(!updated.content.contains("[[Rust Ownership Guide]]"));
+
+        let best = repo
+            .search(&project.id, "Rust Ownership", None, None, None, 3)
+            .await
+            .unwrap();
+        assert!(best.len() >= 2);
+        assert!((best[0].score - best[1].score).abs() < 5.0);
     }
 }

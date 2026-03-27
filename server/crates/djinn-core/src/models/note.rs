@@ -224,6 +224,16 @@ pub struct BrokenLink {
     pub raw_text: String,
 }
 
+/// A wikilink repair applied by housekeeping.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BrokenLinkRepair {
+    pub source_id: String,
+    pub source_title: String,
+    pub original_target: String,
+    pub replacement_title: String,
+    pub score: f64,
+}
+
 /// A note with zero inbound wikilinks (potential dead-end).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct OrphanNote {

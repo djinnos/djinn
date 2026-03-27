@@ -2,6 +2,7 @@ pub mod crypto;
 pub mod database;
 pub mod error;
 pub mod migrations;
+pub mod note_hash;
 pub mod repositories;
 
 pub use database::{Database, default_db_path};
