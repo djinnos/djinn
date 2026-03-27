@@ -72,6 +72,23 @@ fn compose_system_prompt_segments(
     segments
 }
 
+fn system_message_metadata(model: &str, has_cache_breakpoint: bool) -> Option<MessageMeta> {
+    if model.starts_with("anthropic/") && has_cache_breakpoint {
+        Some(MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(serde_json::json!({
+                ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                    kind: Some("stable_prefix".to_string()),
+                }
+            })),
+        })
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 fn compose_system_prompt(
     base_prompt: &str,
@@ -104,29 +121,19 @@ fn build_system_message(
         repo_map_context,
         client_system,
     );
-    let text = segments
-        .iter()
-        .map(|segment| segment.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let metadata = system_message_metadata(
+        model,
+        segments.iter().any(|segment| segment.cache_breakpoint),
+    );
 
-    if model.starts_with("anthropic/") && segments.iter().any(|segment| segment.cache_breakpoint) {
-        return Message::system_with_metadata(
-            text,
-            MessageMeta {
-                input_tokens: None,
-                output_tokens: None,
-                timestamp: None,
-                provider_data: Some(serde_json::json!({
-                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
-                        kind: Some("stable_prefix".to_string()),
-                    }
-                })),
-            },
-        );
+    Message {
+        role: Role::System,
+        content: segments
+            .into_iter()
+            .map(|segment| ContentBlock::text(segment.text))
+            .collect(),
+        metadata,
     }
-
-    Message::system(text)
 }
 
 fn format_repo_map_block(rendered: &str, permalink: Option<&str>) -> String {
@@ -956,6 +963,37 @@ mod tests {
     }
 
     #[test]
+    fn build_system_message_preserves_repo_map_as_its_own_content_block() {
+        let project_context = "## Current Project\nproject";
+        let repo_map = format_repo_map_block(
+            "src/lib.rs\n  pub fn run",
+            Some("reference/repo-maps/repository-map-deadbeef"),
+        );
+        let message = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some(project_context),
+            Some(&repo_map),
+            Some("volatile client system"),
+            "anthropic/claude-3-5-sonnet",
+        );
+
+        assert_eq!(message.content.len(), 4);
+        assert_eq!(
+            message.content[0].as_text(),
+            Some(DJINN_CHAT_SYSTEM_PROMPT.trim())
+        );
+        assert_eq!(message.content[1].as_text(), Some(project_context));
+        assert_eq!(message.content[2].as_text(), Some(repo_map.as_str()));
+        assert!(
+            message.content[2]
+                .as_text()
+                .expect("repo map block text")
+                .contains("Source note: memory://reference/repo-maps/repository-map-deadbeef")
+        );
+        assert_eq!(message.content[3].as_text(), Some("volatile client system"));
+    }
+
+    #[test]
     fn build_system_message_adds_anthropic_cache_breakpoint_for_stable_prefix() {
         let project_context = "## Current Project\nproject";
         let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
@@ -973,8 +1011,9 @@ mod tests {
             .and_then(|meta| meta.provider_data.as_ref())
             .expect("anthropic message should include provider metadata");
         assert!(provider_data.get(ANTHROPIC_CACHE_BREAKPOINT_KEY).is_some());
-        assert!(message.text_content().contains(REPO_MAP_SYSTEM_HEADER));
-        assert!(message.text_content().contains("volatile client system"));
+        assert_eq!(message.content.len(), 4);
+        assert_eq!(message.content[2].as_text(), Some(repo_map.as_str()));
+        assert_eq!(message.content[3].as_text(), Some("volatile client system"));
     }
 
     #[test]
