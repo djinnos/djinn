@@ -169,7 +169,7 @@ async fn collect_completion(
 
     while let Some(event) = stream.next().await {
         match event? {
-            StreamEvent::Delta(ContentBlock::Text { text: delta }) => text.push_str(&delta),
+            StreamEvent::Delta(ContentBlock::Text { text: delta, .. }) => text.push_str(&delta),
             StreamEvent::Usage(token_usage) => usage = token_usage,
             StreamEvent::Done => break,
             StreamEvent::Delta(_) | StreamEvent::Thinking(_) => {}
