@@ -401,10 +401,57 @@ async fn anthropic_provider_serializes_cache_control_for_stable_system_prefix() 
 
     let requests = server.received_requests().await.expect("captured requests");
     let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
-    assert_eq!(body["system"][0]["type"], "text");
-    assert_eq!(body["system"][0]["text"], "Stable system prefix");
-    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-    assert_eq!(body["system"][0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(body["system"], "Stable system prefix");
+}
+
+#[tokio::test]
+async fn anthropic_provider_applies_cache_control_only_to_stable_prefix_blocks() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(anthropic_sse_template())
+        .mount(&server)
+        .await;
+
+    let provider = AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth));
+    let tools = tool_definition();
+    let mut conversation = anthropic_cached_conversation();
+    conversation.messages[0]
+        .content
+        .push(djinn_core::message::ContentBlock::Text {
+            text: "Tool definitions".to_string(),
+        });
+    conversation.messages[0]
+        .content
+        .push(djinn_core::message::ContentBlock::Text {
+            text: "Repository map".to_string(),
+        });
+    conversation.messages[0]
+        .content
+        .push(djinn_core::message::ContentBlock::Text {
+            text: "Task-specific volatile context".to_string(),
+        });
+
+    let mut stream = provider
+        .stream(&conversation, &tools, Some(ToolChoice::Required))
+        .await
+        .expect("provider stream should start");
+    while let Some(item) = stream.next().await {
+        item.expect("stream item should succeed");
+    }
+
+    let requests = server.received_requests().await.expect("captured requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    let system = body["system"].as_array().expect("system block array");
+    assert_eq!(system.len(), 4);
+    assert_eq!(system[0]["text"], "Stable system prefix");
+    assert_eq!(system[1]["text"], "Tool definitions");
+    assert_eq!(system[2]["text"], "Repository map");
+    assert_eq!(system[3]["text"], "Task-specific volatile context");
+    assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(system[2]["cache_control"]["kind"], "stable_prefix");
+    assert!(system[3].get("cache_control").is_none());
 }
 
 #[tokio::test]

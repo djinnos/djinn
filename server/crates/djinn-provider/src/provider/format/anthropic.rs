@@ -53,15 +53,26 @@ impl AnthropicProvider {
             .filter(|message| message.role == djinn_core::message::Role::System)
             .flat_map(|message| {
                 let cache_control = Self::maybe_cache_control(message);
-                message.content.iter().filter_map(move |block| match block {
-                    ContentBlock::Text { text } if !text.trim().is_empty() => {
-                        Some(AnthropicSystemBlock {
-                            text: text.clone(),
-                            cache_control: cache_control.clone(),
-                        })
-                    }
-                    _ => None,
-                })
+                let content_len = message.content.len();
+                message
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, block)| match block {
+                        ContentBlock::Text { text } if !text.trim().is_empty() => {
+                            let cache_control =
+                                if cache_control.is_some() && index + 1 < content_len {
+                                    cache_control.clone()
+                                } else {
+                                    None
+                                };
+                            Some(AnthropicSystemBlock {
+                                text: text.clone(),
+                                cache_control,
+                            })
+                        }
+                        _ => None,
+                    })
             })
             .collect()
     }
@@ -523,7 +534,7 @@ mod tests {
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
         assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
-        assert_eq!(system[2]["cache_control"]["kind"], "stable_prefix");
+        assert!(system[2].get("cache_control").is_none());
     }
 
     #[test]

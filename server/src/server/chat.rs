@@ -34,22 +34,28 @@ const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
 const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum PromptSegmentStability {
+    Stable,
+    Dynamic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PromptSegment {
     text: String,
-    cache_breakpoint: bool,
+    stability: PromptSegmentStability,
 }
 
 fn prompt_segment(text: impl Into<String>) -> PromptSegment {
     PromptSegment {
         text: text.into(),
-        cache_breakpoint: false,
+        stability: PromptSegmentStability::Dynamic,
     }
 }
 
 fn cached_prompt_segment(text: impl Into<String>) -> PromptSegment {
     PromptSegment {
         text: text.into(),
-        cache_breakpoint: true,
+        stability: PromptSegmentStability::Stable,
     }
 }
 
@@ -72,8 +78,8 @@ fn compose_system_prompt_segments(
     segments
 }
 
-fn system_message_metadata(model: &str, has_cache_breakpoint: bool) -> Option<MessageMeta> {
-    if model.starts_with("anthropic/") && has_cache_breakpoint {
+fn system_message_metadata(model: &str, has_stable_prefix: bool) -> Option<MessageMeta> {
+    if model.starts_with("anthropic/") && has_stable_prefix {
         Some(MessageMeta {
             input_tokens: None,
             output_tokens: None,
@@ -123,15 +129,30 @@ fn build_system_message(
     );
     let metadata = system_message_metadata(
         model,
-        segments.iter().any(|segment| segment.cache_breakpoint),
+        segments
+            .iter()
+            .any(|segment| segment.stability == PromptSegmentStability::Stable),
     );
+
+    let stable_content = segments
+        .iter()
+        .filter(|segment| segment.stability == PromptSegmentStability::Stable)
+        .map(|segment| ContentBlock::text(segment.text.clone()));
+    let dynamic_tail = segments
+        .iter()
+        .filter(|segment| segment.stability == PromptSegmentStability::Dynamic)
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let mut content: Vec<ContentBlock> = stable_content.collect();
+    if !dynamic_tail.trim().is_empty() {
+        content.push(ContentBlock::text(dynamic_tail));
+    }
 
     Message {
         role: Role::System,
-        content: segments
-            .into_iter()
-            .map(|segment| ContentBlock::text(segment.text))
-            .collect(),
+        content,
         metadata,
     }
 }
@@ -720,10 +741,10 @@ pub(super) async fn completions_handler(
 #[cfg(test)]
 mod tests {
     use super::{
-        ANTHROPIC_CACHE_BREAKPOINT_KEY, DJINN_CHAT_SYSTEM_PROMPT, REPO_MAP_SYSTEM_HEADER,
-        ToolCallPayload, build_system_message, compose_system_prompt,
-        compose_system_prompt_segments, format_repo_map_block, reinforce_repo_map_companion_notes,
-        repo_map_companion_context, sse_json_event, unique_companion_note_ids,
+        DJINN_CHAT_SYSTEM_PROMPT, PromptSegmentStability, REPO_MAP_SYSTEM_HEADER, ToolCallPayload,
+        build_system_message, compose_system_prompt, compose_system_prompt_segments,
+        format_repo_map_block, reinforce_repo_map_companion_notes, repo_map_companion_context,
+        sse_json_event, unique_companion_note_ids,
     };
     use crate::server::AppState;
     use crate::test_helpers;
@@ -953,13 +974,13 @@ mod tests {
         );
 
         assert_eq!(segments.len(), 4);
-        assert!(segments[0].cache_breakpoint);
+        assert_eq!(segments[0].stability, PromptSegmentStability::Stable);
         assert_eq!(segments[1].text, project_context);
-        assert!(segments[1].cache_breakpoint);
+        assert_eq!(segments[1].stability, PromptSegmentStability::Stable);
         assert_eq!(segments[2].text, repo_map);
-        assert!(segments[2].cache_breakpoint);
+        assert_eq!(segments[2].stability, PromptSegmentStability::Stable);
         assert_eq!(segments[3].text, client_system);
-        assert!(!segments[3].cache_breakpoint);
+        assert_eq!(segments[3].stability, PromptSegmentStability::Dynamic);
     }
 
     #[test]
@@ -994,26 +1015,78 @@ mod tests {
     }
 
     #[test]
-    fn build_system_message_adds_anthropic_cache_breakpoint_for_stable_prefix() {
+    fn build_system_message_keeps_dynamic_context_in_a_trailing_block() {
         let project_context = "## Current Project\nproject";
         let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
+        let client_system = "client-specific instruction";
+        let task_context = "task-specific instruction";
+        let combined_dynamic = format!("{client_system}\n\n{task_context}");
+
         let message = build_system_message(
             DJINN_CHAT_SYSTEM_PROMPT,
             Some(project_context),
             Some(&repo_map),
-            Some("volatile client system"),
+            Some(&combined_dynamic),
             "anthropic/claude-3-5-sonnet",
         );
 
-        let provider_data = message
-            .metadata
-            .as_ref()
-            .and_then(|meta| meta.provider_data.as_ref())
-            .expect("anthropic message should include provider metadata");
-        assert!(provider_data.get(ANTHROPIC_CACHE_BREAKPOINT_KEY).is_some());
         assert_eq!(message.content.len(), 4);
+        assert_eq!(
+            message.content[0].as_text(),
+            Some(DJINN_CHAT_SYSTEM_PROMPT.trim())
+        );
+        assert_eq!(message.content[1].as_text(), Some(project_context));
         assert_eq!(message.content[2].as_text(), Some(repo_map.as_str()));
-        assert_eq!(message.content[3].as_text(), Some("volatile client system"));
+        assert_eq!(
+            message.content[3].as_text(),
+            Some(combined_dynamic.as_str())
+        );
+    }
+
+    #[test]
+    fn build_system_message_keeps_stable_order_when_optional_contexts_are_missing() {
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
+        let with_repo_map_only = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            None,
+            Some(&repo_map),
+            Some("volatile client system"),
+            "anthropic/claude-3-5-sonnet",
+        );
+        assert_eq!(with_repo_map_only.content.len(), 3);
+        assert_eq!(
+            with_repo_map_only.content[0].as_text(),
+            Some(DJINN_CHAT_SYSTEM_PROMPT.trim())
+        );
+        assert_eq!(
+            with_repo_map_only.content[1].as_text(),
+            Some(repo_map.as_str())
+        );
+        assert_eq!(
+            with_repo_map_only.content[2].as_text(),
+            Some("volatile client system")
+        );
+
+        let with_project_only = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some("## Current Project\nproject"),
+            None,
+            Some("volatile client system"),
+            "anthropic/claude-3-5-sonnet",
+        );
+        assert_eq!(with_project_only.content.len(), 3);
+        assert_eq!(
+            with_project_only.content[0].as_text(),
+            Some(DJINN_CHAT_SYSTEM_PROMPT.trim())
+        );
+        assert_eq!(
+            with_project_only.content[1].as_text(),
+            Some("## Current Project\nproject")
+        );
+        assert_eq!(
+            with_project_only.content[2].as_text(),
+            Some("volatile client system")
+        );
     }
 
     #[test]
