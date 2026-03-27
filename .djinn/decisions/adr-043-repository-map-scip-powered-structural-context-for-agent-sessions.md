@@ -88,6 +88,29 @@ Shell out to language-specific indexers to produce `.scip` files:
 
 On project add, detect which indexers are available on PATH. Missing indexers degrade gracefully. For multi-language projects, run each applicable indexer and merge `Index` documents into a single graph.
 
+#### 1a. Monorepo-Aware Workspace Discovery
+
+Indexers must run from the correct workspace root, not the project root. In a monorepo (e.g., `djinn/` with `server/`, `desktop/`, `website/` sub-projects), there is no root `Cargo.toml` or `tsconfig.json` -- running indexers from the project root will fail silently or miss sub-projects entirely.
+
+Before indexing, discover sub-workspace roots per language:
+
+| Language | Discovery | Example |
+|---|---|---|
+| Rust | Find `Cargo.toml` files containing `[workspace]` | `server/Cargo.toml` |
+| TypeScript/JS | Find `tsconfig.json` or `package.json` with `workspaces` | `desktop/package.json`, `website/package.json` |
+| Python | Find `pyproject.toml` or `setup.py` | `services/ml/pyproject.toml` |
+| Go | Find `go.mod` | `tools/cli/go.mod` |
+| Java/Kotlin | Find `build.gradle` or `pom.xml` | `backend/build.gradle` |
+
+For each discovered workspace root, run the applicable indexer with `cwd` set to that root. Merge all resulting SCIP `Document` entries into a single dependency graph, adjusting file paths to be relative to the project root (not the workspace root).
+
+#### 1b. Index on Project Add and Server Startup
+
+Indexing must not wait for the first file change event. Trigger initial indexing:
+
+- **On `project_add`**: immediately after registering the project, spawn background indexing so the first session already has a repo map.
+- **On server startup**: for each registered project, check if a cached index exists for the current HEAD. If not, spawn background indexing.
+
 ### 2. SCIP Index Parsing
 
 Use the `scip` Rust crate (v0.7.0, Apache 2.0):
@@ -179,6 +202,16 @@ CREATE TABLE repo_map_cache (
 );
 ```
 
+#### 5a. Worktree Index Reuse
+
+Full re-indexing (60-120s) for every worktree is wasteful when a branch differs from main by only a few files. Worktrees should inherit from the base branch's index:
+
+1. **Merge-base lookup**: For a worktree branch, find `git merge-base HEAD main` (or the configured default branch).
+2. **Cache hit on merge-base**: If a cached index exists for the merge-base commit, reuse it directly. The PageRank ranking will be 99%+ identical for small diffs.
+3. **Threshold-based re-index**: Only run a full re-index if the diff vs merge-base exceeds a threshold (e.g., >20 files changed). For small diffs, the base index is good enough.
+4. **Future: incremental patching**: For medium diffs, patch the existing graph -- remove/add only changed files' symbols and re-rank. Not in initial scope.
+5. **Fallback**: If no base index exists, do a full index as today.
+
 ### 6. Integration with Cognitive Memory (ADR-023)
 
 **Level A -- Repo map as a memory note:**
@@ -195,10 +228,22 @@ CREATE TABLE repo_map_cache (
 
 ### 7. Lifecycle & Refresh
 
-- **Initial build**: On project add, run all available indexers. 60-120s for medium Rust project.
-- **Pre-session refresh**: Check if HEAD changed. If so, re-index (10-30s with warm caches).
+- **Initial build**: On project add and on server startup (if no cached index for HEAD), run all available indexers. 60-120s for medium Rust project (see §1b).
 - **Fallback on failure**: If indexer fails (broken compilation), use last successful index.
-- **Background indexing**: Re-index asynchronously after PR merges so next session starts warm.
+
+#### 7a. Tool-Call-Driven Refresh (replaces filesystem watcher)
+
+The original design used a `notify` filesystem watcher on project directories. This is the wrong abstraction: Djinn controls the edit surface (Write/Edit/apply-patch tool calls flow through the MCP server), so it already knows which file changed and which worktree it's in. A filesystem watcher adds unnecessary overhead and scans all worktrees on every event.
+
+**Replace the filesystem watcher with event-driven refresh:**
+
+1. After a Write, Edit, or apply-patch tool call completes, emit a `file:changed` event with the file path.
+2. Resolve which project and worktree the path belongs to.
+3. Check if HEAD changed for that specific worktree only (e.g., after a commit).
+4. If HEAD changed and no cache entry exists for the new commit, spawn background re-indexing for that worktree only (with merge-base reuse per §5a).
+5. If HEAD hasn't changed (uncommitted edit), no re-indexing needed -- the SCIP index is commit-keyed, and uncommitted edits don't affect it.
+
+This eliminates the filesystem watcher entirely. All refreshes are targeted, minimal, and triggered only by actual edits through Djinn.
 
 ### 8. Prompt Placement
 
@@ -227,14 +272,15 @@ Rendered as user message + assistant acknowledgment pair (Aider's pattern).
 
 ### Negative
 
-- **Indexing latency**: 60-120s full reindex. Mitigated by commit-hash caching and background indexing.
+- **Indexing latency**: 60-120s full reindex. Mitigated by commit-hash caching, worktree merge-base reuse (§5a), and background indexing.
 - **Requires compilable code**: Mitigated by CI gates on main and fallback to last-good index.
 - **External tool dependency**: Indexers must be installed. Mitigated by graceful degradation.
 - **Supported languages only**: Djinn targets Rust, TypeScript, Python, Go, Java -- all have mature SCIP indexers. Other languages are out of scope.
+- **Monorepo discovery heuristics**: Workspace root detection (§1a) relies on conventions (`[workspace]` in Cargo.toml, `workspaces` in package.json). Non-standard layouts may require manual configuration.
 
 ## Implementation Phases
 
-### Phase 1: Core SCIP indexing + rendering
+### Phase 1: Core SCIP indexing + rendering ✅
 - Add `scip` and `petgraph` dependencies
 - Indexer orchestration: detect, shell out, collect `.scip` files
 - SCIP parsing: definitions, references, relationships
@@ -243,20 +289,25 @@ Rendered as user message + assistant acknowledgment pair (Aider's pattern).
 - `repo_map_cache` table + commit-hash keying
 - Inject rendered map into agent session system prompt
 
-### Phase 2: Task-aware personalization
+### Phase 2: Task-aware personalization ✅
 - Extract identifiers from task for personalization vector
 - Boost files from task `memory_refs`
 - Track edited files for dynamic re-ranking
 - Dynamic map sizing; render `-> impl by ...` lines
 
-### Phase 3: Memory integration (ADR-023)
+### Phase 3: Memory integration (ADR-023) ✅
 - `repo_map` note type with L0/L1/L2 tiers
 - File affinity as 6th RRF signal with type-relationship extension
 - Co-access Hebbian learning
 
 ### Phase 4: Prompt cache optimization
-- `cache_control` breakpoints for Anthropic
-- Background re-indexing after PR merges
+- `cache_control` breakpoints for Anthropic *(not yet implemented)*
+
+### Phase 5: Monorepo, worktree reuse, and tool-call-driven refresh
+- Monorepo-aware workspace discovery per language (§1a)
+- Index on project add and server startup (§1b)
+- Worktree merge-base index reuse (§5a)
+- Replace filesystem watcher with tool-call-driven refresh (§7a)
 
 ## Appendix: PageRank Parameters
 
