@@ -8,6 +8,14 @@ use crate::message::{CacheBreakpoint, ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
+const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
+
+#[derive(Debug, Clone, PartialEq)]
+struct AnthropicSystemBlock {
+    text: String,
+    cache_control: Option<Value>,
+}
+
 pub struct AnthropicProvider {
     config: ProviderConfig,
     client: ApiClient,
@@ -26,7 +34,7 @@ impl AnthropicProvider {
             .metadata
             .as_ref()
             .and_then(|meta| meta.provider_data.as_ref())
-            .and_then(|data| data.get("anthropic_cache_breakpoint"))
+            .and_then(|data| data.get(ANTHROPIC_CACHE_BREAKPOINT_KEY))
             .and_then(|value| serde_json::from_value::<CacheBreakpoint>(value.clone()).ok())
             .map(|breakpoint| {
                 let mut obj = serde_json::Map::new();
@@ -38,35 +46,64 @@ impl AnthropicProvider {
             })
     }
 
+    fn system_blocks(conversation: &Conversation) -> Vec<AnthropicSystemBlock> {
+        conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == djinn_core::message::Role::System)
+            .flat_map(|message| {
+                let cache_control = Self::maybe_cache_control(message);
+                message.content.iter().filter_map(move |block| match block {
+                    ContentBlock::Text { text } if !text.trim().is_empty() => {
+                        Some(AnthropicSystemBlock {
+                            text: text.clone(),
+                            cache_control: cache_control.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    fn serialize_system_blocks(blocks: &[AnthropicSystemBlock]) -> Value {
+        if blocks.len() == 1 && blocks[0].cache_control.is_none() {
+            return Value::String(blocks[0].text.clone());
+        }
+
+        Value::Array(
+            blocks
+                .iter()
+                .map(|block| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("type".to_string(), json!("text"));
+                    obj.insert("text".to_string(), json!(block.text));
+                    if let Some(cache_control) = &block.cache_control {
+                        obj.insert("cache_control".to_string(), cache_control.clone());
+                    }
+                    Value::Object(obj)
+                })
+                .collect(),
+        )
+    }
+
     fn build_request(
         &self,
         conversation: &Conversation,
         tools: &[Value],
         tool_choice: Option<ToolChoice>,
     ) -> Value {
-        let (system, messages) = conversation.to_anthropic_messages();
-        let system_text = system.unwrap_or_default();
+        let (_system, messages) = conversation.to_anthropic_messages();
+        let system_blocks = Self::system_blocks(conversation);
 
         let max_tokens = self.config.capabilities.max_tokens_default.unwrap_or(8192);
 
         let mut body = json!({
             "model": self.config.model_id,
-            "system": system_text,
+            "system": Self::serialize_system_blocks(&system_blocks),
             "messages": messages,
             "max_tokens": max_tokens
         });
-
-        if let Some(system_message) = conversation.messages.iter().find(|message| {
-            message.role == djinn_core::message::Role::System
-                && !message.text_content().trim().is_empty()
-        }) && let Some(cache_control) = Self::maybe_cache_control(system_message)
-        {
-            body["system"] = json!([{
-                "type": "text",
-                "text": system_text,
-                "cache_control": cache_control,
-            }]);
-        }
 
         if self.config.capabilities.streaming {
             body["stream"] = json!(true);
@@ -450,6 +487,43 @@ mod tests {
         let messages = req["messages"].as_array().expect("messages array");
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"][0]["text"], "first user");
+    }
+
+    #[test]
+    fn test_build_request_preserves_separate_system_blocks_with_cache_control() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::system_with_metadata(
+            "base prompt",
+            crate::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                        kind: Some("stable_prefix".to_string()),
+                    }
+                })),
+            },
+        ));
+        conv.messages[0].content.push(ContentBlock::Text {
+            text: "tool definitions".to_string(),
+        });
+        conv.messages[0].content.push(ContentBlock::Text {
+            text: "repo map".to_string(),
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let req = provider.build_request(&conv, &[], None);
+        let system = req["system"].as_array().expect("system block array");
+        assert_eq!(system.len(), 3);
+        assert_eq!(system[0]["text"], "base prompt");
+        assert_eq!(system[1]["text"], "tool definitions");
+        assert_eq!(system[2]["text"], "repo map");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[2]["cache_control"]["kind"], "stable_prefix");
     }
 
     #[test]
