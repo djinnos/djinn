@@ -73,6 +73,13 @@ impl fmt::Display for RepoMapRefreshError {
 
 impl std::error::Error for RepoMapRefreshError {}
 
+/// Phase-1 worktree reuse policy from ADR-043:
+/// - directly reuse a canonical/base cached map when refresh planning finds one for the
+///   current commit lineage (for example the primary repo checkout or a merge-base-backed
+///   canonical entry), because branch-local ranking stays close enough for small worktree diffs;
+/// - fall back to a full index whenever no suitable cached base map exists;
+/// - defer diff-threshold heuristics and graph patching to a later wave once reuse semantics
+///   are validated end-to-end.
 pub fn spawn_repo_map_refresh_watchers(
     db: Database,
     events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
