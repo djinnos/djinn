@@ -10,7 +10,7 @@ doctest = false
 anyhow = "1"
 git2 = "0.20"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
