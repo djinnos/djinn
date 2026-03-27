@@ -739,7 +739,7 @@ fn discover_workspaces(project_root: &Path, indexer: SupportedIndexer) -> Vec<Di
     let mut roots = HashSet::new();
     let mut discovered = Vec::new();
 
-    let _ = visit_dirs(project_root, &mut |path| {
+    if let Err(error) = visit_dirs(project_root, &mut |path| {
         let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
             return Ok(());
         };
@@ -768,7 +768,14 @@ fn discover_workspaces(project_root: &Path, indexer: SupportedIndexer) -> Vec<Di
             });
         }
         Ok(())
-    });
+    }) {
+        tracing::warn!(
+            project_root = %project_root.display(),
+            language = indexer.language(),
+            error = %error,
+            "failed to discover workspace roots; falling back to project root"
+        );
+    }
 
     if discovered.is_empty() {
         discovered.push(DiscoveredWorkspace {
