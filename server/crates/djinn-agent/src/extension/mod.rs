@@ -9,6 +9,7 @@ use shared_schemas::{shared_base_tool_schemas, shared_lead_tool_schemas, tool_ta
 use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
+use crate::lsp::{SymbolQuery, parse_symbol_kind_filter};
 use djinn_core::models::Task;
 use djinn_db::AgentRepository;
 use djinn_db::EpicRepository;
@@ -2044,6 +2045,38 @@ struct LspParams {
     file_path: String,
     line: Option<u32>,
     character: Option<u32>,
+    #[serde(default)]
+    depth: Option<usize>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    name_filter: Option<String>,
+}
+
+fn validate_symbol_only_params(operation: &str, params: &LspParams) -> Result<(), String> {
+    if operation == "symbols" {
+        return Ok(());
+    }
+
+    let mut unexpected = Vec::new();
+    if params.depth.is_some() {
+        unexpected.push("depth");
+    }
+    if params.kind.is_some() {
+        unexpected.push("kind");
+    }
+    if params.name_filter.is_some() {
+        unexpected.push("name_filter");
+    }
+
+    if unexpected.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} only supported for operation='symbols'",
+            unexpected.join(", ")
+        ))
+    }
 }
 
 async fn call_lsp(
@@ -2052,6 +2085,7 @@ async fn call_lsp(
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: LspParams = parse_args(arguments)?;
+    validate_symbol_only_params(p.operation.as_str(), &p)?;
     let path = resolve_path(&p.file_path, worktree_path);
 
     match p.operation.as_str() {
@@ -2099,7 +2133,19 @@ async fn call_lsp(
             Ok(serde_json::json!({ "operation": "references", "result": result }))
         }
         "symbols" => {
-            let result = state.lsp.document_symbols(worktree_path, &path).await?;
+            let query = SymbolQuery {
+                depth: p.depth,
+                kinds: p
+                    .kind
+                    .as_deref()
+                    .map(parse_symbol_kind_filter)
+                    .transpose()?,
+                name_filter: p.name_filter,
+            };
+            let result = state
+                .lsp
+                .document_symbols(worktree_path, &path, query)
+                .await?;
             Ok(serde_json::json!({ "operation": "symbols", "result": result }))
         }
         other => Err(format!(
@@ -2976,7 +3022,7 @@ fn tool_apply_patch() -> RmcpTool {
 fn tool_lsp() -> RmcpTool {
     RmcpTool::new(
         "lsp".to_string(),
-        "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols). Line and character are 1-based.".to_string(),
+        "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.".to_string(),
         object!({
             "type": "object",
             "required": ["operation", "file_path"],
@@ -2999,6 +3045,19 @@ fn tool_lsp() -> RmcpTool {
                     "type": "integer",
                     "minimum": 1,
                     "description": "1-based column number (required for hover, definition, references)"
+                },
+                "depth": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum nesting depth for operation='symbols'. 0 = top-level only; omitted = unlimited"
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Comma-separated symbol kind filter for operation='symbols' (e.g. function,method,struct,class,interface,enum,variable,constant,module,field,property,constructor,type_parameter)"
+                },
+                "name_filter": {
+                    "type": "string",
+                    "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'"
                 }
             }
         }),
@@ -3099,6 +3158,59 @@ mod tests {
     #[test]
     fn floor_char_boundary_zero() {
         assert_eq!(floor_char_boundary("hello", 0), 0);
+    }
+
+    #[test]
+    fn tool_lsp_schema_exposes_symbol_filters() {
+        let tool = tool_lsp();
+        let schema = serde_json::to_value(&tool).unwrap();
+        let input_schema = &schema["inputSchema"]["properties"];
+        assert!(input_schema.get("depth").is_some());
+        assert!(input_schema.get("kind").is_some());
+        assert!(input_schema.get("name_filter").is_some());
+    }
+
+    #[test]
+    fn validate_symbol_only_params_rejects_non_symbol_operations() {
+        let params = LspParams {
+            operation: "hover".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line: Some(1),
+            character: Some(1),
+            depth: Some(1),
+            kind: Some("function".to_string()),
+            name_filter: Some("foo".to_string()),
+        };
+
+        let error = validate_symbol_only_params("hover", &params).unwrap_err();
+        assert!(error.contains("depth"));
+        assert!(error.contains("kind"));
+        assert!(error.contains("name_filter"));
+    }
+
+    #[test]
+    fn validate_symbol_only_params_allows_symbols_and_plain_hover() {
+        let symbol_params = LspParams {
+            operation: "symbols".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line: None,
+            character: None,
+            depth: Some(2),
+            kind: Some("function".to_string()),
+            name_filter: Some("foo".to_string()),
+        };
+        assert!(validate_symbol_only_params("symbols", &symbol_params).is_ok());
+
+        let hover_params = LspParams {
+            operation: "hover".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line: Some(1),
+            character: Some(1),
+            depth: None,
+            kind: None,
+            name_filter: None,
+        };
+        assert!(validate_symbol_only_params("hover", &hover_params).is_ok());
     }
 
     #[tokio::test]

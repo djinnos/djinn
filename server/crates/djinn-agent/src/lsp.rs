@@ -3,7 +3,7 @@ pub use diagnostics::{Diagnostic, format_diagnostics_xml};
 mod client;
 mod diagnostics;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -609,37 +609,223 @@ fn format_location(loc: &serde_json::Value) -> String {
     format!("{file}:{line}:{character}")
 }
 
-/// Format LSP DocumentSymbol or SymbolInformation into a readable list.
-fn format_symbol(sym: &serde_json::Value, indent: usize) -> String {
-    let name = sym.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-    let kind_num = sym.get("kind").and_then(|k| k.as_u64()).unwrap_or(0);
-    let kind = symbol_kind_name(kind_num);
-    let prefix = "  ".repeat(indent);
+#[derive(Debug, Clone, Default)]
+pub struct SymbolQuery {
+    pub depth: Option<usize>,
+    pub kinds: Option<HashSet<u64>>,
+    pub name_filter: Option<String>,
+}
 
-    let mut result = format!("{prefix}{kind} {name}");
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolEntry {
+    kind_name: &'static str,
+    name_path: String,
+    line: Option<u64>,
+    location: Option<String>,
+    child_count: usize,
+}
 
-    // If it has a location (SymbolInformation style), show it
-    if let Some(loc) = sym.get("location") {
-        result.push_str(&format!("  → {}", format_location(loc)));
-    } else if let Some(range) = sym.get("range") {
-        let line = range
-            .get("start")
-            .and_then(|s| s.get("line"))
-            .and_then(|l| l.as_u64())
-            .unwrap_or(0)
-            + 1;
-        result.push_str(&format!("  [line {line}]"));
+fn parse_symbol_tree(symbols: &[serde_json::Value], query: &SymbolQuery) -> Vec<SymbolEntry> {
+    let normalized_name_filter = query.name_filter.as_ref().map(|value| value.to_lowercase());
+    let mut entries = Vec::new();
+    for symbol in symbols {
+        collect_symbol_entries(
+            symbol,
+            0,
+            &mut Vec::new(),
+            &normalized_name_filter,
+            query,
+            &mut entries,
+        );
+    }
+    entries
+}
+
+fn collect_symbol_entries(
+    symbol: &serde_json::Value,
+    depth: usize,
+    parent_path: &mut Vec<String>,
+    normalized_name_filter: &Option<String>,
+    query: &SymbolQuery,
+    entries: &mut Vec<SymbolEntry>,
+) {
+    let name = symbol
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let kind_num = symbol
+        .get("kind")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+
+    parent_path.push(name.clone());
+    let name_path = parent_path.join("/");
+
+    let matches_depth = query.depth.is_none_or(|max_depth| depth <= max_depth);
+    let matches_kind = query
+        .kinds
+        .as_ref()
+        .is_none_or(|kinds| kinds.contains(&kind_num));
+    let matches_name = normalized_name_filter.as_ref().is_none_or(|needle| {
+        let lowered_name = name.to_lowercase();
+        let lowered_path = name_path.to_lowercase();
+        lowered_name.contains(needle) || lowered_path.contains(needle)
+    });
+
+    if matches_depth && matches_kind && matches_name {
+        let line = symbol
+            .get("range")
+            .and_then(|range| range.get("start"))
+            .and_then(|start| start.get("line"))
+            .and_then(|line| line.as_u64())
+            .map(|line| line + 1);
+        let location = symbol.get("location").map(format_location);
+        let child_count = symbol
+            .get("children")
+            .and_then(|value| value.as_array())
+            .map(Vec::len)
+            .unwrap_or(0);
+        entries.push(SymbolEntry {
+            kind_name: symbol_kind_name(kind_num),
+            name_path,
+            line,
+            location,
+            child_count,
+        });
     }
 
-    // Recurse into children (DocumentSymbol style)
-    if let Some(children) = sym.get("children").and_then(|c| c.as_array()) {
+    if let Some(children) = symbol.get("children").and_then(|value| value.as_array()) {
         for child in children {
-            result.push('\n');
-            result.push_str(&format_symbol(child, indent + 1));
+            collect_symbol_entries(
+                child,
+                depth + 1,
+                parent_path,
+                normalized_name_filter,
+                query,
+                entries,
+            );
         }
     }
 
-    result
+    parent_path.pop();
+}
+
+fn format_symbol_entries(entries: &[SymbolEntry]) -> String {
+    if entries.is_empty() {
+        return "No symbols found in this document.".to_string();
+    }
+
+    let full = render_grouped_symbols(entries, SymbolRenderMode::Full);
+    if full.len() <= 8_000 {
+        return full;
+    }
+
+    let compact = render_grouped_symbols(entries, SymbolRenderMode::ChildCounts);
+    if compact.len() <= 8_000 {
+        return format!("{compact}\n\n(output shortened: children collapsed to counts)");
+    }
+
+    format!(
+        "{}\n\n(output shortened: showing kind counts only)",
+        render_kind_counts(entries)
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SymbolRenderMode {
+    Full,
+    ChildCounts,
+}
+
+fn render_grouped_symbols(entries: &[SymbolEntry], mode: SymbolRenderMode) -> String {
+    let mut groups: BTreeMap<&'static str, Vec<&SymbolEntry>> = BTreeMap::new();
+    for entry in entries {
+        groups.entry(entry.kind_name).or_default().push(entry);
+    }
+
+    let mut sections = Vec::new();
+    for (kind, mut group_entries) in groups {
+        group_entries.sort_by(|a, b| a.name_path.cmp(&b.name_path).then(a.line.cmp(&b.line)));
+        let mut lines = vec![format!("{kind} ({})", group_entries.len())];
+        for entry in group_entries {
+            let location = entry
+                .location
+                .clone()
+                .or_else(|| entry.line.map(|line| format!("line {line}")))
+                .unwrap_or_else(|| "line ?".to_string());
+            let suffix = match mode {
+                SymbolRenderMode::Full => String::new(),
+                SymbolRenderMode::ChildCounts if entry.child_count > 0 => {
+                    format!(" [children: {}]", entry.child_count)
+                }
+                SymbolRenderMode::ChildCounts => String::new(),
+            };
+            lines.push(format!("- {} ({location}){suffix}", entry.name_path));
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    sections.join("\n\n")
+}
+
+fn render_kind_counts(entries: &[SymbolEntry]) -> String {
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for entry in entries {
+        *counts.entry(entry.kind_name).or_default() += 1;
+    }
+
+    let mut lines = vec!["Symbol kinds".to_string()];
+    for (kind, count) in counts {
+        lines.push(format!("- {kind}: {count}"));
+    }
+    lines.join("\n")
+}
+
+pub fn parse_symbol_kind_filter(value: &str) -> Result<HashSet<u64>, String> {
+    let mut kinds = HashSet::new();
+    for raw_kind in value.split(',') {
+        let normalized = raw_kind.trim().to_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        let kind_num = match normalized.as_str() {
+            "file" => 1,
+            "module" => 2,
+            "namespace" => 3,
+            "package" => 4,
+            "class" => 5,
+            "method" => 6,
+            "property" => 7,
+            "field" => 8,
+            "constructor" => 9,
+            "enum" => 10,
+            "interface" => 11,
+            "function" | "fn" => 12,
+            "variable" | "var" => 13,
+            "constant" | "const" => 14,
+            "string" => 15,
+            "number" => 16,
+            "boolean" | "bool" => 17,
+            "array" => 18,
+            "object" => 19,
+            "key" => 20,
+            "null" => 21,
+            "enummember" | "enum_member" | "enum-member" => 22,
+            "struct" => 23,
+            "event" => 24,
+            "operator" => 25,
+            "typeparameter" | "type_parameter" | "type-parameter" => 26,
+            other => return Err(format!("unknown symbol kind filter: {other}")),
+        };
+        kinds.insert(kind_num);
+    }
+
+    if kinds.is_empty() {
+        return Err("symbol kind filter must not be empty".to_string());
+    }
+
+    Ok(kinds)
 }
 
 fn symbol_kind_name(kind: u64) -> &'static str {
@@ -856,7 +1042,12 @@ impl LspManager {
     }
 
     /// Send textDocument/documentSymbol and return formatted symbol list.
-    pub async fn document_symbols(&self, worktree: &Path, path: &Path) -> Result<String, String> {
+    pub async fn document_symbols(
+        &self,
+        worktree: &Path,
+        path: &Path,
+        query: SymbolQuery,
+    ) -> Result<String, String> {
         let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
         let uri = ensure_did_open(&stdin, path, &opened).await?;
 
@@ -881,8 +1072,8 @@ impl LspManager {
             return Ok("No symbols found in this document.".to_string());
         }
 
-        let formatted: Vec<String> = symbols.iter().map(|s| format_symbol(s, 0)).collect();
-        Ok(formatted.join("\n"))
+        let entries = parse_symbol_tree(&symbols, &query);
+        Ok(format_symbol_entries(&entries))
     }
 }
 
@@ -1541,39 +1732,93 @@ mod tests {
         assert_eq!(result.unwrap(), ra_path);
     }
 
-    // --- format_symbol ---
+    // --- symbols formatting and filtering ---
 
     #[test]
-    fn format_symbol_with_location() {
-        let sym = json!({
-            "name": "my_func",
-            "kind": 12,
-            "location": {
-                "uri": "file:///foo.rs",
-                "range": { "start": { "line": 5, "character": 0 }, "end": { "line": 5, "character": 10 } }
-            }
-        });
-        let result = format_symbol(&sym, 0);
-        assert!(result.contains("Function my_func"));
-        assert!(result.contains("/foo.rs:6:1"));
+    fn parse_symbol_kind_filter_supports_aliases() {
+        let kinds = parse_symbol_kind_filter("function,method,type_parameter").unwrap();
+        assert!(kinds.contains(&12));
+        assert!(kinds.contains(&6));
+        assert!(kinds.contains(&26));
     }
 
     #[test]
-    fn format_symbol_with_children() {
-        let sym = json!({
-            "name": "MyStruct",
+    fn parse_symbol_tree_filters_and_formats_grouped_output() {
+        let symbols = vec![json!({
+            "name": "Config",
             "kind": 23,
             "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 10, "character": 0 } },
             "children": [
                 {
-                    "name": "field_a",
+                    "name": "new",
+                    "kind": 12,
+                    "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 3 } }
+                },
+                {
+                    "name": "value",
                     "kind": 8,
-                    "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 20 } }
+                    "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 5 } }
                 }
             ]
-        });
-        let result = format_symbol(&sym, 0);
-        assert!(result.contains("Struct MyStruct"));
-        assert!(result.contains("  Field field_a"));
+        })];
+
+        let entries = parse_symbol_tree(
+            &symbols,
+            &SymbolQuery {
+                depth: Some(1),
+                kinds: Some(HashSet::from([23])),
+                name_filter: Some("conf".to_string()),
+            },
+        );
+
+        let output = format_symbol_entries(&entries);
+        assert!(output.contains("Struct (1)"));
+        assert!(output.contains("- Config (line 1)"));
+        assert!(!output.contains("Field"));
+        assert!(!output.contains("new"));
+    }
+
+    #[test]
+    fn parse_symbol_tree_matches_nested_name_paths() {
+        let symbols = vec![json!({
+            "name": "Outer",
+            "kind": 5,
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 5, "character": 0 } },
+            "children": [
+                {
+                    "name": "target_method",
+                    "kind": 6,
+                    "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 5 } }
+                }
+            ]
+        })];
+
+        let entries = parse_symbol_tree(
+            &symbols,
+            &SymbolQuery {
+                depth: None,
+                kinds: Some(HashSet::from([6])),
+                name_filter: Some("outer/target".to_string()),
+            },
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name_path, "Outer/target_method");
+    }
+
+    #[test]
+    fn format_symbol_entries_falls_back_for_large_outputs() {
+        let entries: Vec<SymbolEntry> = (0..250)
+            .map(|index| SymbolEntry {
+                kind_name: "Function",
+                name_path: format!("module/very_long_symbol_name_{index:03}_{}", "x".repeat(40)),
+                line: Some(index + 1),
+                location: None,
+                child_count: 3,
+            })
+            .collect();
+
+        let output = format_symbol_entries(&entries);
+        assert!(output.contains("output shortened"));
     }
 }
