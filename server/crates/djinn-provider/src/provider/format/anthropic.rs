@@ -690,7 +690,6 @@ mod tests {
 
     #[test]
     fn test_system_blocks_skips_empty_and_whitespace_content() {
-        let provider = test_provider();
         let mut conv = Conversation::default();
         conv.push(crate::message::Message {
             role: djinn_core::message::Role::System,
