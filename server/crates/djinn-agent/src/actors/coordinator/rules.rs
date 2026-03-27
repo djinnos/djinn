@@ -359,6 +359,28 @@ mod tests {
             .count()
     }
 
+    async fn assert_planning_task_count(
+        task_repo: &TaskRepository,
+        epic_id: &str,
+        expected: usize,
+        message: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let tasks = task_repo.list_by_epic(epic_id).await.unwrap();
+            let count = planning_count(&tasks);
+            if count == expected {
+                return;
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                assert_eq!(count, expected, "{message}");
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     // ── AC1: Spike/research closure → decomposition task ──────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -376,14 +398,13 @@ mod tests {
 
         // Close the spike task — should trigger decomposition task creation.
         close_task(&db, &spike.id, &tx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
-        assert_eq!(
-            planning_count(&tasks),
+        assert_planning_task_count(
+            &task_repo,
+            &epic.id,
             1,
-            "spike closure should create exactly one planning task"
-        );
+            "spike closure should create exactly one planning task",
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -401,14 +422,13 @@ mod tests {
         let _handle = spawn_coordinator(&db, &tx);
 
         close_task(&db, &research.id, &tx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
-        assert_eq!(
-            planning_count(&tasks),
+        assert_planning_task_count(
+            &task_repo,
+            &epic.id,
             1,
-            "research closure should create one planning task"
-        );
+            "research closure should create one planning task",
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
