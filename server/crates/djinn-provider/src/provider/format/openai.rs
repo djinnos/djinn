@@ -832,4 +832,75 @@ mod tests {
             other => panic!("expected ToolUse, got {other:?}"),
         }
     }
+
+    // ─── E2E: OpenAI formatting ignores Anthropic cache metadata ──────────────
+
+    /// E2E: when a system message carries Anthropic-style cache metadata and
+    /// multi-block content (as produced by build_system_message for an Anthropic
+    /// model), OpenAI formatting flattens it into a single system message with
+    /// concatenated text — no cache_control, no array blocks.
+    #[test]
+    fn e2e_openai_ignores_anthropic_cache_metadata_on_system_message() {
+        use crate::message::{CacheBreakpoint, ContentBlock, MessageMeta};
+
+        let provider = OpenAIProvider::new(test_openai_config());
+
+        // Build a system message with the same structure that build_system_message
+        // would produce for an Anthropic model with repo map present.
+        let sys_msg = Message {
+            role: Role::System,
+            content: vec![
+                ContentBlock::Text {
+                    text: "You are a helpful assistant.".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "## Current Project\nDemo project".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "## Repository Map\nsrc/lib.rs\n  pub fn run()".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "Be concise.".to_string(),
+                },
+            ],
+            metadata: Some(MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(serde_json::json!({
+                    "anthropic_cache_breakpoint": CacheBreakpoint {
+                        kind: Some("stable_prefix".to_string()),
+                    }
+                })),
+            }),
+        };
+
+        let mut conv = Conversation::new();
+        conv.push(sys_msg);
+        conv.push(Message::user("Hello"));
+
+        let req = provider.build_request(&conv, &[], None);
+        let messages = req["messages"].as_array().expect("messages array");
+
+        // OpenAI format: system message is a regular message, no cache_control anywhere
+        let system_msg = &messages[0];
+        assert_eq!(system_msg["role"], "system");
+
+        // Content should be a plain array of text blocks without cache_control
+        let content = system_msg["content"].as_array().expect("content array");
+        for block in content {
+            assert!(
+                block.get("cache_control").is_none(),
+                "OpenAI system blocks must not contain cache_control: {block}"
+            );
+        }
+
+        // The text content is preserved
+        let texts: Vec<&str> = content
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("helpful assistant")));
+        assert!(texts.iter().any(|t| t.contains("Repository Map")));
+    }
 }
