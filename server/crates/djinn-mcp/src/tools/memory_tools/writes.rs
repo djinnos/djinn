@@ -329,7 +329,7 @@ impl DjinnMcpServer {
         self.memory_write_with_worktree(Parameters(p), None).await
     }
 
-    pub(crate) async fn memory_write_with_worktree(
+    pub async fn memory_write_with_worktree(
         &self,
         Parameters(p): Parameters<WriteParams>,
         worktree_root: Option<std::path::PathBuf>,
@@ -442,7 +442,7 @@ impl DjinnMcpServer {
         self.memory_edit_with_worktree(Parameters(p), None).await
     }
 
-    pub(crate) async fn memory_edit_with_worktree(
+    pub async fn memory_edit_with_worktree(
         &self,
         Parameters(p): Parameters<EditParams>,
         worktree_root: Option<std::path::PathBuf>,

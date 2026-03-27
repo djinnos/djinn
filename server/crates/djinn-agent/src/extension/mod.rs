@@ -22,8 +22,10 @@ use djinn_mcp::tools::agent_tools::{
 };
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
 use djinn_mcp::tools::memory_tools::{
-    BuildContextParams as SharedMemoryBuildContextParams, ListParams as SharedMemoryListParams,
+    BuildContextParams as SharedMemoryBuildContextParams,
+    EditParams as SharedMemoryEditParams, ListParams as SharedMemoryListParams,
     ReadParams as SharedMemoryReadParams, SearchParams as SharedMemorySearchParams,
+    WriteParams as SharedMemoryWriteParams,
 };
 use djinn_mcp::tools::task_tools::{
     CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
@@ -183,6 +185,12 @@ where
             )
             .await
         }
+        "memory_write" => {
+            call_memory_write(state, &call.arguments, &worktree_project_path).await
+        }
+        "memory_edit" => {
+            call_memory_edit(state, &call.arguments, &worktree_project_path).await
+        }
         "agent_metrics" => call_agent_metrics(state, &call.arguments, &worktree_project_path).await,
         "agent_amend_prompt" => {
             call_agent_amend_prompt(state, &call.arguments, &worktree_project_path).await
@@ -337,6 +345,26 @@ struct MemoryBuildContextParams {
     budget: Option<i64>,
     task_id: Option<String>,
     min_confidence: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct MemoryWriteParams {
+    title: String,
+    content: String,
+    #[serde(rename = "type")]
+    note_type: String,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct MemoryEditParams {
+    identifier: String,
+    operation: String,
+    content: String,
+    find_text: Option<String>,
+    section: Option<String>,
+    #[serde(rename = "type")]
+    note_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1064,6 +1092,56 @@ async fn call_memory_build_context(
     .unwrap_or_else(
         |_| serde_json::json!({ "error": "failed to serialize memory_build_context response" }),
     ))
+}
+
+async fn call_memory_write(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let p: MemoryWriteParams = parse_args(arguments)?;
+    let project_path = project_path.to_owned();
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let result = server
+        .memory_write_with_worktree(
+            rmcp::handler::server::wrapper::Parameters(SharedMemoryWriteParams {
+                project: project_path,
+                title: p.title,
+                content: p.content,
+                note_type: p.note_type,
+                tags: p.tags,
+            }),
+            None,
+        )
+        .await;
+    Ok(serde_json::to_value(result.0)
+        .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize memory_write response" })))
+}
+
+async fn call_memory_edit(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let p: MemoryEditParams = parse_args(arguments)?;
+    let project_path = project_path.to_owned();
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let result = server
+        .memory_edit_with_worktree(
+            rmcp::handler::server::wrapper::Parameters(SharedMemoryEditParams {
+                project: project_path,
+                identifier: p.identifier,
+                operation: p.operation,
+                content: p.content,
+                find_text: p.find_text,
+                section: p.section,
+                note_type: p.note_type,
+            }),
+            None,
+        )
+        .await;
+    Ok(serde_json::to_value(result.0)
+        .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize memory_edit response" })))
 }
 
 async fn call_agent_metrics(
@@ -2909,6 +2987,14 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
     tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
     tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_write())
+            .expect("serialize tool_memory_write"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_edit())
+            .expect("serialize tool_memory_edit"),
+    );
     tool_values
         .push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
     tool_values.push(
@@ -3009,6 +3095,14 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     tool_values.push(
         serde_json::to_value(shared_schemas::tool_role_create())
             .expect("serialize tool_role_create"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_write())
+            .expect("serialize tool_memory_write"),
+    );
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_memory_edit())
+            .expect("serialize tool_memory_edit"),
     );
     for value in [
         serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
@@ -4759,6 +4853,8 @@ mod tests {
         assert!(worker.iter().any(|n| n == "shell"));
         assert!(worker.iter().any(|n| n == "write"));
         assert!(worker.iter().any(|n| n == "edit"));
+        assert!(worker.iter().any(|n| n == "memory_write"));
+        assert!(worker.iter().any(|n| n == "memory_edit"));
         assert!(worker.iter().any(|n| n == "submit_work"));
         assert!(!worker.iter().any(|n| n == "task_comment_add"));
 
@@ -4786,6 +4882,8 @@ mod tests {
         assert!(architect.iter().any(|n| n == "task_comment_add"));
         assert!(architect.iter().any(|n| n == "task_transition"));
         assert!(architect.iter().any(|n| n == "task_kill_session"));
+        assert!(architect.iter().any(|n| n == "memory_write"));
+        assert!(architect.iter().any(|n| n == "memory_edit"));
         assert!(architect.iter().any(|n| n == "submit_work"));
         // Architect must NOT have code-writing tools.
         assert!(!architect.iter().any(|n| n == "write"));

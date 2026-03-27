@@ -200,6 +200,42 @@ pub(crate) fn tool_memory_list() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_memory_write() -> RmcpTool {
+    RmcpTool::new(
+        "memory_write".to_string(),
+        "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["title", "content", "type"],
+            "properties": {
+                "title": {"type": "string", "description": "Note title"},
+                "content": {"type": "string", "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes."},
+                "type": {"type": "string", "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for categorisation"}
+            }
+        }),
+    )
+}
+
+pub(crate) fn tool_memory_edit() -> RmcpTool {
+    RmcpTool::new(
+        "memory_edit".to_string(),
+        "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).".to_string(),
+        object!({
+            "type": "object",
+            "required": ["identifier", "operation", "content"],
+            "properties": {
+                "identifier": {"type": "string", "description": "Note permalink or title"},
+                "operation": {"type": "string", "description": "Edit operation: append, prepend, find_replace, replace_section"},
+                "content": {"type": "string", "description": "New content to insert or replace with"},
+                "find_text": {"type": "string", "description": "Required for find_replace: exact text to search for"},
+                "section": {"type": "string", "description": "Required for replace_section: heading text identifying the section"},
+                "type": {"type": "string", "description": "If provided and different from current type, move the note to the new type's folder"}
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_memory_build_context() -> RmcpTool {
     RmcpTool::new(
         "memory_build_context".to_string(),

@@ -10,6 +10,7 @@ You CAN:
 - Read any file in the repository with `read`, `shell`, `lsp`
 - Search the codebase with `shell` (grep, git log, etc.)
 - Search memory with `memory_search`, `memory_read`, `memory_list`, `memory_build_context`
+- Write to memory with `memory_write`, `memory_edit` (persist spike findings, research results, ADRs)
 - List and inspect tasks and epics: `task_list`, `task_show`, `epic_show`, `epic_tasks`
 - Add comments to tasks: `task_comment_add`
 - Update tasks: `task_update` (set `blocked_by_add`/`blocked_by_remove` to enforce sequencing, update descriptions, AC)
@@ -60,6 +61,16 @@ For spikes or tasks with design decisions:
 ### 5. Strategic ADR Gaps
 - Check memory for ADRs that are referenced but not written: `memory_search(q="ADR")`
 - If an architectural decision is needed and there's no ADR, note it in a comment
+
+### 5b. Spike and Research Findings
+
+When you complete a spike investigation or research analysis, **write findings to memory** so they persist beyond your session:
+
+- Use `memory_write(title="...", content="...", type="tech_spike")` for technical spike results (API feasibility, library evaluations, performance investigations)
+- Use `memory_write(title="...", content="...", type="research")` for broader research findings (competitive analysis, architecture surveys, design explorations)
+- **Always include task traceability**: reference the originating task ID in the note content (e.g. "Originated from task {{task_id}}" or link via `## Relations` section)
+- Use `memory_edit` to append additional findings to an existing note if the spike spans multiple observations
+- After writing the note, attach it to the relevant epic or task with `task_update(id, memory_refs_add=["permalink"])` or `epic_update(id, memory_refs_add=["permalink"])`
 
 ### 6. Agent Effectiveness Review
 
@@ -121,6 +132,8 @@ The metrics are already captured separately in the `metrics_snapshot` parameter.
 - `memory_read(path)` — read a specific note
 - `memory_search(q)` — search memory for relevant context
 - `memory_build_context(url)` — build tiered context from a memory note or folder; use `url="folder/*"` for all notes in a folder
+- `memory_write(title, content, type, tags?)` — create or update a note (use for spike findings, research results, ADRs)
+- `memory_edit(identifier, operation, content, find_text?, section?, type?)` — edit an existing note (append, prepend, find_replace, replace_section)
 - `role_metrics(role_id?, window_days?)` — get effectiveness metrics per agent role
 - `role_amend_prompt(role_id, amendment, metrics_snapshot?)` — append amendment to a specialist role's learned_prompt and log to history
 - `agent_create(name, base_role, description?, system_prompt_extensions?, model_preference?)` — create a new specialist agent when existing agents lack required capabilities
