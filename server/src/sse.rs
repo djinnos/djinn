@@ -1,13 +1,228 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use futures::stream;
 use serde::Serialize;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio::sync::broadcast;
 
+use crate::events::DjinnEventEnvelope;
 use crate::server::AppState;
 use djinn_db::default_db_path;
+
+const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
+const SESSION_MESSAGE_MIN_INTERVAL: Duration = Duration::from_millis(50);
+const SESSION_TOKEN_UPDATE_MIN_INTERVAL: Duration = Duration::from_millis(500);
+const VERIFICATION_STEP_MIN_INTERVAL: Duration = Duration::from_millis(200);
+
+enum EventTier {
+    Immediate,
+    Coalesced {
+        key: String,
+    },
+    Throttled {
+        key: &'static str,
+        min_interval: Duration,
+    },
+}
+
+struct BatchAccumulator {
+    coalesced: HashMap<String, DjinnEventEnvelope>,
+    throttled_pending: HashMap<&'static str, DjinnEventEnvelope>,
+    throttled_last_sent: HashMap<&'static str, Instant>,
+}
+
+impl BatchAccumulator {
+    fn new() -> Self {
+        Self {
+            coalesced: HashMap::new(),
+            throttled_pending: HashMap::new(),
+            throttled_last_sent: HashMap::new(),
+        }
+    }
+
+    fn classify(envelope: &DjinnEventEnvelope) -> EventTier {
+        match (envelope.entity_type(), envelope.action()) {
+            ("task", "created" | "deleted")
+            | ("epic", "created" | "deleted")
+            | ("session", "dispatched" | "ended")
+            | ("lifecycle", "step") => EventTier::Immediate,
+            ("task", "updated")
+            | ("epic", "updated")
+            | ("agent", "updated")
+            | ("project", "updated") => EventTier::Coalesced {
+                key: coalesce_key(envelope),
+            },
+            ("session", "message") => EventTier::Throttled {
+                key: "session.message",
+                min_interval: SESSION_MESSAGE_MIN_INTERVAL,
+            },
+            ("session", "token_update") => EventTier::Throttled {
+                key: "session.token_update",
+                min_interval: SESSION_TOKEN_UPDATE_MIN_INTERVAL,
+            },
+            ("verification", "step") => EventTier::Throttled {
+                key: "verification.step",
+                min_interval: VERIFICATION_STEP_MIN_INTERVAL,
+            },
+            _ => EventTier::Immediate,
+        }
+    }
+
+    fn push(&mut self, envelope: DjinnEventEnvelope) -> Vec<DjinnEventEnvelope> {
+        match Self::classify(&envelope) {
+            EventTier::Immediate => vec![envelope],
+            EventTier::Coalesced { key } => {
+                self.coalesced.insert(key, envelope);
+                Vec::new()
+            }
+            EventTier::Throttled { key, min_interval } => {
+                let should_send_now = self
+                    .throttled_last_sent
+                    .get(key)
+                    .map(|last| last.elapsed() >= min_interval)
+                    .unwrap_or(true);
+                if should_send_now {
+                    self.throttled_last_sent.insert(key, Instant::now());
+                    vec![envelope]
+                } else {
+                    self.throttled_pending.insert(key, envelope);
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn flush(&mut self) -> Vec<DjinnEventEnvelope> {
+        let mut out = Vec::new();
+
+        let mut coalesced = self.coalesced.drain().collect::<Vec<_>>();
+        coalesced.sort_by(|a, b| a.0.cmp(&b.0));
+        out.extend(coalesced.into_iter().map(|(_, envelope)| envelope));
+
+        let pending_keys = self.throttled_pending.keys().copied().collect::<Vec<_>>();
+        for key in pending_keys {
+            let Some(envelope) = self.throttled_pending.get(key) else {
+                continue;
+            };
+            let min_interval = match key {
+                "session.message" => SESSION_MESSAGE_MIN_INTERVAL,
+                "session.token_update" => SESSION_TOKEN_UPDATE_MIN_INTERVAL,
+                "verification.step" => VERIFICATION_STEP_MIN_INTERVAL,
+                _ => continue,
+            };
+            let allowed = self
+                .throttled_last_sent
+                .get(key)
+                .map(|last| last.elapsed() >= min_interval)
+                .unwrap_or(true);
+            if allowed {
+                let envelope = self
+                    .throttled_pending
+                    .remove(key)
+                    .expect("pending throttled event exists");
+                self.throttled_last_sent.insert(key, Instant::now());
+                out.push(envelope);
+            } else {
+                let _ = envelope;
+            }
+        }
+
+        out
+    }
+}
+
+fn coalesce_key(envelope: &DjinnEventEnvelope) -> String {
+    let event_name = format!("{}.{}", envelope.entity_type(), envelope.action());
+    let payload = envelope.payload();
+    match (envelope.entity_type(), envelope.action()) {
+        ("task", "updated") => payload
+            .get("task")
+            .and_then(|task| task.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|id| format!("{event_name}:{id}"))
+            .unwrap_or(event_name),
+        ("epic", "updated") => payload
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(|id| format!("{event_name}:{id}"))
+            .unwrap_or(event_name),
+        ("agent", "updated") => payload
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(|id| format!("{event_name}:{id}"))
+            .unwrap_or(event_name),
+        ("project", "updated") => payload
+            .get("id")
+            .and_then(|id| id.as_str())
+            .or_else(|| payload.get("project_id").and_then(|id| id.as_str()))
+            .map(|id| format!("{event_name}:{id}"))
+            .unwrap_or(event_name),
+        _ => event_name,
+    }
+}
+
+fn event_name(envelope: &DjinnEventEnvelope) -> String {
+    format!("{}.{}", envelope.entity_type, envelope.action)
+}
+
+fn serialize_event(envelope: &DjinnEventEnvelope) -> Result<Event, Infallible> {
+    let event_name = event_name(envelope);
+    if envelope.entity_type == "session" {
+        tracing::debug!(event_name = %event_name, "SSE: sending session event to client");
+    }
+    let data = serde_json::to_string(envelope).unwrap_or_else(|_| "{}".to_string());
+    Ok(Event::default().event(event_name).data(data))
+}
+
+fn lagged_event() -> Event {
+    Event::default().event("lagged").data("{}")
+}
+
+async fn next_batched_event(
+    rx: &mut broadcast::Receiver<DjinnEventEnvelope>,
+    accumulator: &mut BatchAccumulator,
+    interval: &mut tokio::time::Interval,
+) -> Option<Result<Event, Infallible>> {
+    loop {
+        let flushed = accumulator.flush();
+        if let Some(first) = flushed.into_iter().next() {
+            return Some(serialize_event(&first));
+        }
+
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(envelope) => {
+                        let ready = accumulator.push(envelope);
+                        if let Some(first) = ready.into_iter().next() {
+                            return Some(serialize_event(&first));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "SSE subscriber lagged");
+                        return Some(Ok(lagged_event()));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let flushed = accumulator.flush();
+                        if let Some(first) = flushed.into_iter().next() {
+                            return Some(serialize_event(&first));
+                        }
+                        return None;
+                    }
+                }
+            }
+            _ = interval.tick() => {
+                let flushed = accumulator.flush();
+                if let Some(first) = flushed.into_iter().next() {
+                    return Some(serialize_event(&first));
+                }
+            }
+        }
+    }
+}
 
 pub async fn events_handler(
     State(state): State<AppState>,
@@ -16,23 +231,19 @@ pub async fn events_handler(
     let cancel = state.cancel().clone();
     tracing::info!("SSE: new client connected");
 
-    let event_stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(envelope) => {
-            let event_name = format!("{}.{}", envelope.entity_type, envelope.action);
-            if envelope.entity_type == "session" {
-                tracing::debug!(event_name = %event_name, "SSE: sending session event to client");
-            }
-            serde_json::to_string(&envelope)
-                .ok()
-                .map(|data| Ok::<Event, Infallible>(Event::default().event(event_name).data(data)))
-        }
-        Err(e) => {
-            tracing::warn!("SSE subscriber lagged: {e}");
-            Some(Ok(Event::default().event("lagged").data("{}")))
-        }
-    });
+    let stream = stream::unfold(
+        (
+            rx,
+            BatchAccumulator::new(),
+            tokio::time::interval(FLUSH_INTERVAL),
+        ),
+        |(mut rx, mut accumulator, mut interval)| async move {
+            let next = next_batched_event(&mut rx, &mut accumulator, &mut interval).await;
+            next.map(|event| (event, (rx, accumulator, interval)))
+        },
+    );
 
-    let stream = futures::StreamExt::take_until(event_stream, cancel.cancelled_owned());
+    let stream = futures::StreamExt::take_until(stream, cancel.cancelled_owned());
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -66,7 +277,9 @@ fn is_wsl() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::events::DjinnEventEnvelope;
+    use super::*;
+    use djinn_agent::verification::StepEvent;
+    use serde_json::json;
 
     #[test]
     fn sse_event_name_uses_entity_type_and_action() {
@@ -91,5 +304,106 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("t1")
         );
+    }
+
+    #[test]
+    fn accumulator_immediate_bypasses_batching() {
+        let mut accumulator = BatchAccumulator::new();
+        let ready = accumulator.push(DjinnEventEnvelope::task_deleted("t1"));
+        assert_eq!(ready.len(), 1);
+        assert!(accumulator.flush().is_empty());
+    }
+
+    #[test]
+    fn accumulator_coalesces_entity_updates_keep_latest() {
+        let mut accumulator = BatchAccumulator::new();
+        let first = json!({"id": "task-1", "title": "old"});
+        let second = json!({"id": "task-1", "title": "new"});
+        let first_env = DjinnEventEnvelope {
+            entity_type: "task",
+            action: "updated",
+            payload: json!({"task": first, "from_sync": false}),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        };
+        let second_env = DjinnEventEnvelope {
+            entity_type: "task",
+            action: "updated",
+            payload: json!({"task": second, "from_sync": false}),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        };
+        assert!(accumulator.push(first_env).is_empty());
+        assert!(accumulator.push(second_env).is_empty());
+        let flushed = accumulator.flush();
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].payload()["task"]["title"], "new");
+    }
+
+    #[test]
+    fn accumulator_throttles_streaming_events_keep_latest() {
+        let mut accumulator = BatchAccumulator::new();
+        let first =
+            DjinnEventEnvelope::session_message("s1", "t1", "worker", &json!({"content": "a"}));
+        let second =
+            DjinnEventEnvelope::session_message("s1", "t1", "worker", &json!({"content": "b"}));
+        let ready = accumulator.push(first);
+        assert_eq!(ready.len(), 1);
+        assert!(accumulator.push(second).is_empty());
+        assert!(accumulator.flush().is_empty());
+        accumulator.throttled_last_sent.insert(
+            "session.message",
+            Instant::now() - SESSION_MESSAGE_MIN_INTERVAL,
+        );
+        let flushed = accumulator.flush();
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].payload()["message"]["content"], "b");
+    }
+
+    #[test]
+    fn accumulator_throttles_verification_steps() {
+        let mut accumulator = BatchAccumulator::new();
+        let first = DjinnEventEnvelope::verification_step(
+            "p1",
+            Some("t1"),
+            "verification",
+            &StepEvent::Started {
+                index: 1,
+                total: 2,
+                name: "test".into(),
+                command: "cargo test".into(),
+            },
+        );
+        let second = DjinnEventEnvelope::verification_step(
+            "p1",
+            Some("t1"),
+            "verification",
+            &StepEvent::Finished {
+                index: 1,
+                name: "test".into(),
+                exit_code: 0,
+                duration_ms: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        assert_eq!(accumulator.push(first).len(), 1);
+        assert!(accumulator.push(second).is_empty());
+        accumulator.throttled_last_sent.insert(
+            "verification.step",
+            Instant::now() - VERIFICATION_STEP_MIN_INTERVAL,
+        );
+        let flushed = accumulator.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(flushed[0].payload()["step"].get("Finished").is_some());
+    }
+
+    #[test]
+    fn accumulator_preserves_lagged_signal_behavior() {
+        let event = lagged_event();
+        let text = format!("{:?}", event);
+        assert!(text.contains("lagged"));
     }
 }
