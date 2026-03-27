@@ -70,9 +70,12 @@ fn conversation() -> Conversation {
     conversation
 }
 
-fn anthropic_cached_conversation() -> Conversation {
+fn anthropic_segmented_conversation(
+    include_repo_map: bool,
+    include_dynamic_tail: bool,
+) -> Conversation {
     let mut conversation = Conversation::new();
-    conversation.push(Message::system_with_metadata(
+    let mut system = Message::system_with_metadata(
         "Stable system prefix",
         djinn_core::message::MessageMeta {
             input_tokens: None,
@@ -84,9 +87,45 @@ fn anthropic_cached_conversation() -> Conversation {
                 }
             })),
         },
-    ));
+    );
+    system
+        .content
+        .push(djinn_core::message::ContentBlock::Text {
+            text: "Tool definitions".to_string(),
+        });
+    if include_repo_map {
+        system
+            .content
+            .push(djinn_core::message::ContentBlock::Text {
+                text: "Repository map".to_string(),
+            });
+    }
+    if include_dynamic_tail {
+        system
+            .content
+            .push(djinn_core::message::ContentBlock::Text {
+                text: "Task-specific volatile context".to_string(),
+            });
+    }
+    conversation.push(system);
     conversation.push(Message::user("List files"));
     conversation
+}
+
+async fn drain_provider_stream_with_conversation(
+    provider: &dyn LlmProvider,
+    conversation: &Conversation,
+    tools: &[Value],
+    tool_choice: Option<ToolChoice>,
+) {
+    let mut stream = provider
+        .stream(conversation, tools, tool_choice)
+        .await
+        .expect("provider stream should start");
+
+    while let Some(item) = stream.next().await {
+        item.expect("stream item should succeed");
+    }
 }
 
 async fn drain_provider_stream(
@@ -95,14 +134,7 @@ async fn drain_provider_stream(
     tool_choice: Option<ToolChoice>,
 ) {
     let conversation = conversation();
-    let mut stream = provider
-        .stream(&conversation, tools, tool_choice)
-        .await
-        .expect("provider stream should start");
-
-    while let Some(item) = stream.next().await {
-        item.expect("stream item should succeed");
-    }
+    drain_provider_stream_with_conversation(provider, &conversation, tools, tool_choice).await;
 }
 
 fn sse_template() -> ResponseTemplate {
@@ -390,18 +422,23 @@ async fn anthropic_provider_serializes_cache_control_for_stable_system_prefix() 
 
     let provider = AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth));
     let tools = tool_definition();
-    let conversation = anthropic_cached_conversation();
-    let mut stream = provider
-        .stream(&conversation, &tools, Some(ToolChoice::Required))
-        .await
-        .expect("provider stream should start");
-    while let Some(item) = stream.next().await {
-        item.expect("stream item should succeed");
-    }
+    let conversation = anthropic_segmented_conversation(false, false);
+    drain_provider_stream_with_conversation(
+        &provider,
+        &conversation,
+        &tools,
+        Some(ToolChoice::Required),
+    )
+    .await;
 
     let requests = server.received_requests().await.expect("captured requests");
     let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
-    assert_eq!(body["system"], "Stable system prefix");
+    let system = body["system"].as_array().expect("system block array");
+    assert_eq!(system.len(), 2);
+    assert_eq!(system[0]["text"], "Stable system prefix");
+    assert_eq!(system[1]["text"], "Tool definitions");
+    assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+    assert!(system[1].get("cache_control").is_none());
 }
 
 #[tokio::test]
@@ -415,30 +452,15 @@ async fn anthropic_provider_applies_cache_control_only_to_stable_prefix_blocks()
 
     let provider = AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth));
     let tools = tool_definition();
-    let mut conversation = anthropic_cached_conversation();
-    conversation.messages[0]
-        .content
-        .push(djinn_core::message::ContentBlock::Text {
-            text: "Tool definitions".to_string(),
-        });
-    conversation.messages[0]
-        .content
-        .push(djinn_core::message::ContentBlock::Text {
-            text: "Repository map".to_string(),
-        });
-    conversation.messages[0]
-        .content
-        .push(djinn_core::message::ContentBlock::Text {
-            text: "Task-specific volatile context".to_string(),
-        });
+    let conversation = anthropic_segmented_conversation(true, true);
 
-    let mut stream = provider
-        .stream(&conversation, &tools, Some(ToolChoice::Required))
-        .await
-        .expect("provider stream should start");
-    while let Some(item) = stream.next().await {
-        item.expect("stream item should succeed");
-    }
+    drain_provider_stream_with_conversation(
+        &provider,
+        &conversation,
+        &tools,
+        Some(ToolChoice::Required),
+    )
+    .await;
 
     let requests = server.received_requests().await.expect("captured requests");
     let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
@@ -452,6 +474,72 @@ async fn anthropic_provider_applies_cache_control_only_to_stable_prefix_blocks()
     assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
     assert_eq!(system[2]["cache_control"]["kind"], "stable_prefix");
     assert!(system[3].get("cache_control").is_none());
+}
+
+#[tokio::test]
+async fn anthropic_provider_preserves_order_when_repo_map_is_absent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(anthropic_sse_template())
+        .mount(&server)
+        .await;
+
+    let provider = AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth));
+    let tools = tool_definition();
+    let conversation = anthropic_segmented_conversation(false, true);
+
+    drain_provider_stream_with_conversation(
+        &provider,
+        &conversation,
+        &tools,
+        Some(ToolChoice::Required),
+    )
+    .await;
+
+    let requests = server.received_requests().await.expect("captured requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    let system = body["system"].as_array().expect("system block array");
+    assert_eq!(system.len(), 3);
+    assert_eq!(system[0]["text"], "Stable system prefix");
+    assert_eq!(system[1]["text"], "Tool definitions");
+    assert_eq!(system[2]["text"], "Task-specific volatile context");
+    assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+    assert!(system[2].get("cache_control").is_none());
+}
+
+#[tokio::test]
+async fn anthropic_provider_preserves_order_when_dynamic_tail_is_absent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(anthropic_sse_template())
+        .mount(&server)
+        .await;
+
+    let provider = AnthropicProvider::new(anthropic_config(server.uri(), AuthMethod::NoAuth));
+    let tools = tool_definition();
+    let conversation = anthropic_segmented_conversation(true, false);
+
+    drain_provider_stream_with_conversation(
+        &provider,
+        &conversation,
+        &tools,
+        Some(ToolChoice::Required),
+    )
+    .await;
+
+    let requests = server.received_requests().await.expect("captured requests");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    let system = body["system"].as_array().expect("system block array");
+    assert_eq!(system.len(), 3);
+    assert_eq!(system[0]["text"], "Stable system prefix");
+    assert_eq!(system[1]["text"], "Tool definitions");
+    assert_eq!(system[2]["text"], "Repository map");
+    assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+    assert!(system[2].get("cache_control").is_none());
 }
 
 #[tokio::test]
