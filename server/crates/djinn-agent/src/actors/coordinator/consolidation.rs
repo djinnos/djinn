@@ -14,9 +14,22 @@ const CONSOLIDATION_MIN_CLUSTER_SIZE: usize = 3;
 const CONSOLIDATION_TAGS: &str = r#"["canonical","consolidated"]"#;
 
 pub(super) trait ConsolidationRunner: Send + Sync {
+    /// Run consolidation for a note group across all notes (unscoped).
+    /// Retained for backward compatibility and direct invocations outside the
+    /// periodic session-scoped consolidation loop.
+    #[allow(dead_code)]
     fn run_for_group<'a>(
         &'a self,
         group: DbNoteGroup,
+    ) -> Pin<Box<dyn Future<Output = djinn_db::Result<()>> + Send + 'a>>;
+
+    /// Run consolidation for a note group scoped to a single session.
+    /// Only notes linked to `session_id` via `consolidated_note_provenance`
+    /// are considered as duplicate candidates.
+    fn run_for_group_in_session<'a>(
+        &'a self,
+        group: DbNoteGroup,
+        session_id: String,
     ) -> Pin<Box<dyn Future<Output = djinn_db::Result<()>> + Send + 'a>>;
 }
 
@@ -41,64 +54,94 @@ impl ConsolidationRunner for DbConsolidationRunner {
             let clusters = repo
                 .likely_duplicate_clusters(&group.project_id, &group.note_type)
                 .await?;
-            let qualifying_clusters = clusters
-                .iter()
-                .filter(|cluster| cluster.note_ids.len() >= CONSOLIDATION_MIN_CLUSTER_SIZE)
-                .collect::<Vec<_>>();
-
-            if qualifying_clusters.is_empty() {
-                return Ok(());
-            }
-
-            let mut consolidated_note_count = 0_i64;
-            let mut source_note_count = 0_i64;
-
-            for cluster in qualifying_clusters.iter().copied() {
-                let source_session_ids = repo
-                    .resolve_source_session_ids(&group.project_id, &cluster.note_ids)
-                    .await?;
-                let source_session_refs = source_session_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                let synthesized = synthesize_cluster(cluster);
-
-                repo.create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
-                    project_id: &group.project_id,
-                    note_type: &group.note_type,
-                    title: &synthesized.title,
-                    content: &synthesized.content,
-                    tags: CONSOLIDATION_TAGS,
-                    abstract_: synthesized.abstract_.as_deref(),
-                    overview: synthesized.overview.as_deref(),
-                    confidence: synthesized.confidence,
-                    source_session_ids: &source_session_refs,
-                })
-                .await?;
-
-                consolidated_note_count += 1;
-                source_note_count += cluster.note_ids.len() as i64;
-            }
-
-            let completed_at = now_rfc3339();
-            repo.create_run_metric(CreateConsolidationRunMetric {
-                project_id: &group.project_id,
-                note_type: &group.note_type,
-                status: "completed",
-                scanned_note_count: group.note_count,
-                candidate_cluster_count: clusters.len() as i64,
-                consolidated_cluster_count: qualifying_clusters.len() as i64,
-                consolidated_note_count,
-                source_note_count,
-                started_at: &started_at,
-                completed_at: Some(&completed_at),
-                error_message: None,
-            })
-            .await?;
-
-            Ok(())
+            consolidate_clusters(&repo, &group, &clusters, &started_at).await
         })
     }
+
+    fn run_for_group_in_session<'a>(
+        &'a self,
+        group: DbNoteGroup,
+        session_id: String,
+    ) -> Pin<Box<dyn Future<Output = djinn_db::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let repo = NoteConsolidationRepository::new(self.db.clone());
+            let started_at = now_rfc3339();
+            let clusters = repo
+                .likely_duplicate_clusters_for_session(
+                    &group.project_id,
+                    &group.note_type,
+                    &session_id,
+                )
+                .await?;
+            consolidate_clusters(&repo, &group, &clusters, &started_at).await
+        })
+    }
+}
+
+/// Shared consolidation logic: filter qualifying clusters, create canonical
+/// notes, and record run metrics.
+async fn consolidate_clusters(
+    repo: &NoteConsolidationRepository,
+    group: &DbNoteGroup,
+    clusters: &[ConsolidationCluster],
+    started_at: &str,
+) -> djinn_db::Result<()> {
+    let qualifying_clusters = clusters
+        .iter()
+        .filter(|cluster| cluster.note_ids.len() >= CONSOLIDATION_MIN_CLUSTER_SIZE)
+        .collect::<Vec<_>>();
+
+    if qualifying_clusters.is_empty() {
+        return Ok(());
+    }
+
+    let mut consolidated_note_count = 0_i64;
+    let mut source_note_count = 0_i64;
+
+    for cluster in qualifying_clusters.iter().copied() {
+        let source_session_ids = repo
+            .resolve_source_session_ids(&group.project_id, &cluster.note_ids)
+            .await?;
+        let source_session_refs = source_session_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let synthesized = synthesize_cluster(cluster);
+
+        repo.create_canonical_consolidated_note(CreateCanonicalConsolidatedNote {
+            project_id: &group.project_id,
+            note_type: &group.note_type,
+            title: &synthesized.title,
+            content: &synthesized.content,
+            tags: CONSOLIDATION_TAGS,
+            abstract_: synthesized.abstract_.as_deref(),
+            overview: synthesized.overview.as_deref(),
+            confidence: synthesized.confidence,
+            source_session_ids: &source_session_refs,
+        })
+        .await?;
+
+        consolidated_note_count += 1;
+        source_note_count += cluster.note_ids.len() as i64;
+    }
+
+    let completed_at = now_rfc3339();
+    repo.create_run_metric(CreateConsolidationRunMetric {
+        project_id: &group.project_id,
+        note_type: &group.note_type,
+        status: "completed",
+        scanned_note_count: group.note_count,
+        candidate_cluster_count: clusters.len() as i64,
+        consolidated_cluster_count: qualifying_clusters.len() as i64,
+        consolidated_note_count,
+        source_note_count,
+        started_at,
+        completed_at: Some(&completed_at),
+        error_message: None,
+    })
+    .await?;
+
+    Ok(())
 }
 
 struct SynthesizedClusterNote {
@@ -227,22 +270,47 @@ pub(super) async fn run_note_consolidation(
     consolidation_runner: &Arc<dyn ConsolidationRunner>,
 ) {
     let repo = NoteConsolidationRepository::new(db.clone());
-    let groups = match repo.list_db_note_groups().await {
-        Ok(groups) => groups,
+
+    // Session-scoped consolidation: discover sessions that have provenance
+    // entries and consolidate per-session to avoid merging unrelated
+    // cross-session notes (ADR-045 §5).
+    let session_ids = match repo.list_sessions_with_provenance().await {
+        Ok(ids) => ids,
         Err(error) => {
-            tracing::warn!(error = %error, "CoordinatorActor: failed to list DB note groups for consolidation");
+            tracing::warn!(
+                error = %error,
+                "CoordinatorActor: failed to list sessions with provenance for consolidation"
+            );
             return;
         }
     };
 
-    for group in groups {
-        if let Err(error) = consolidation_runner.run_for_group(group.clone()).await {
-            tracing::warn!(
-                project_id = %group.project_id,
-                note_type = %group.note_type,
-                error = %error,
-                "CoordinatorActor: failed to run DB note consolidation"
-            );
+    for session_id in session_ids {
+        let groups = match repo.list_db_note_groups_for_session(&session_id).await {
+            Ok(groups) => groups,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "CoordinatorActor: failed to list session note groups for consolidation"
+                );
+                continue;
+            }
+        };
+
+        for group in groups {
+            if let Err(error) = consolidation_runner
+                .run_for_group_in_session(group.clone(), session_id.clone())
+                .await
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    project_id = %group.project_id,
+                    note_type = %group.note_type,
+                    error = %error,
+                    "CoordinatorActor: failed to run session-scoped DB note consolidation"
+                );
+            }
         }
     }
 }

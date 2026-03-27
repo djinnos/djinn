@@ -1283,17 +1283,24 @@ mod tests {
 
     struct RecordingConsolidationRunner {
         calls: Arc<Mutex<Vec<djinn_db::DbNoteGroup>>>,
+        session_calls: Arc<Mutex<Vec<(djinn_db::DbNoteGroup, String)>>>,
     }
 
     impl RecordingConsolidationRunner {
         fn new() -> Self {
             Self {
                 calls: Arc::new(Mutex::new(Vec::new())),
+                session_calls: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
+        #[allow(dead_code)]
         fn groups(&self) -> Vec<djinn_db::DbNoteGroup> {
             self.calls.lock().unwrap().clone()
+        }
+
+        fn session_groups(&self) -> Vec<(djinn_db::DbNoteGroup, String)> {
+            self.session_calls.lock().unwrap().clone()
         }
     }
 
@@ -1304,6 +1311,20 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = djinn_db::Result<()>> + Send + 'a>> {
             Box::pin(async move {
                 self.calls.lock().unwrap().push(group);
+                Ok(())
+            })
+        }
+
+        fn run_for_group_in_session<'a>(
+            &'a self,
+            group: djinn_db::DbNoteGroup,
+            session_id: String,
+        ) -> Pin<Box<dyn Future<Output = djinn_db::Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.session_calls
+                    .lock()
+                    .unwrap()
+                    .push((group, session_id));
                 Ok(())
             })
         }
@@ -1422,7 +1443,8 @@ mod tests {
         let (tx, _rx) = broadcast::channel(256);
         let project = test_helpers::create_test_project(&db).await;
         let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        note_repo
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+        let note_a = note_repo
             .create_db_note(
                 &project.id,
                 "Retry Storm A",
@@ -1432,7 +1454,7 @@ mod tests {
             )
             .await
             .unwrap();
-        note_repo
+        let note_b = note_repo
             .create_db_note(
                 &project.id,
                 "Retry Storm B",
@@ -1440,6 +1462,29 @@ mod tests {
                 "case",
                 "[]",
             )
+            .await
+            .unwrap();
+
+        // Link both notes to the same session so session-scoped consolidation
+        // discovers them.
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: None,
+                model: "test-model",
+                agent_type: "worker",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        consolidation_repo
+            .add_provenance(&note_a.id, &session.id)
+            .await
+            .unwrap();
+        consolidation_repo
+            .add_provenance(&note_b.id, &session.id)
             .await
             .unwrap();
 
@@ -1501,10 +1546,11 @@ mod tests {
         };
         consolidation::run_note_consolidation(&actor.db, &actor.consolidation_runner).await;
 
-        let groups = runner.groups();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].project_id, project.id);
-        assert_eq!(groups[0].note_type, "case");
+        let session_groups = runner.session_groups();
+        assert_eq!(session_groups.len(), 1);
+        assert_eq!(session_groups[0].0.project_id, project.id);
+        assert_eq!(session_groups[0].0.note_type, "case");
+        assert_eq!(session_groups[0].1, session.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

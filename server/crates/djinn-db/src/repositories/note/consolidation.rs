@@ -53,6 +53,22 @@ impl NoteConsolidationRepository {
         Self { db }
     }
 
+    /// Return distinct session IDs that have at least one provenance entry,
+    /// ordered by session_id ASC.  Used by the consolidation runner to iterate
+    /// over sessions when performing session-scoped duplicate detection.
+    pub async fn list_sessions_with_provenance(&self) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT session_id
+             FROM consolidated_note_provenance
+             ORDER BY session_id ASC",
+        )
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn list_db_note_groups(&self) -> Result<Vec<DbNoteGroup>> {
         self.db.ensure_initialized().await?;
 
@@ -98,6 +114,77 @@ impl NoteConsolidationRepository {
         note_type: &str,
     ) -> Result<Vec<ConsolidationCluster>> {
         let notes = self.list_db_notes_in_group(project_id, note_type).await?;
+        self.clusters_from_notes(project_id, &notes).await
+    }
+
+    /// List DB notes in a group that have provenance linking them to a specific
+    /// session.  This enables session-scoped consolidation — only notes created
+    /// or touched during the given session are returned.
+    pub async fn list_db_notes_in_group_for_session(
+        &self,
+        project_id: &str,
+        note_type: &str,
+        session_id: &str,
+    ) -> Result<Vec<ConsolidationNote>> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query_as::<_, ConsolidationNote>(
+            "SELECT n.id, n.project_id, n.permalink, n.title, n.note_type, n.folder, n.content,
+                    n.abstract as abstract_, n.overview, n.confidence
+             FROM notes n
+             JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
+             WHERE n.project_id = ?1
+               AND n.note_type = ?2
+               AND n.storage = 'db'
+               AND cnp.session_id = ?3
+             ORDER BY n.permalink ASC, n.id ASC",
+        )
+        .bind(project_id)
+        .bind(note_type)
+        .bind(session_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Return note groups that contain at least one note linked to the given
+    /// session via `consolidated_note_provenance`.  Only groups with 2+ notes
+    /// in the session are returned (a minimum for duplicate detection).
+    pub async fn list_db_note_groups_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<DbNoteGroup>> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query_as::<_, DbNoteGroup>(
+            "SELECT n.project_id, n.note_type, COUNT(*) as note_count
+             FROM notes n
+             JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
+             WHERE n.storage = 'db'
+               AND n.note_type IN ('case', 'pattern', 'pitfall')
+               AND cnp.session_id = ?1
+             GROUP BY n.project_id, n.note_type
+             HAVING COUNT(*) >= 2
+             ORDER BY n.project_id ASC, n.note_type ASC",
+        )
+        .bind(session_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Find likely duplicate clusters scoped to notes from a single session.
+    /// Only notes with provenance linking them to `session_id` are considered,
+    /// preventing unrelated cross-session notes from being consolidated together.
+    pub async fn likely_duplicate_clusters_for_session(
+        &self,
+        project_id: &str,
+        note_type: &str,
+        session_id: &str,
+    ) -> Result<Vec<ConsolidationCluster>> {
+        let notes = self
+            .list_db_notes_in_group_for_session(project_id, note_type, session_id)
+            .await?;
         self.clusters_from_notes(project_id, &notes).await
     }
 
