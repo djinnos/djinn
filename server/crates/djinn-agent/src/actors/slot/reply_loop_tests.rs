@@ -68,6 +68,7 @@ async fn run_with_provider(
             cancel,
             global_cancel: cancel,
             app_state,
+            mcp_registry: None,
         },
         conversation,
         false,

@@ -110,6 +110,8 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub cancel: &'a tokio_util::sync::CancellationToken,
     pub global_cancel: &'a tokio_util::sync::CancellationToken,
     pub app_state: &'a crate::context::AgentContext,
+    /// Optional MCP tool registry for dispatching tools to external MCP servers.
+    pub mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
 }
 
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
@@ -138,6 +140,7 @@ pub(super) async fn run_reply_loop(
         cancel,
         global_cancel,
         app_state,
+        mcp_registry,
     } = ctx;
 
     // Register activity tracker — stall detection uses this to kill idle sessions.
@@ -779,6 +782,49 @@ pub(super) async fn run_reply_loop(
                             };
                         }
 
+                        // ── MCP tool dispatch (takes priority for MCP-registered names) ──
+                        // If the MCP registry knows this tool, dispatch directly
+                        // to the owning MCP server — skip the built-in extension
+                        // dispatch entirely.
+                        if let Some(registry) = mcp_registry {
+                            if registry.has_tool(&name) {
+                                tracing::debug!(
+                                    task_id = %task_id,
+                                    tool = %name,
+                                    "ReplyLoop: dispatching to MCP server"
+                                );
+                                let mcp_result = registry.call_tool(&name, args.clone()).await;
+                                let (content, is_error) = match mcp_result {
+                                    Ok(value) => {
+                                        let text = if value.is_string() {
+                                            value.as_str().unwrap_or("").to_string()
+                                        } else {
+                                            serde_json::to_string_pretty(&value)
+                                                .unwrap_or_else(|_| value.to_string())
+                                        };
+                                        if let Some(ts) = &tool_span {
+                                            ts.record_output(&text, false);
+                                        }
+                                        (vec![ContentBlock::Text { text }], false)
+                                    }
+                                    Err(err) => {
+                                        if let Some(ts) = &tool_span {
+                                            ts.record_output(&err, true);
+                                        }
+                                        (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
+                                    }
+                                };
+                                if let Some(ts) = tool_span {
+                                    if is_error { ts.end_error("MCP tool returned error"); } else { ts.end_ok(); }
+                                }
+                                return ContentBlock::ToolResult {
+                                    tool_use_id: id,
+                                    content,
+                                    is_error,
+                                };
+                            }
+                        }
+
                         // ── Normal tool dispatch ────────────────────────────────
                         // Retry logic for SQLite BUSY errors (concurrent tool
                         // calls from the same generation can contend on the
@@ -1234,6 +1280,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                mcp_registry: None,
             },
             &mut conv,
             false,
@@ -1319,6 +1366,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                mcp_registry: None,
             },
             &mut conv,
             false,
@@ -1436,6 +1484,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                mcp_registry: None,
             },
             &mut conv,
             false,
@@ -1654,6 +1703,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                mcp_registry: None,
             },
             &mut conv,
             false,
@@ -1709,6 +1759,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                mcp_registry: None,
             },
             &mut conv,
             false,
@@ -1776,6 +1827,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                mcp_registry: None,
             },
             &mut conv,
             false,
@@ -1868,6 +1920,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                mcp_registry: None,
             },
             &mut conv,
             false,

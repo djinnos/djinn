@@ -453,14 +453,18 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         Vec::new()
     };
 
-    if !resolved_mcp_servers.is_empty() {
-        tracing::debug!(
-            task_id = %task.short_id,
-            role = %role.config().name,
-            servers = ?resolved_mcp_servers.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-            "Lifecycle: MCP servers ready for session (rmcp client wiring pending full transport support)"
-        );
-    }
+    // Connect to resolved MCP servers and discover their tool definitions.
+    // Unreachable or misconfigured servers are logged and skipped (non-fatal).
+    let mcp_registry = if !resolved_mcp_servers.is_empty() {
+        crate::mcp_client::connect_and_discover(
+            &task.short_id,
+            role.config().name,
+            &resolved_mcp_servers,
+        )
+        .await
+    } else {
+        None
+    };
 
     // ── Load and resolve skills from worktree .djinn/skills/ ─────────────────
     // Skills are markdown files with YAML frontmatter. Missing skills are logged
@@ -918,7 +922,19 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     };
 
     // ── Create or resume session record + build conversation ─────────────────
-    let tools = (role.config().tool_schemas)();
+    let mut tools = (role.config().tool_schemas)();
+
+    // Append MCP-provided tool schemas to the session tool list.
+    if let Some(ref registry) = mcp_registry {
+        let mcp_schemas = registry.tool_schemas();
+        tracing::info!(
+            task_id = %task.short_id,
+            role = %role.config().name,
+            mcp_tool_count = mcp_schemas.len(),
+            "Lifecycle: appending MCP tool schemas to session"
+        );
+        tools.extend_from_slice(mcp_schemas);
+    }
 
     // Workers include recent feedback in the initial message; other roles use
     // a generic kickoff (they read activity via tools themselves).
@@ -1089,6 +1105,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             cancel: &cancel,
             global_cancel: &pause,
             app_state: &app_state,
+            mcp_registry: mcp_registry.as_ref(),
         },
         &mut conversation,
         resume_record_id.is_some(),
