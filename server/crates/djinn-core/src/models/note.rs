@@ -128,6 +128,11 @@ pub struct NoteOverview {
     pub note_type: String,
     pub overview_text: String,
     pub score: Option<f32>,
+    /// True when this note has been superseded by a newer note (stale-citation
+    /// confidence signal applied). Consumers should treat the content as
+    /// potentially outdated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
 }
 
 /// L0 note abstract payload used in tiered context responses.
@@ -139,6 +144,11 @@ pub struct NoteAbstract {
     pub note_type: String,
     pub abstract_text: String,
     pub score: Option<f32>,
+    /// True when this note has been superseded by a newer note (stale-citation
+    /// confidence signal applied). Consumers should treat the content as
+    /// potentially outdated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
 }
 
 /// A single git commit entry for note history.
@@ -257,6 +267,7 @@ mod tests {
             note_type: "reference".to_string(),
             overview_text: "Short summary".to_string(),
             score: Some(0.87),
+            superseded: false,
         };
 
         let value = serde_json::to_value(payload).expect("serializes to JSON value");
@@ -277,6 +288,7 @@ mod tests {
             note_type: "reference".to_string(),
             abstract_text: "L0 abstract".to_string(),
             score: None,
+            superseded: false,
         };
 
         let value = serde_json::to_value(payload).expect("serializes to JSON value");

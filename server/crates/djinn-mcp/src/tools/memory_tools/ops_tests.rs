@@ -267,6 +267,7 @@ mod tests {
                 max_related: Some(10),
                 budget: Some(4096),
                 task_id: None,
+                min_confidence: None,
             },
             None,
         )
@@ -287,6 +288,7 @@ mod tests {
                 max_related: Some(10),
                 budget: Some(4096),
                 task_id: None,
+                min_confidence: None,
             },
             None,
         )

@@ -333,6 +333,7 @@ struct MemoryBuildContextParams {
     max_related: Option<i64>,
     budget: Option<i64>,
     task_id: Option<String>,
+    min_confidence: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -1051,6 +1052,7 @@ async fn call_memory_build_context(
                 max_related: p.max_related,
                 budget: p.budget,
                 task_id: task_id.clone(),
+                min_confidence: p.min_confidence,
             },
             task_id.as_deref(),
         )

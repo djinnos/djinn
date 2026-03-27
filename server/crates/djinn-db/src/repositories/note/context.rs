@@ -7,6 +7,11 @@ use crate::repositories::note::rrf::rrf_fuse;
 
 use super::NoteRepository;
 
+/// Default minimum confidence threshold for related notes in build_context.
+/// Notes below this value are excluded from context results. This prevents
+/// contradicted or very low-confidence notes from polluting context.
+pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.1;
+
 /// Tiered context response with budget-aware disclosure.
 #[derive(Clone, Debug)]
 pub struct BuildContextResponse {
@@ -27,6 +32,9 @@ impl NoteRepository {
     /// * `budget` - Optional token budget (default: 4096). Seeds are uncapped and always returned.
     /// * `task_id` - Optional task ID for task-affinity scoring in RRF pipeline
     /// * `max_related` - Maximum related notes to consider (before budget pruning)
+    /// * `min_confidence` - Minimum confidence threshold for related notes (default 0.1).
+    ///   Notes below this threshold are excluded. Superseded/stale-citation notes that pass
+    ///   the threshold are annotated in the response.
     ///
     /// # Tier Disclosure Strategy
     /// * L2 (Primary/Seed): Full content, uncapped, never dropped
@@ -39,6 +47,7 @@ impl NoteRepository {
         budget: Option<usize>,
         task_id: Option<&str>,
         max_related: usize,
+        min_confidence: Option<f64>,
     ) -> Result<BuildContextResponse> {
         self.db.ensure_initialized().await?;
 
@@ -83,13 +92,48 @@ impl NoteRepository {
         l1_candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         l0_candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
+        // Build confidence map for all candidates to support filtering and
+        // superseded annotation.
+        let min_conf = min_confidence.unwrap_or(DEFAULT_MIN_CONFIDENCE);
+        let all_candidate_ids: Vec<String> = l1_candidates
+            .iter()
+            .map(|(id, _)| id.clone())
+            .chain(l0_candidates.iter().map(|(id, _)| id.clone()))
+            .collect();
+        let confidence_map = self.note_confidence_map(&all_candidate_ids).await?;
+
+        // Filter candidates below min_confidence threshold.
+        l1_candidates.retain(|(id, _)| {
+            confidence_map.get(id).copied().unwrap_or(1.0) >= min_conf
+        });
+        l0_candidates.retain(|(id, _)| {
+            confidence_map.get(id).copied().unwrap_or(1.0) >= min_conf
+        });
+
         // Fetch note data and apply budget-aware pruning
         let l1_notes = self.fetch_l1_notes(&l1_candidates).await?;
         let l0_notes = self.fetch_l0_notes(&l0_candidates).await?;
 
         // Apply budget pruning
-        let (pruned_l1, pruned_l0) =
+        let (mut pruned_l1, mut pruned_l0) =
             apply_budget_pruning(l1_notes, l0_notes, budget, &seed.content);
+
+        // Annotate superseded notes: notes whose confidence is at or below the
+        // STALE_CITATION threshold (0.3) are marked as superseded so consumers
+        // know the content may be outdated.
+        use crate::repositories::note::scoring::STALE_CITATION;
+        for note in &mut pruned_l1 {
+            if confidence_map.get(&note.id).copied().unwrap_or(1.0) <= STALE_CITATION {
+                note.superseded = true;
+                note.overview_text = format!("[SUPERSEDED] {}", note.overview_text);
+            }
+        }
+        for note in &mut pruned_l0 {
+            if confidence_map.get(&note.id).copied().unwrap_or(1.0) <= STALE_CITATION {
+                note.superseded = true;
+                note.abstract_text = format!("[SUPERSEDED] {}", note.abstract_text);
+            }
+        }
 
         Ok(BuildContextResponse {
             primary: vec![seed],
@@ -298,6 +342,7 @@ impl NoteRepository {
                         note_type,
                         overview_text: disclosure_text,
                         score: score.map(|s| s as f32),
+                        superseded: false,
                     };
                     (overview, token_estimate)
                 },
@@ -356,6 +401,7 @@ impl NoteRepository {
                         note_type,
                         abstract_text: disclosure_text,
                         score: score.map(|s| s as f32),
+                        superseded: false,
                     };
                     (abstract_, token_estimate)
                 },
@@ -466,4 +512,200 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let doy = (153 * mp + 2) / 5 + day as i32 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     (era as i64) * 146_097 + doe as i64 - 719_468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_MIN_CONFIDENCE;
+    use crate::repositories::note::scoring::STALE_CITATION;
+    use crate::{Database, NoteRepository, ProjectRepository};
+    use djinn_core::events::EventBus;
+    use tokio::sync::broadcast;
+
+    async fn setup_repo() -> (tempfile::TempDir, NoteRepository, String) {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel::<djinn_core::events::DjinnEventEnvelope>(16);
+        let bus = {
+            let tx = tx.clone();
+            EventBus::new(move |event| {
+                let _ = tx.send(event);
+            })
+        };
+
+        db.ensure_initialized().await.unwrap();
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-project", tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let repo = NoteRepository::new(db, bus);
+        (tmp, repo, project.id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_default_min_confidence_excludes_very_low_confidence() {
+        let (tmp, repo, project_id) = setup_repo().await;
+
+        let seed = repo
+            .create(&project_id, tmp.path(), "Seed", "Seed about architecture patterns.", "adr", "[]")
+            .await
+            .unwrap();
+
+        // Create a note with confidence below default threshold (0.1)
+        let low = repo
+            .create(
+                &project_id,
+                tmp.path(),
+                "Low Conf",
+                "architecture patterns low content referencing [[Seed]].",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        repo.set_confidence(&low.id, 0.05).await.unwrap();
+
+        // Create a normal note
+        let _normal = repo
+            .create(
+                &project_id,
+                tmp.path(),
+                "Normal Conf",
+                "architecture patterns normal content referencing [[Seed]].",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let result = repo
+            .build_context(&project_id, &seed.permalink, Some(8192), None, 20, None)
+            .await
+            .unwrap();
+
+        let all_ids: Vec<&str> = result
+            .related_l1
+            .iter()
+            .map(|n| n.id.as_str())
+            .chain(result.related_l0.iter().map(|n| n.id.as_str()))
+            .collect();
+
+        assert!(
+            !all_ids.contains(&low.id.as_str()),
+            "note with confidence 0.05 should be excluded with default min_confidence={}",
+            DEFAULT_MIN_CONFIDENCE,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_min_confidence_zero_includes_all() {
+        let (tmp, repo, project_id) = setup_repo().await;
+
+        let seed = repo
+            .create(&project_id, tmp.path(), "Seed", "Seed about architecture patterns.", "adr", "[]")
+            .await
+            .unwrap();
+
+        let low = repo
+            .create(
+                &project_id,
+                tmp.path(),
+                "Low Conf",
+                "architecture patterns low content referencing [[Seed]].",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        repo.set_confidence(&low.id, 0.05).await.unwrap();
+
+        let result = repo
+            .build_context(&project_id, &seed.permalink, Some(8192), None, 20, Some(0.0))
+            .await
+            .unwrap();
+
+        let all_ids: Vec<&str> = result
+            .related_l1
+            .iter()
+            .map(|n| n.id.as_str())
+            .chain(result.related_l0.iter().map(|n| n.id.as_str()))
+            .collect();
+
+        assert!(
+            all_ids.contains(&low.id.as_str()),
+            "note with confidence 0.05 should be included with min_confidence=0.0",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_stale_citation_notes_annotated_superseded() {
+        let (tmp, repo, project_id) = setup_repo().await;
+
+        let seed = repo
+            .create(&project_id, tmp.path(), "Seed", "Seed about architecture patterns.", "adr", "[]")
+            .await
+            .unwrap();
+
+        let stale = repo
+            .create(
+                &project_id,
+                tmp.path(),
+                "Stale Note",
+                "architecture patterns stale content referencing [[Seed]].",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        repo.set_confidence(&stale.id, STALE_CITATION).await.unwrap();
+
+        let normal = repo
+            .create(
+                &project_id,
+                tmp.path(),
+                "Normal Note",
+                "architecture patterns normal content referencing [[Seed]].",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        // Use min_confidence=0.0 to include everything so we can test annotations
+        let result = repo
+            .build_context(&project_id, &seed.permalink, Some(8192), None, 20, Some(0.0))
+            .await
+            .unwrap();
+
+        // Find stale note in results
+        let stale_l1 = result.related_l1.iter().find(|n| n.id == stale.id);
+        let stale_l0 = result.related_l0.iter().find(|n| n.id == stale.id);
+
+        if let Some(note) = stale_l1 {
+            assert!(note.superseded, "stale L1 note should be superseded");
+            assert!(
+                note.overview_text.starts_with("[SUPERSEDED]"),
+                "stale L1 note should have [SUPERSEDED] prefix",
+            );
+        } else if let Some(note) = stale_l0 {
+            assert!(note.superseded, "stale L0 note should be superseded");
+            assert!(
+                note.abstract_text.starts_with("[SUPERSEDED]"),
+                "stale L0 note should have [SUPERSEDED] prefix",
+            );
+        } else {
+            panic!("stale note should appear in results with min_confidence=0.0");
+        }
+
+        // Normal note should not be superseded
+        let normal_l1 = result.related_l1.iter().find(|n| n.id == normal.id);
+        let normal_l0 = result.related_l0.iter().find(|n| n.id == normal.id);
+        if let Some(note) = normal_l1 {
+            assert!(!note.superseded, "normal L1 note should not be superseded");
+        }
+        if let Some(note) = normal_l0 {
+            assert!(!note.superseded, "normal L0 note should not be superseded");
+        }
+    }
 }

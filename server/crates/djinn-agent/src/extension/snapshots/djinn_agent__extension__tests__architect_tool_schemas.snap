@@ -606,6 +606,10 @@ expression: tool_schemas_architect()
           "description": "Maximum notes to include (default 8)",
           "type": "integer"
         },
+        "min_confidence": {
+          "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded.",
+          "type": "number"
+        },
         "query": {
           "description": "Optional free-text query to bias retrieval",
           "type": "string"

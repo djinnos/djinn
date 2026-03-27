@@ -209,7 +209,8 @@ pub(crate) fn tool_memory_build_context() -> RmcpTool {
             "properties": {
                 "task_id": {"type": "string", "description": "Task ID to gather related memory for; defaults to current session task when omitted"},
                 "query": {"type": "string", "description": "Optional free-text query to bias retrieval"},
-                "limit": {"type": "integer", "description": "Maximum notes to include (default 8)"}
+                "limit": {"type": "integer", "description": "Maximum notes to include (default 8)"},
+                "min_confidence": {"type": "number", "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded."}
             }
         }),
     )

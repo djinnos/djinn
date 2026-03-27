@@ -167,7 +167,7 @@ pub async fn memory_build_context(
     }
 
     match repo
-        .build_context(&project_id, url, budget, task_id, max_related)
+        .build_context(&project_id, url, budget, task_id, max_related, p.min_confidence)
         .await
     {
         Ok(response) => MemoryBuildContextResponse {

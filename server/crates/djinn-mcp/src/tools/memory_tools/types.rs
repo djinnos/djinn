@@ -145,6 +145,10 @@ pub struct BuildContextParams {
     pub budget: Option<i64>,
     /// Optional task ID for task-affinity scoring in RRF retrieval.
     pub task_id: Option<String>,
+    /// Minimum confidence threshold for related notes (default 0.1). Notes
+    /// below this threshold are excluded from the context response. Set to 0.0
+    /// to include all notes regardless of confidence.
+    pub min_confidence: Option<f64>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

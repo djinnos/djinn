@@ -147,6 +147,7 @@ mod tests {
                     max_related: Some(20),
                     budget: Some(500),
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -161,6 +162,7 @@ mod tests {
                     max_related: Some(20),
                     budget: Some(4096),
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -214,6 +216,7 @@ mod tests {
                     max_related: Some(20),
                     budget: Some(100),
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -228,6 +231,7 @@ mod tests {
                     max_related: Some(20),
                     budget: Some(4096),
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -285,6 +289,7 @@ mod tests {
                     max_related: Some(20),
                     budget: Some(4096),
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -299,6 +304,7 @@ mod tests {
                     max_related: Some(20),
                     budget: Some(1500),
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -313,6 +319,7 @@ mod tests {
                     max_related: Some(20),
                     budget: Some(500),
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -383,6 +390,7 @@ mod tests {
                     max_related: Some(20),
                     budget: None,
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -397,6 +405,7 @@ mod tests {
                     max_related: Some(20),
                     budget: Some(4096),
                     task_id: None,
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -435,6 +444,7 @@ mod tests {
                     max_related: Some(10),
                     budget: Some(4096),
                     task_id: Some("test-task-123".to_string()),
+                    min_confidence: None,
                 },
             ))
             .await;
@@ -450,5 +460,249 @@ mod tests {
 
         // Should return seed
         assert!(!response.primary.is_empty(), "should return primary note");
+    }
+
+    /// Helper: create a seed note and related notes with controlled confidence values.
+    /// Returns (seed_permalink, low_confidence_title, stale_citation_title, normal_title).
+    async fn setup_confidence_test_data(
+        tmp: &tempfile::TempDir,
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+        project: &Project,
+    ) -> (String, String, String, String) {
+        let repo = NoteRepository::new(db.clone(), event_bus_for(tx));
+
+        // Create seed note
+        let seed = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Confidence Seed",
+                "This seed note covers database architecture patterns for confidence testing.",
+                "adr",
+                "[\"seed\"]",
+            )
+            .await
+            .unwrap();
+
+        // Create a note with very low confidence (below default 0.1 threshold)
+        let low_conf = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Low Confidence Note",
+                "database architecture patterns low confidence content that references [[Confidence Seed]].",
+                "reference",
+                "[\"low\"]",
+            )
+            .await
+            .unwrap();
+        repo.set_confidence(&low_conf.id, 0.05).await.unwrap();
+
+        // Create a note with stale-citation confidence (0.3 - at the STALE_CITATION threshold)
+        let stale = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Stale Citation Note",
+                "database architecture patterns stale citation content that references [[Confidence Seed]].",
+                "reference",
+                "[\"stale\"]",
+            )
+            .await
+            .unwrap();
+        repo.set_confidence(&stale.id, 0.3).await.unwrap();
+
+        // Create a normal high-confidence note
+        let normal = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Normal Confidence Note",
+                "database architecture patterns normal confidence content that references [[Confidence Seed]].",
+                "reference",
+                "[\"normal\"]",
+            )
+            .await
+            .unwrap();
+        // confidence defaults to 1.0, no need to set
+
+        (
+            seed.permalink,
+            low_conf.title,
+            stale.title,
+            normal.title,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_default_min_confidence_filters_low_confidence_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let (seed_permalink, low_conf_title, _stale_title, _normal_title) =
+            setup_confidence_test_data(&tmp, &db, &tx, &project).await;
+
+        let state = test_mcp_state(db, &tx);
+        let server = DjinnMcpServer::new(state);
+
+        // Default min_confidence (0.1) should exclude notes with confidence < 0.1
+        let result = server
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink,
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(8192),
+                    task_id: None,
+                    min_confidence: None, // uses default 0.1
+                },
+            ))
+            .await;
+
+        let response = result.0;
+        assert!(response.error.is_none(), "should not error: {:?}", response.error);
+
+        // Collect all related note titles
+        let all_related_titles: Vec<String> = response
+            .related_l1
+            .iter()
+            .map(|n| n.title.clone())
+            .chain(response.related_l0.iter().map(|n| n.title.clone()))
+            .collect();
+
+        // Low confidence note (0.05) should be filtered out
+        assert!(
+            !all_related_titles.contains(&low_conf_title),
+            "low confidence note should be filtered out with default min_confidence=0.1, but found in: {:?}",
+            all_related_titles
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_min_confidence_zero_includes_all_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let (seed_permalink, low_conf_title, _stale_title, _normal_title) =
+            setup_confidence_test_data(&tmp, &db, &tx, &project).await;
+
+        let state = test_mcp_state(db, &tx);
+        let server = DjinnMcpServer::new(state);
+
+        // min_confidence=0.0 should include all notes
+        let result = server
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink,
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(8192),
+                    task_id: None,
+                    min_confidence: Some(0.0),
+                },
+            ))
+            .await;
+
+        let response = result.0;
+        assert!(response.error.is_none(), "should not error: {:?}", response.error);
+
+        // Collect all related note titles
+        let all_related_titles: Vec<String> = response
+            .related_l1
+            .iter()
+            .map(|n| n.title.clone())
+            .chain(response.related_l0.iter().map(|n| n.title.clone()))
+            .collect();
+
+        // Low confidence note should now be included
+        assert!(
+            all_related_titles.contains(&low_conf_title),
+            "low confidence note should be included with min_confidence=0.0, titles found: {:?}",
+            all_related_titles
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_context_superseded_notes_are_annotated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let (seed_permalink, _low_conf_title, stale_title, normal_title) =
+            setup_confidence_test_data(&tmp, &db, &tx, &project).await;
+
+        let state = test_mcp_state(db, &tx);
+        let server = DjinnMcpServer::new(state);
+
+        // Use min_confidence=0.0 to include all notes so we can check annotations
+        let result = server
+            .memory_build_context(rmcp::handler::server::wrapper::Parameters(
+                BuildContextParams {
+                    project: tmp.path().to_str().unwrap().to_string(),
+                    url: seed_permalink,
+                    depth: None,
+                    max_related: Some(20),
+                    budget: Some(8192),
+                    task_id: None,
+                    min_confidence: Some(0.0),
+                },
+            ))
+            .await;
+
+        let response = result.0;
+        assert!(response.error.is_none(), "should not error: {:?}", response.error);
+
+        // Find the stale citation note in the results
+        let stale_l1 = response.related_l1.iter().find(|n| n.title == stale_title);
+        let stale_l0 = response.related_l0.iter().find(|n| n.title == stale_title);
+
+        let stale_note = stale_l1.is_some() || stale_l0.is_some();
+        assert!(stale_note, "stale citation note should appear in results with min_confidence=0.0");
+
+        // Verify superseded annotation
+        if let Some(note) = stale_l1 {
+            assert!(
+                note.superseded,
+                "stale citation L1 note should be marked superseded"
+            );
+            assert!(
+                note.overview_text.starts_with("[SUPERSEDED]"),
+                "stale citation L1 note overview should have [SUPERSEDED] prefix, got: {}",
+                note.overview_text
+            );
+        }
+        if let Some(note) = stale_l0 {
+            assert!(
+                note.superseded,
+                "stale citation L0 note should be marked superseded"
+            );
+            assert!(
+                note.abstract_text.starts_with("[SUPERSEDED]"),
+                "stale citation L0 note abstract should have [SUPERSEDED] prefix, got: {}",
+                note.abstract_text
+            );
+        }
+
+        // Normal confidence note should NOT be superseded
+        let normal_l1 = response.related_l1.iter().find(|n| n.title == normal_title);
+        let normal_l0 = response.related_l0.iter().find(|n| n.title == normal_title);
+
+        if let Some(note) = normal_l1 {
+            assert!(
+                !note.superseded,
+                "normal confidence L1 note should not be marked superseded"
+            );
+        }
+        if let Some(note) = normal_l0 {
+            assert!(
+                !note.superseded,
+                "normal confidence L0 note should not be marked superseded"
+            );
+        }
     }
 }

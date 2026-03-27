@@ -2253,6 +2253,12 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
+        "min_confidence": {
+          "description": "Minimum confidence threshold for related notes (default 0.1). Notes\nbelow this threshold are excluded from the context response. Set to 0.0\nto include all notes regardless of confidence.",
+          "format": "double",
+          "nullable": true,
+          "type": "number"
+        },
         "project": {
           "type": "string"
         },
@@ -2355,6 +2361,10 @@ expression: signatures
               "nullable": true,
               "type": "number"
             },
+            "superseded": {
+              "description": "True when this note has been superseded by a newer note (stale-citation\nconfidence signal applied). Consumers should treat the content as\npotentially outdated.",
+              "type": "boolean"
+            },
             "title": {
               "type": "string"
             }
@@ -2387,6 +2397,10 @@ expression: signatures
               "format": "float",
               "nullable": true,
               "type": "number"
+            },
+            "superseded": {
+              "description": "True when this note has been superseded by a newer note (stale-citation\nconfidence signal applied). Consumers should treat the content as\npotentially outdated.",
+              "type": "boolean"
             },
             "title": {
               "type": "string"
