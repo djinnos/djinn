@@ -1148,6 +1148,77 @@ mod tests {
         );
     }
 
+    // ─── Empty-segment edge case tests ──────────────────────────────────────
+
+    #[test]
+    fn compose_segments_skips_empty_optional_segments() {
+        let segments =
+            compose_system_prompt_segments(DJINN_CHAT_SYSTEM_PROMPT, Some(""), None, Some("  \n "));
+        // Only the base prompt should survive
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, DJINN_CHAT_SYSTEM_PROMPT.trim());
+    }
+
+    #[test]
+    fn compose_segments_skips_whitespace_only_repo_map() {
+        let segments =
+            compose_system_prompt_segments(DJINN_CHAT_SYSTEM_PROMPT, None, Some("   "), None);
+        assert_eq!(segments.len(), 1);
+    }
+
+    #[test]
+    fn compose_segments_preserves_order_when_middle_segment_absent() {
+        let segments = compose_system_prompt_segments(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some("project ctx"),
+            None,
+            Some("client system"),
+        );
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].text, DJINN_CHAT_SYSTEM_PROMPT.trim());
+        assert_eq!(segments[1].text, "project ctx");
+        assert_eq!(segments[1].stability, PromptSegmentStability::Stable);
+        assert_eq!(segments[2].text, "client system");
+        assert_eq!(segments[2].stability, PromptSegmentStability::Dynamic);
+    }
+
+    #[test]
+    fn build_system_message_with_all_optional_segments_empty() {
+        let message = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some(""),
+            Some("   "),
+            Some("\n"),
+            "anthropic/claude-3-5-sonnet",
+        );
+        // Only the base prompt block should be present
+        assert_eq!(message.content.len(), 1);
+        assert_eq!(
+            message.content[0].as_text(),
+            Some(DJINN_CHAT_SYSTEM_PROMPT.trim())
+        );
+    }
+
+    #[test]
+    fn build_system_message_no_dynamic_tail_when_client_system_blank() {
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
+        let message = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some("project ctx"),
+            Some(&repo_map),
+            Some(""),
+            "anthropic/claude-3-5-sonnet",
+        );
+        // base + project + repo_map, no dynamic tail
+        assert_eq!(message.content.len(), 3);
+        assert_eq!(
+            message.content[0].as_text(),
+            Some(DJINN_CHAT_SYSTEM_PROMPT.trim())
+        );
+        assert_eq!(message.content[1].as_text(), Some("project ctx"));
+        assert_eq!(message.content[2].as_text(), Some(repo_map.as_str()));
+    }
+
     #[test]
     fn tool_call_payload_serialization_keeps_existing_keys_for_backward_compat() {
         let payload = ToolCallPayload {

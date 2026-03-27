@@ -53,36 +53,47 @@ impl AnthropicProvider {
             .filter(|message| message.role == djinn_core::message::Role::System)
             .flat_map(|message| {
                 let cache_control = Self::maybe_cache_control(message);
-                let content_len = message.content.len();
-                message
+                // Collect non-empty text blocks first, then apply cache_control
+                // to all but the last block (the stable-prefix boundary).
+                let non_empty_blocks: Vec<&str> = message
                     .content
                     .iter()
-                    .enumerate()
-                    .filter_map(move |(index, block)| match block {
+                    .filter_map(|block| match block {
                         ContentBlock::Text { text } if !text.trim().is_empty() => {
-                            let cache_control =
-                                if cache_control.is_some() && index + 1 < content_len {
-                                    cache_control.clone()
-                                } else {
-                                    None
-                                };
-                            Some(AnthropicSystemBlock {
-                                text: text.clone(),
-                                cache_control,
-                            })
+                            Some(text.as_str())
                         }
                         _ => None,
                     })
+                    .collect();
+                let block_count = non_empty_blocks.len();
+                non_empty_blocks
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(index, text)| {
+                        let cc = if cache_control.is_some() && index + 1 < block_count {
+                            cache_control.clone()
+                        } else {
+                            None
+                        };
+                        AnthropicSystemBlock {
+                            text: text.to_string(),
+                            cache_control: cc,
+                        }
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
 
-    fn serialize_system_blocks(blocks: &[AnthropicSystemBlock]) -> Value {
+    fn serialize_system_blocks(blocks: &[AnthropicSystemBlock]) -> Option<Value> {
+        if blocks.is_empty() {
+            return None;
+        }
         if blocks.len() == 1 && blocks[0].cache_control.is_none() {
-            return Value::String(blocks[0].text.clone());
+            return Some(Value::String(blocks[0].text.clone()));
         }
 
-        Value::Array(
+        Some(Value::Array(
             blocks
                 .iter()
                 .map(|block| {
@@ -95,7 +106,7 @@ impl AnthropicProvider {
                     Value::Object(obj)
                 })
                 .collect(),
-        )
+        ))
     }
 
     fn build_request(
@@ -111,10 +122,13 @@ impl AnthropicProvider {
 
         let mut body = json!({
             "model": self.config.model_id,
-            "system": Self::serialize_system_blocks(&system_blocks),
             "messages": messages,
             "max_tokens": max_tokens
         });
+
+        if let Some(system_value) = Self::serialize_system_blocks(&system_blocks) {
+            body["system"] = system_value;
+        }
 
         if self.config.capabilities.streaming {
             body["stream"] = json!(true);
@@ -645,6 +659,234 @@ mod tests {
 
         let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
         assert_eq!(req["tool_choice"]["type"], "any");
+    }
+
+    // ─── Empty-segment handling tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_system_blocks_skips_empty_and_whitespace_content() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message {
+            role: djinn_core::message::Role::System,
+            content: vec![
+                ContentBlock::Text {
+                    text: "base prompt".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "   \n  ".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "dynamic tail".to_string(),
+                },
+            ],
+            metadata: None,
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let blocks = AnthropicProvider::system_blocks(&conv);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "base prompt");
+        assert_eq!(blocks[1].text, "dynamic tail");
+    }
+
+    #[test]
+    fn test_system_blocks_empty_conversation_produces_no_blocks() {
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::user("hello"));
+
+        let blocks = AnthropicProvider::system_blocks(&conv);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_system_blocks_returns_none_for_empty() {
+        let result = AnthropicProvider::serialize_system_blocks(&[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_serialize_system_blocks_single_no_cache() {
+        let blocks = vec![AnthropicSystemBlock {
+            text: "hello".to_string(),
+            cache_control: None,
+        }];
+        let result = AnthropicProvider::serialize_system_blocks(&blocks);
+        assert_eq!(result, Some(Value::String("hello".to_string())));
+    }
+
+    #[test]
+    fn test_build_request_no_system_field_when_no_system_message() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::user("hello"));
+
+        let req = provider.build_request(&conv, &[], None);
+        assert!(
+            req.get("system").is_none(),
+            "system field should be absent when there are no system blocks"
+        );
+    }
+
+    #[test]
+    fn test_build_request_with_all_empty_system_content_omits_system() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message {
+            role: djinn_core::message::Role::System,
+            content: vec![
+                ContentBlock::Text {
+                    text: "".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "   ".to_string(),
+                },
+            ],
+            metadata: None,
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let req = provider.build_request(&conv, &[], None);
+        assert!(
+            req.get("system").is_none(),
+            "system field should be absent when all system content blocks are empty"
+        );
+    }
+
+    #[test]
+    fn test_cache_control_correct_after_empty_block_filtering() {
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message {
+            role: djinn_core::message::Role::System,
+            content: vec![
+                ContentBlock::Text {
+                    text: "base prompt".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "tools".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "   ".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "dynamic tail".to_string(),
+                },
+            ],
+            metadata: Some(crate::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                        kind: Some("stable_prefix".to_string()),
+                    }
+                })),
+            }),
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let blocks = AnthropicProvider::system_blocks(&conv);
+        // After filtering: ["base prompt", "tools", "dynamic tail"]
+        assert_eq!(blocks.len(), 3);
+        // First two should have cache_control, last should not
+        assert!(
+            blocks[0].cache_control.is_some(),
+            "first block should have cache_control"
+        );
+        assert!(
+            blocks[1].cache_control.is_some(),
+            "second block should have cache_control"
+        );
+        assert!(
+            blocks[2].cache_control.is_none(),
+            "last block should NOT have cache_control"
+        );
+    }
+
+    #[test]
+    fn test_cache_control_when_trailing_empty_blocks_are_filtered() {
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message {
+            role: djinn_core::message::Role::System,
+            content: vec![
+                ContentBlock::Text {
+                    text: "base prompt".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "cached segment".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "".to_string(),
+                },
+            ],
+            metadata: Some(crate::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                        kind: Some("stable_prefix".to_string()),
+                    }
+                })),
+            }),
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let blocks = AnthropicProvider::system_blocks(&conv);
+        // After filtering: ["base prompt", "cached segment"]
+        assert_eq!(blocks.len(), 2);
+        assert!(
+            blocks[0].cache_control.is_some(),
+            "first block should have cache_control"
+        );
+        assert!(
+            blocks[1].cache_control.is_none(),
+            "last non-empty block should NOT have cache_control (it is now the tail)"
+        );
+    }
+
+    #[test]
+    fn test_populated_segments_unchanged() {
+        // Verify that the existing behavior for fully-populated segments is preserved
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::system_with_metadata(
+            "base prompt",
+            crate::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                        kind: Some("stable_prefix".to_string()),
+                    }
+                })),
+            },
+        ));
+        conv.messages[0].content.push(ContentBlock::Text {
+            text: "tool definitions".to_string(),
+        });
+        conv.messages[0].content.push(ContentBlock::Text {
+            text: "repo map".to_string(),
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let req = provider.build_request(&conv, &[], None);
+        let system = req["system"].as_array().expect("system block array");
+        assert_eq!(system.len(), 3);
+        assert_eq!(system[0]["text"], "base prompt");
+        assert_eq!(system[1]["text"], "tool definitions");
+        assert_eq!(system[2]["text"], "repo map");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+        assert!(system[2].get("cache_control").is_none());
     }
 
     // ─── End-to-end prompt assembly → Anthropic request coverage ──────────────
