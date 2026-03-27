@@ -194,7 +194,7 @@ expression: tool_schemas_architect()
     "name": "read"
   },
   {
-    "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols). Line and character are 1-based.",
+    "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
     "inputSchema": {
       "properties": {
         "character": {
@@ -202,14 +202,27 @@ expression: tool_schemas_architect()
           "minimum": 1,
           "type": "integer"
         },
+        "depth": {
+          "description": "Maximum nesting depth for operation='symbols'. 0 = top-level only; omitted = unlimited",
+          "minimum": 0,
+          "type": "integer"
+        },
         "file_path": {
           "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Comma-separated symbol kind filter for operation='symbols' (e.g. function,method,struct,class,interface,enum,variable,constant,module,field,property,constructor,type_parameter)",
           "type": "string"
         },
         "line": {
           "description": "1-based line number (required for hover, definition, references)",
           "minimum": 1,
           "type": "integer"
+        },
+        "name_filter": {
+          "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'",
+          "type": "string"
         },
         "operation": {
           "description": "LSP operation to perform",

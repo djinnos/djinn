@@ -9,6 +9,7 @@ use shared_schemas::{shared_base_tool_schemas, shared_lead_tool_schemas, tool_ta
 use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
+use crate::lsp::{SymbolQuery, parse_symbol_kind_filter};
 use djinn_core::models::Task;
 use djinn_db::AgentRepository;
 use djinn_db::EpicRepository;
@@ -2044,6 +2045,9 @@ struct LspParams {
     file_path: String,
     line: Option<u32>,
     character: Option<u32>,
+    depth: Option<usize>,
+    kind: Option<String>,
+    name_filter: Option<String>,
 }
 
 async fn call_lsp(
@@ -2099,7 +2103,19 @@ async fn call_lsp(
             Ok(serde_json::json!({ "operation": "references", "result": result }))
         }
         "symbols" => {
-            let result = state.lsp.document_symbols(worktree_path, &path).await?;
+            let query = SymbolQuery {
+                depth: p.depth,
+                kinds: p
+                    .kind
+                    .as_deref()
+                    .map(parse_symbol_kind_filter)
+                    .transpose()?,
+                name_filter: p.name_filter,
+            };
+            let result = state
+                .lsp
+                .document_symbols(worktree_path, &path, query)
+                .await?;
             Ok(serde_json::json!({ "operation": "symbols", "result": result }))
         }
         other => Err(format!(
@@ -2976,7 +2992,7 @@ fn tool_apply_patch() -> RmcpTool {
 fn tool_lsp() -> RmcpTool {
     RmcpTool::new(
         "lsp".to_string(),
-        "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols). Line and character are 1-based.".to_string(),
+        "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.".to_string(),
         object!({
             "type": "object",
             "required": ["operation", "file_path"],
@@ -2999,6 +3015,19 @@ fn tool_lsp() -> RmcpTool {
                     "type": "integer",
                     "minimum": 1,
                     "description": "1-based column number (required for hover, definition, references)"
+                },
+                "depth": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum nesting depth for operation='symbols'. 0 = top-level only; omitted = unlimited"
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Comma-separated symbol kind filter for operation='symbols' (e.g. function,method,struct,class,interface,enum,variable,constant,module,field,property,constructor,type_parameter)"
+                },
+                "name_filter": {
+                    "type": "string",
+                    "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'"
                 }
             }
         }),
@@ -3099,6 +3128,16 @@ mod tests {
     #[test]
     fn floor_char_boundary_zero() {
         assert_eq!(floor_char_boundary("hello", 0), 0);
+    }
+
+    #[test]
+    fn tool_lsp_schema_exposes_symbol_filters() {
+        let tool = tool_lsp();
+        let schema = serde_json::to_value(&tool).unwrap();
+        let input_schema = &schema["inputSchema"]["properties"];
+        assert!(input_schema.get("depth").is_some());
+        assert!(input_schema.get("kind").is_some());
+        assert!(input_schema.get("name_filter").is_some());
     }
 
     #[tokio::test]
