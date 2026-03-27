@@ -65,6 +65,8 @@ pub struct EpicCreateInput<'a> {
     pub color: &'a str,
     pub owner: &'a str,
     pub memory_refs: Option<&'a str>,
+    /// Epic status: "drafting" (default) or "open".
+    pub status: Option<&'a str>,
 }
 
 pub type EpicUpdateInput<'a> = EpicCreateInput<'a>;
@@ -127,6 +129,7 @@ impl EpicRepository {
                 color,
                 owner,
                 memory_refs,
+                status: None,
             },
         )
         .await
@@ -140,9 +143,10 @@ impl EpicRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
+        let status = input.status.unwrap_or("drafting");
         sqlx::query(
-            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(&id)
         .bind(project_id)
@@ -151,6 +155,7 @@ impl EpicRepository {
         .bind(input.description)
         .bind(input.emoji)
         .bind(input.color)
+        .bind(status)
         .bind(input.owner)
         .bind(input.memory_refs.unwrap_or("[]"))
         .execute(self.db.pool())
@@ -531,7 +536,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(epic.title, "My Epic");
-        assert_eq!(epic.status, "open");
+        assert_eq!(epic.status, "drafting");
         assert_eq!(epic.short_id.len(), 4);
 
         let fetched = repo.get(&epic.id).await.unwrap().unwrap();
@@ -582,6 +587,7 @@ mod tests {
                     color: "#fff",
                     owner: "",
                     memory_refs: None,
+                    status: None,
                 },
             )
             .await
@@ -774,6 +780,75 @@ mod tests {
         let count = repo.delete_with_count(&epic.id).await.unwrap();
         assert_eq!(count, 2);
         assert!(repo.get(&epic.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_defaults_to_drafting() {
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
+        let epic = repo.create("Draft Epic", "", "", "", "", None).await.unwrap();
+        assert_eq!(epic.status, "drafting");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_with_explicit_open_status() {
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
+        let project_id = repo.ensure_default_project_id().await.unwrap();
+        let epic = repo
+            .create_for_project(
+                &project_id,
+                EpicCreateInput {
+                    title: "Open Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("open"),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(epic.status, "open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_with_explicit_drafting_status() {
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
+        let project_id = repo.ensure_default_project_id().await.unwrap();
+        let epic = repo
+            .create_for_project(
+                &project_id,
+                EpicCreateInput {
+                    title: "Drafting Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("drafting"),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(epic.status, "drafting");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_from_drafting() {
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
+        let epic = repo.create("Draft", "", "", "", "", None).await.unwrap();
+        assert_eq!(epic.status, "drafting");
+        let closed = repo.close(&epic.id).await.unwrap();
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_from_drafting_is_error() {
+        let repo = EpicRepository::new(test_db(), EventBus::noop());
+        let epic = repo.create("Draft", "", "", "", "", None).await.unwrap();
+        assert_eq!(epic.status, "drafting");
+        assert!(repo.reopen(&epic.id).await.is_err());
     }
 
     #[test]

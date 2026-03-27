@@ -805,6 +805,7 @@ mod tests {
                     color: "blue",
                     owner: "test",
                     memory_refs: None,
+                    status: None,
                 },
             )
             .await

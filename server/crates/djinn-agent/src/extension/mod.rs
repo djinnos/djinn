@@ -4803,6 +4803,7 @@ mod tests {
                     color: "#0000ff",
                     owner: "test-owner",
                     memory_refs: Some("[]"),
+                    status: None,
                 },
             )
             .await

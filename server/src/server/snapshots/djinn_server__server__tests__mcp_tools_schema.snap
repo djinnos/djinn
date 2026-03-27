@@ -1,6 +1,5 @@
 ---
 source: src/server/mod.rs
-assertion_line: 587
 expression: signatures
 ---
 [
@@ -1018,6 +1017,11 @@ expression: signatures
         },
         "project": {
           "description": "Absolute project path.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Initial status: \"drafting\" (default) or \"open\".",
+          "nullable": true,
           "type": "string"
         },
         "title": {

@@ -104,6 +104,7 @@ pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
             color: "blue",
             owner: "test-owner",
             memory_refs: None,
+            status: None,
         },
     )
     .await

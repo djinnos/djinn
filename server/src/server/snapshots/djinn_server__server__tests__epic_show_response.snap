@@ -15,7 +15,7 @@ expression: epic_show
   "open_count": 0,
   "owner": "",
   "short_id": "[SHORT_ID]",
-  "status": "open",
+  "status": "drafting",
   "task_count": 0,
   "title": "Snapshot Epic",
   "updated_at": "[TIMESTAMP]"

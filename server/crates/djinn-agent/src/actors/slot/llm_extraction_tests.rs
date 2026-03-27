@@ -88,6 +88,7 @@ async fn make_fixture() -> TestFixture {
                 color: "blue",
                 owner: "test",
                 memory_refs: None,
+                status: None,
             },
         )
         .await

@@ -344,6 +344,7 @@ pub async fn epic_update(
                 color,
                 owner: &owner,
                 memory_refs: Some(&memory_refs_str),
+                status: None,
             },
         )
         .await

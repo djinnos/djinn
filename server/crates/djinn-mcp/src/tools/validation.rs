@@ -190,6 +190,18 @@ pub fn validate_task_create_status(status: Option<&str>) -> Result<Option<&str>,
     }
 }
 
+/// Validate initial epic status for epic_create: "drafting" (default) or "open".
+pub fn validate_epic_create_status(status: Option<&str>) -> Result<Option<&str>, String> {
+    match status {
+        None => Ok(None),
+        Some("drafting") => Ok(Some("drafting")),
+        Some("open") => Ok(Some("open")),
+        Some(other) => Err(format!(
+            "invalid epic status: {other:?} (expected drafting or open)"
+        )),
+    }
+}
+
 // ── Emoji helpers ────────────────────────────────────────────────────────────
 
 /// Heuristic: is this char in a common emoji range?
@@ -354,5 +366,20 @@ mod tests {
         assert!(validate_ac_count(0).is_ok());
         assert!(validate_ac_count(50).is_ok());
         assert!(validate_ac_count(51).is_err());
+    }
+
+    #[test]
+    fn epic_create_status_validation() {
+        assert_eq!(validate_epic_create_status(None).unwrap(), None);
+        assert_eq!(
+            validate_epic_create_status(Some("drafting")).unwrap(),
+            Some("drafting")
+        );
+        assert_eq!(
+            validate_epic_create_status(Some("open")).unwrap(),
+            Some("open")
+        );
+        assert!(validate_epic_create_status(Some("closed")).is_err());
+        assert!(validate_epic_create_status(Some("invalid")).is_err());
     }
 }

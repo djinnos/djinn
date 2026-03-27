@@ -303,6 +303,7 @@ mod tests {
                     color: "",
                     owner: "",
                     memory_refs: None,
+                    status: None,
                 },
             )
             .await

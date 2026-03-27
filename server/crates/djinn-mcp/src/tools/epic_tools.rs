@@ -14,8 +14,8 @@ use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
 use crate::tools::validation::{
-    validate_color, validate_description, validate_emoji, validate_limit, validate_offset,
-    validate_owner, validate_sort, validate_title,
+    validate_color, validate_description, validate_emoji, validate_epic_create_status,
+    validate_limit, validate_offset, validate_owner, validate_sort, validate_title,
 };
 use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository};
 
@@ -106,6 +106,8 @@ pub struct EpicCreateParams {
     pub owner: Option<String>,
     /// Memory reference URLs for this epic (e.g. ADR paths).
     pub memory_refs: Option<Vec<String>>,
+    /// Initial status: "drafting" (default) or "open".
+    pub status: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -245,6 +247,16 @@ impl DjinnMcpServer {
             }
         };
 
+        let status = match validate_epic_create_status(p.status.as_deref()) {
+            Ok(s) => s,
+            Err(e) => {
+                return Json(EpicSingleResponse {
+                    epic: None,
+                    error: Some(e),
+                });
+            }
+        };
+
         let memory_refs_json = p
             .memory_refs
             .as_ref()
@@ -270,6 +282,7 @@ impl DjinnMcpServer {
                     color,
                     owner: &owner,
                     memory_refs: memory_refs_json.as_deref(),
+                    status,
                 },
             )
             .await

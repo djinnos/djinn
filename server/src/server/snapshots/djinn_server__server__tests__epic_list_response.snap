@@ -14,7 +14,7 @@ expression: epic_list
       "memory_refs": [],
       "owner": "",
       "short_id": "[SHORT_ID]",
-      "status": "open",
+      "status": "drafting",
       "title": "Snapshot Epic",
       "updated_at": "[TIMESTAMP]"
     }
