@@ -138,14 +138,12 @@ pub struct SessionSignals {
 /// `MemoryNoteResponse`; we extract the `permalink` field.
 fn permalink_from_tool_result(content: &[ContentBlock]) -> Option<String> {
     for block in content {
-        if let ContentBlock::Text { text } = block {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
-                if let Some(permalink) = val.get("permalink").and_then(|v| v.as_str()) {
-                    if !permalink.is_empty() {
-                        return Some(permalink.to_string());
-                    }
-                }
-            }
+        if let ContentBlock::Text { text } = block
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(text)
+            && let Some(permalink) = val.get("permalink").and_then(|v| v.as_str())
+            && !permalink.is_empty()
+        {
+            return Some(permalink.to_string());
         }
     }
     None
@@ -229,10 +227,9 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
                             taxonomy.errors += 1;
                         } else if memory_write_tool_use_ids.contains(tool_use_id) {
                             // Extract canonical permalink from successful memory write result
-                            if let Some(permalink) = permalink_from_tool_result(content) {
-                                if notes_written_set.insert(permalink.clone()) {
+                            if let Some(permalink) = permalink_from_tool_result(content)
+                                && notes_written_set.insert(permalink.clone()) {
                                     notes_written_permalinks.push(permalink);
-                                }
                             }
                         }
                     }
@@ -1068,7 +1065,7 @@ mod tests {
     #[test]
     fn permalink_from_tool_result_extracts_from_json_text() {
         let content = vec![ContentBlock::text(
-            &serde_json::json!({"id": "x", "permalink": "research/note", "title": "T"}).to_string(),
+            serde_json::json!({"id": "x", "permalink": "research/note", "title": "T"}).to_string(),
         )];
         assert_eq!(
             permalink_from_tool_result(&content),
@@ -1079,7 +1076,7 @@ mod tests {
     #[test]
     fn permalink_from_tool_result_returns_none_for_missing_field() {
         let content = vec![ContentBlock::text(
-            &serde_json::json!({"id": "x", "title": "T"}).to_string(),
+            serde_json::json!({"id": "x", "title": "T"}).to_string(),
         )];
         assert_eq!(permalink_from_tool_result(&content), None);
     }
@@ -1087,7 +1084,7 @@ mod tests {
     #[test]
     fn permalink_from_tool_result_returns_none_for_empty_permalink() {
         let content = vec![ContentBlock::text(
-            &serde_json::json!({"permalink": ""}).to_string(),
+            serde_json::json!({"permalink": ""}).to_string(),
         )];
         assert_eq!(permalink_from_tool_result(&content), None);
     }

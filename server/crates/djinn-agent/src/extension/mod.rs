@@ -5118,14 +5118,14 @@ mod tests {
 
     #[test]
     fn snapshot_lsp_tool_schema() {
-        insta::assert_json_snapshot!("lsp_tool_schema", serde_json::to_value(&tool_lsp()).unwrap());
+        insta::assert_json_snapshot!("lsp_tool_schema", serde_json::to_value(tool_lsp()).unwrap());
     }
 
     #[test]
     fn snapshot_code_graph_tool_schema() {
         insta::assert_json_snapshot!(
             "code_graph_tool_schema",
-            serde_json::to_value(&tool_code_graph()).unwrap()
+            serde_json::to_value(tool_code_graph()).unwrap()
         );
     }
 

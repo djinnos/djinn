@@ -786,8 +786,8 @@ pub(super) async fn run_reply_loop(
                         // If the MCP registry knows this tool, dispatch directly
                         // to the owning MCP server — skip the built-in extension
                         // dispatch entirely.
-                        if let Some(registry) = mcp_registry {
-                            if registry.has_tool(&name) {
+                        if let Some(registry) = mcp_registry
+                            && registry.has_tool(&name) {
                                 tracing::debug!(
                                     task_id = %task_id,
                                     tool = %name,
@@ -823,7 +823,6 @@ pub(super) async fn run_reply_loop(
                                     is_error,
                                 };
                             }
-                        }
 
                         // ── Normal tool dispatch ────────────────────────────────
                         // Retry logic for SQLite BUSY errors (concurrent tool
