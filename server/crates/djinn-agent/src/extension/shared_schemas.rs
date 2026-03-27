@@ -279,7 +279,8 @@ pub(crate) fn tool_memory_broken_links() -> RmcpTool {
 pub(crate) fn tool_memory_orphans() -> RmcpTool {
     RmcpTool::new(
         "memory_orphans".to_string(),
-        "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).".to_string(),
+        "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap)."
+            .to_string(),
         object!({
             "type": "object",
             "properties": {

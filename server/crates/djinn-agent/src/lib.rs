@@ -21,9 +21,9 @@ pub(crate) mod output_stash;
 pub(crate) mod patch;
 pub mod prompts;
 pub use djinn_provider::provider;
+pub(crate) mod mcp_client;
 pub mod roles;
 pub mod sandbox;
-pub(crate) mod mcp_client;
 pub(crate) mod skills;
 pub(crate) mod truncate;
 

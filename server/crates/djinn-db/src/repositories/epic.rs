@@ -806,7 +806,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_defaults_to_drafting() {
         let repo = EpicRepository::new(test_db(), EventBus::noop());
-        let epic = repo.create("Draft Epic", "", "", "", "", None).await.unwrap();
+        let epic = repo
+            .create("Draft Epic", "", "", "", "", None)
+            .await
+            .unwrap();
         assert_eq!(epic.status, "drafting");
     }
 

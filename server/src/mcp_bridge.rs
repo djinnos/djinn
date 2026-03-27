@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
-use petgraph::visit::EdgeRef;
 use djinn_mcp::bridge::{
     ChannelStatus, CoordinatorOps, CoordinatorStatus, GitOps, GraphNeighbor, ImpactEntry, LspOps,
     LspWarning, ModelPoolStatus, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo, RuntimeOps,
     SlotPoolOps, SyncOps, SyncResult,
 };
+use petgraph::visit::EdgeRef;
 
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
@@ -476,10 +476,8 @@ async fn build_graph_for_project(
     project_path: &str,
 ) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
     let project_path = std::path::PathBuf::from(project_path);
-    let output_dir = std::env::temp_dir().join(format!(
-        "djinn-code-graph-{}",
-        uuid::Uuid::now_v7()
-    ));
+    let output_dir =
+        std::env::temp_dir().join(format!("djinn-code-graph-{}", uuid::Uuid::now_v7()));
     let run = crate::repo_map::run_indexers(&project_path, &output_dir)
         .await
         .map_err(|e| format!("failed to run indexers: {e}"))?;
@@ -616,10 +614,7 @@ mod graph_bridge_tests {
                     relative_path: PathBuf::from("src/app.rs"),
                     definitions: vec![def_occ(&main_symbol.symbol)],
                     references: vec![ref_occ(&helper_symbol_name)],
-                    occurrences: vec![
-                        def_occ(&main_symbol.symbol),
-                        ref_occ(&helper_symbol_name),
-                    ],
+                    occurrences: vec![def_occ(&main_symbol.symbol), ref_occ(&helper_symbol_name)],
                     symbols: vec![main_symbol, trait_symbol],
                 },
             ],
@@ -641,14 +636,8 @@ mod graph_bridge_tests {
     #[test]
     fn resolve_node_finds_symbol_by_name() {
         let graph = build_test_graph();
-        assert!(
-            resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`().").is_ok()
-        );
-        assert!(resolve_node(
-            &graph,
-            "symbol:scip-rust pkg src/helper.rs `helper`()."
-        )
-        .is_ok());
+        assert!(resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`().").is_ok());
+        assert!(resolve_node(&graph, "symbol:scip-rust pkg src/helper.rs `helper`().").is_ok());
     }
 
     #[test]
@@ -675,10 +664,7 @@ mod graph_bridge_tests {
         let graph = build_test_graph();
         let node_index = resolve_node(&graph, "src/app.rs").unwrap();
         let mut neighbors = Vec::new();
-        for dir in [
-            petgraph::Direction::Incoming,
-            petgraph::Direction::Outgoing,
-        ] {
+        for dir in [petgraph::Direction::Incoming, petgraph::Direction::Outgoing] {
             let dir_label = match dir {
                 petgraph::Direction::Incoming => "incoming",
                 petgraph::Direction::Outgoing => "outgoing",
@@ -704,9 +690,7 @@ mod graph_bridge_tests {
             "expected at least one neighbor for src/app.rs"
         );
         // Should contain the helper symbol as a neighbor
-        assert!(neighbors
-            .iter()
-            .any(|n| n.display_name == "helper"));
+        assert!(neighbors.iter().any(|n| n.display_name == "helper"));
     }
 
     #[tokio::test]

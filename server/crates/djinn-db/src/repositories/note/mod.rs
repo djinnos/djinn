@@ -3324,8 +3324,7 @@ mod tests {
             .unwrap();
         assert_eq!(clusters_s1.len(), 1, "session 1 should have 1 cluster");
         let cluster = &clusters_s1[0];
-        let cluster_ids: std::collections::HashSet<_> =
-            cluster.note_ids.iter().cloned().collect();
+        let cluster_ids: std::collections::HashSet<_> = cluster.note_ids.iter().cloned().collect();
         assert!(cluster_ids.contains(&note_a.id));
         assert!(cluster_ids.contains(&note_b.id));
         assert!(cluster_ids.contains(&note_c.id));

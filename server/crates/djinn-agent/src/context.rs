@@ -120,12 +120,7 @@ impl RepoGraphOps for AgentRepoGraphOps {
     ) -> Result<Vec<GraphNeighbor>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn ranked(
-        &self,
-        _: &str,
-        _: Option<&str>,
-        _: usize,
-    ) -> Result<Vec<RankedNode>, String> {
+    async fn ranked(&self, _: &str, _: Option<&str>, _: usize) -> Result<Vec<RankedNode>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {

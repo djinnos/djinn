@@ -23,12 +23,10 @@ use djinn_mcp::tools::agent_tools::{
 use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
 use djinn_mcp::tools::memory_tools::{
     BrokenLinksParams as SharedMemoryBrokenLinksParams,
-    BuildContextParams as SharedMemoryBuildContextParams,
-    EditParams as SharedMemoryEditParams,
+    BuildContextParams as SharedMemoryBuildContextParams, EditParams as SharedMemoryEditParams,
     HealthParams as SharedMemoryHealthParams, ListParams as SharedMemoryListParams,
     OrphansParams as SharedMemoryOrphansParams, ReadParams as SharedMemoryReadParams,
-    SearchParams as SharedMemorySearchParams,
-    WriteParams as SharedMemoryWriteParams,
+    SearchParams as SharedMemorySearchParams, WriteParams as SharedMemoryWriteParams,
 };
 use djinn_mcp::tools::task_tools::{
     CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
@@ -188,15 +186,9 @@ where
             )
             .await
         }
-        "memory_write" => {
-            call_memory_write(state, &call.arguments, &worktree_project_path).await
-        }
-        "memory_edit" => {
-            call_memory_edit(state, &call.arguments, &worktree_project_path).await
-        }
-        "memory_health" => {
-            call_memory_health(state, &call.arguments, &worktree_project_path).await
-        }
+        "memory_write" => call_memory_write(state, &call.arguments, &worktree_project_path).await,
+        "memory_edit" => call_memory_edit(state, &call.arguments, &worktree_project_path).await,
+        "memory_health" => call_memory_health(state, &call.arguments, &worktree_project_path).await,
         "memory_broken_links" => {
             call_memory_broken_links(state, &call.arguments, &worktree_project_path).await
         }
@@ -215,9 +207,7 @@ where
         "edit" => call_edit(state, &call.arguments, worktree_path).await,
         "apply_patch" => call_apply_patch(state, &call.arguments, worktree_path).await,
         "lsp" => call_lsp(state, &call.arguments, worktree_path).await,
-        "code_graph" => {
-            call_code_graph(state, &call.arguments, &worktree_project_path).await
-        }
+        "code_graph" => call_code_graph(state, &call.arguments, &worktree_project_path).await,
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
 }
@@ -1156,8 +1146,9 @@ async fn call_memory_write(
             None,
         )
         .await;
-    Ok(serde_json::to_value(result.0)
-        .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize memory_write response" })))
+    Ok(serde_json::to_value(result.0).unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_write response" }),
+    ))
 }
 
 async fn call_memory_edit(
@@ -1182,8 +1173,9 @@ async fn call_memory_edit(
             None,
         )
         .await;
-    Ok(serde_json::to_value(result.0)
-        .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize memory_edit response" })))
+    Ok(serde_json::to_value(result.0).unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_edit response" }),
+    ))
 }
 
 async fn call_memory_broken_links(
@@ -3412,16 +3404,14 @@ async fn call_code_graph(
             let neighbors = graph_ops
                 .neighbors(effective_path, key, p.direction.as_deref())
                 .await?;
-            serde_json::to_value(&neighbors)
-                .map_err(|e| format!("serialize error: {e}"))?
+            serde_json::to_value(&neighbors).map_err(|e| format!("serialize error: {e}"))?
         }
         "ranked" => {
             let limit = p.limit.unwrap_or(20);
             let ranked = graph_ops
                 .ranked(effective_path, p.kind_filter.as_deref(), limit)
                 .await?;
-            serde_json::to_value(&ranked)
-                .map_err(|e| format!("serialize error: {e}"))?
+            serde_json::to_value(&ranked).map_err(|e| format!("serialize error: {e}"))?
         }
         "implementations" => {
             let key = p
@@ -3429,11 +3419,8 @@ async fn call_code_graph(
                 .as_deref()
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'implementations'")?;
-            let impls = graph_ops
-                .implementations(effective_path, key)
-                .await?;
-            serde_json::to_value(&impls)
-                .map_err(|e| format!("serialize error: {e}"))?
+            let impls = graph_ops.implementations(effective_path, key).await?;
+            serde_json::to_value(&impls).map_err(|e| format!("serialize error: {e}"))?
         }
         "impact" => {
             let key = p
@@ -3442,11 +3429,8 @@ async fn call_code_graph(
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'impact'")?;
             let depth = p.limit.unwrap_or(3);
-            let impact = graph_ops
-                .impact(effective_path, key, depth)
-                .await?;
-            serde_json::to_value(&impact)
-                .map_err(|e| format!("serialize error: {e}"))?
+            let impact = graph_ops.impact(effective_path, key, depth).await?;
+            serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?
         }
         other => {
             return Err(format!(
@@ -3976,7 +3960,10 @@ mod tests {
         call_tool(
             state,
             "lsp",
-            args.as_object().expect("lsp args must be an object").clone().into(),
+            args.as_object()
+                .expect("lsp args must be an object")
+                .clone()
+                .into(),
             worktree,
             None,
             None,

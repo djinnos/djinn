@@ -529,12 +529,7 @@ mod tests {
             .unwrap();
         // confidence defaults to 1.0, no need to set
 
-        (
-            seed.permalink,
-            low_conf.title,
-            stale.title,
-            normal.title,
-        )
+        (seed.permalink, low_conf.title, stale.title, normal.title)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -565,7 +560,11 @@ mod tests {
             .await;
 
         let response = result.0;
-        assert!(response.error.is_none(), "should not error: {:?}", response.error);
+        assert!(
+            response.error.is_none(),
+            "should not error: {:?}",
+            response.error
+        );
 
         // Collect all related note titles
         let all_related_titles: Vec<String> = response
@@ -611,7 +610,11 @@ mod tests {
             .await;
 
         let response = result.0;
-        assert!(response.error.is_none(), "should not error: {:?}", response.error);
+        assert!(
+            response.error.is_none(),
+            "should not error: {:?}",
+            response.error
+        );
 
         // Collect all related note titles
         let all_related_titles: Vec<String> = response
@@ -657,14 +660,21 @@ mod tests {
             .await;
 
         let response = result.0;
-        assert!(response.error.is_none(), "should not error: {:?}", response.error);
+        assert!(
+            response.error.is_none(),
+            "should not error: {:?}",
+            response.error
+        );
 
         // Find the stale citation note in the results
         let stale_l1 = response.related_l1.iter().find(|n| n.title == stale_title);
         let stale_l0 = response.related_l0.iter().find(|n| n.title == stale_title);
 
         let stale_note = stale_l1.is_some() || stale_l0.is_some();
-        assert!(stale_note, "stale citation note should appear in results with min_confidence=0.0");
+        assert!(
+            stale_note,
+            "stale citation note should appear in results with min_confidence=0.0"
+        );
 
         // Verify superseded annotation
         if let Some(note) = stale_l1 {

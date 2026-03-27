@@ -896,10 +896,7 @@ mod tests {
         }
 
         // The text content is preserved
-        let texts: Vec<&str> = content
-            .iter()
-            .filter_map(|b| b["text"].as_str())
-            .collect();
+        let texts: Vec<&str> = content.iter().filter_map(|b| b["text"].as_str()).collect();
         assert!(texts.iter().any(|t| t.contains("helpful assistant")));
         assert!(texts.iter().any(|t| t.contains("Repository Map")));
     }
