@@ -651,8 +651,8 @@ pub fn compute_transition(
         }
 
         TransitionAction::PrConflict => {
-            if !matches!(from, TaskStatus::Approved | TaskStatus::PrDraft) {
-                return bad("pr_conflict is only valid from approved or pr_draft");
+            if !matches!(from, TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview) {
+                return bad("pr_conflict is only valid from approved, pr_draft, or pr_review");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
@@ -849,7 +849,7 @@ mod tests {
             (TransitionAction::PrCreated, TaskStatus::Approved) => Some(TaskStatus::PrDraft),
             (TransitionAction::PrUndraft, TaskStatus::PrDraft) => Some(TaskStatus::PrReview),
             (TransitionAction::PrCiFailed, TaskStatus::PrDraft) => Some(TaskStatus::Open),
-            (TransitionAction::PrConflict, TaskStatus::Approved | TaskStatus::PrDraft) => {
+            (TransitionAction::PrConflict, TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview) => {
                 Some(TaskStatus::Open)
             }
             (TransitionAction::PrMerge, TaskStatus::PrReview) => Some(TaskStatus::Closed),

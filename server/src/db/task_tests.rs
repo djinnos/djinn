@@ -1712,6 +1712,8 @@ async fn blocker_swap_atomic_no_race_concurrent() {
 #[case("approved", TransitionAction::PrConflict, "open", None)]
 // pr_conflict transitions pr_draft → open
 #[case("pr_draft", TransitionAction::PrConflict, "open", None)]
+// pr_conflict transitions pr_review → open
+#[case("pr_review", TransitionAction::PrConflict, "open", None)]
 // pr_merge transitions pr_review → closed
 #[case("pr_review", TransitionAction::PrMerge, "closed", None)]
 // pr_changes_requested transitions pr_review → open (requires reason)
@@ -1804,10 +1806,9 @@ async fn valid_transition(
 #[case("open", TransitionAction::PrCiFailed)]
 #[case("approved", TransitionAction::PrCiFailed)]
 #[case("pr_review", TransitionAction::PrCiFailed)]
-// pr_conflict only from approved or pr_draft
+// pr_conflict only from approved, pr_draft, or pr_review
 #[case("open", TransitionAction::PrConflict)]
 #[case("in_progress", TransitionAction::PrConflict)]
-#[case("pr_review", TransitionAction::PrConflict)]
 // pr_merge only from pr_review
 #[case("open", TransitionAction::PrMerge)]
 #[case("in_task_review", TransitionAction::PrMerge)]
