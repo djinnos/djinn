@@ -31,6 +31,8 @@ mod build_context_tests;
 #[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
+mod search_tests;
+#[cfg(test)]
 mod writes_tests;
 
 // ── Router composition ────────────────────────────────────────────────────────
