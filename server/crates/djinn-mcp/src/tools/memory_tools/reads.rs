@@ -157,6 +157,17 @@ impl DjinnMcpServer {
             });
         };
 
+        // Guard: git history is only available for file-backed notes
+        if note.storage != "file" {
+            return Json(MemoryHistoryResponse {
+                history: vec![],
+                error: Some(format!(
+                    "note '{}' is stored in database only; git history unavailable",
+                    p.permalink
+                )),
+            });
+        }
+
         let limit = p.limit.unwrap_or(20).clamp(1, 100);
         let history = git_log_for_file(&note.file_path, limit).await;
         Json(MemoryHistoryResponse {
