@@ -1,4 +1,7 @@
 {
+  "setup": [
+    {"name": "cargo-build", "command": "cd server && cargo build --workspace --tests", "timeout_secs": 300}
+  ],
   "verification_rules": [
     {
       "match": "server/crates/djinn-agent/**",
