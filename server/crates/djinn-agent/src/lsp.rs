@@ -747,8 +747,13 @@ fn filter_symbol_entries(entries: Vec<SymbolEntry>, query: &SymbolQuery) -> Vec<
 
 fn symbol_location(symbol: &serde_json::Value) -> Option<String> {
     symbol.get("location").map(format_location).or_else(|| {
-        symbol_stable_position(symbol)
-            .map(|position| format!("line {}:{}", position.line + 1, position.character + 1))
+        symbol_stable_position(symbol).map(|position| {
+            if position.character == 0 {
+                format!("line {}", position.line + 1)
+            } else {
+                format!("line {}:{}", position.line + 1, position.character + 1)
+            }
+        })
     })
 }
 
