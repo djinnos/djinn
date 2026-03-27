@@ -46,6 +46,31 @@ impl AnthropicProvider {
             })
     }
 
+    /// Convert system messages into Anthropic system blocks with cache_control.
+    ///
+    /// # Anthropic prompt-cache semantics (ADR-043 §8)
+    ///
+    /// Anthropic caches the longest prefix of the `system` array whose
+    /// blocks all carry `cache_control: {"type": "ephemeral"}`.  To
+    /// maximise the cache hit rate we:
+    ///
+    /// 1. Emit each *stable* content block (base prompt, project context,
+    ///    repo map) as a separate `{"type": "text", ...}` entry with
+    ///    `cache_control` attached.
+    /// 2. The *dynamic* tail (client system prompt) is emitted as the
+    ///    final block **without** `cache_control`, so it sits outside the
+    ///    cached prefix and can change freely without cache invalidation.
+    /// 3. Within a single system message, `cache_control` is applied to
+    ///    all blocks *except the last one*.  The last block is either the
+    ///    dynamic tail or, when there is no dynamic content, the final
+    ///    stable block (which still benefits from being part of the
+    ///    prefix -- Anthropic caches up to and including it).
+    ///
+    /// The upstream segmentation in `build_system_message`
+    /// (`server/src/server/chat.rs`) guarantees the block order:
+    ///   base system prompt -> project context -> repo map -> client system
+    ///
+    /// See also: `compose_system_prompt_segments` in `chat.rs`.
     fn system_blocks(conversation: &Conversation) -> Vec<AnthropicSystemBlock> {
         conversation
             .messages

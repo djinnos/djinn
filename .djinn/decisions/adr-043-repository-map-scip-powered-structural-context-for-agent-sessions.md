@@ -300,8 +300,13 @@ Rendered as user message + assistant acknowledgment pair (Aider's pattern).
 - File affinity as 6th RRF signal with type-relationship extension
 - Co-access Hebbian learning
 
-### Phase 4: Prompt cache optimization
-- `cache_control` breakpoints for Anthropic *(not yet implemented)*
+### Phase 4: Prompt cache optimization ✅
+- Stable/dynamic segment classification in `compose_system_prompt_segments` (`server/src/server/chat.rs`)
+- `build_system_message` emits each stable segment as its own `ContentBlock` and collapses dynamic segments into a trailing block without cache metadata
+- `system_message_metadata` attaches `anthropic_cache_breakpoint` (`stable_prefix` kind) to the system message when at least one stable segment exists and the model is `anthropic/*`
+- `AnthropicProvider::system_blocks` (`server/crates/djinn-provider/src/provider/format/anthropic.rs`) reads the breakpoint and attaches `cache_control: {"type": "ephemeral"}` to every system block except the last, marking the boundary between the cached prefix and the dynamic tail
+- Non-Anthropic providers ignore the cache metadata and treat all blocks as plain text
+- Landed block order: **base system prompt** -> **project context** -> **repo map** -> **client system prompt** (dynamic tail)
 
 ### Phase 5: Monorepo, worktree reuse, and tool-call-driven refresh
 - Monorepo-aware workspace discovery per language (§1a)

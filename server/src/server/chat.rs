@@ -33,6 +33,14 @@ const MAX_TOOL_ITERATIONS: usize = 20;
 const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
 const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
 
+/// Whether a prompt segment's content is stable across consecutive turns.
+///
+/// Stable segments (base prompt, project context, repo map) are placed first
+/// in the system message so they form a cacheable prefix for Anthropic's
+/// prompt cache.  Dynamic segments (client-supplied system instructions) are
+/// appended after the stable prefix and do **not** receive `cache_control`.
+///
+/// See [`compose_system_prompt_segments`] for the full ordering rationale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PromptSegmentStability {
     Stable,
@@ -59,6 +67,35 @@ fn cached_prompt_segment(text: impl Into<String>) -> PromptSegment {
     }
 }
 
+/// Assemble the system prompt into ordered segments with cache-stability markers.
+///
+/// # Segment ordering (ADR-043 §8, prompt-cache optimization)
+///
+/// The segments are emitted in a fixed order chosen to maximise Anthropic
+/// prompt-cache hit rate.  Only *stable* segments (content that is identical
+/// across consecutive turns) carry `cache_control`; the dynamic tail does not.
+///
+/// ```text
+///   1. Base system prompt   (Stable)  — chat persona instructions
+///   2. Project context      (Stable)  — project name, brief, epic/task counts
+///   3. Repository map       (Stable)  — SCIP-powered structural overview
+///   4. Client system prompt  (Dynamic) — per-request caller-supplied context
+/// ```
+///
+/// *Why this order?*  Anthropic caches the longest matching prefix of the
+/// system message.  By placing content that rarely changes first and content
+/// that varies per request last, we keep the cacheable prefix as long as
+/// possible.  Tool definitions are injected by the provider layer *between*
+/// the system message and the first user message, so they do not affect the
+/// system-block prefix here.
+///
+/// Callers: [`build_system_message`] converts these segments into a single
+/// [`Message`] with the appropriate [`MessageMeta`] for Anthropic cache
+/// breakpoints.
+///
+/// Files changed for ADR-043 prompt-cache work:
+/// - `server/src/server/chat.rs` (this file)
+/// - `server/crates/djinn-provider/src/provider/format/anthropic.rs`
 fn compose_system_prompt_segments(
     base_prompt: &str,
     project_context: Option<&str>,
@@ -114,6 +151,26 @@ fn compose_system_prompt(
     .join("\n\n")
 }
 
+/// Build the system [`Message`] from prompt segments, preserving cache semantics.
+///
+/// # Content-block layout (ADR-043 §8)
+///
+/// Each *stable* segment becomes its own [`ContentBlock::Text`] so the
+/// Anthropic formatter can attach `cache_control` to each one independently.
+/// All *dynamic* segments are collapsed into a single trailing text block
+/// **without** `cache_control` -- this ensures the dynamic tail never
+/// invalidates the cached prefix.
+///
+/// When the model is an Anthropic model and at least one stable segment
+/// exists, the message carries [`MessageMeta`] with an
+/// `anthropic_cache_breakpoint` marker.  The Anthropic provider
+/// (`AnthropicProvider::system_blocks`) reads this marker and emits
+/// `cache_control: {"type": "ephemeral"}` on each stable block except the
+/// last one in the message, which marks the boundary between the cached
+/// prefix and the dynamic tail.
+///
+/// Non-Anthropic providers ignore the metadata entirely, receiving the
+/// content blocks as plain text.
 fn build_system_message(
     base_prompt: &str,
     project_context: Option<&str>,
