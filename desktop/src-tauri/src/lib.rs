@@ -144,6 +144,7 @@ pub fn run() {
             commands::select_directory,
             commands::check_git_remote,
             commands::setup_git_remote,
+            commands::sync_github_tokens,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

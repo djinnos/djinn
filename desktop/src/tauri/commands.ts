@@ -118,6 +118,15 @@ export async function setupGitRemote(projectPath: string, remoteUrl: string): Pr
 }
 
 /**
+ * Re-sync locally stored GitHub tokens to the server credential vault.
+ * Call when the server may have lost credential state (e.g. after restart).
+ * @returns true if tokens were synced, false if no local tokens available
+ */
+export async function syncGithubTokens(): Promise<boolean> {
+  return invoke<boolean>("sync_github_tokens");
+}
+
+/**
  * Get current authentication state.
  */
 export async function authGetState(): Promise<AuthState> {

@@ -163,6 +163,34 @@ pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
                         }
                     }
                     let _ = app_handle.emit("server:reconnected", &base_url);
+
+                    // Re-sync GitHub tokens to the server credential vault.
+                    // The server may have restarted with a fresh DB, so push
+                    // the locally-stored tokens again.
+                    if let Some(token_state) = crate::token_refresh::get_token_state() {
+                        let user_login = match crate::auth::retrieve_token().await {
+                            Ok(Some(json)) => {
+                                serde_json::from_str::<crate::auth::StoredTokens>(&json)
+                                    .ok()
+                                    .and_then(|s| {
+                                        if s.user_login.is_empty() {
+                                            None
+                                        } else {
+                                            Some(s.user_login)
+                                        }
+                                    })
+                            }
+                            _ => None,
+                        };
+                        crate::token_sync::sync_tokens_to_server(
+                            &token_state.access_token,
+                            &token_state.refresh_token,
+                            token_state.expires_at_unix,
+                            user_login.as_deref(),
+                        )
+                        .await;
+                    }
+
                     was_healthy = true;
                 }
                 continue;

@@ -490,6 +490,42 @@ pub async fn logout() -> Result<(), String> {
     token_refresh::logout().await
 }
 
+/// Re-sync locally stored GitHub tokens to the server credential vault.
+///
+/// Call this when the server may have lost its credential state (e.g. after a
+/// restart or DB reset). Returns Ok(true) if tokens were synced, Ok(false) if
+/// no local tokens were available.
+#[tauri::command]
+pub async fn sync_github_tokens() -> Result<bool, String> {
+    let token_state = match token_refresh::get_token_state() {
+        Some(ts) => ts,
+        None => return Ok(false),
+    };
+
+    let user_login = match retrieve_token().await {
+        Ok(Some(json)) => serde_json::from_str::<crate::auth::StoredTokens>(&json)
+            .ok()
+            .and_then(|s| {
+                if s.user_login.is_empty() {
+                    None
+                } else {
+                    Some(s.user_login)
+                }
+            }),
+        _ => None,
+    };
+
+    crate::token_sync::sync_tokens_to_server(
+        &token_state.access_token,
+        &token_state.refresh_token,
+        token_state.expires_at_unix,
+        user_login.as_deref(),
+    )
+    .await;
+
+    Ok(true)
+}
+
 /// Check if a git repository has an 'origin' remote configured
 #[tauri::command]
 pub fn check_git_remote(project_path: String) -> Result<Option<String>, String> {

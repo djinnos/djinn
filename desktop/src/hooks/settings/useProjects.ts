@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { addProject, fetchProjects, removeProject, type Project } from '@/api/server';
 import { showToast } from '@/lib/toast';
-import { selectDirectory } from '@/tauri/commands';
+import { selectDirectory, syncGithubTokens } from '@/tauri/commands';
 
 export function useProjects() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -33,7 +33,18 @@ export function useProjects() {
     try {
       const path = await selectDirectory('Select Project Directory');
       if (!path) return;
-      await addProject(path);
+      try {
+        await addProject(path);
+      } catch (err) {
+        // If the server doesn't have GitHub tokens yet, re-sync and retry once.
+        const msg = err instanceof Error ? err.message : '';
+        if (msg.includes('Connect GitHub first')) {
+          await syncGithubTokens();
+          await addProject(path);
+        } else {
+          throw err;
+        }
+      }
       await loadProjects();
       showToast.success('Project added');
     } catch (err) {
