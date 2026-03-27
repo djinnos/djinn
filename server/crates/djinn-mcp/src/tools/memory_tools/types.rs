@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use super::*;
 
 // ── Param structs ─────────────────────────────────────────────────────────────
