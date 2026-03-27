@@ -473,3 +473,45 @@ async fn list_worktrees_includes_main_and_task() {
     assert_eq!(task_wt.branch.as_deref(), Some("task/wt3"));
     assert_eq!(task_wt.head.len(), 40, "HEAD should be a 40-char SHA");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_base_and_changed_file_count_report_git_diff_inputs() {
+    let (local, _remote) = setup_git_repo();
+    let path = local.path();
+
+    std::process::Command::new("git")
+        .args(["checkout", "-b", "task/reuse-policy"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+
+    std::fs::write(path.join("src.txt"), "base\nworker\n").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "src.txt"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "change file"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+
+    let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+    let merge_base = handle.merge_base("main", "HEAD").await.unwrap();
+    let main_head = std::process::Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        merge_base,
+        String::from_utf8_lossy(&main_head.stdout).trim()
+    );
+
+    let changed = handle
+        .changed_file_count(&merge_base, "HEAD")
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+}

@@ -62,6 +62,20 @@ struct RefreshDecision {
     should_spawn: bool,
 }
 
+/// Phase-1 worktree reuse policy for ADR-043:
+/// - Reuse a cached repo map directly when the exact commit already exists, even if it was
+///   produced for a different worktree path.
+/// - Otherwise fall back to full indexing for the current worktree commit.
+/// - Future work may use merge-base + changed-file-count helpers to gate direct reuse for
+///   nearby commits or to patch the graph incrementally, but that is intentionally out of scope
+///   for this wave.
+const PHASE_1_WORKTREE_REUSE_POLICY: &str =
+    "direct canonical/base cache reuse for exact commit matches; otherwise full indexing";
+
+fn phase_1_worktree_reuse_policy() -> &'static str {
+    PHASE_1_WORKTREE_REUSE_POLICY
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RepoMapRefreshError(String);
 
@@ -281,6 +295,20 @@ async fn plan_refresh(
         return None;
     }
 
+    if repo
+        .get_for_commit_across_worktrees(
+            &target.project_id,
+            &target.project_path,
+            &target.commit_sha,
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
+
     let mut guard = in_flight.lock().await;
     if !guard.insert(target.clone()) {
         return Some(RefreshDecision {
@@ -461,6 +489,43 @@ mod tests {
         assert!(decision.should_spawn);
         assert_eq!(decision.target.commit_sha, "new-commit");
         assert!(in_flight.lock().await.contains(&decision.target));
+    }
+
+    #[tokio::test]
+    async fn exact_commit_is_reused_across_worktrees_without_reindex() {
+        let db = create_test_db();
+        let repo = RepoMapCacheRepository::new(db.clone());
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/tmp/project",
+                worktree_path: None,
+                commit_sha: "shared-commit",
+            },
+            rendered_map: "cached",
+            token_estimate: 1,
+            included_entries: 1,
+        })
+        .await
+        .unwrap();
+
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let identity = RefreshIdentity {
+            project_id: "p1".into(),
+            project_path: PathBuf::from("/tmp/project"),
+            worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
+            commit_sha: "shared-commit".into(),
+        };
+
+        let decision = plan_refresh(&db, in_flight.clone(), &identity).await;
+        assert!(decision.is_none());
+        assert!(in_flight.lock().await.is_empty());
+    }
+
+    #[test]
+    fn phase_1_policy_comment_stays_specific() {
+        assert!(phase_1_worktree_reuse_policy().contains("exact commit"));
+        assert!(phase_1_worktree_reuse_policy().contains("full indexing"));
     }
 
     #[tokio::test]

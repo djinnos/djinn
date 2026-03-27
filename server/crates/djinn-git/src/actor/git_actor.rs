@@ -103,6 +103,24 @@ impl GitActor {
                 let result = crate::list_worktrees(path).await;
                 let _ = respond_to.send(result);
             }
+            GitMessage::MergeBase {
+                left,
+                right,
+                respond_to,
+            } => {
+                let path = self.path.clone();
+                let result = crate::merge_base(path, left, right).await;
+                let _ = respond_to.send(result);
+            }
+            GitMessage::ChangedFileCount {
+                base,
+                head,
+                respond_to,
+            } => {
+                let path = self.path.clone();
+                let result = crate::changed_file_count(path, base, head).await;
+                let _ = respond_to.send(result);
+            }
         }
     }
 

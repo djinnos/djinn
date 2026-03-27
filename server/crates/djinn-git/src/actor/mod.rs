@@ -72,6 +72,18 @@ pub(super) enum GitMessage {
     ListWorktrees {
         respond_to: Reply<Vec<WorktreeInfo>>,
     },
+    /// Find the merge-base commit shared by two revisions.
+    MergeBase {
+        left: String,
+        right: String,
+        respond_to: Reply<String>,
+    },
+    /// Count changed files between two revisions.
+    ChangedFileCount {
+        base: String,
+        head: String,
+        respond_to: Reply<usize>,
+    },
 }
 
 // ─── Submodules ──────────────────────────────────────────────────────────────

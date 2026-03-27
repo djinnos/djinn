@@ -154,6 +154,26 @@ impl GitActorHandle {
         self.request(|tx| GitMessage::ListWorktrees { respond_to: tx })
             .await
     }
+
+    /// Resolve the merge-base commit between two revisions.
+    pub async fn merge_base(&self, left: &str, right: &str) -> Result<String, GitError> {
+        self.request(|tx| GitMessage::MergeBase {
+            left: left.into(),
+            right: right.into(),
+            respond_to: tx,
+        })
+        .await
+    }
+
+    /// Count changed files between two revisions.
+    pub async fn changed_file_count(&self, base: &str, head: &str) -> Result<usize, GitError> {
+        self.request(|tx| GitMessage::ChangedFileCount {
+            base: base.into(),
+            head: head.into(),
+            respond_to: tx,
+        })
+        .await
+    }
 }
 
 // ─── Registry helper ──────────────────────────────────────────────────────────

@@ -52,6 +52,29 @@ impl RepoMapCacheRepository {
         .await?)
     }
 
+    pub async fn get_for_commit_across_worktrees(
+        &self,
+        project_id: &str,
+        project_path: &str,
+        commit_sha: &str,
+    ) -> Result<Option<CachedRepoMap>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, CachedRepoMap>(
+            "SELECT rendered_map, token_estimate, included_entries, created_at
+             FROM repo_map_cache
+             WHERE project_id = ?1
+               AND project_path = ?2
+               AND commit_sha = ?3
+             ORDER BY CASE WHEN worktree_path IS NULL THEN 0 ELSE 1 END, created_at DESC
+             LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(project_path)
+        .bind(commit_sha)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     pub async fn insert(&self, entry: RepoMapCacheInsert<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
@@ -148,6 +171,44 @@ mod tests {
             .await
             .expect("get");
         assert!(cached.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_for_commit_across_worktrees_reuses_main_cache() {
+        let repo = test_repo().await;
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: None,
+                commit_sha: "abc123",
+            },
+            rendered_map: "main-map",
+            token_estimate: 10,
+            included_entries: 1,
+        })
+        .await
+        .expect("insert main");
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: Some("/repo/.djinn/worktrees/t1"),
+                commit_sha: "abc123",
+            },
+            rendered_map: "worktree-map",
+            token_estimate: 11,
+            included_entries: 2,
+        })
+        .await
+        .expect("insert worktree");
+
+        let cached = repo
+            .get_for_commit_across_worktrees("p1", "/repo", "abc123")
+            .await
+            .expect("get")
+            .expect("hit");
+        assert_eq!(cached.rendered_map, "main-map");
     }
 
     #[tokio::test]

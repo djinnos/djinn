@@ -394,6 +394,33 @@ pub async fn list_worktrees(path: PathBuf) -> Result<Vec<WorktreeInfo>, GitError
     Ok(worktrees)
 }
 
+pub async fn merge_base(path: PathBuf, left: String, right: String) -> Result<String, GitError> {
+    let out = run_git_command(path, vec!["merge-base".into(), left, right]).await?;
+    Ok(out.stdout.trim().to_string())
+}
+
+pub async fn changed_file_count(
+    path: PathBuf,
+    base: String,
+    head: String,
+) -> Result<usize, GitError> {
+    let out = run_git_command(
+        path,
+        vec![
+            "diff".into(),
+            "--name-only".into(),
+            format!("{base}..{head}"),
+        ],
+    )
+    .await?;
+    Ok(out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .count())
+}
+
 pub async fn unmerged_files(path: PathBuf) -> Result<Vec<String>, GitError> {
     let out = run_git_command(
         path,
