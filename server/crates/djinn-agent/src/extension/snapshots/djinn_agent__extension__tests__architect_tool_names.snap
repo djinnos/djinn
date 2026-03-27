@@ -12,6 +12,7 @@ expression: names
   "shell",
   "read",
   "lsp",
+  "code_graph",
   "ci_job_log",
   "output_view",
   "output_grep",

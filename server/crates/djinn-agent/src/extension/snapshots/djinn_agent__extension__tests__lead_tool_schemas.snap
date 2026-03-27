@@ -248,6 +248,58 @@ expression: tool_schemas_lead()
     "name": "lsp"
   },
   {
+    "description": "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol).",
+    "inputSchema": {
+      "properties": {
+        "direction": {
+          "description": "Edge direction filter for neighbors (omit for both)",
+          "enum": [
+            "incoming",
+            "outgoing"
+          ],
+          "type": "string"
+        },
+        "key": {
+          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations)",
+          "type": "string"
+        },
+        "kind_filter": {
+          "description": "Node kind filter for ranked",
+          "enum": [
+            "file",
+            "symbol"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max results for ranked (default 20) or max traversal depth for impact (default 3)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "operation": {
+          "description": "Graph query to perform",
+          "enum": [
+            "neighbors",
+            "ranked",
+            "impact",
+            "implementations"
+          ],
+          "type": "string"
+        },
+        "project_path": {
+          "description": "Absolute path to project root",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "project_path"
+      ],
+      "type": "object"
+    },
+    "name": "code_graph"
+  },
+  {
     "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
     "inputSchema": {
       "properties": {
