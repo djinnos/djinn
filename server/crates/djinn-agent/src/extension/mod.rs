@@ -2045,9 +2045,38 @@ struct LspParams {
     file_path: String,
     line: Option<u32>,
     character: Option<u32>,
+    #[serde(default)]
     depth: Option<usize>,
+    #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
     name_filter: Option<String>,
+}
+
+fn validate_symbol_only_params(operation: &str, params: &LspParams) -> Result<(), String> {
+    if operation == "symbols" {
+        return Ok(());
+    }
+
+    let mut unexpected = Vec::new();
+    if params.depth.is_some() {
+        unexpected.push("depth");
+    }
+    if params.kind.is_some() {
+        unexpected.push("kind");
+    }
+    if params.name_filter.is_some() {
+        unexpected.push("name_filter");
+    }
+
+    if unexpected.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} only supported for operation='symbols'",
+            unexpected.join(", ")
+        ))
+    }
 }
 
 async fn call_lsp(
@@ -2056,6 +2085,7 @@ async fn call_lsp(
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: LspParams = parse_args(arguments)?;
+    validate_symbol_only_params(p.operation.as_str(), &p)?;
     let path = resolve_path(&p.file_path, worktree_path);
 
     match p.operation.as_str() {
@@ -3138,6 +3168,49 @@ mod tests {
         assert!(input_schema.get("depth").is_some());
         assert!(input_schema.get("kind").is_some());
         assert!(input_schema.get("name_filter").is_some());
+    }
+
+    #[test]
+    fn validate_symbol_only_params_rejects_non_symbol_operations() {
+        let params = LspParams {
+            operation: "hover".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line: Some(1),
+            character: Some(1),
+            depth: Some(1),
+            kind: Some("function".to_string()),
+            name_filter: Some("foo".to_string()),
+        };
+
+        let error = validate_symbol_only_params("hover", &params).unwrap_err();
+        assert!(error.contains("depth"));
+        assert!(error.contains("kind"));
+        assert!(error.contains("name_filter"));
+    }
+
+    #[test]
+    fn validate_symbol_only_params_allows_symbols_and_plain_hover() {
+        let symbol_params = LspParams {
+            operation: "symbols".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line: None,
+            character: None,
+            depth: Some(2),
+            kind: Some("function".to_string()),
+            name_filter: Some("foo".to_string()),
+        };
+        assert!(validate_symbol_only_params("symbols", &symbol_params).is_ok());
+
+        let hover_params = LspParams {
+            operation: "hover".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line: Some(1),
+            character: Some(1),
+            depth: None,
+            kind: None,
+            name_filter: None,
+        };
+        assert!(validate_symbol_only_params("hover", &hover_params).is_ok());
     }
 
     #[tokio::test]
