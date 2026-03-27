@@ -8,6 +8,7 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow};
 use djinn_db::NoteRepository;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use petgraph::visit::EdgeRef;
 
@@ -68,17 +69,34 @@ impl SupportedIndexer {
         }
     }
 
-    fn default_output_path(self, project_root: &Path, output_root: &Path) -> PathBuf {
+    fn marker_files(self) -> &'static [&'static str] {
+        match self {
+            Self::RustAnalyzer => &["Cargo.toml"],
+            Self::TypeScript => &["tsconfig.json", "package.json"],
+            Self::Python => &["pyproject.toml", "setup.py"],
+            Self::Go => &["go.mod"],
+            Self::Java => &["build.gradle", "pom.xml"],
+        }
+    }
+
+    fn default_output_path(
+        self,
+        project_root: &Path,
+        output_root: &Path,
+        workspace_slug: &str,
+    ) -> PathBuf {
         let project_name = project_root
             .file_name()
             .and_then(OsStr::to_str)
             .filter(|name| !name.is_empty())
             .unwrap_or("project");
-        output_root.join(format!("{project_name}-{}.scip", self.language()))
+        output_root.join(format!(
+            "{project_name}-{}-{workspace_slug}.scip",
+            self.language()
+        ))
     }
 
-    fn command_args(self, project_root: &Path, output_root: &Path) -> Vec<String> {
-        let output_path = self.default_output_path(project_root, output_root);
+    fn command_args(self, output_path: &Path) -> Vec<String> {
         let output = output_path.to_string_lossy().into_owned();
         match self {
             Self::RustAnalyzer => vec!["scip".to_string(), output],
@@ -88,6 +106,13 @@ impl SupportedIndexer {
             Self::Java => vec!["index".to_string(), output],
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveredWorkspace {
+    pub indexer: SupportedIndexer,
+    pub root: PathBuf,
+    pub slug: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +134,7 @@ pub struct PlannedIndexerCommand {
     pub binary_path: PathBuf,
     pub args: Vec<String>,
     pub working_directory: PathBuf,
+    pub workspace_root: PathBuf,
     pub output_path: PathBuf,
 }
 
@@ -284,19 +310,30 @@ pub fn plan_indexer_commands(
 
     available_indexers
         .iter()
-        .filter_map(|availability| {
-            availability.path.as_ref().map(|binary_path| {
-                let output_path = availability
-                    .indexer
-                    .default_output_path(project_root, output_root);
-                PlannedIndexerCommand {
-                    indexer: availability.indexer,
-                    binary_path: binary_path.clone(),
-                    args: availability.indexer.command_args(project_root, output_root),
-                    working_directory: project_root.to_path_buf(),
-                    output_path,
-                }
-            })
+        .flat_map(|availability| {
+            let Some(binary_path) = availability.path.as_ref() else {
+                return Vec::new();
+            };
+
+            discover_workspaces(project_root, availability.indexer)
+                .into_iter()
+                .map(|workspace| {
+                    let working_directory = project_root.join(&workspace.root);
+                    let output_path = availability.indexer.default_output_path(
+                        project_root,
+                        output_root,
+                        &workspace.slug,
+                    );
+                    PlannedIndexerCommand {
+                        indexer: availability.indexer,
+                        binary_path: binary_path.clone(),
+                        args: availability.indexer.command_args(&output_path),
+                        working_directory: working_directory.clone(),
+                        workspace_root: working_directory,
+                        output_path,
+                    }
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -698,6 +735,118 @@ fn format_edge_kind(kind: RepoGraphEdgeKind) -> &'static str {
     }
 }
 
+fn discover_workspaces(project_root: &Path, indexer: SupportedIndexer) -> Vec<DiscoveredWorkspace> {
+    let mut roots = HashSet::new();
+    let mut discovered = Vec::new();
+
+    let _ = visit_dirs(project_root, &mut |path| {
+        let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
+            return Ok(());
+        };
+
+        if !indexer.marker_files().contains(&file_name) {
+            return Ok(());
+        }
+
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+
+        if !matches_workspace_marker(indexer, path)? {
+            return Ok(());
+        }
+
+        let relative_root = parent
+            .strip_prefix(project_root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| parent.to_path_buf());
+        if roots.insert(relative_root.clone()) {
+            discovered.push(DiscoveredWorkspace {
+                indexer,
+                slug: workspace_slug(&relative_root),
+                root: relative_root,
+            });
+        }
+        Ok(())
+    });
+
+    if discovered.is_empty() {
+        discovered.push(DiscoveredWorkspace {
+            indexer,
+            root: PathBuf::new(),
+            slug: "root".to_string(),
+        });
+    }
+
+    discovered.sort_by(|left, right| left.root.cmp(&right.root));
+    discovered
+}
+
+fn matches_workspace_marker(indexer: SupportedIndexer, path: &Path) -> Result<bool> {
+    match indexer {
+        SupportedIndexer::RustAnalyzer => file_contains(path, "[workspace]"),
+        SupportedIndexer::TypeScript => {
+            let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+            if file_name == "tsconfig.json" {
+                Ok(true)
+            } else {
+                package_json_has_workspaces(path)
+            }
+        }
+        SupportedIndexer::Python | SupportedIndexer::Go | SupportedIndexer::Java => Ok(true),
+    }
+}
+
+fn file_contains(path: &Path, needle: &str) -> Result<bool> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("read workspace marker {}", path.display()))?;
+    Ok(content.contains(needle))
+}
+
+fn package_json_has_workspaces(path: &Path) -> Result<bool> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("read package.json {}", path.display()))?;
+    let json: Value = serde_json::from_str(&content)
+        .with_context(|| format!("parse package.json {}", path.display()))?;
+    Ok(match json.get("workspaces") {
+        Some(Value::Array(values)) => !values.is_empty(),
+        Some(Value::Object(map)) => map
+            .get("packages")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty()),
+        Some(_) => true,
+        None => false,
+    })
+}
+
+fn workspace_slug(root: &Path) -> String {
+    if root.as_os_str().is_empty() {
+        return "root".to_string();
+    }
+
+    let slug = root
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .flat_map(|segment| {
+            segment
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|part| !part.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if slug.is_empty() {
+        "root".to_string()
+    } else {
+        slug
+    }
+}
+
 fn discover_scip_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut artifacts = Vec::new();
     visit_dirs(root, &mut |path| {
@@ -851,10 +1000,18 @@ mod tests {
         assert_eq!(plans.len(), 2);
         assert_eq!(plans[0].indexer, SupportedIndexer::RustAnalyzer);
         assert_eq!(
+            plans[0].working_directory,
+            PathBuf::from("/tmp/example-project")
+        );
+        assert_eq!(
+            plans[0].workspace_root,
+            PathBuf::from("/tmp/example-project")
+        );
+        assert_eq!(
             plans[0].args,
             vec![
                 "scip",
-                "/tmp/example-project/.djinn/scip/example-project-rust.scip"
+                "/tmp/example-project/.djinn/scip/example-project-rust-root.scip"
             ]
         );
         assert_eq!(plans[1].indexer, SupportedIndexer::TypeScript);
@@ -862,9 +1019,202 @@ mod tests {
             plans[1].args,
             vec![
                 "index",
-                "/tmp/example-project/.djinn/scip/example-project-typescript.scip"
+                "/tmp/example-project/.djinn/scip/example-project-typescript-root.scip"
             ]
         );
+    }
+
+    #[test]
+    fn discovers_monorepo_workspaces_per_language() {
+        let tmp = tempdir_in_tmp();
+        let project_root = tmp.path().join("djinn");
+        fs::create_dir_all(project_root.join("server")).expect("create server dir");
+        fs::create_dir_all(project_root.join("desktop")).expect("create desktop dir");
+        fs::create_dir_all(project_root.join("website")).expect("create website dir");
+        fs::write(
+            project_root.join("server/Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write rust workspace");
+        fs::write(project_root.join("desktop/tsconfig.json"), "{}\n")
+            .expect("write desktop tsconfig");
+        fs::write(
+            project_root.join("website/package.json"),
+            "{\"private\": true, \"workspaces\": [\"apps/*\"]}\n",
+        )
+        .expect("write website package.json");
+
+        let rust_workspaces = discover_workspaces(&project_root, SupportedIndexer::RustAnalyzer);
+        assert_eq!(rust_workspaces.len(), 1);
+        assert_eq!(rust_workspaces[0].root, PathBuf::from("server"));
+        assert_eq!(rust_workspaces[0].slug, "server");
+
+        let ts_workspaces = discover_workspaces(&project_root, SupportedIndexer::TypeScript);
+        assert_eq!(
+            ts_workspaces
+                .iter()
+                .map(|workspace| workspace.root.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("desktop"), PathBuf::from("website")]
+        );
+        assert_eq!(
+            ts_workspaces
+                .iter()
+                .map(|workspace| workspace.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["desktop", "website"]
+        );
+    }
+
+    #[test]
+    fn monorepo_command_planning_emits_per_workspace_outputs() {
+        let tmp = tempdir_in_tmp();
+        let project_root = tmp.path().join("djinn");
+        let output_root = project_root.join(".djinn/scip");
+        fs::create_dir_all(project_root.join("server")).expect("create server dir");
+        fs::create_dir_all(project_root.join("desktop")).expect("create desktop dir");
+        fs::create_dir_all(project_root.join("website")).expect("create website dir");
+        fs::write(
+            project_root.join("server/Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write rust workspace");
+        fs::write(project_root.join("desktop/tsconfig.json"), "{}\n")
+            .expect("write desktop tsconfig");
+        fs::write(
+            project_root.join("website/package.json"),
+            "{\"private\": true, \"workspaces\": [\"apps/*\"]}\n",
+        )
+        .expect("write website package.json");
+
+        let available = vec![
+            IndexerAvailability {
+                indexer: SupportedIndexer::RustAnalyzer,
+                binary: "rust-analyzer".to_string(),
+                path: Some(PathBuf::from("/tooling/rust-analyzer")),
+            },
+            IndexerAvailability {
+                indexer: SupportedIndexer::TypeScript,
+                binary: "scip-typescript".to_string(),
+                path: Some(PathBuf::from("/tooling/scip-typescript")),
+            },
+        ];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available);
+        assert_eq!(plans.len(), 3);
+        assert_eq!(plans[0].working_directory, project_root.join("server"));
+        assert_eq!(plans[0].workspace_root, project_root.join("server"));
+        assert_eq!(
+            plans[0].output_path,
+            output_root.join("djinn-rust-server.scip")
+        );
+        assert_eq!(
+            plans[1..]
+                .iter()
+                .map(|plan| plan
+                    .working_directory
+                    .strip_prefix(&project_root)
+                    .unwrap()
+                    .to_path_buf())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("desktop"), PathBuf::from("website")]
+        );
+        assert_eq!(
+            plans[1..]
+                .iter()
+                .map(|plan| plan
+                    .output_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "djinn-typescript-desktop.scip".to_string(),
+                "djinn-typescript-website.scip".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn command_planning_falls_back_to_project_root_when_no_workspace_detected() {
+        let project_root = PathBuf::from("/workspace/repo");
+        let output_root = PathBuf::from("/workspace/repo/.djinn/scip");
+        let available = vec![IndexerAvailability {
+            indexer: SupportedIndexer::Python,
+            binary: "scip-python".to_string(),
+            path: Some(PathBuf::from("/tooling/scip-python")),
+        }];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].working_directory, project_root);
+        assert_eq!(plans[0].workspace_root, PathBuf::from("/workspace/repo"));
+        assert_eq!(
+            plans[0].args,
+            vec!["index", "/workspace/repo/.djinn/scip/repo-python-root.scip"]
+        );
+    }
+
+    #[test]
+    fn collect_scip_artifacts_tags_multiple_planned_outputs_per_indexer() {
+        let tmp = tempdir_in_tmp();
+        let output_root = tmp.path().join("out");
+        fs::create_dir_all(&output_root).expect("create output dirs");
+
+        let planned_rust = PlannedIndexerCommand {
+            indexer: SupportedIndexer::RustAnalyzer,
+            binary_path: PathBuf::from("/tooling/rust-analyzer"),
+            args: vec![
+                "scip".to_string(),
+                output_root
+                    .join("repo-rust-server.scip")
+                    .display()
+                    .to_string(),
+            ],
+            working_directory: PathBuf::from("/tmp/project/server"),
+            workspace_root: PathBuf::from("/tmp/project/server"),
+            output_path: output_root.join("repo-rust-server.scip"),
+        };
+        let planned_ts = PlannedIndexerCommand {
+            indexer: SupportedIndexer::TypeScript,
+            binary_path: PathBuf::from("/tooling/scip-typescript"),
+            args: vec![
+                "index".to_string(),
+                output_root
+                    .join("repo-typescript-desktop.scip")
+                    .display()
+                    .to_string(),
+            ],
+            working_directory: PathBuf::from("/tmp/project/desktop"),
+            workspace_root: PathBuf::from("/tmp/project/desktop"),
+            output_path: output_root.join("repo-typescript-desktop.scip"),
+        };
+        fs::write(&planned_rust.output_path, b"rust-index").expect("write rust output");
+        fs::write(&planned_ts.output_path, b"ts-index").expect("write ts output");
+
+        let artifacts = collect_scip_artifacts(
+            &output_root,
+            &[
+                ExecutedIndexerCommand {
+                    plan: planned_rust,
+                    exit_code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                ExecutedIndexerCommand {
+                    plan: planned_ts,
+                    exit_code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            ],
+        )
+        .expect("collect artifacts");
+
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].indexer, Some(SupportedIndexer::RustAnalyzer));
+        assert_eq!(artifacts[1].indexer, Some(SupportedIndexer::TypeScript));
     }
 
     #[test]
@@ -881,6 +1231,7 @@ mod tests {
                 output_root.join("example-go.scip").display().to_string(),
             ],
             working_directory: PathBuf::from("/tmp/project"),
+            workspace_root: PathBuf::from("/tmp/project"),
             output_path: output_root.join("example-go.scip"),
         };
         fs::write(&planned.output_path, b"go-index").expect("write planned output");
@@ -929,23 +1280,26 @@ mod tests {
         );
         assert_eq!(
             plans[0].args,
-            vec!["scip", "/workspace/repo/.djinn/scip/repo-rust.scip"]
+            vec!["scip", "/workspace/repo/.djinn/scip/repo-rust-root.scip"]
         );
         assert_eq!(
             plans[1].args,
-            vec!["index", "/workspace/repo/.djinn/scip/repo-typescript.scip"]
+            vec![
+                "index",
+                "/workspace/repo/.djinn/scip/repo-typescript-root.scip"
+            ]
         );
         assert_eq!(
             plans[2].args,
-            vec!["index", "/workspace/repo/.djinn/scip/repo-python.scip"]
+            vec!["index", "/workspace/repo/.djinn/scip/repo-python-root.scip"]
         );
         assert_eq!(
             plans[3].args,
-            vec!["index", "/workspace/repo/.djinn/scip/repo-go.scip"]
+            vec!["index", "/workspace/repo/.djinn/scip/repo-go-root.scip"]
         );
         assert_eq!(
             plans[4].args,
-            vec!["index", "/workspace/repo/.djinn/scip/repo-java.scip"]
+            vec!["index", "/workspace/repo/.djinn/scip/repo-java-root.scip"]
         );
     }
 
