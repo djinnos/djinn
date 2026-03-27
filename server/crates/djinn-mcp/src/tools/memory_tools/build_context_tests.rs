@@ -19,7 +19,8 @@ mod tests {
     use crate::server::DjinnMcpServer;
     use crate::state::McpState;
     use crate::state::stubs::{
-        StubCoordinatorOps, StubGitOps, StubLspOps, StubRuntimeOps, StubSlotPoolOps, StubSyncOps,
+        StubCoordinatorOps, StubGitOps, StubLspOps, StubRepoGraphOps, StubRuntimeOps,
+        StubSlotPoolOps, StubSyncOps,
     };
     use crate::tools::memory_tools::BuildContextParams;
 
@@ -52,6 +53,7 @@ mod tests {
             Arc::new(StubSyncOps),
             Arc::new(StubRuntimeOps),
             Arc::new(StubGitOps),
+            Arc::new(StubRepoGraphOps),
         )
     }
 

@@ -195,6 +195,9 @@ where
         "edit" => call_edit(state, &call.arguments, worktree_path).await,
         "apply_patch" => call_apply_patch(state, &call.arguments, worktree_path).await,
         "lsp" => call_lsp(state, &call.arguments, worktree_path).await,
+        "code_graph" => {
+            call_code_graph(state, &call.arguments, &worktree_project_path).await
+        }
         other => Err(format!("unknown djinn frontend tool: {other}")),
     }
 }
@@ -2893,6 +2896,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
     tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
     tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
+    tool_values.push(serde_json::to_value(tool_code_graph()).expect("serialize tool_code_graph"));
     tool_values.push(serde_json::to_value(tool_ci_job_log()).expect("serialize tool_ci_job_log"));
     tool_values.push(serde_json::to_value(tool_output_view()).expect("serialize tool_output_view"));
     tool_values.push(serde_json::to_value(tool_output_grep()).expect("serialize tool_output_grep"));
@@ -3134,6 +3138,132 @@ fn tool_lsp() -> RmcpTool {
             }
         }),
     )
+}
+
+fn tool_code_graph() -> RmcpTool {
+    RmcpTool::new(
+        "code_graph".to_string(),
+        "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol).".to_string(),
+        object!({
+            "type": "object",
+            "required": ["operation", "project_path"],
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["neighbors", "ranked", "impact", "implementations"],
+                    "description": "Graph query to perform"
+                },
+                "project_path": {
+                    "type": "string",
+                    "description": "Absolute path to project root"
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations)"
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["incoming", "outgoing"],
+                    "description": "Edge direction filter for neighbors (omit for both)"
+                },
+                "kind_filter": {
+                    "type": "string",
+                    "enum": ["file", "symbol"],
+                    "description": "Node kind filter for ranked"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Max results for ranked (default 20) or max traversal depth for impact (default 3)"
+                }
+            }
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+struct CodeGraphParams {
+    operation: String,
+    project_path: String,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    kind_filter: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn call_code_graph(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let p: CodeGraphParams = parse_args(arguments)?;
+    let mcp_state = state.to_mcp_state();
+    let graph_ops = mcp_state.repo_graph();
+    // Use worktree project path if user did not supply an explicit project_path
+    let effective_path = if p.project_path.is_empty() {
+        project_path
+    } else {
+        &p.project_path
+    };
+
+    let result: serde_json::Value = match p.operation.as_str() {
+        "neighbors" => {
+            let key = p
+                .key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .ok_or("'key' is required for 'neighbors'")?;
+            let neighbors = graph_ops
+                .neighbors(effective_path, key, p.direction.as_deref())
+                .await?;
+            serde_json::to_value(&neighbors)
+                .map_err(|e| format!("serialize error: {e}"))?
+        }
+        "ranked" => {
+            let limit = p.limit.unwrap_or(20);
+            let ranked = graph_ops
+                .ranked(effective_path, p.kind_filter.as_deref(), limit)
+                .await?;
+            serde_json::to_value(&ranked)
+                .map_err(|e| format!("serialize error: {e}"))?
+        }
+        "implementations" => {
+            let key = p
+                .key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .ok_or("'key' is required for 'implementations'")?;
+            let impls = graph_ops
+                .implementations(effective_path, key)
+                .await?;
+            serde_json::to_value(&impls)
+                .map_err(|e| format!("serialize error: {e}"))?
+        }
+        "impact" => {
+            let key = p
+                .key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .ok_or("'key' is required for 'impact'")?;
+            let depth = p.limit.unwrap_or(3);
+            let impact = graph_ops
+                .impact(effective_path, key, depth)
+                .await?;
+            serde_json::to_value(&impact)
+                .map_err(|e| format!("serialize error: {e}"))?
+        }
+        other => {
+            return Err(format!(
+                "unknown code_graph operation '{other}': expected one of \
+                 'neighbors', 'ranked', 'impact', 'implementations'"
+            ));
+        }
+    };
+    Ok(result)
 }
 
 #[cfg(test)]

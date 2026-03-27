@@ -11,6 +11,7 @@ use crate::tools::epic_tools::{
     EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams, EpicListParams,
     EpicReopenParams, EpicShowParams, EpicTasksParams, EpicUpdateParams,
 };
+use crate::tools::graph_tools::CodeGraphParams;
 use crate::tools::execution_tools::{
     ExecutionKillTaskParams, ExecutionPauseParams, ExecutionResumeParams, ExecutionStartParams,
     ExecutionStatusParams, SessionForTaskParams,
@@ -568,6 +569,11 @@ impl DjinnMcpServer {
             "agent_metrics" => map_json(
                 name,
                 self.agent_metrics(Parameters(decode_args::<AgentMetricsParams>(name, args)?))
+                    .await,
+            ),
+            "code_graph" => map_error_or(
+                name,
+                self.code_graph(Parameters(decode_args::<CodeGraphParams>(name, args)?))
                     .await,
             ),
             _ => Err(format!("unknown MCP tool: '{name}'")),

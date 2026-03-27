@@ -6,7 +6,9 @@ use djinn_core::models::DjinnSettings;
 use djinn_db::Database;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
-use crate::bridge::{CoordinatorOps, GitOps, LspOps, RuntimeOps, SlotPoolOps, SyncOps};
+use crate::bridge::{
+    CoordinatorOps, GitOps, LspOps, RepoGraphOps, RuntimeOps, SlotPoolOps, SyncOps,
+};
 
 /// Subset of application state consumed by the MCP layer.
 ///
@@ -27,6 +29,7 @@ pub struct McpState {
     sync: Arc<dyn SyncOps>,
     runtime: Arc<dyn RuntimeOps>,
     git: Arc<dyn GitOps>,
+    repo_graph: Arc<dyn RepoGraphOps>,
 }
 
 impl McpState {
@@ -43,6 +46,7 @@ impl McpState {
         sync: Arc<dyn SyncOps>,
         runtime: Arc<dyn RuntimeOps>,
         git: Arc<dyn GitOps>,
+        repo_graph: Arc<dyn RepoGraphOps>,
     ) -> Self {
         Self {
             db,
@@ -56,6 +60,7 @@ impl McpState {
             sync,
             runtime,
             git,
+            repo_graph,
         }
     }
 
@@ -102,6 +107,10 @@ impl McpState {
         self.git.git_actor(path).await
     }
 
+    pub fn repo_graph(&self) -> &Arc<dyn RepoGraphOps> {
+        &self.repo_graph
+    }
+
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
         self.runtime.apply_settings(settings).await
     }
@@ -127,7 +136,10 @@ impl McpState {
 pub(crate) mod stubs {
     #![allow(dead_code, unused_imports)]
     use super::*;
-    use crate::bridge::{ChannelStatus, LspWarning, PoolStatus, RunningTaskInfo, SyncResult};
+    use crate::bridge::{
+        ChannelStatus, GraphNeighbor, ImpactEntry, LspWarning, PoolStatus, RankedNode,
+        RunningTaskInfo, SyncResult,
+    };
     use async_trait::async_trait;
     use djinn_git::{GitActorHandle, GitError};
 
@@ -249,6 +261,38 @@ pub(crate) mod stubs {
         }
     }
 
+    pub struct StubRepoGraphOps;
+    #[async_trait]
+    impl RepoGraphOps for StubRepoGraphOps {
+        async fn neighbors(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<GraphNeighbor>, String> {
+            Ok(vec![])
+        }
+        async fn ranked(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<RankedNode>, String> {
+            Ok(vec![])
+        }
+        async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
+            Ok(vec![])
+        }
+        async fn impact(
+            &self,
+            _: &str,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<ImpactEntry>, String> {
+            Ok(vec![])
+        }
+    }
+
     /// Build a McpState backed only by an in-memory database (no live actors).
     /// Useful for direct-invocation tests of MCP tool handlers.
     pub fn test_mcp_state(db: Database) -> McpState {
@@ -264,6 +308,7 @@ pub(crate) mod stubs {
             Arc::new(StubSyncOps),
             Arc::new(StubRuntimeOps),
             Arc::new(StubGitOps),
+            Arc::new(StubRepoGraphOps),
         )
     }
 }

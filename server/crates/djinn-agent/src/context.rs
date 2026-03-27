@@ -6,7 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
-use djinn_mcp::{McpState, bridge, tools::task_tools::ErrorResponse};
+use djinn_mcp::{
+    McpState, bridge,
+    bridge::{GraphNeighbor, ImpactEntry, RankedNode, RepoGraphOps},
+    tools::task_tools::ErrorResponse,
+};
 use tokio::sync::Mutex;
 
 use crate::actors::coordinator::{CoordinatorHandle, VerificationTracker};
@@ -104,6 +108,34 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
     async fn purge_worktrees(&self) {}
 }
 
+struct AgentRepoGraphOps;
+
+#[async_trait]
+impl RepoGraphOps for AgentRepoGraphOps {
+    async fn neighbors(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<Vec<GraphNeighbor>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn ranked(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<RankedNode>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn impact(&self, _: &str, _: &str, _: usize) -> Result<Vec<ImpactEntry>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+}
+
 struct AgentGitOps {
     git_actors: Arc<Mutex<HashMap<PathBuf, GitActorHandle>>>,
 }
@@ -155,6 +187,7 @@ impl AgentContext {
             Arc::new(AgentGitOps {
                 git_actors: self.git_actors.clone(),
             }),
+            Arc::new(AgentRepoGraphOps),
         )
     }
 

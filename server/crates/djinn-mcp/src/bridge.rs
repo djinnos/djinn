@@ -146,3 +146,71 @@ pub trait GitOps: Send + Sync {
         path: &Path,
     ) -> Result<djinn_git::GitActorHandle, djinn_git::GitError>;
 }
+
+// ── Repo Graph ──────────────────────────────────────────────────────────────────
+// Bridge for RepoDependencyGraph queries. The server implements this by
+// building the graph from SCIP artifacts; djinn-mcp/djinn-agent never depend
+// on petgraph or SCIP protobuf types directly.
+
+/// A neighbor of a node in the repository dependency graph.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphNeighbor {
+    pub key: String,
+    pub kind: String,
+    pub display_name: String,
+    pub edge_kind: String,
+    pub edge_weight: f64,
+    pub direction: String,
+}
+
+/// A ranked node from PageRank + structural weight scoring.
+#[derive(Debug, Clone, Serialize)]
+pub struct RankedNode {
+    pub key: String,
+    pub kind: String,
+    pub display_name: String,
+    pub score: f64,
+    pub page_rank: f64,
+    pub structural_weight: f64,
+}
+
+/// An impact-set entry: a node transitively dependent on the queried node.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImpactEntry {
+    pub key: String,
+    pub depth: usize,
+}
+
+#[async_trait]
+pub trait RepoGraphOps: Send + Sync {
+    /// Neighbors of a file or symbol node (edges in/out).
+    async fn neighbors(
+        &self,
+        project_path: &str,
+        key: &str,
+        direction: Option<&str>,
+    ) -> Result<Vec<GraphNeighbor>, String>;
+
+    /// Top-ranked nodes by PageRank + structural weight.
+    async fn ranked(
+        &self,
+        project_path: &str,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RankedNode>, String>;
+
+    /// Symbols that implement a given trait/interface symbol.
+    async fn implementations(
+        &self,
+        project_path: &str,
+        symbol: &str,
+    ) -> Result<Vec<String>, String>;
+
+    /// Transitive impact set — nodes that depend on the queried node.
+    async fn impact(
+        &self,
+        project_path: &str,
+        key: &str,
+        depth: usize,
+    ) -> Result<Vec<ImpactEntry>, String>;
+}

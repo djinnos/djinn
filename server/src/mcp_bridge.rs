@@ -10,9 +10,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
+use petgraph::visit::EdgeRef;
 use djinn_mcp::bridge::{
-    ChannelStatus, CoordinatorOps, CoordinatorStatus, GitOps, LspOps, LspWarning, ModelPoolStatus,
-    PoolStatus, RunningTaskInfo, RuntimeOps, SlotPoolOps, SyncOps, SyncResult,
+    ChannelStatus, CoordinatorOps, CoordinatorStatus, GitOps, GraphNeighbor, ImpactEntry, LspOps,
+    LspWarning, ModelPoolStatus, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo, RuntimeOps,
+    SlotPoolOps, SyncOps, SyncResult,
 };
 
 use djinn_agent::actors::coordinator::CoordinatorHandle;
@@ -297,6 +299,199 @@ impl GitOps for AppState {
     }
 }
 
+// ── RepoGraphBridge → RepoGraphOps ──────────────────────────────────────────
+
+pub struct RepoGraphBridge;
+
+#[async_trait]
+impl RepoGraphOps for RepoGraphBridge {
+    async fn neighbors(
+        &self,
+        project_path: &str,
+        key: &str,
+        direction: Option<&str>,
+    ) -> Result<Vec<GraphNeighbor>, String> {
+        use petgraph::Direction;
+        let graph = build_graph_for_project(project_path).await?;
+        let node_index = resolve_node(&graph, key)?;
+        let directions: Vec<Direction> = match direction {
+            Some("incoming") => vec![Direction::Incoming],
+            Some("outgoing") => vec![Direction::Outgoing],
+            _ => vec![Direction::Incoming, Direction::Outgoing],
+        };
+
+        let mut neighbors = Vec::new();
+        for dir in directions {
+            let dir_label = match dir {
+                Direction::Incoming => "incoming",
+                Direction::Outgoing => "outgoing",
+            };
+            for edge in graph.graph().edges_directed(node_index, dir) {
+                let other_index = match dir {
+                    Direction::Outgoing => edge.target(),
+                    Direction::Incoming => edge.source(),
+                };
+                let other_node = graph.node(other_index);
+                neighbors.push(GraphNeighbor {
+                    key: format_node_key(&other_node.id),
+                    kind: format!("{:?}", other_node.kind).to_lowercase(),
+                    display_name: other_node.display_name.clone(),
+                    edge_kind: format!("{:?}", edge.weight().kind),
+                    edge_weight: edge.weight().weight,
+                    direction: dir_label.to_string(),
+                });
+            }
+        }
+        Ok(neighbors)
+    }
+
+    async fn ranked(
+        &self,
+        project_path: &str,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RankedNode>, String> {
+        use crate::repo_graph::RepoGraphNodeKind;
+        let graph = build_graph_for_project(project_path).await?;
+        let ranking = graph.rank();
+        let filter = match kind_filter {
+            Some("file") => Some(RepoGraphNodeKind::File),
+            Some("symbol") => Some(RepoGraphNodeKind::Symbol),
+            _ => None,
+        };
+        let nodes: Vec<RankedNode> = ranking
+            .nodes
+            .iter()
+            .filter(|node| filter.is_none() || Some(node.kind) == filter)
+            .take(limit)
+            .map(|node| {
+                let graph_node = graph.node(node.node_index);
+                RankedNode {
+                    key: format_node_key(&node.key),
+                    kind: format!("{:?}", node.kind).to_lowercase(),
+                    display_name: graph_node.display_name.clone(),
+                    score: node.score,
+                    page_rank: node.page_rank,
+                    structural_weight: node.structural_weight,
+                }
+            })
+            .collect();
+        Ok(nodes)
+    }
+
+    async fn implementations(
+        &self,
+        project_path: &str,
+        symbol: &str,
+    ) -> Result<Vec<String>, String> {
+        use crate::repo_graph::RepoGraphEdgeKind;
+        let graph = build_graph_for_project(project_path).await?;
+        let node_index = graph
+            .symbol_node(symbol)
+            .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
+        // Find nodes that have SymbolRelationshipImplementation edges pointing TO this symbol
+        let mut impls = Vec::new();
+        for edge in graph
+            .graph()
+            .edges_directed(node_index, petgraph::Direction::Incoming)
+        {
+            if edge.weight().kind == RepoGraphEdgeKind::SymbolRelationshipImplementation {
+                let source_node = graph.node(edge.source());
+                if let Some(sym) = &source_node.symbol {
+                    impls.push(sym.clone());
+                }
+            }
+        }
+        Ok(impls)
+    }
+
+    async fn impact(
+        &self,
+        project_path: &str,
+        key: &str,
+        max_depth: usize,
+    ) -> Result<Vec<ImpactEntry>, String> {
+        let graph = build_graph_for_project(project_path).await?;
+        let start = resolve_node(&graph, key)?;
+        // BFS over incoming edges to find nodes that depend on this node
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(start);
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((start, 0usize));
+        let mut result = Vec::new();
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth > 0 {
+                let node = graph.node(current);
+                result.push(ImpactEntry {
+                    key: format_node_key(&node.id),
+                    depth,
+                });
+            }
+            if depth < max_depth {
+                for edge in graph
+                    .graph()
+                    .edges_directed(current, petgraph::Direction::Incoming)
+                {
+                    let source = edge.source();
+                    if visited.insert(source) {
+                        queue.push_back((source, depth + 1));
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+fn format_node_key(key: &crate::repo_graph::RepoNodeKey) -> String {
+    match key {
+        crate::repo_graph::RepoNodeKey::File(path) => {
+            format!("file:{}", path.display())
+        }
+        crate::repo_graph::RepoNodeKey::Symbol(sym) => {
+            format!("symbol:{sym}")
+        }
+    }
+}
+
+fn resolve_node(
+    graph: &crate::repo_graph::RepoDependencyGraph,
+    key: &str,
+) -> Result<petgraph::graph::NodeIndex, String> {
+    // Try file path first (strip optional "file:" prefix)
+    let stripped = key.strip_prefix("file:").unwrap_or(key);
+    if let Some(index) = graph.file_node(stripped) {
+        return Ok(index);
+    }
+    // Try symbol (strip optional "symbol:" prefix)
+    let stripped = key.strip_prefix("symbol:").unwrap_or(key);
+    if let Some(index) = graph.symbol_node(stripped) {
+        return Ok(index);
+    }
+    Err(format!("node '{key}' not found in graph"))
+}
+
+async fn build_graph_for_project(
+    project_path: &str,
+) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
+    let project_path = std::path::PathBuf::from(project_path);
+    let output_dir = std::env::temp_dir().join(format!(
+        "djinn-code-graph-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let run = crate::repo_map::run_indexers(&project_path, &output_dir)
+        .await
+        .map_err(|e| format!("failed to run indexers: {e}"))?;
+    let parsed = crate::scip_parser::parse_scip_artifacts(&run.artifacts)
+        .map_err(|e| format!("failed to parse SCIP artifacts: {e}"))?;
+    let _ = std::fs::remove_dir_all(&output_dir);
+    if parsed.is_empty() {
+        return Err("no SCIP artifacts produced — ensure indexers are installed".to_string());
+    }
+    Ok(crate::repo_graph::RepoDependencyGraph::build(&parsed))
+}
+
 impl AppState {
     /// Build a `djinn_mcp::McpState` from this AppState, wiring all bridge impls.
     ///
@@ -323,6 +518,284 @@ impl AppState {
             Arc::new(SyncBridge(self.sync_manager().clone())),
             Arc::new(self.clone()),
             Arc::new(self.clone()),
+            Arc::new(RepoGraphBridge),
         )
+    }
+}
+
+#[cfg(test)]
+mod graph_bridge_tests {
+    use super::*;
+    use crate::repo_graph::{RepoDependencyGraph, RepoNodeKey};
+    use crate::scip_parser::{
+        ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
+        ScipRelationshipKind, ScipSymbol, ScipSymbolKind, ScipSymbolRole,
+    };
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    fn fixture_index() -> ParsedScipIndex {
+        let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
+        let helper_symbol = ScipSymbol {
+            symbol: helper_symbol_name.clone(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("helper".to_string()),
+            signature: Some("fn helper()".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+        };
+        let trait_symbol = ScipSymbol {
+            symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
+            kind: Some(ScipSymbolKind::Type),
+            display_name: Some("HelperTrait".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+        };
+        let main_symbol = ScipSymbol {
+            symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("main".to_string()),
+            signature: Some("fn main()".to_string()),
+            documentation: vec![],
+            relationships: vec![ScipRelationship {
+                source_symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
+                target_symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
+                kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
+            }],
+        };
+
+        fn def_occ(symbol: &str) -> ScipOccurrence {
+            ScipOccurrence {
+                symbol: symbol.to_string(),
+                range: ScipRange {
+                    start_line: 0,
+                    start_character: 0,
+                    end_line: 0,
+                    end_character: 6,
+                },
+                enclosing_range: None,
+                roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }
+        }
+        fn ref_occ(symbol: &str) -> ScipOccurrence {
+            ScipOccurrence {
+                symbol: symbol.to_string(),
+                range: ScipRange {
+                    start_line: 1,
+                    start_character: 4,
+                    end_line: 1,
+                    end_character: 10,
+                },
+                enclosing_range: None,
+                roles: BTreeSet::from([ScipSymbolRole::ReadAccess]),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }
+        }
+
+        ParsedScipIndex {
+            metadata: ScipMetadata {
+                project_root: Some("file:///workspace/repo".to_string()),
+                tool_name: Some("rust-analyzer".to_string()),
+                tool_version: Some("1.0.0".to_string()),
+            },
+            files: vec![
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/helper.rs"),
+                    definitions: vec![def_occ(&helper_symbol_name)],
+                    references: vec![],
+                    occurrences: vec![def_occ(&helper_symbol_name)],
+                    symbols: vec![helper_symbol],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/app.rs"),
+                    definitions: vec![def_occ(&main_symbol.symbol)],
+                    references: vec![ref_occ(&helper_symbol_name)],
+                    occurrences: vec![
+                        def_occ(&main_symbol.symbol),
+                        ref_occ(&helper_symbol_name),
+                    ],
+                    symbols: vec![main_symbol, trait_symbol],
+                },
+            ],
+            external_symbols: vec![],
+        }
+    }
+
+    fn build_test_graph() -> RepoDependencyGraph {
+        RepoDependencyGraph::build(&[fixture_index()])
+    }
+
+    #[test]
+    fn resolve_node_finds_file_by_path() {
+        let graph = build_test_graph();
+        assert!(resolve_node(&graph, "src/app.rs").is_ok());
+        assert!(resolve_node(&graph, "file:src/app.rs").is_ok());
+    }
+
+    #[test]
+    fn resolve_node_finds_symbol_by_name() {
+        let graph = build_test_graph();
+        assert!(
+            resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`().").is_ok()
+        );
+        assert!(resolve_node(
+            &graph,
+            "symbol:scip-rust pkg src/helper.rs `helper`()."
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn resolve_node_returns_error_for_unknown() {
+        let graph = build_test_graph();
+        let err = resolve_node(&graph, "nonexistent").unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn format_node_key_file() {
+        let key = RepoNodeKey::File(PathBuf::from("src/lib.rs"));
+        assert_eq!(format_node_key(&key), "file:src/lib.rs");
+    }
+
+    #[test]
+    fn format_node_key_symbol() {
+        let key = RepoNodeKey::Symbol("scip-rust . . . Foo#".to_string());
+        assert_eq!(format_node_key(&key), "symbol:scip-rust . . . Foo#");
+    }
+
+    #[tokio::test]
+    async fn neighbors_returns_connected_nodes() {
+        let graph = build_test_graph();
+        let node_index = resolve_node(&graph, "src/app.rs").unwrap();
+        let mut neighbors = Vec::new();
+        for dir in [
+            petgraph::Direction::Incoming,
+            petgraph::Direction::Outgoing,
+        ] {
+            let dir_label = match dir {
+                petgraph::Direction::Incoming => "incoming",
+                petgraph::Direction::Outgoing => "outgoing",
+            };
+            for edge in graph.graph().edges_directed(node_index, dir) {
+                let other_index = match dir {
+                    petgraph::Direction::Outgoing => edge.target(),
+                    petgraph::Direction::Incoming => edge.source(),
+                };
+                let other_node = graph.node(other_index);
+                neighbors.push(GraphNeighbor {
+                    key: format_node_key(&other_node.id),
+                    kind: format!("{:?}", other_node.kind).to_lowercase(),
+                    display_name: other_node.display_name.clone(),
+                    edge_kind: format!("{:?}", edge.weight().kind),
+                    edge_weight: edge.weight().weight,
+                    direction: dir_label.to_string(),
+                });
+            }
+        }
+        assert!(
+            !neighbors.is_empty(),
+            "expected at least one neighbor for src/app.rs"
+        );
+        // Should contain the helper symbol as a neighbor
+        assert!(neighbors
+            .iter()
+            .any(|n| n.display_name == "helper"));
+    }
+
+    #[tokio::test]
+    async fn ranked_returns_scored_nodes() {
+        let graph = build_test_graph();
+        let ranking = graph.rank();
+        let nodes: Vec<RankedNode> = ranking
+            .nodes
+            .iter()
+            .take(5)
+            .map(|node| {
+                let graph_node = graph.node(node.node_index);
+                RankedNode {
+                    key: format_node_key(&node.key),
+                    kind: format!("{:?}", node.kind).to_lowercase(),
+                    display_name: graph_node.display_name.clone(),
+                    score: node.score,
+                    page_rank: node.page_rank,
+                    structural_weight: node.structural_weight,
+                }
+            })
+            .collect();
+        assert!(!nodes.is_empty());
+        // Scores should be non-negative
+        for node in &nodes {
+            assert!(node.score >= 0.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn implementations_finds_implementors() {
+        let graph = build_test_graph();
+        let trait_symbol = "scip-rust pkg src/types.rs `HelperTrait`#";
+        let node_index = graph
+            .symbol_node(trait_symbol)
+            .expect("trait symbol should exist");
+        let mut impls = Vec::new();
+        for edge in graph
+            .graph()
+            .edges_directed(node_index, petgraph::Direction::Incoming)
+        {
+            if edge.weight().kind
+                == crate::repo_graph::RepoGraphEdgeKind::SymbolRelationshipImplementation
+            {
+                let source_node = graph.node(edge.source());
+                if let Some(sym) = &source_node.symbol {
+                    impls.push(sym.clone());
+                }
+            }
+        }
+        assert_eq!(impls.len(), 1);
+        assert!(impls[0].contains("main"));
+    }
+
+    #[tokio::test]
+    async fn impact_returns_transitive_dependents() {
+        let graph = build_test_graph();
+        let start = resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`().").unwrap();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(start);
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((start, 0usize));
+        let mut result = Vec::new();
+        let max_depth = 3;
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth > 0 {
+                let node = graph.node(current);
+                result.push(ImpactEntry {
+                    key: format_node_key(&node.id),
+                    depth,
+                });
+            }
+            if depth < max_depth {
+                for edge in graph
+                    .graph()
+                    .edges_directed(current, petgraph::Direction::Incoming)
+                {
+                    let source = edge.source();
+                    if visited.insert(source) {
+                        queue.push_back((source, depth + 1));
+                    }
+                }
+            }
+        }
+        // The helper symbol should be depended on by src/app.rs (via file reference)
+        assert!(
+            !result.is_empty(),
+            "expected at least one node in the impact set"
+        );
     }
 }
