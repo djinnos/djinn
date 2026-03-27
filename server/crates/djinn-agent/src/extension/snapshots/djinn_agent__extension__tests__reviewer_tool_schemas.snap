@@ -198,7 +198,7 @@ expression: tool_schemas_reviewer()
     "inputSchema": {
       "properties": {
         "character": {
-          "description": "1-based column number (required for hover, definition, references)",
+          "description": "1-based column number (required for hover, definition, references when symbol is omitted)",
           "minimum": 1,
           "type": "integer"
         },
@@ -232,6 +232,10 @@ expression: tool_schemas_reviewer()
             "references",
             "symbols"
           ],
+          "type": "string"
+        },
+        "symbol": {
+          "description": "Optional symbol name path for hover, definition, or references as an alternative to line+character",
           "type": "string"
         }
       },

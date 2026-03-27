@@ -2046,6 +2046,8 @@ struct LspParams {
     line: Option<u32>,
     character: Option<u32>,
     #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
     depth: Option<usize>,
     #[serde(default)]
     kind: Option<String>,
@@ -2090,46 +2092,110 @@ async fn call_lsp(
 
     match p.operation.as_str() {
         "hover" => {
-            let line = p.line.ok_or("line is required for hover")?;
-            let character = p.character.ok_or("character is required for hover")?;
-            // LSP uses 0-based positions; accept 1-based from agents
-            let result = state
-                .lsp
-                .hover(
-                    worktree_path,
-                    &path,
-                    line.saturating_sub(1),
-                    character.saturating_sub(1),
-                )
-                .await?;
+            let result = match (&p.symbol, p.line, p.character) {
+                (Some(symbol), None, None) => {
+                    state.lsp.hover_symbol(worktree_path, &path, symbol).await?
+                }
+                (None, Some(line), Some(character)) => {
+                    // LSP uses 0-based positions; accept 1-based from agents
+                    state
+                        .lsp
+                        .hover(
+                            worktree_path,
+                            &path,
+                            line.saturating_sub(1),
+                            character.saturating_sub(1),
+                        )
+                        .await?
+                }
+                (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                    return Err(
+                        "hover accepts either symbol or line+character, but not both".to_string(),
+                    );
+                }
+                (None, Some(_), None) | (None, None, Some(_)) => {
+                    return Err(
+                        "hover requires both line and character when symbol is omitted".to_string(),
+                    );
+                }
+                (None, None, None) => {
+                    return Err("hover requires either symbol or line+character".to_string());
+                }
+            };
             Ok(serde_json::json!({ "operation": "hover", "result": result }))
         }
         "definition" => {
-            let line = p.line.ok_or("line is required for definition")?;
-            let character = p.character.ok_or("character is required for definition")?;
-            let result = state
-                .lsp
-                .go_to_definition(
-                    worktree_path,
-                    &path,
-                    line.saturating_sub(1),
-                    character.saturating_sub(1),
-                )
-                .await?;
+            let result = match (&p.symbol, p.line, p.character) {
+                (Some(symbol), None, None) => {
+                    state
+                        .lsp
+                        .go_to_definition_symbol(worktree_path, &path, symbol)
+                        .await?
+                }
+                (None, Some(line), Some(character)) => {
+                    state
+                        .lsp
+                        .go_to_definition(
+                            worktree_path,
+                            &path,
+                            line.saturating_sub(1),
+                            character.saturating_sub(1),
+                        )
+                        .await?
+                }
+                (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                    return Err(
+                        "definition accepts either symbol or line+character, but not both"
+                            .to_string(),
+                    );
+                }
+                (None, Some(_), None) | (None, None, Some(_)) => {
+                    return Err(
+                        "definition requires both line and character when symbol is omitted"
+                            .to_string(),
+                    );
+                }
+                (None, None, None) => {
+                    return Err("definition requires either symbol or line+character".to_string());
+                }
+            };
             Ok(serde_json::json!({ "operation": "definition", "result": result }))
         }
         "references" => {
-            let line = p.line.ok_or("line is required for references")?;
-            let character = p.character.ok_or("character is required for references")?;
-            let result = state
-                .lsp
-                .find_references(
-                    worktree_path,
-                    &path,
-                    line.saturating_sub(1),
-                    character.saturating_sub(1),
-                )
-                .await?;
+            let result = match (&p.symbol, p.line, p.character) {
+                (Some(symbol), None, None) => {
+                    state
+                        .lsp
+                        .find_references_symbol(worktree_path, &path, symbol)
+                        .await?
+                }
+                (None, Some(line), Some(character)) => {
+                    state
+                        .lsp
+                        .find_references(
+                            worktree_path,
+                            &path,
+                            line.saturating_sub(1),
+                            character.saturating_sub(1),
+                        )
+                        .await?
+                }
+                (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                    return Err(
+                        "references accepts either symbol or line+character, but not both"
+                            .to_string(),
+                    );
+                }
+                (None, Some(_), None) | (None, None, Some(_)) => {
+                    return Err(
+                        "references requires both line and character when symbol is omitted"
+                            .to_string(),
+                    );
+                }
+                (None, None, None) => {
+                    return Err("references requires either symbol or line+character".to_string());
+                }
+            };
             Ok(serde_json::json!({ "operation": "references", "result": result }))
         }
         "symbols" => {
@@ -3044,7 +3110,11 @@ fn tool_lsp() -> RmcpTool {
                 "character": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "1-based column number (required for hover, definition, references)"
+                    "description": "1-based column number (required for hover, definition, references when symbol is omitted)"
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Optional symbol name path for hover, definition, or references as an alternative to line+character"
                 },
                 "depth": {
                     "type": "integer",
@@ -3165,6 +3235,7 @@ mod tests {
         let tool = tool_lsp();
         let schema = serde_json::to_value(&tool).unwrap();
         let input_schema = &schema["inputSchema"]["properties"];
+        assert!(input_schema.get("symbol").is_some());
         assert!(input_schema.get("depth").is_some());
         assert!(input_schema.get("kind").is_some());
         assert!(input_schema.get("name_filter").is_some());
@@ -3177,6 +3248,7 @@ mod tests {
             file_path: "src/lib.rs".to_string(),
             line: Some(1),
             character: Some(1),
+            symbol: None,
             depth: Some(1),
             kind: Some("function".to_string()),
             name_filter: Some("foo".to_string()),
@@ -3195,6 +3267,7 @@ mod tests {
             file_path: "src/lib.rs".to_string(),
             line: None,
             character: None,
+            symbol: None,
             depth: Some(2),
             kind: Some("function".to_string()),
             name_filter: Some("foo".to_string()),
@@ -3206,11 +3279,364 @@ mod tests {
             file_path: "src/lib.rs".to_string(),
             line: Some(1),
             character: Some(1),
+            symbol: None,
             depth: None,
             kind: None,
             name_filter: None,
         };
         assert!(validate_symbol_only_params("hover", &hover_params).is_ok());
+    }
+
+    #[tokio::test]
+    async fn call_lsp_rejects_invalid_hover_target_combinations() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-lsp-hover-");
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let missing_both = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "hover",
+                    "file_path": "src/lib.rs"
+                })
+                .as_object()
+                .expect("hover args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            missing_both,
+            "hover requires either symbol or line+character"
+        );
+
+        let incomplete_coords = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "hover",
+                    "file_path": "src/lib.rs",
+                    "line": 4
+                })
+                .as_object()
+                .expect("hover args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            incomplete_coords,
+            "hover requires both line and character when symbol is omitted"
+        );
+
+        let mixed = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "hover",
+                    "file_path": "src/lib.rs",
+                    "line": 4,
+                    "character": 2,
+                    "symbol": "Thing/method"
+                })
+                .as_object()
+                .expect("hover args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            mixed,
+            "hover accepts either symbol or line+character, but not both"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_lsp_rejects_invalid_definition_target_combinations() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-lsp-definition-");
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let missing_both = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "definition",
+                    "file_path": "src/lib.rs"
+                })
+                .as_object()
+                .expect("definition args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            missing_both,
+            "definition requires either symbol or line+character"
+        );
+
+        let incomplete_coords = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "definition",
+                    "file_path": "src/lib.rs",
+                    "line": 4
+                })
+                .as_object()
+                .expect("definition args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            incomplete_coords,
+            "definition requires both line and character when symbol is omitted"
+        );
+
+        let mixed = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "definition",
+                    "file_path": "src/lib.rs",
+                    "line": 4,
+                    "character": 2,
+                    "symbol": "Thing/method"
+                })
+                .as_object()
+                .expect("definition args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            mixed,
+            "definition accepts either symbol or line+character, but not both"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_lsp_rejects_invalid_references_target_combinations() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-lsp-references-");
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let missing_both = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "references",
+                    "file_path": "src/lib.rs"
+                })
+                .as_object()
+                .expect("references args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            missing_both,
+            "references requires either symbol or line+character"
+        );
+
+        let incomplete_coords = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "references",
+                    "file_path": "src/lib.rs",
+                    "line": 4
+                })
+                .as_object()
+                .expect("references args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            incomplete_coords,
+            "references requires both line and character when symbol is omitted"
+        );
+
+        let mixed = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "references",
+                    "file_path": "src/lib.rs",
+                    "line": 4,
+                    "character": 2,
+                    "symbol": "Thing/method"
+                })
+                .as_object()
+                .expect("references args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            mixed,
+            "references accepts either symbol or line+character, but not both"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_lsp_uses_coordinate_dispatch_for_hover_definition_and_references() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-lsp-coords-");
+        let file_path = worktree.path().join("src/lib.txt");
+        std::fs::create_dir_all(file_path.parent().expect("parent dir")).expect("create src dir");
+        std::fs::write(&file_path, "pub fn sample() {}\n").expect("write file");
+
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let hover = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "hover",
+                    "file_path": "src/lib.txt",
+                    "line": 1,
+                    "character": 1
+                })
+                .as_object()
+                .expect("hover args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(hover.contains("no LSP server configured for"));
+        assert!(hover.contains("src/lib.txt"));
+
+        let definition = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "definition",
+                    "file_path": "src/lib.txt",
+                    "line": 1,
+                    "character": 1
+                })
+                .as_object()
+                .expect("definition args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(definition.contains("no LSP server configured for"));
+        assert!(definition.contains("src/lib.txt"));
+
+        let references = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "references",
+                    "file_path": "src/lib.txt",
+                    "line": 1,
+                    "character": 1
+                })
+                .as_object()
+                .expect("references args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(references.contains("no LSP server configured for"));
+        assert!(references.contains("src/lib.txt"));
+    }
+
+    #[tokio::test]
+    async fn call_lsp_uses_symbol_dispatch_for_hover_definition_and_references() {
+        let worktree = crate::test_helpers::test_tempdir("djinn-ext-lsp-symbol-");
+        let file_path = worktree.path().join("src/lib.txt");
+        std::fs::create_dir_all(file_path.parent().expect("parent dir")).expect("create src dir");
+        std::fs::write(&file_path, "pub fn sample() {}\n").expect("write file");
+
+        let state =
+            crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+        let hover = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "hover",
+                    "file_path": "src/lib.txt",
+                    "symbol": "sample"
+                })
+                .as_object()
+                .expect("hover args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(hover.contains("no LSP server configured for"));
+        assert!(hover.contains("src/lib.txt"));
+
+        let definition = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "definition",
+                    "file_path": "src/lib.txt",
+                    "symbol": "sample"
+                })
+                .as_object()
+                .expect("definition args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(definition.contains("no LSP server configured for"));
+        assert!(definition.contains("src/lib.txt"));
+
+        let references = call_lsp(
+            &state,
+            &Some(
+                serde_json::json!({
+                    "operation": "references",
+                    "file_path": "src/lib.txt",
+                    "symbol": "sample"
+                })
+                .as_object()
+                .expect("references args object")
+                .clone(),
+            ),
+            worktree.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(references.contains("no LSP server configured for"));
+        assert!(references.contains("src/lib.txt"));
     }
 
     #[tokio::test]
