@@ -19,6 +19,8 @@ expression: names
   "write",
   "edit",
   "apply_patch",
+  "memory_write",
+  "memory_edit",
   "request_lead",
   "submit_work"
 ]

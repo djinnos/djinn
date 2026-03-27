@@ -31,6 +31,8 @@ expression: names
   "memory_orphans",
   "agent_metrics",
   "agent_create",
+  "memory_write",
+  "memory_edit",
   "task_delete_branch",
   "task_archive_activity",
   "task_reset_counters",
