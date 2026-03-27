@@ -103,12 +103,8 @@ impl NoteRepository {
         let confidence_map = self.note_confidence_map(&all_candidate_ids).await?;
 
         // Filter candidates below min_confidence threshold.
-        l1_candidates.retain(|(id, _)| {
-            confidence_map.get(id).copied().unwrap_or(1.0) >= min_conf
-        });
-        l0_candidates.retain(|(id, _)| {
-            confidence_map.get(id).copied().unwrap_or(1.0) >= min_conf
-        });
+        l1_candidates.retain(|(id, _)| confidence_map.get(id).copied().unwrap_or(1.0) >= min_conf);
+        l0_candidates.retain(|(id, _)| confidence_map.get(id).copied().unwrap_or(1.0) >= min_conf);
 
         // Fetch note data and apply budget-aware pruning
         let l1_notes = self.fetch_l1_notes(&l1_candidates).await?;
@@ -548,7 +544,14 @@ mod tests {
         let (tmp, repo, project_id) = setup_repo().await;
 
         let seed = repo
-            .create(&project_id, tmp.path(), "Seed", "Seed about architecture patterns.", "adr", "[]")
+            .create(
+                &project_id,
+                tmp.path(),
+                "Seed",
+                "Seed about architecture patterns.",
+                "adr",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -603,7 +606,14 @@ mod tests {
         let (tmp, repo, project_id) = setup_repo().await;
 
         let seed = repo
-            .create(&project_id, tmp.path(), "Seed", "Seed about architecture patterns.", "adr", "[]")
+            .create(
+                &project_id,
+                tmp.path(),
+                "Seed",
+                "Seed about architecture patterns.",
+                "adr",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -621,7 +631,14 @@ mod tests {
         repo.set_confidence(&low.id, 0.05).await.unwrap();
 
         let result = repo
-            .build_context(&project_id, &seed.permalink, Some(8192), None, 20, Some(0.0))
+            .build_context(
+                &project_id,
+                &seed.permalink,
+                Some(8192),
+                None,
+                20,
+                Some(0.0),
+            )
             .await
             .unwrap();
 
@@ -643,7 +660,14 @@ mod tests {
         let (tmp, repo, project_id) = setup_repo().await;
 
         let seed = repo
-            .create(&project_id, tmp.path(), "Seed", "Seed about architecture patterns.", "adr", "[]")
+            .create(
+                &project_id,
+                tmp.path(),
+                "Seed",
+                "Seed about architecture patterns.",
+                "adr",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -658,7 +682,9 @@ mod tests {
             )
             .await
             .unwrap();
-        repo.set_confidence(&stale.id, STALE_CITATION).await.unwrap();
+        repo.set_confidence(&stale.id, STALE_CITATION)
+            .await
+            .unwrap();
 
         let normal = repo
             .create(
@@ -674,7 +700,14 @@ mod tests {
 
         // Use min_confidence=0.0 to include everything so we can test annotations
         let result = repo
-            .build_context(&project_id, &seed.permalink, Some(8192), None, 20, Some(0.0))
+            .build_context(
+                &project_id,
+                &seed.permalink,
+                Some(8192),
+                None,
+                20,
+                Some(0.0),
+            )
             .await
             .unwrap();
 

@@ -228,8 +228,9 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
                         } else if memory_write_tool_use_ids.contains(tool_use_id) {
                             // Extract canonical permalink from successful memory write result
                             if let Some(permalink) = permalink_from_tool_result(content)
-                                && notes_written_set.insert(permalink.clone()) {
-                                    notes_written_permalinks.push(permalink);
+                                && notes_written_set.insert(permalink.clone())
+                            {
+                                notes_written_permalinks.push(permalink);
                             }
                         }
                     }
@@ -455,11 +456,7 @@ fn dedup_append_memory_refs(existing_json: &str, new_permalinks: &[String]) -> S
 
 /// Look up the session's task, deduplicate-append written note permalinks to the
 /// task's `memory_refs`, and propagate to the parent epic's `memory_refs`.
-async fn autolink_memory_refs(
-    session_id: &str,
-    permalinks: &[String],
-    app_state: &AgentContext,
-) {
+async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state: &AgentContext) {
     // Load the session to find task_id
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -790,7 +787,10 @@ mod tests {
             ),
         ];
         let signals = extract_session_signals(&msgs);
-        assert!(signals.stale_note_ids.is_empty(), "note was referenced in later tool call");
+        assert!(
+            signals.stale_note_ids.is_empty(),
+            "note was referenced in later tool call"
+        );
     }
 
     #[test]
@@ -875,7 +875,8 @@ mod tests {
                     "permalink": "research/my-research",
                     "title": "My Research",
                     "note_type": "research"
-                }).to_string(),
+                })
+                .to_string(),
             ),
         ];
         let signals = extract_session_signals(&msgs);
@@ -900,7 +901,8 @@ mod tests {
                     "id": "note-uuid-2",
                     "permalink": "decisions/adr-1",
                     "title": "ADR 1"
-                }).to_string(),
+                })
+                .to_string(),
             ),
         ];
         let signals = extract_session_signals(&msgs);
@@ -922,7 +924,8 @@ mod tests {
                     "id": "note-uuid-3",
                     "permalink": "decisions/old-name",
                     "title": "Old Name"
-                }).to_string(),
+                })
+                .to_string(),
             ),
         ];
         let signals = extract_session_signals(&msgs);
@@ -1056,8 +1059,7 @@ mod tests {
 
     #[test]
     fn dedup_append_memory_refs_malformed_json_recovers() {
-        let result =
-            dedup_append_memory_refs("not-json", &["research/a".to_string()]);
+        let result = dedup_append_memory_refs("not-json", &["research/a".to_string()]);
         let parsed: Vec<String> = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed, vec!["research/a"]);
     }

@@ -758,9 +758,7 @@ mod tests {
         // Project creation must have succeeded regardless of refresh outcome.
         let projects = project_repo.list().await.unwrap();
         assert!(
-            projects
-                .iter()
-                .any(|p| p.name == "initial-refresh-project"),
+            projects.iter().any(|p| p.name == "initial-refresh-project"),
             "project should exist after creation even if initial refresh fails"
         );
 
@@ -845,8 +843,7 @@ mod tests {
             match tokio::time::timeout(Duration::from_millis(100), events_rx.recv()).await {
                 Ok(Ok(envelope)) => {
                     if envelope.entity_type == "project" && envelope.action == "created" {
-                        let parsed =
-                            envelope.parse_payload::<djinn_core::models::Project>();
+                        let parsed = envelope.parse_payload::<djinn_core::models::Project>();
                         assert!(
                             parsed.is_some(),
                             "project.created event must carry a parseable Project payload"

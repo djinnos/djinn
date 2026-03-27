@@ -281,6 +281,65 @@ mod tests {
     use djinn_agent::verification::StepEvent;
     use serde_json::json;
 
+    fn task_updated_envelope(id: &str, title: &str) -> DjinnEventEnvelope {
+        DjinnEventEnvelope {
+            entity_type: "task",
+            action: "updated",
+            payload: json!({
+                "task": {
+                    "id": id,
+                    "title": title,
+                },
+                "from_sync": false,
+            }),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+
+    fn epic_updated_envelope(id: &str, title: &str) -> DjinnEventEnvelope {
+        DjinnEventEnvelope {
+            entity_type: "epic",
+            action: "updated",
+            payload: json!({
+                "id": id,
+                "title": title,
+            }),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+
+    fn project_updated_envelope(id: &str, name: &str) -> DjinnEventEnvelope {
+        DjinnEventEnvelope {
+            entity_type: "project",
+            action: "updated",
+            payload: json!({
+                "id": id,
+                "name": name,
+            }),
+            id: None,
+            project_id: Some(id.to_string()),
+            from_sync: false,
+        }
+    }
+
+    fn agent_updated_envelope(id: &str, status: &str) -> DjinnEventEnvelope {
+        DjinnEventEnvelope {
+            entity_type: "agent",
+            action: "updated",
+            payload: json!({
+                "id": id,
+                "status": status,
+            }),
+            id: Some(id.to_string()),
+            project_id: None,
+            from_sync: false,
+        }
+    }
+
     #[test]
     fn sse_event_name_uses_entity_type_and_action() {
         let envelope = DjinnEventEnvelope::task_deleted("t1");
@@ -307,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn accumulator_immediate_bypasses_batching() {
+    fn adr_045_immediate_events_bypass_batching() {
         let mut accumulator = BatchAccumulator::new();
         let ready = accumulator.push(DjinnEventEnvelope::task_deleted("t1"));
         assert_eq!(ready.len(), 1);
@@ -315,35 +374,70 @@ mod tests {
     }
 
     #[test]
-    fn accumulator_coalesces_entity_updates_keep_latest() {
+    fn adr_045_coalesced_task_updates_keep_latest_per_entity() {
         let mut accumulator = BatchAccumulator::new();
-        let first = json!({"id": "task-1", "title": "old"});
-        let second = json!({"id": "task-1", "title": "new"});
-        let first_env = DjinnEventEnvelope {
-            entity_type: "task",
-            action: "updated",
-            payload: json!({"task": first, "from_sync": false}),
-            id: None,
-            project_id: None,
-            from_sync: false,
-        };
-        let second_env = DjinnEventEnvelope {
-            entity_type: "task",
-            action: "updated",
-            payload: json!({"task": second, "from_sync": false}),
-            id: None,
-            project_id: None,
-            from_sync: false,
-        };
-        assert!(accumulator.push(first_env).is_empty());
-        assert!(accumulator.push(second_env).is_empty());
+
+        assert!(
+            accumulator
+                .push(task_updated_envelope("task-1", "old"))
+                .is_empty()
+        );
+        assert!(
+            accumulator
+                .push(task_updated_envelope("task-1", "new"))
+                .is_empty()
+        );
+
         let flushed = accumulator.flush();
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].payload()["task"]["title"], "new");
     }
 
     #[test]
-    fn accumulator_throttles_streaming_events_keep_latest() {
+    fn adr_045_coalesced_flush_keeps_latest_for_each_entity_type() {
+        let mut accumulator = BatchAccumulator::new();
+
+        assert!(
+            accumulator
+                .push(task_updated_envelope("task-1", "task latest"))
+                .is_empty()
+        );
+        assert!(
+            accumulator
+                .push(epic_updated_envelope("epic-1", "epic latest"))
+                .is_empty()
+        );
+        assert!(
+            accumulator
+                .push(project_updated_envelope("project-1", "project latest"))
+                .is_empty()
+        );
+        assert!(
+            accumulator
+                .push(agent_updated_envelope("agent-1", "busy"))
+                .is_empty()
+        );
+
+        let flushed = accumulator.flush();
+        assert_eq!(flushed.len(), 4);
+        assert!(flushed.iter().any(|event| event.entity_type() == "task"
+            && event.payload()["task"]["title"] == "task latest"));
+        assert!(flushed.iter().any(
+            |event| event.entity_type() == "epic" && event.payload()["title"] == "epic latest"
+        ));
+        assert!(
+            flushed.iter().any(|event| event.entity_type() == "project"
+                && event.payload()["name"] == "project latest")
+        );
+        assert!(
+            flushed
+                .iter()
+                .any(|event| event.entity_type() == "agent" && event.payload()["status"] == "busy")
+        );
+    }
+
+    #[test]
+    fn adr_045_throttled_session_messages_keep_latest_until_interval_elapses() {
         let mut accumulator = BatchAccumulator::new();
         let first =
             DjinnEventEnvelope::session_message("s1", "t1", "worker", &json!({"content": "a"}));
@@ -363,7 +457,40 @@ mod tests {
     }
 
     #[test]
-    fn accumulator_throttles_verification_steps() {
+    fn adr_045_throttled_token_updates_stay_pending_before_interval_and_flush_afterwards() {
+        let mut accumulator = BatchAccumulator::new();
+        let first = DjinnEventEnvelope {
+            entity_type: "session",
+            action: "token_update",
+            payload: json!({"session_id": "s1", "task_id": "t1", "tokens": 1}),
+            id: Some("s1".to_string()),
+            project_id: None,
+            from_sync: false,
+        };
+        let second = DjinnEventEnvelope {
+            entity_type: "session",
+            action: "token_update",
+            payload: json!({"session_id": "s1", "task_id": "t1", "tokens": 2}),
+            id: Some("s1".to_string()),
+            project_id: None,
+            from_sync: false,
+        };
+
+        assert_eq!(accumulator.push(first).len(), 1);
+        assert!(accumulator.push(second).is_empty());
+        assert!(accumulator.flush().is_empty());
+
+        accumulator.throttled_last_sent.insert(
+            "session.token_update",
+            Instant::now() - SESSION_TOKEN_UPDATE_MIN_INTERVAL,
+        );
+        let flushed = accumulator.flush();
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].payload()["tokens"], 2);
+    }
+
+    #[test]
+    fn adr_045_throttles_verification_steps() {
         let mut accumulator = BatchAccumulator::new();
         let first = DjinnEventEnvelope::verification_step(
             "p1",
@@ -401,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn accumulator_preserves_lagged_signal_behavior() {
+    fn adr_045_lagged_signal_still_bypasses_batch_state() {
         let event = lagged_event();
         let text = format!("{:?}", event);
         assert!(text.contains("lagged"));

@@ -7,13 +7,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{Peer, RoleClient};
 use rmcp::transport::{
-    StreamableHttpClientTransport,
-    streamable_http_client::StreamableHttpClientTransportConfig,
+    StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
 };
-use rmcp::ServiceExt;
 
 use crate::verification::settings::McpServerConfig;
 

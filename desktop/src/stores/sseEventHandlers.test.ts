@@ -78,6 +78,7 @@ describe('sseEventHandlers', () => {
   });
 
   afterEach(() => {
+    flushDebouncedInvalidations();
     vi.clearAllTimers();
     vi.useRealTimers();
   });
@@ -188,7 +189,7 @@ describe('sseEventHandlers', () => {
     cleanup();
   });
 
-  it('debounces sync-triggered query invalidations across bursts', () => {
+  it('adr-045 collapses bursty sync-triggered query invalidations into one refetch per key', () => {
     const cleanup = initSSEEventHandlers();
 
     sseStore.getState().emit({
@@ -215,7 +216,7 @@ describe('sseEventHandlers', () => {
     cleanup();
   });
 
-  it('coalesces project refresh invalidations while still updating project store immediately', async () => {
+  it('adr-045 coalesces project refresh invalidations while still updating project store immediately', async () => {
     const cleanup = initSSEEventHandlers();
     const projects = [{ id: 'p1', name: 'Proj', path: '/tmp/proj' }];
     vi.mocked(fetchProjects).mockResolvedValue(projects as never);
@@ -263,7 +264,7 @@ describe('sseEventHandlers', () => {
     expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(2, { queryKey: ['epics'] });
   });
 
-  it('preserves live session visibility while task updates arrive in bursts', () => {
+  it('adr-045 keeps store state converged across bursty task updates while preserving live session visibility', () => {
     const cleanup = initSSEEventHandlers();
 
     sseStore.getState().emit({
@@ -309,6 +310,108 @@ describe('sseEventHandlers', () => {
     expect(task?.title).toBe('Burst task 2');
     expect(task?.active_session?.session_id).toBe('s1');
     expect(queryClient.setQueryData).toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  it('adr-045 converges bursty epic updates without redundant invalidations', () => {
+    const cleanup = initSSEEventHandlers();
+
+    sseStore.getState().emit({
+      type: 'epic_created',
+      data: { entity_type: 'epic', action: 'created', payload: { id: 'e-burst', title: 'Epic 0', project_id: 'p1' } },
+      timestamp: 1,
+    });
+
+    sseStore.getState().emit({
+      type: 'sync_completed',
+      data: { entity_type: 'sync', action: 'completed', payload: { direction: 'import', count: 3 } },
+      timestamp: 2,
+    });
+    sseStore.getState().emit({
+      type: 'epic_updated',
+      data: { entity_type: 'epic', action: 'updated', payload: { id: 'e-burst', title: 'Epic 1', project_id: 'p1' } },
+      timestamp: 3,
+    });
+    sseStore.getState().emit({
+      type: 'sync_completed',
+      data: { entity_type: 'sync', action: 'completed', payload: { direction: 'import', count: 1 } },
+      timestamp: 4,
+    });
+    sseStore.getState().emit({
+      type: 'epic_updated',
+      data: { entity_type: 'epic', action: 'updated', payload: { id: 'e-burst', title: 'Epic 2', project_id: 'p1' } },
+      timestamp: 5,
+    });
+
+    expect(epicStore.getState().getEpic('e-burst')?.title).toBe('Epic 2');
+    expect(queryClient.invalidateQueries).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(SSE_QUERY_DEBOUNCE_MS);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(2);
+    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(1, { queryKey: ['tasks'] });
+    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(2, { queryKey: ['epics'] });
+
+    cleanup();
+  });
+
+  it('adr-045 collapses session and project burst traffic into one debounced invalidation per query key', async () => {
+    const cleanup = initSSEEventHandlers();
+    const projects = [{ id: 'p2', name: 'Proj 2', path: '/tmp/proj-2' }];
+    vi.mocked(fetchProjects).mockResolvedValue(projects as never);
+
+    sseStore.getState().emit({
+      type: 'task_created',
+      data: {
+        entity_type: 'task',
+        action: 'created',
+        payload: { task: { id: 'session-task', title: 'Session Task', status: 'open', project_id: 'p2' }, from_sync: false },
+      },
+      timestamp: 1,
+    });
+
+    sseStore.getState().emit({
+      type: 'session_started',
+      data: {
+        entity_type: 'session',
+        action: 'started',
+        payload: { id: 's-1', task_id: 'session-task', agent_type: 'worker', model_id: 'gpt', started_at: '2024-01-01T00:00:00Z', status: 'running' },
+      },
+      timestamp: 2,
+    });
+    sseStore.getState().emit({
+      type: 'project_changed',
+      data: { entity_type: 'project', action: 'updated', payload: { id: 'p2' } },
+      timestamp: 3,
+    });
+    sseStore.getState().emit({
+      type: 'session_ended',
+      data: {
+        entity_type: 'session',
+        action: 'ended',
+        payload: { task_id: 'session-task' },
+      },
+      timestamp: 4,
+    });
+    sseStore.getState().emit({
+      type: 'project_changed',
+      data: { entity_type: 'project', action: 'updated', payload: { id: 'p2' } },
+      timestamp: 5,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const task = taskStore.getState().getTask('session-task');
+    expect(task?.active_session).toBeUndefined();
+    expect(task?.session_count).toBe(1);
+    expect(projectStore.getState().projects).toEqual(projects);
+    expect(queryClient.invalidateQueries).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(SSE_QUERY_DEBOUNCE_MS);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(2);
+    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(1, { queryKey: ['providers'] });
+    expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(2, { queryKey: ['settings'] });
 
     cleanup();
   });

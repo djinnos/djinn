@@ -3,8 +3,8 @@
 //! All graph queries are dispatched through the [`RepoGraphOps`] bridge trait,
 //! keeping the MCP layer free of petgraph/SCIP dependencies.
 
-use rmcp::handler::server::wrapper::Parameters;
 use rmcp::Json;
+use rmcp::handler::server::wrapper::Parameters;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{GraphNeighbor, ImpactEntry, RankedNode};
@@ -138,11 +138,7 @@ impl DjinnMcpServer {
         let neighbors = self
             .state
             .repo_graph()
-            .neighbors(
-                &params.project_path,
-                key,
-                params.direction.as_deref(),
-            )
+            .neighbors(&params.project_path, key, params.direction.as_deref())
             .await?;
         Ok(CodeGraphResponse::Neighbors(NeighborsResponse {
             key: key.to_string(),
@@ -159,11 +155,7 @@ impl DjinnMcpServer {
         let nodes = self
             .state
             .repo_graph()
-            .ranked(
-                &params.project_path,
-                params.kind_filter.as_deref(),
-                limit,
-            )
+            .ranked(&params.project_path, params.kind_filter.as_deref(), limit)
             .await?;
         Ok(CodeGraphResponse::Ranked(RankedResponse { nodes }))
     }

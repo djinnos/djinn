@@ -5,8 +5,8 @@ use crate::server::DjinnMcpServer;
 use super::{
     BrokenLinksParams, BuildContextParams, HealthParams, ListParams, MemoryBrokenLinksResponse,
     MemoryBuildContextResponse, MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse,
-    MemoryOrphansResponse, MemorySearchResponse, MemorySearchResultItem, OrphansParams,
-    ReadParams, SearchParams, note_to_view,
+    MemoryOrphansResponse, MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams,
+    SearchParams, note_to_view,
 };
 
 pub async fn resolve_project_id(server: &DjinnMcpServer, project: &str) -> Result<String, String> {
@@ -168,7 +168,14 @@ pub async fn memory_build_context(
     }
 
     match repo
-        .build_context(&project_id, url, budget, task_id, max_related, p.min_confidence)
+        .build_context(
+            &project_id,
+            url,
+            budget,
+            task_id,
+            max_related,
+            p.min_confidence,
+        )
         .await
     {
         Ok(response) => MemoryBuildContextResponse {
@@ -254,10 +261,7 @@ pub async fn memory_broken_links(
     }
 }
 
-pub async fn memory_orphans(
-    server: &DjinnMcpServer,
-    p: OrphansParams,
-) -> MemoryOrphansResponse {
+pub async fn memory_orphans(server: &DjinnMcpServer, p: OrphansParams) -> MemoryOrphansResponse {
     let project_id = match resolve_project_id(server, &p.project).await {
         Ok(id) => id,
         Err(error) => {

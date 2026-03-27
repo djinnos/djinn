@@ -34,6 +34,10 @@ function runInvalidation(filters: InvalidateQueryFilters, options?: InvalidateOp
   void queryClient.invalidateQueries(filters, options);
 }
 
+/**
+ * ADR-045 phase 45a: collapse bursty SSE-driven invalidations into one refetch per query key.
+ * Store updates still happen immediately; only the TanStack invalidation is debounced.
+ */
 export function debounceInvalidateQueries(
   filters: InvalidateQueryFilters,
   options?: InvalidateOptions,

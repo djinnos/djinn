@@ -1321,10 +1321,7 @@ mod tests {
             session_id: String,
         ) -> Pin<Box<dyn Future<Output = djinn_db::Result<()>> + Send + 'a>> {
             Box::pin(async move {
-                self.session_calls
-                    .lock()
-                    .unwrap()
-                    .push((group, session_id));
+                self.session_calls.lock().unwrap().push((group, session_id));
                 Ok(())
             })
         }

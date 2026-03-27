@@ -283,12 +283,7 @@ pub(crate) mod stubs {
         async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
             Ok(vec![])
         }
-        async fn impact(
-            &self,
-            _: &str,
-            _: &str,
-            _: usize,
-        ) -> Result<Vec<ImpactEntry>, String> {
+        async fn impact(&self, _: &str, _: &str, _: usize) -> Result<Vec<ImpactEntry>, String> {
             Ok(vec![])
         }
     }
