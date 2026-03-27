@@ -8,6 +8,7 @@ import { AgentConfig } from '@/components/AgentConfig';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { AddProviderModal } from '@/components/AddProviderModal';
 
 function ProvidersSettings() {
@@ -21,6 +22,7 @@ function ProvidersSettings() {
   } = useProviders();
 
   const agentConfig = useAgentConfig();
+  const loadProviderModels = useSettingsStore((s) => s.loadProviderModels);
 
   const [isAddOpen, setIsAddOpen] = useState(false);
 
@@ -60,7 +62,7 @@ function ProvidersSettings() {
           open={isAddOpen}
           onOpenChange={setIsAddOpen}
           configuredProviderIds={configuredProviders.map((p) => p.id)}
-          onDone={() => void loadData()}
+          onDone={() => { void loadData(); void loadProviderModels(); }}
         />
 
         <div className="rounded-lg border border-border bg-card px-4 py-3">
