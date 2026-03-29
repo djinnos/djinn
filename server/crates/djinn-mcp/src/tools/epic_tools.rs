@@ -144,6 +144,8 @@ pub struct EpicUpdateParams {
     pub owner: Option<String>,
     /// Memory reference URLs for this epic (e.g. ADR paths).
     pub memory_refs: Option<Vec<String>>,
+    /// Target lifecycle status: "drafting" or "open".
+    pub status: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -404,6 +406,7 @@ impl DjinnMcpServer {
                     color: p.color,
                     owner: p.owner,
                     memory_refs: p.memory_refs,
+                    status: p.status,
                 },
             )
             .await,

@@ -294,8 +294,7 @@ struct EpicUpdateParams {
     id: String,
     title: Option<String>,
     description: Option<String>,
-    #[serde(rename = "status")]
-    _status: Option<String>,
+    status: Option<String>,
     memory_refs_add: Option<Vec<String>>,
     memory_refs_remove: Option<Vec<String>>,
 }
@@ -656,6 +655,7 @@ async fn call_epic_update(
             owner: None,
             memory_refs_add: p.memory_refs_add,
             memory_refs_remove: p.memory_refs_remove,
+            status: p.status,
         },
     )
     .await;
@@ -5489,7 +5489,7 @@ mod tests {
                 "id": epic.short_id,
                 "title": "updated epic title",
                 "description": "updated epic description",
-                "status": "ignored-by-extension-contract",
+                "status": "open",
                 "memory_refs_add": ["notes/adr-041"],
             })
             .as_object()

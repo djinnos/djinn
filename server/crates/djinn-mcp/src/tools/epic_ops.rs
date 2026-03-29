@@ -154,6 +154,7 @@ pub struct EpicUpdateRequest {
     pub color: Option<String>,
     pub owner: Option<String>,
     pub memory_refs: Option<Vec<String>>,
+    pub status: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
@@ -167,6 +168,7 @@ pub struct EpicUpdateDeltaRequest {
     pub owner: Option<String>,
     pub memory_refs_add: Option<Vec<String>>,
     pub memory_refs_remove: Option<Vec<String>>,
+    pub status: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
@@ -328,6 +330,19 @@ pub async fn epic_update(
         epic.owner.clone()
     };
 
+    let status = request.status.as_deref().unwrap_or(&epic.status);
+    match status {
+        "drafting" | "open" | "closed" => {}
+        other => {
+            return EpicSingleResponse {
+                epic: None,
+                error: Some(format!(
+                    "invalid epic status: {other} (expected drafting, open, or closed)"
+                )),
+            };
+        }
+    }
+
     let memory_refs_str = if let Some(ref refs) = request.memory_refs {
         serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_string())
     } else {
@@ -344,7 +359,7 @@ pub async fn epic_update(
                 color,
                 owner: &owner,
                 memory_refs: Some(&memory_refs_str),
-                status: None,
+                status: Some(status),
             },
         )
         .await
@@ -401,6 +416,7 @@ pub async fn epic_update_with_delta(
             color: request.color,
             owner: request.owner,
             memory_refs: Some(memory_refs),
+            status: request.status,
         },
     )
     .await
