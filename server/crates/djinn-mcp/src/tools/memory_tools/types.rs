@@ -219,6 +219,7 @@ pub struct MemoryNoteResponse {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub last_accessed: Option<String>,
+    pub deduplicated: bool,
     pub error: Option<String>,
 }
 
@@ -413,6 +414,14 @@ impl From<&djinn_core::models::Note> for MemoryNoteView {
 
 impl MemoryNoteResponse {
     pub fn from_note(note: &djinn_core::models::Note) -> Self {
+        Self::from_note_with_deduplicated(note, false)
+    }
+
+    pub fn deduplicated_from_note(note: &djinn_core::models::Note) -> Self {
+        Self::from_note_with_deduplicated(note, true)
+    }
+
+    fn from_note_with_deduplicated(note: &djinn_core::models::Note, deduplicated: bool) -> Self {
         Self {
             id: Some(note.id.clone()),
             project_id: Some(note.project_id.clone()),
@@ -426,6 +435,7 @@ impl MemoryNoteResponse {
             created_at: Some(note.created_at.clone()),
             updated_at: Some(note.updated_at.clone()),
             last_accessed: Some(note.last_accessed.clone()),
+            deduplicated,
             error: None,
         }
     }
@@ -444,6 +454,7 @@ impl MemoryNoteResponse {
             created_at: None,
             updated_at: None,
             last_accessed: None,
+            deduplicated: false,
             error: Some(error),
         }
     }
