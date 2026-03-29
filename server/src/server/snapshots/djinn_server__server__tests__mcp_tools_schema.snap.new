@@ -1,0 +1,7042 @@
+---
+source: src/server/mod.rs
+assertion_line: 482
+expression: signatures
+---
+[
+  {
+    "input_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "description": "Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.",
+          "type": "string"
+        },
+        "description": {
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "description": "Additional MCP server refs for this agent.",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "model_preference": {
+          "description": "Preferred model ID (falls back to project default).",
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "description": "Unique agent name within the project.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "skills": {
+          "description": "Skills (prompt templates) available to this agent.",
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "description": "Additional system prompt content appended to the base role prompt.",
+          "nullable": true,
+          "type": "string"
+        },
+        "verification_command": {
+          "description": "Custom verification command (falls back to project default).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "name",
+        "base_role"
+      ],
+      "title": "AgentCreateParams",
+      "type": "object"
+    },
+    "name": "agent_create",
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "model_preference": {
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "verification_command": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "AgentSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "description": "Filter by base role: worker, lead, planner, architect, reviewer, resolver.",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "AgentListParams",
+      "type": "object"
+    },
+    "name": "agent_list",
+    "output_schema": {
+      "$defs": {
+        "AgentModel": {
+          "properties": {
+            "base_role": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "is_default": {
+              "type": "boolean"
+            },
+            "learned_prompt": {
+              "description": "Auto-improvement loop amendments. None if not yet set.",
+              "nullable": true,
+              "type": "string"
+            },
+            "mcp_servers": {
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              },
+              "type": "array"
+            },
+            "model_preference": {
+              "nullable": true,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "skills": {
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              },
+              "type": "array"
+            },
+            "system_prompt_extensions": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "verification_command": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "project_id",
+            "name",
+            "base_role",
+            "description",
+            "system_prompt_extensions",
+            "mcp_servers",
+            "skills",
+            "is_default",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/AgentModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "has_more": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "total_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "AgentListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "agent_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "window_days": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "AgentMetricsParams",
+      "type": "object"
+    },
+    "name": "agent_metrics",
+    "output_schema": {
+      "$defs": {
+        "AgentMetricEntry": {
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "agent_name": {
+              "type": "string"
+            },
+            "avg_reopens": {
+              "format": "double",
+              "type": "number"
+            },
+            "avg_time_seconds": {
+              "format": "double",
+              "type": "number"
+            },
+            "avg_tokens": {
+              "format": "double",
+              "type": "number"
+            },
+            "base_role": {
+              "type": "string"
+            },
+            "completed_task_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "extraction_quality": {
+              "$ref": "#/$defs/ExtractionQualityMetricEntry"
+            },
+            "learned_prompt": {
+              "nullable": true,
+              "type": "string"
+            },
+            "success_rate": {
+              "format": "double",
+              "type": "number"
+            },
+            "verification_pass_rate": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "agent_id",
+            "agent_name",
+            "base_role",
+            "success_rate",
+            "avg_tokens",
+            "avg_time_seconds",
+            "verification_pass_rate",
+            "avg_reopens",
+            "completed_task_count",
+            "extraction_quality"
+          ],
+          "type": "object"
+        },
+        "ExtractionQualityMetricEntry": {
+          "properties": {
+            "dedup_skipped": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "extracted": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "novelty_skipped": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "written": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "extracted",
+            "dedup_skipped",
+            "novelty_skipped",
+            "written"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/AgentMetricEntry"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "window_days": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "window_days"
+      ],
+      "title": "AgentMetricsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Agent UUID or name.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "AgentShowParams",
+      "type": "object"
+    },
+    "name": "agent_show",
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "model_preference": {
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "verification_command": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "AgentSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "clear_learned_prompt": {
+          "description": "Set to true to clear learned_prompt back to NULL. Takes precedence over learned_prompt.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "description": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "description": "Agent UUID or name.",
+          "type": "string"
+        },
+        "learned_prompt": {
+          "description": "Set a new learned_prompt value (auto-improvement loop only).",
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "model_preference": {
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "nullable": true,
+          "type": "string"
+        },
+        "verification_command": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "AgentUpdateParams",
+      "type": "object"
+    },
+    "name": "agent_update",
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {}
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_role": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "learned_prompt": {
+          "description": "Auto-improvement loop amendments. None if not yet set.",
+          "nullable": true,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "model_preference": {
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AnyJson"
+          },
+          "type": "array"
+        },
+        "system_prompt_extensions": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "verification_command": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "AgentSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "stale_threshold_hours": {
+          "description": "Hours before an in_progress task is considered stale (default: 24).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "BoardHealthParams",
+      "type": "object"
+    },
+    "name": "board_health",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrBoardHealthResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "stale_threshold_hours": {
+          "description": "Hours before an in_progress task is considered stale (default: 24).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "BoardReconcileParams",
+      "type": "object"
+    },
+    "name": "board_reconcile",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrBoardReconcileResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "key_name": {
+          "description": "Env-var style key name of the credential to delete (e.g. 'ANTHROPIC_API_KEY').",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_name"
+      ],
+      "title": "CredentialDeleteInput",
+      "type": "object"
+    },
+    "name": "credential_delete",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "key_name": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "success",
+        "deleted",
+        "key_name"
+      ],
+      "title": "CredentialDeleteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "credential_list",
+    "output_schema": {
+      "$defs": {
+        "CredentialSummary": {
+          "properties": {
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "key_name": {
+              "type": "string"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "provider_id",
+            "key_name",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "credentials": {
+          "items": {
+            "$ref": "#/$defs/CredentialSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "credentials"
+      ],
+      "title": "CredentialListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "api_key": {
+          "description": "The raw API key value to store encrypted.",
+          "type": "string"
+        },
+        "key_name": {
+          "description": "Env-var style key name (e.g. 'ANTHROPIC_API_KEY').",
+          "type": "string"
+        },
+        "provider_id": {
+          "description": "Provider ID this key belongs to (e.g. 'anthropic', 'openai').",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id",
+        "key_name",
+        "api_key"
+      ],
+      "title": "CredentialSetInput",
+      "type": "object"
+    },
+    "name": "credential_set",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key_name": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "success",
+        "id",
+        "key_name"
+      ],
+      "title": "CredentialSetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "EpicCloseParams",
+      "type": "object"
+    },
+    "name": "epic_close",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "color": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "emoji": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "memory_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "EpicSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "group_by": {
+          "description": "Group results by: \"status\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "status": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "EpicCountParams",
+      "type": "object"
+    },
+    "name": "epic_count",
+    "output_schema": {
+      "$defs": {
+        "EpicCountGroup": {
+          "properties": {
+            "count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/EpicCountGroup"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "total_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "EpicCountResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "color": {
+          "nullable": true,
+          "type": "string"
+        },
+        "description": {
+          "nullable": true,
+          "type": "string"
+        },
+        "emoji": {
+          "nullable": true,
+          "type": "string"
+        },
+        "memory_refs": {
+          "description": "Memory reference URLs for this epic (e.g. ADR paths).",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "owner": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Initial status: \"drafting\" (default) or \"open\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "title"
+      ],
+      "title": "EpicCreateParams",
+      "type": "object"
+    },
+    "name": "epic_create",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "color": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "emoji": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "memory_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "EpicSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "EpicDeleteParams",
+      "type": "object"
+    },
+    "name": "epic_delete",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "deleted_task_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "nullable": true,
+          "type": "boolean"
+        }
+      },
+      "title": "EpicDeleteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "sort": {
+          "description": "Sort order: \"created\" (default), \"created_desc\", \"updated\", \"updated_desc\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "nullable": true,
+          "type": "string"
+        },
+        "text": {
+          "description": "Full-text search on title and description.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "EpicListParams",
+      "type": "object"
+    },
+    "name": "epic_list",
+    "output_schema": {
+      "$defs": {
+        "EpicModel": {
+          "properties": {
+            "closed_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "color": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "emoji": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "memory_refs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "description",
+            "emoji",
+            "color",
+            "status",
+            "owner",
+            "created_at",
+            "updated_at",
+            "memory_refs"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "epics": {
+          "items": {
+            "$ref": "#/$defs/EpicModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "has_more": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "total_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "EpicListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "EpicReopenParams",
+      "type": "object"
+    },
+    "name": "epic_reopen",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "color": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "emoji": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "memory_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "EpicSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "EpicShowParams",
+      "type": "object"
+    },
+    "name": "epic_show",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "closed_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "color": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "emoji": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "in_progress_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "memory_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "open_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "EpicShowResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "epic_id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "issue_type": {
+          "description": "Filter by issue type: \"task\", \"feature\", or \"bug\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "sort": {
+          "description": "Sort order: \"priority\" (default), \"created\", \"created_desc\",\n\"updated\", \"updated_desc\", \"closed\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "epic_id"
+      ],
+      "title": "EpicTasksParams",
+      "type": "object"
+    },
+    "name": "epic_tasks",
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        },
+        "EpicTaskModel": {
+          "properties": {
+            "acceptance_criteria": {
+              "items": {
+                "$ref": "#/$defs/AcceptanceCriterionItem"
+              },
+              "type": "array"
+            },
+            "close_reason": {
+              "nullable": true,
+              "type": "string"
+            },
+            "closed_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "continuation_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "design": {
+              "type": "string"
+            },
+            "epic_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "issue_type": {
+              "type": "string"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "memory_refs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "merge_commit_sha": {
+              "nullable": true,
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "priority": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "reopen_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "verification_failure_count": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "description",
+            "design",
+            "issue_type",
+            "status",
+            "priority",
+            "owner",
+            "labels",
+            "memory_refs",
+            "acceptance_criteria",
+            "reopen_count",
+            "continuation_count",
+            "verification_failure_count",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "has_more": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/$defs/EpicTaskModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "total_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "EpicTasksResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "color": {
+          "nullable": true,
+          "type": "string"
+        },
+        "description": {
+          "nullable": true,
+          "type": "string"
+        },
+        "emoji": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "memory_refs": {
+          "description": "Memory reference URLs for this epic (e.g. ADR paths).",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "owner": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Target lifecycle status: \"drafting\" or \"open\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "EpicUpdateParams",
+      "type": "object"
+    },
+    "name": "epic_update",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "color": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "emoji": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "memory_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "EpicSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Project path (accepted for API compatibility, currently unused).",
+          "nullable": true,
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task ID to interrupt.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "title": "ExecutionKillTaskParams",
+      "type": "object"
+    },
+    "name": "execution_kill_task",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "task_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "title": "ExecutionKillTaskResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "mode": {
+          "description": "Pause mode: \"graceful\" (default) or \"immediate\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "description": "Optional project path for project-scoped execution pause.",
+          "nullable": true,
+          "type": "string"
+        },
+        "reason": {
+          "description": "Optional reason used when mode is \"immediate\".",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ExecutionPauseParams",
+      "type": "object"
+    },
+    "name": "execution_pause",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "mode": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "scope": {
+          "nullable": true,
+          "type": "string"
+        },
+        "state": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "title": "ExecutionPauseResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Optional project path for project-scoped execution resume.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ExecutionResumeParams",
+      "type": "object"
+    },
+    "name": "execution_resume",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "scope": {
+          "nullable": true,
+          "type": "string"
+        },
+        "state": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "title": "ExecutionResumeResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Optional project path for project-scoped execution start.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ExecutionStartParams",
+      "type": "object"
+    },
+    "name": "execution_start",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "resumed": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "scope": {
+          "nullable": true,
+          "type": "string"
+        },
+        "state": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "title": "ExecutionStartResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Optional project path for project-scoped execution status.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ExecutionStatusParams",
+      "type": "object"
+    },
+    "name": "execution_status",
+    "output_schema": {
+      "$defs": {
+        "ExecutionStatusCapacity": {
+          "properties": {
+            "active": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "max": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "active",
+            "max"
+          ],
+          "type": "object"
+        },
+        "ExecutionStatusMetrics": {
+          "properties": {
+            "sessions_recovered": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "tasks_dispatched": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "tasks_dispatched",
+            "sessions_recovered"
+          ],
+          "type": "object"
+        },
+        "ExecutionStatusSession": {
+          "properties": {
+            "duration_seconds": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "worktree_path": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "model_id",
+            "session_id",
+            "duration_seconds"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "capacity": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ExecutionStatusCapacity"
+          },
+          "nullable": true,
+          "type": "object"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "max_sessions": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "metrics": {
+          "$ref": "#/$defs/ExecutionStatusMetrics"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project_issues": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Per-project health issues blocking execution (project_id -> error message).",
+          "nullable": true,
+          "type": "object"
+        },
+        "running_sessions": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "scope": {
+          "nullable": true,
+          "type": "string"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/ExecutionStatusSession"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "state": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "metrics"
+      ],
+      "title": "ExecutionStatusResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "identifier": {
+          "description": "Note ID or permalink (e.g. \"decisions/my-adr\").",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Maximum number of results. Default: 20.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "min_weight": {
+          "description": "Minimum association weight [0.0, 1.0]. Default: 0.0 (all associations).",
+          "format": "double",
+          "nullable": true,
+          "type": "number"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "identifier"
+      ],
+      "title": "AssociationsParams",
+      "type": "object"
+    },
+    "name": "memory_associations",
+    "output_schema": {
+      "$defs": {
+        "MemoryAssociationEntry": {
+          "properties": {
+            "co_access_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_co_access": {
+              "type": "string"
+            },
+            "note_permalink": {
+              "type": "string"
+            },
+            "note_title": {
+              "type": "string"
+            },
+            "weight": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "note_permalink",
+            "note_title",
+            "weight",
+            "co_access_count",
+            "last_co_access"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "associations": {
+          "items": {
+            "$ref": "#/$defs/MemoryAssociationEntry"
+          },
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "associations"
+      ],
+      "title": "MemoryAssociationsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "folder": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "BrokenLinksParams",
+      "type": "object"
+    },
+    "name": "memory_broken_links",
+    "output_schema": {
+      "$defs": {
+        "BrokenLink": {
+          "description": "A wikilink pointing to a note that does not exist.",
+          "properties": {
+            "raw_text": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "source_permalink": {
+              "type": "string"
+            },
+            "source_title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "source_permalink",
+            "source_title",
+            "raw_text"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "broken_links": {
+          "items": {
+            "$ref": "#/$defs/BrokenLink"
+          },
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "broken_links"
+      ],
+      "title": "MemoryBrokenLinksResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "budget": {
+          "description": "Token budget for context (default 4096). Seed notes are uncapped.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "depth": {
+          "description": "Link traversal depth (default 1).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "max_related": {
+          "description": "Maximum related notes to return (default 10).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "min_confidence": {
+          "description": "Minimum confidence threshold for related notes (default 0.1). Notes\nbelow this threshold are excluded from the context response. Set to 0.0\nto include all notes regardless of confidence.",
+          "format": "double",
+          "nullable": true,
+          "type": "number"
+        },
+        "project": {
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Optional task ID for task-affinity scoring in RRF retrieval.",
+          "nullable": true,
+          "type": "string"
+        },
+        "url": {
+          "description": "Memory URI: \"memory://folder/note\", \"folder/note\", or \"folder/*\" for all\nnotes in a folder.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "url",
+        "budget"
+      ],
+      "title": "BuildContextParams",
+      "type": "object"
+    },
+    "name": "memory_build_context",
+    "output_schema": {
+      "$defs": {
+        "MemoryNoteView": {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "file_path": {
+              "type": "string"
+            },
+            "folder": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "last_accessed": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "project_id",
+            "permalink",
+            "title",
+            "file_path",
+            "note_type",
+            "folder",
+            "tags",
+            "content",
+            "created_at",
+            "updated_at",
+            "last_accessed"
+          ],
+          "type": "object"
+        },
+        "NoteAbstract": {
+          "description": "L0 note abstract payload used in tiered context responses.",
+          "properties": {
+            "abstract_text": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "score": {
+              "format": "float",
+              "nullable": true,
+              "type": "number"
+            },
+            "superseded": {
+              "description": "True when this note has been superseded by a newer note (stale-citation\nconfidence signal applied). Consumers should treat the content as\npotentially outdated.",
+              "type": "boolean"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "permalink",
+            "title",
+            "note_type",
+            "abstract_text"
+          ],
+          "type": "object"
+        },
+        "NoteOverview": {
+          "description": "L1 note overview payload used in tiered context responses.",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "overview_text": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "score": {
+              "format": "float",
+              "nullable": true,
+              "type": "number"
+            },
+            "superseded": {
+              "description": "True when this note has been superseded by a newer note (stale-citation\nconfidence signal applied). Consumers should treat the content as\npotentially outdated.",
+              "type": "boolean"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "permalink",
+            "title",
+            "note_type",
+            "overview_text"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "primary": {
+          "items": {
+            "$ref": "#/$defs/MemoryNoteView"
+          },
+          "type": "array"
+        },
+        "related_l0": {
+          "items": {
+            "$ref": "#/$defs/NoteAbstract"
+          },
+          "type": "array"
+        },
+        "related_l1": {
+          "items": {
+            "$ref": "#/$defs/NoteOverview"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "primary",
+        "related_l1",
+        "related_l0"
+      ],
+      "title": "MemoryBuildContextResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "CatalogParams",
+      "type": "object"
+    },
+    "name": "memory_catalog",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "catalog": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "catalog"
+      ],
+      "title": "MemoryCatalogResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "comment": {
+          "description": "Optional reason for confirmation.",
+          "nullable": true,
+          "type": "string"
+        },
+        "identifier": {
+          "description": "Note permalink or note ID.",
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "identifier"
+      ],
+      "title": "MemoryConfirmParams",
+      "type": "object"
+    },
+    "name": "memory_confirm",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "new_confidence": {
+          "format": "double",
+          "nullable": true,
+          "type": "number"
+        },
+        "note_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "permalink": {
+          "nullable": true,
+          "type": "string"
+        },
+        "previous_confidence": {
+          "format": "double",
+          "nullable": true,
+          "type": "number"
+        }
+      },
+      "title": "MemoryConfirmResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "identifier": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "identifier"
+      ],
+      "title": "DeleteParams",
+      "type": "object"
+    },
+    "name": "memory_delete",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "title": "MemoryDeleteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "permalink": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "sha": {
+          "description": "Specific commit SHA. Omit to get the diff for the most recent change.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "permalink"
+      ],
+      "title": "DiffParams",
+      "type": "object"
+    },
+    "name": "memory_diff",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "diff": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "diff"
+      ],
+      "title": "MemoryDiffResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "find_text": {
+          "description": "Required for find_replace: exact text to search for.",
+          "nullable": true,
+          "type": "string"
+        },
+        "identifier": {
+          "description": "Note permalink or title.",
+          "type": "string"
+        },
+        "operation": {
+          "description": "Operation: \"append\", \"prepend\", \"find_replace\", \"replace_section\".",
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "section": {
+          "description": "Required for replace_section: heading text identifying the section.",
+          "nullable": true,
+          "type": "string"
+        },
+        "type": {
+          "description": "If provided and different from current type, move the note to the new\ntype's folder. Allowed values same as memory_write type.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "identifier",
+        "operation",
+        "content"
+      ],
+      "title": "EditParams",
+      "type": "object"
+    },
+    "name": "memory_edit",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "content": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "deduplicated": {
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "file_path": {
+          "nullable": true,
+          "type": "string"
+        },
+        "folder": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "last_accessed": {
+          "nullable": true,
+          "type": "string"
+        },
+        "note_type": {
+          "nullable": true,
+          "type": "string"
+        },
+        "permalink": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "title": {
+          "nullable": true,
+          "type": "string"
+        },
+        "updated_at": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "deduplicated"
+      ],
+      "title": "MemoryNoteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "GraphParams",
+      "type": "object"
+    },
+    "name": "memory_graph",
+    "output_schema": {
+      "$defs": {
+        "GraphEdge": {
+          "description": "A resolved wikilink edge between two notes.",
+          "properties": {
+            "raw_text": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "target_id",
+            "raw_text"
+          ],
+          "type": "object"
+        },
+        "GraphNode": {
+          "description": "A knowledge graph node (note with connection metadata).",
+          "properties": {
+            "connection_count": {
+              "description": "Total resolved edges incident to this node (inbound + outbound).",
+              "format": "int64",
+              "type": "integer"
+            },
+            "folder": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "permalink",
+            "title",
+            "note_type",
+            "folder",
+            "connection_count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/GraphEdge"
+          },
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/GraphNode"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "nodes",
+        "edges"
+      ],
+      "title": "MemoryGraphResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute path to the project directory.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "HealthParams",
+      "type": "object"
+    },
+    "name": "memory_health",
+    "output_schema": {
+      "$defs": {
+        "StaleFolder": {
+          "description": "Stale-note count for one folder.",
+          "properties": {
+            "count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "folder": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "folder",
+            "count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "broken_link_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "orphan_note_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "stale_notes_by_folder": {
+          "items": {
+            "$ref": "#/$defs/StaleFolder"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "total_notes": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "MemoryHealthResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "permalink": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "permalink"
+      ],
+      "title": "HistoryParams",
+      "type": "object"
+    },
+    "name": "memory_history",
+    "output_schema": {
+      "$defs": {
+        "GitLogEntry": {
+          "description": "A single git commit entry for note history.",
+          "properties": {
+            "author": {
+              "type": "string"
+            },
+            "date": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "sha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha",
+            "message",
+            "author",
+            "date"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "history": {
+          "items": {
+            "$ref": "#/$defs/GitLogEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "history"
+      ],
+      "title": "MemoryHistoryResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "depth": {
+          "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "folder": {
+          "description": "Filter by folder. Omit to list all notes.",
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "type": {
+          "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\").",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ListParams",
+      "type": "object"
+    },
+    "name": "memory_list",
+    "output_schema": {
+      "$defs": {
+        "NoteCompact": {
+          "description": "Compact note summary (no full content) for list and recent queries.",
+          "properties": {
+            "folder": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "permalink",
+            "title",
+            "note_type",
+            "folder",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/NoteCompact"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "notes"
+      ],
+      "title": "MemoryListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "identifier": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "title": {
+          "description": "Optional new title; keep current title if omitted.",
+          "nullable": true,
+          "type": "string"
+        },
+        "type": {
+          "description": "New note type to move the note to.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "identifier",
+        "type"
+      ],
+      "title": "MoveParams",
+      "type": "object"
+    },
+    "name": "memory_move",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "content": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "deduplicated": {
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "file_path": {
+          "nullable": true,
+          "type": "string"
+        },
+        "folder": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "last_accessed": {
+          "nullable": true,
+          "type": "string"
+        },
+        "note_type": {
+          "nullable": true,
+          "type": "string"
+        },
+        "permalink": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "title": {
+          "nullable": true,
+          "type": "string"
+        },
+        "updated_at": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "deduplicated"
+      ],
+      "title": "MemoryNoteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "folder": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "OrphansParams",
+      "type": "object"
+    },
+    "name": "memory_orphans",
+    "output_schema": {
+      "$defs": {
+        "OrphanNote": {
+          "description": "A note with zero inbound wikilinks (potential dead-end).",
+          "properties": {
+            "folder": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "permalink",
+            "title",
+            "note_type",
+            "folder"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "orphans": {
+          "items": {
+            "$ref": "#/$defs/OrphanNote"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "orphans"
+      ],
+      "title": "MemoryOrphansResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "identifier": {
+          "description": "Note permalink (e.g. \"decisions/my-adr\") or title.",
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "identifier"
+      ],
+      "title": "ReadParams",
+      "type": "object"
+    },
+    "name": "memory_read",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "content": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "deduplicated": {
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "file_path": {
+          "nullable": true,
+          "type": "string"
+        },
+        "folder": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "last_accessed": {
+          "nullable": true,
+          "type": "string"
+        },
+        "note_type": {
+          "nullable": true,
+          "type": "string"
+        },
+        "permalink": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "title": {
+          "nullable": true,
+          "type": "string"
+        },
+        "updated_at": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "deduplicated"
+      ],
+      "title": "MemoryNoteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "type": "string"
+        },
+        "timeframe": {
+          "description": "Timeframe string, e.g. \"7d\", \"24h\", \"today\", \"last week\". Default: \"7d\".",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "RecentParams",
+      "type": "object"
+    },
+    "name": "memory_recent",
+    "output_schema": {
+      "$defs": {
+        "NoteCompact": {
+          "description": "Compact note summary (no full content) for list and recent queries.",
+          "properties": {
+            "folder": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "permalink",
+            "title",
+            "note_type",
+            "folder",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/NoteCompact"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "notes"
+      ],
+      "title": "MemoryRecentResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ReindexParams",
+      "type": "object"
+    },
+    "name": "memory_reindex",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "created": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "deleted": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "unchanged": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "updated",
+        "created",
+        "deleted",
+        "unchanged"
+      ],
+      "title": "MemoryReindexResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "folder": {
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "type": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "query"
+      ],
+      "title": "SearchParams",
+      "type": "object"
+    },
+    "name": "memory_search",
+    "output_schema": {
+      "$defs": {
+        "MemorySearchResultItem": {
+          "properties": {
+            "folder": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "score": {
+              "default": 0.0,
+              "description": "RRF fusion score (higher = more relevant). Defaults to 0.0 for backward compat.",
+              "format": "double",
+              "type": "number"
+            },
+            "snippet": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "permalink",
+            "title",
+            "folder",
+            "note_type",
+            "snippet"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/MemorySearchResultItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "results"
+      ],
+      "title": "MemorySearchResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "permalink": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "permalink"
+      ],
+      "title": "TaskRefsParams",
+      "type": "object"
+    },
+    "name": "memory_task_refs",
+    "output_schema": {
+      "$defs": {
+        "MemoryTaskRefItem": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/$defs/MemoryTaskRefItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tasks"
+      ],
+      "title": "MemoryTaskRefsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute path to the project directory.",
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "type": {
+          "description": "Note type: adr, pattern, case, pitfall, research, requirement,\nreference, design, session, persona, journey, design_spec,\ncompetitive, tech_spike, brief (singleton), roadmap (singleton).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "title",
+        "content",
+        "type"
+      ],
+      "title": "WriteParams",
+      "type": "object"
+    },
+    "name": "memory_write",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "content": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "deduplicated": {
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "file_path": {
+          "nullable": true,
+          "type": "string"
+        },
+        "folder": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "last_accessed": {
+          "nullable": true,
+          "type": "string"
+        },
+        "note_type": {
+          "nullable": true,
+          "type": "string"
+        },
+        "permalink": {
+          "nullable": true,
+          "type": "string"
+        },
+        "project_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "title": {
+          "nullable": true,
+          "type": "string"
+        },
+        "updated_at": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "deduplicated"
+      ],
+      "title": "MemoryNoteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action": {
+          "default": "status",
+          "description": "Action to perform: status (view all, default), reset (reset one model),\nreset_all (reset all models), enable (re-enable auto-disabled model).",
+          "type": "string"
+        },
+        "model": {
+          "description": "Model ID (required for reset and enable actions).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ModelHealthInput",
+      "type": "object"
+    },
+    "name": "model_health",
+    "output_schema": {
+      "$defs": {
+        "ModelHealthOutput": {
+          "properties": {
+            "auto_disabled": {
+              "type": "boolean"
+            },
+            "consecutive_failures": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "cooldown_seconds_remaining": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            },
+            "disable_ttl_trips": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "total_failures": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "total_successes": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "model_id",
+            "auto_disabled",
+            "consecutive_failures",
+            "total_failures",
+            "total_successes",
+            "disable_ttl_trips"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ModelHealthOutput"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "action",
+        "models"
+      ],
+      "title": "ModelHealthResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "name": {
+          "description": "Human-readable project name (unique identifier).",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path to the project directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "title": "ProjectAddParams",
+      "type": "object"
+    },
+    "name": "project_add",
+    "output_schema": {
+      "$defs": {
+        "ProjectInfo": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "$ref": "#/$defs/ProjectInfo"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "project"
+      ],
+      "title": "ProjectAddResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ProjectConfigGetParams",
+      "type": "object"
+    },
+    "name": "project_config_get",
+    "output_schema": {
+      "$defs": {
+        "VerificationRuleDto": {
+          "description": "A single verification rule returned in project config.",
+          "properties": {
+            "commands": {
+              "description": "One or more shell commands to run when the pattern matches.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "match_pattern": {
+              "description": "Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "match_pattern",
+            "commands"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "auto_merge": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "sync_enabled": {
+          "type": "boolean"
+        },
+        "sync_remote": {
+          "nullable": true,
+          "type": "string"
+        },
+        "target_branch": {
+          "type": "string"
+        },
+        "verification_rules": {
+          "description": "File-pattern-to-command mapping for selective verification.\nEmpty list means fall back to full-project verification.",
+          "items": {
+            "$ref": "#/$defs/VerificationRuleDto"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "status",
+        "project",
+        "target_branch",
+        "auto_merge",
+        "sync_enabled",
+        "verification_rules"
+      ],
+      "title": "ProjectConfigResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "key",
+        "value"
+      ],
+      "title": "ProjectConfigSetParams",
+      "type": "object"
+    },
+    "name": "project_config_set",
+    "output_schema": {
+      "$defs": {
+        "VerificationRuleDto": {
+          "description": "A single verification rule returned in project config.",
+          "properties": {
+            "commands": {
+              "description": "One or more shell commands to run when the pattern matches.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "match_pattern": {
+              "description": "Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "match_pattern",
+            "commands"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "auto_merge": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "sync_enabled": {
+          "type": "boolean"
+        },
+        "sync_remote": {
+          "nullable": true,
+          "type": "string"
+        },
+        "target_branch": {
+          "type": "string"
+        },
+        "verification_rules": {
+          "description": "File-pattern-to-command mapping for selective verification.\nEmpty list means fall back to full-project verification.",
+          "items": {
+            "$ref": "#/$defs/VerificationRuleDto"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "status",
+        "project",
+        "target_branch",
+        "auto_merge",
+        "sync_enabled",
+        "verification_rules"
+      ],
+      "title": "ProjectConfigResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "project_list",
+    "output_schema": {
+      "$defs": {
+        "ProjectInfo": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/ProjectInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projects"
+      ],
+      "title": "ProjectListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "name": {
+          "description": "Project name to remove.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path of the project to remove. Must match the registered path exactly.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "title": "ProjectRemoveParams",
+      "type": "object"
+    },
+    "name": "project_remove",
+    "output_schema": {
+      "$defs": {
+        "ProjectInfo": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "$ref": "#/$defs/ProjectInfo"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "project"
+      ],
+      "title": "ProjectRemoveResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "worktree_path": {
+          "description": "Absolute path to the worktree containing .djinn/settings.json",
+          "type": "string"
+        }
+      },
+      "required": [
+        "worktree_path"
+      ],
+      "title": "ProjectSettingsValidateParams",
+      "type": "object"
+    },
+    "name": "project_settings_validate",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "valid": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "valid",
+        "errors"
+      ],
+      "title": "ProjectSettingsValidateResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "SeedModelInput": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "base_url": {
+          "description": "Root URL for OpenAI-compatible API calls (e.g. https://api.my-llm.com/v1).",
+          "type": "string"
+        },
+        "env_var": {
+          "description": "Environment variable name for the API key (e.g. MY_LLM_API_KEY).",
+          "type": "string"
+        },
+        "id": {
+          "description": "Unique provider slug (e.g. 'my-llm'). Must not collide with models.dev IDs.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human-readable display name (e.g. 'My LLM').",
+          "type": "string"
+        },
+        "seed_models": {
+          "description": "Optional seed models to pre-populate the model picker.",
+          "items": {
+            "$ref": "#/$defs/SeedModelInput"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "base_url",
+        "env_var"
+      ],
+      "title": "ProviderAddCustomInput",
+      "type": "object"
+    },
+    "name": "provider_add_custom",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "success",
+        "id"
+      ],
+      "title": "ProviderAddCustomResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "provider_catalog",
+    "output_schema": {
+      "$defs": {
+        "ProviderCatalogItem": {
+          "properties": {
+            "base_url": {
+              "type": "string"
+            },
+            "builtin_id": {
+              "type": "string"
+            },
+            "connected": {
+              "type": "boolean"
+            },
+            "connection_methods": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "docs_url": {
+              "type": "string"
+            },
+            "env_vars": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "goose_provider_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "is_openai_compatible": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "npm": {
+              "type": "string"
+            },
+            "oauth_keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "oauth_supported": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "builtin_id",
+            "goose_provider_id",
+            "name",
+            "npm",
+            "env_vars",
+            "base_url",
+            "docs_url",
+            "is_openai_compatible",
+            "connected",
+            "oauth_supported",
+            "oauth_keys",
+            "connection_methods"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderCatalogItem"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "providers",
+        "total"
+      ],
+      "title": "ProviderCatalogResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "provider_connected",
+    "output_schema": {
+      "$defs": {
+        "ProviderCatalogItem": {
+          "properties": {
+            "base_url": {
+              "type": "string"
+            },
+            "builtin_id": {
+              "type": "string"
+            },
+            "connected": {
+              "type": "boolean"
+            },
+            "connection_methods": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "docs_url": {
+              "type": "string"
+            },
+            "env_vars": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "goose_provider_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "is_openai_compatible": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "npm": {
+              "type": "string"
+            },
+            "oauth_keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "oauth_supported": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "builtin_id",
+            "goose_provider_id",
+            "name",
+            "npm",
+            "env_vars",
+            "base_url",
+            "docs_url",
+            "is_openai_compatible",
+            "connected",
+            "oauth_supported",
+            "oauth_keys",
+            "connection_methods"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderCatalogItem"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "providers",
+        "total"
+      ],
+      "title": "ProviderConnectedResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "model_id": {
+          "description": "Full model ID in 'providerID/modelID' format (e.g. 'anthropic/claude-opus-4-6').",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id"
+      ],
+      "title": "ProviderModelLookupInput",
+      "type": "object"
+    },
+    "name": "provider_model_lookup",
+    "output_schema": {
+      "$defs": {
+        "ModelPricingOutput": {
+          "properties": {
+            "cache_read_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "cache_write_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "input_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "output_per_million": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "input_per_million",
+            "output_per_million",
+            "cache_read_per_million",
+            "cache_write_per_million"
+          ],
+          "type": "object"
+        },
+        "ProviderModelOutput": {
+          "properties": {
+            "attachment": {
+              "type": "boolean"
+            },
+            "context_window": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "output_limit": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "pricing": {
+              "$ref": "#/$defs/ModelPricingOutput"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "reasoning": {
+              "type": "boolean"
+            },
+            "tool_call": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "provider_id",
+            "name",
+            "tool_call",
+            "reasoning",
+            "attachment",
+            "context_window",
+            "output_limit",
+            "pricing"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "found": {
+          "type": "boolean"
+        },
+        "model": {
+          "$ref": "#/$defs/ProviderModelOutput"
+        },
+        "model_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id",
+        "found",
+        "model"
+      ],
+      "title": "ProviderModelLookupResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "provider_id": {
+          "description": "Provider ID to fetch models for (e.g. 'anthropic', 'openai').",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id"
+      ],
+      "title": "ProviderModelsInput",
+      "type": "object"
+    },
+    "name": "provider_models",
+    "output_schema": {
+      "$defs": {
+        "ModelPricingOutput": {
+          "properties": {
+            "cache_read_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "cache_write_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "input_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "output_per_million": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "input_per_million",
+            "output_per_million",
+            "cache_read_per_million",
+            "cache_write_per_million"
+          ],
+          "type": "object"
+        },
+        "ProviderModelOutput": {
+          "properties": {
+            "attachment": {
+              "type": "boolean"
+            },
+            "context_window": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "output_limit": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "pricing": {
+              "$ref": "#/$defs/ModelPricingOutput"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "reasoning": {
+              "type": "boolean"
+            },
+            "tool_call": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "provider_id",
+            "name",
+            "tool_call",
+            "reasoning",
+            "attachment",
+            "context_window",
+            "output_limit",
+            "pricing"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderModelOutput"
+          },
+          "type": "array"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider_id",
+        "models",
+        "total"
+      ],
+      "title": "ProviderModelsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "provider_models_connected",
+    "output_schema": {
+      "$defs": {
+        "ModelPricingOutput": {
+          "properties": {
+            "cache_read_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "cache_write_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "input_per_million": {
+              "format": "double",
+              "type": "number"
+            },
+            "output_per_million": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "input_per_million",
+            "output_per_million",
+            "cache_read_per_million",
+            "cache_write_per_million"
+          ],
+          "type": "object"
+        },
+        "ProviderModelOutput": {
+          "properties": {
+            "attachment": {
+              "type": "boolean"
+            },
+            "context_window": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "output_limit": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "pricing": {
+              "$ref": "#/$defs/ModelPricingOutput"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "reasoning": {
+              "type": "boolean"
+            },
+            "tool_call": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "provider_id",
+            "name",
+            "tool_call",
+            "reasoning",
+            "attachment",
+            "context_window",
+            "output_limit",
+            "pricing"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderModelOutput"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "models",
+        "total"
+      ],
+      "title": "ProviderModelsConnectedResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "provider_id": {
+          "description": "Provider ID to start OAuth for (accepts catalog aliases, e.g. 'github-copilot').",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id"
+      ],
+      "title": "ProviderOauthStartInput",
+      "type": "object"
+    },
+    "name": "provider_oauth_start",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "builtin_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "configured_keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "goose_provider_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "oauth_supported": {
+          "type": "boolean"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "pending": {
+          "description": "True when the flow is still in progress (device-code polling in background).",
+          "type": "boolean"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "user_code": {
+          "description": "For device-code flows: the code the user must enter.",
+          "nullable": true,
+          "type": "string"
+        },
+        "verification_uri": {
+          "description": "For device-code flows: the URL where the user enters the code.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "success",
+        "provider_id",
+        "oauth_supported",
+        "configured_keys",
+        "pending"
+      ],
+      "title": "ProviderOauthStartResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "provider_id": {
+          "description": "Provider ID to disconnect and remove (e.g. 'anthropic', 'openai', 'my-custom-llm').",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id"
+      ],
+      "title": "ProviderRemoveInput",
+      "type": "object"
+    },
+    "name": "provider_remove",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "credentials_deleted": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "custom_provider_deleted": {
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "oauth_cleared": {
+          "type": "boolean"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "success",
+        "provider_id",
+        "credentials_deleted",
+        "custom_provider_deleted",
+        "oauth_cleared"
+      ],
+      "title": "ProviderRemoveResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "api_key": {
+          "description": "API key to validate.",
+          "type": "string"
+        },
+        "base_url": {
+          "description": "Provider API base URL (e.g. https://api.openai.com/v1). The probe appends /models.\nWhen omitted, the server resolves it from the catalog using provider_id.",
+          "nullable": true,
+          "type": "string"
+        },
+        "provider_id": {
+          "description": "Provider identifier. Used for logging and to resolve base_url from the catalog when not supplied.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_key"
+      ],
+      "title": "ProviderValidateInput",
+      "type": "object"
+    },
+    "name": "provider_validate",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string"
+        },
+        "http_status": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "error_kind",
+        "error",
+        "models",
+        "http_status"
+      ],
+      "title": "ProviderValidateResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute project path (required).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "SessionActiveParams",
+      "type": "object"
+    },
+    "name": "session_active",
+    "output_schema": {
+      "$defs": {
+        "SessionToolSession": {
+          "properties": {
+            "agent_type": {
+              "type": "string"
+            },
+            "ended_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "tokens_in": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "tokens_out": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "worktree_path": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "project_id",
+            "model_id",
+            "agent_type",
+            "started_at",
+            "status",
+            "tokens_in",
+            "tokens_out"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "recovery_triggered": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionToolSession"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "stale_sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionToolSession"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "SessionActiveResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task ID to query.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "project"
+      ],
+      "title": "SessionForTaskParams",
+      "type": "object"
+    },
+    "name": "session_for_task",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "duration_seconds": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "model_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "session": {
+          "nullable": true,
+          "type": "string"
+        },
+        "session_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "worktree_path": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "task_id"
+      ],
+      "title": "SessionForTaskResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute project path (required).",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task UUID or short_id.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "SessionListParams",
+      "type": "object"
+    },
+    "name": "session_list",
+    "output_schema": {
+      "$defs": {
+        "SessionToolSession": {
+          "properties": {
+            "agent_type": {
+              "type": "string"
+            },
+            "ended_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "tokens_in": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "tokens_out": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "worktree_path": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "project_id",
+            "model_id",
+            "agent_type",
+            "started_at",
+            "status",
+            "tokens_in",
+            "tokens_out"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionToolSession"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "task_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "SessionListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Session UUID.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path (required).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project"
+      ],
+      "title": "SessionMessagesParams",
+      "type": "object"
+    },
+    "name": "session_messages",
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {},
+        "SessionMessage": {
+          "properties": {
+            "content": {
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              },
+              "type": "array"
+            },
+            "role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "content"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "agent_type": {
+          "nullable": true,
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/SessionMessage"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "model_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "session_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "SessionMessagesResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Session UUID.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path (required).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project"
+      ],
+      "title": "SessionShowParams",
+      "type": "object"
+    },
+    "name": "session_show",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "agent_type": {
+          "type": "string"
+        },
+        "ended_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "tokens_in": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tokens_out": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "worktree_path": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "SessionShowResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "key": {
+          "description": "Optional settings key to fetch (defaults to settings.raw).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "SettingsGetParams",
+      "type": "object"
+    },
+    "name": "settings_get",
+    "output_schema": {
+      "$defs": {
+        "DjinnSettings": {
+          "additionalProperties": false,
+          "description": "Typed settings schema. Unknown fields are rejected at parse time.",
+          "properties": {
+            "dispatch_limit": {
+              "description": "Maximum number of tasks to dispatch per cycle (default 50).",
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            },
+            "langfuse_endpoint": {
+              "description": "Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).",
+              "nullable": true,
+              "type": "string"
+            },
+            "langfuse_public_key": {
+              "description": "Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).",
+              "nullable": true,
+              "type": "string"
+            },
+            "langfuse_secret_key": {
+              "description": "Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).",
+              "nullable": true,
+              "type": "string"
+            },
+            "max_sessions": {
+              "additionalProperties": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "description": "Per-model concurrent session caps, e.g. `{\"openai/gpt-4o\": 4}`.",
+              "nullable": true,
+              "type": "object"
+            },
+            "models": {
+              "description": "Ordered list of models available to agents, e.g. `[\"openai/gpt-4o\"]`.",
+              "items": {
+                "type": "string"
+              },
+              "nullable": true,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "raw_value": {
+          "nullable": true,
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/$defs/DjinnSettings"
+        }
+      },
+      "required": [
+        "key",
+        "exists",
+        "settings"
+      ],
+      "title": "SettingsGetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "SettingsResetParams",
+      "type": "object"
+    },
+    "name": "settings_reset",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "deleted"
+      ],
+      "title": "SettingsResetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "dispatch_limit": {
+          "description": "Maximum number of tasks to dispatch per cycle. Omit to keep current value.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "langfuse_endpoint": {
+          "description": "Langfuse OTLP endpoint URL (defaults to \"http://localhost:3000/api/public/otel\"). Set to \"\" to disable. Omit to keep current value.",
+          "nullable": true,
+          "type": "string"
+        },
+        "langfuse_public_key": {
+          "description": "Langfuse public key for LLM observability (e.g. \"pk-lf-...\"). Set to \"\" to disable. Omit to keep current value.",
+          "nullable": true,
+          "type": "string"
+        },
+        "langfuse_secret_key": {
+          "description": "Langfuse secret key for LLM observability (e.g. \"sk-lf-...\"). Set to \"\" to disable. Omit to keep current value.",
+          "nullable": true,
+          "type": "string"
+        },
+        "max_sessions": {
+          "additionalProperties": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "description": "Per-model concurrent session caps (e.g. {\"openai/gpt-4o\": 4}). Omit to keep current value.",
+          "nullable": true,
+          "type": "object"
+        },
+        "models": {
+          "description": "Ordered list of models available to all agents (e.g. [\"openai/gpt-4o\"]). Omit to keep current value.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "SettingsSetParams",
+      "type": "object"
+    },
+    "name": "settings_set",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "applied": {
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "applied"
+      ],
+      "title": "SettingsSetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "level": {
+          "nullable": true,
+          "type": "string"
+        },
+        "lines": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "SystemLogsInput",
+      "type": "object"
+    },
+    "name": "system_logs",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "filtered": {
+          "type": "boolean"
+        },
+        "lines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "file",
+        "lines",
+        "filtered"
+      ],
+      "title": "SystemLogsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "system_ping",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "version"
+      ],
+      "title": "PingResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor_role": {
+          "description": "Filter by actor_role (e.g. \"lead\", \"reviewer\", \"worker\", \"verification\", \"system\").",
+          "nullable": true,
+          "type": "string"
+        },
+        "event_type": {
+          "description": "Filter by event_type (e.g. \"status_changed\", \"comment\").",
+          "nullable": true,
+          "type": "string"
+        },
+        "from_time": {
+          "description": "ISO-8601 lower bound on created_at.",
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short_id (optional - omit to query all tasks).",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "to_time": {
+          "description": "ISO-8601 upper bound on created_at.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "TaskActivityListParams",
+      "type": "object"
+    },
+    "name": "task_activity_list",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskActivityListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Task UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path. Optional - task IDs are globally unique.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "TaskBlockedListParams",
+      "type": "object"
+    },
+    "name": "task_blocked_list",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskBlockedListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Task UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "TaskBlockersListParams",
+      "type": "object"
+    },
+    "name": "task_blockers_list",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskBlockersListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "label": {
+          "description": "Filter by label value.",
+          "nullable": true,
+          "type": "string"
+        },
+        "owner": {
+          "description": "Filter by owner email.",
+          "nullable": true,
+          "type": "string"
+        },
+        "priority_max": {
+          "description": "Maximum priority to include (0=highest).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "Session ID of the claiming agent (recorded as actor_id in the activity log).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "TaskClaimParams",
+      "type": "object"
+    },
+    "name": "task_claim",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskClaimSuccess",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actor_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "actor_role": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "description": "Comment body text.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id",
+        "body"
+      ],
+      "title": "TaskCommentAddParams",
+      "type": "object"
+    },
+    "name": "task_comment_add",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrActivityEntryResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "group_by": {
+          "description": "Group results by: \"status\", \"priority\", \"issue_type\", or \"epic\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "issue_type": {
+          "nullable": true,
+          "type": "string"
+        },
+        "label": {
+          "nullable": true,
+          "type": "string"
+        },
+        "priority": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "status": {
+          "nullable": true,
+          "type": "string"
+        },
+        "text": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "TaskCountParams",
+      "type": "object"
+    },
+    "name": "task_count",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskCountSuccess",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "agent_type": {
+          "description": "Specialist role name to route this task (e.g. \"rust-expert\").",
+          "nullable": true,
+          "type": "string"
+        },
+        "blocked_by": {
+          "description": "Task IDs (UUID or short_id) that block this task. Blockers are set atomically at creation.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "description": {
+          "nullable": true,
+          "type": "string"
+        },
+        "design": {
+          "nullable": true,
+          "type": "string"
+        },
+        "epic_id": {
+          "description": "Parent epic ID - UUID or short_id (required).",
+          "nullable": true,
+          "type": "string"
+        },
+        "issue_type": {
+          "description": "Task type: \"task\" (default), \"feature\", \"bug\", \"spike\", \"research\", \"planning\", or \"review\".\nSpike, research, planning, and review use a simple lifecycle: open → in_progress → closed.\nPlanning tasks are routed to the Planner; spike and review tasks are routed to the Architect.",
+          "nullable": true,
+          "type": "string"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "memory_refs": {
+          "description": "Memory note permalinks to attach to this task at creation.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "owner": {
+          "nullable": true,
+          "type": "string"
+        },
+        "priority": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Optional initial status. Allowed value: \"open\" (default).",
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "title"
+      ],
+      "title": "TaskCreateParams",
+      "type": "object"
+    },
+    "name": "task_create",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "issue_type": {
+          "description": "Positive (\"task\") or negative (\"!epic\") issue_type filter.",
+          "nullable": true,
+          "type": "string"
+        },
+        "label": {
+          "description": "Filter by label value.",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "priority": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "sort": {
+          "description": "Sort order: \"priority\" (default), \"created\", \"created_desc\",\n\"updated\", \"updated_desc\", \"closed\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "nullable": true,
+          "type": "string"
+        },
+        "text": {
+          "description": "Full-text search on title and description.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "TaskListParams",
+      "type": "object"
+    },
+    "name": "task_list",
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        },
+        "TaskListItem": {
+          "properties": {
+            "acceptance_criteria": {
+              "items": {
+                "$ref": "#/$defs/AcceptanceCriterionItem"
+              },
+              "type": "array"
+            },
+            "active_session": {
+              "description": "Active running session for this task, if any.",
+              "nullable": true,
+              "properties": {
+                "agent_type": {
+                  "type": "string"
+                },
+                "model_id": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                },
+                "started_at": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "agent_type",
+                "model_id",
+                "started_at",
+                "status"
+              ],
+              "type": "object"
+            },
+            "agent_type": {
+              "description": "Specialist role name assigned to this task, if any.",
+              "nullable": true,
+              "type": "string"
+            },
+            "close_reason": {
+              "nullable": true,
+              "type": "string"
+            },
+            "closed_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "continuation_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "design": {
+              "type": "string"
+            },
+            "epic_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "intervention_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "issue_type": {
+              "type": "string"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "last_intervention_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "memory_refs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "merge_commit_sha": {
+              "nullable": true,
+              "type": "string"
+            },
+            "merge_conflict_metadata": {
+              "additionalProperties": true,
+              "description": "JSON metadata about an active merge conflict (files, branches).",
+              "nullable": true,
+              "type": "object"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "priority": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "reopen_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "session_count": {
+              "description": "Total number of sessions that have worked on this task.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "total_reopen_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "total_verification_failure_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "unresolved_blocker_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "verification_failure_count": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "description",
+            "design",
+            "issue_type",
+            "status",
+            "priority",
+            "owner",
+            "labels",
+            "memory_refs",
+            "acceptance_criteria",
+            "reopen_count",
+            "continuation_count",
+            "verification_failure_count",
+            "total_reopen_count",
+            "total_verification_failure_count",
+            "intervention_count",
+            "created_at",
+            "updated_at",
+            "unresolved_blocker_count",
+            "session_count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "has_more": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/$defs/TaskListItem"
+          },
+          "type": "array"
+        },
+        "total_count": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tasks",
+        "total_count",
+        "limit",
+        "offset",
+        "has_more"
+      ],
+      "title": "TaskListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Task UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "project"
+      ],
+      "title": "TaskMemoryRefsParams",
+      "type": "object"
+    },
+    "name": "task_memory_refs",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskMemoryRefsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "label": {
+          "description": "Filter by label value.",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "owner": {
+          "description": "Filter by owner email.",
+          "nullable": true,
+          "type": "string"
+        },
+        "priority_max": {
+          "description": "Maximum priority to include (0=highest, higher numbers=lower priority).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "TaskReadyParams",
+      "type": "object"
+    },
+    "name": "task_ready",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskReadyResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Task UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path. Optional - task IDs are globally unique.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "TaskShowParams",
+      "type": "object"
+    },
+    "name": "task_show",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskShowResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute path to the project git repository.",
+          "type": "string"
+        },
+        "team_wide": {
+          "description": "If true, delete the remote `djinn/tasks` branch (team-wide disable).\nIf false or absent, only clear the local enabled flag (machine opt-out).",
+          "nullable": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "TaskSyncDisableParams",
+      "type": "object"
+    },
+    "name": "task_sync_disable",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "team_wide": {
+          "nullable": true,
+          "type": "boolean"
+        }
+      },
+      "title": "TaskSyncDisableResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute path to the project git repository.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "TaskSyncEnableParams",
+      "type": "object"
+    },
+    "name": "task_sync_enable",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "note": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "tasks_exported": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "TaskSyncEnableResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Project path (accepted for API compatibility, currently unused).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "TaskSyncExportParams",
+      "type": "object"
+    },
+    "name": "task_sync_export",
+    "output_schema": {
+      "$defs": {
+        "SyncChannelResult": {
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "count": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            },
+            "error": {
+              "nullable": true,
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "channel",
+            "ok"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channels": {
+          "items": {
+            "$ref": "#/$defs/SyncChannelResult"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "nullable": true,
+          "type": "boolean"
+        }
+      },
+      "title": "TaskSyncRunResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Project path (accepted for API compatibility, currently unused).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "TaskSyncImportParams",
+      "type": "object"
+    },
+    "name": "task_sync_import",
+    "output_schema": {
+      "$defs": {
+        "SyncChannelResult": {
+          "properties": {
+            "channel": {
+              "type": "string"
+            },
+            "count": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            },
+            "error": {
+              "nullable": true,
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "channel",
+            "ok"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channels": {
+          "items": {
+            "$ref": "#/$defs/SyncChannelResult"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "nullable": true,
+          "type": "boolean"
+        }
+      },
+      "title": "TaskSyncRunResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Project path (accepted for API compatibility, currently unused).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "TaskSyncStatusParams",
+      "type": "object"
+    },
+    "name": "task_sync_status",
+    "output_schema": {
+      "$defs": {
+        "SyncChannelStatus": {
+          "properties": {
+            "backoff_secs": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "failure_count": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_error": {
+              "nullable": true,
+              "type": "string"
+            },
+            "last_synced_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "needs_attention": {
+              "description": "Whether the channel needs attention (3+ failures) (SYNC-16).",
+              "type": "boolean"
+            },
+            "project_paths": {
+              "description": "Sync-enabled project paths (SYNC-07).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "name",
+            "branch",
+            "enabled",
+            "project_paths",
+            "failure_count",
+            "backoff_secs",
+            "needs_attention"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channels": {
+          "items": {
+            "$ref": "#/$defs/SyncChannelStatus"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "TaskSyncStatusResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Absolute project path (required).",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task UUID or short_id.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "TaskTimelineParams",
+      "type": "object"
+    },
+    "name": "task_timeline",
+    "output_schema": {
+      "$defs": {
+        "AnyJson": {},
+        "SessionToolSession": {
+          "properties": {
+            "agent_type": {
+              "type": "string"
+            },
+            "ended_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "tokens_in": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "tokens_out": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "worktree_path": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "project_id",
+            "model_id",
+            "agent_type",
+            "started_at",
+            "status",
+            "tokens_in",
+            "tokens_out"
+          ],
+          "type": "object"
+        },
+        "TimelineActivity": {
+          "properties": {
+            "event_type": {
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/AnyJson"
+            },
+            "timestamp": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "event_type",
+            "payload",
+            "timestamp"
+          ],
+          "type": "object"
+        },
+        "TimelineMessage": {
+          "properties": {
+            "agent_type": {
+              "type": "string"
+            },
+            "content": {
+              "items": {
+                "$ref": "#/$defs/AnyJson"
+              },
+              "type": "array"
+            },
+            "model_id": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "timestamp": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "role",
+            "content",
+            "agent_type",
+            "model_id",
+            "timestamp"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "activity": {
+          "items": {
+            "$ref": "#/$defs/TimelineActivity"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/TimelineMessage"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionToolSession"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "TaskTimelineResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action": {
+          "description": "Transition action: start, submit_verification,\nverification_pass, verification_fail, release_verification,\nsubmit_task_review, task_review_start,\ntask_review_reject, task_review_reject_conflict, task_review_approve,\npr_created, pr_undraft, pr_ci_failed, pr_conflict,\npr_merge, pr_changes_requested,\nreopen, close, release, release_task_review, force_close,\nuser_override.",
+          "type": "string"
+        },
+        "actor_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "actor_role": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Required for: verification_fail, release_verification,\ntask_review_reject, task_review_reject_conflict,\npr_changes_requested,\nreopen, release, release_task_review, force_close.",
+          "nullable": true,
+          "type": "string"
+        },
+        "target_status": {
+          "description": "Required when action = \"user_override\". Allowed values: open, in_progress,\nverifying, needs_task_review, in_task_review, approved, pr_draft, pr_review, closed.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id",
+        "action"
+      ],
+      "title": "TaskTransitionParams",
+      "type": "object"
+    },
+    "name": "task_transition",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Full replacement for acceptance_criteria.",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "agent_type": {
+          "description": "Specialist role name to assign (set None/\"\" to clear).",
+          "nullable": true,
+          "type": "string"
+        },
+        "blocked_by_add": {
+          "description": "Task IDs (UUID or short_id) to add as blockers of this task.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "blocked_by_remove": {
+          "description": "Task IDs (UUID or short_id) to remove as blockers of this task.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "description": {
+          "nullable": true,
+          "type": "string"
+        },
+        "design": {
+          "nullable": true,
+          "type": "string"
+        },
+        "epic_id": {
+          "description": "New parent epic UUID or short_id.",
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short_id.",
+          "type": "string"
+        },
+        "labels_add": {
+          "description": "Labels to add.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "labels_remove": {
+          "description": "Labels to remove.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "memory_refs_add": {
+          "description": "Memory note permalinks to add to this task.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "memory_refs_remove": {
+          "description": "Memory note permalinks to remove from this task.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "owner": {
+          "nullable": true,
+          "type": "string"
+        },
+        "priority": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        },
+        "title": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "TaskUpdateParams",
+      "type": "object"
+    },
+    "name": "task_update",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrTaskResponse",
+      "type": "object"
+    }
+  }
+]

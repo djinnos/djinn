@@ -524,12 +524,20 @@ export function KanbanBoard({
                     const isCollapsed = !!collapsedEpics[collapseKey];
 
                     return (
-                      <Card key={epicKey} size="sm" className="gap-0 cursor-pointer bg-zinc-900 py-3 ring-white/[0.04]" onClick={() => toggleEpic(column.key, epicKey)}>
+                      <Card key={epicKey} size="sm" className={cn(
+                        "gap-0 cursor-pointer py-3 ring-white/[0.04]",
+                        epic?.status === "drafting" ? "border-amber-500/15 bg-zinc-900/60" : "bg-zinc-900"
+                      )} onClick={() => toggleEpic(column.key, epicKey)}>
                         <CardContent>
                           <div className="flex w-full items-center justify-between gap-2 px-1 py-1.5 text-sm font-medium">
                             <span className="flex items-center gap-2 truncate">
                               <span className="shrink-0 text-xs leading-none">{getEpicEmoji(epic)}</span>
                               <span className="truncate">{getEpicTitle(epic, firstTaskEpicId)}</span>
+                              {epic?.status === "drafting" && (
+                                <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
+                                  Drafting
+                                </span>
+                              )}
                             </span>
                             <HugeiconsIcon
                               icon={isCollapsed ? ArrowRight01Icon : ArrowDown01Icon}

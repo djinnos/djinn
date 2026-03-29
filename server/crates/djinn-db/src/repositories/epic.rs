@@ -173,7 +173,8 @@ impl EpicRepository {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE epics SET title = ?2, description = ?3, emoji = ?4,
-                    color = ?5, owner = ?6, memory_refs = ?7,
+                    color = ?5, status = ?6, owner = ?7, memory_refs = ?8,
+                    closed_at = CASE WHEN ?6 = 'closed' THEN COALESCE(closed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) ELSE NULL END,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
         )
@@ -182,6 +183,7 @@ impl EpicRepository {
         .bind(input.description)
         .bind(input.emoji)
         .bind(input.color)
+        .bind(input.status.unwrap_or("drafting"))
         .bind(input.owner)
         .bind(input.memory_refs.unwrap_or("[]"))
         .execute(self.db.pool())
