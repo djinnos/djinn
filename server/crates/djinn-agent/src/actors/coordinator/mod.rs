@@ -1794,6 +1794,187 @@ mod tests {
         assert!(metric.completed_at.is_some());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_scoped_consolidation_excludes_cross_session_notes_and_preserves_metrics() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let consolidation_repo = NoteConsolidationRepository::new(db.clone());
+
+        let session_note_a = note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Cluster A",
+                "Repeated retry storm during incident recovery.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let session_note_b = note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Cluster B",
+                "Repeated retry storm during incident recovery.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let session_note_c = note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Cluster C",
+                "Repeated retry storm during incident recovery.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let cross_session_note = note_repo
+            .create_db_note(
+                &project.id,
+                "Retry Cluster D",
+                "Repeated retry storm during incident recovery.",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        for (note_id, overview) in [
+            (
+                &session_note_a.id,
+                "Prefer backoff and idempotent recovery steps.",
+            ),
+            (
+                &session_note_b.id,
+                "Throttle retries before cache warmup completes.",
+            ),
+            (
+                &session_note_c.id,
+                "Use idempotent jobs plus exponential backoff.",
+            ),
+            (
+                &cross_session_note.id,
+                "A later session found the same retry pattern independently.",
+            ),
+        ] {
+            sqlx::query("UPDATE notes SET abstract = ?1, overview = ?2 WHERE id = ?3")
+                .bind("Retry storms amplify duplicate work during recovery.")
+                .bind(overview)
+                .bind(note_id)
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let source_session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: None,
+                model: "test-model",
+                agent_type: "worker",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let later_session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: None,
+                model: "test-model",
+                agent_type: "worker",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        for note_id in [&session_note_a.id, &session_note_b.id, &session_note_c.id] {
+            consolidation_repo
+                .add_provenance(note_id, &source_session.id)
+                .await
+                .unwrap();
+        }
+        consolidation_repo
+            .add_provenance(&cross_session_note.id, &later_session.id)
+            .await
+            .unwrap();
+
+        let runner = Arc::new(DbConsolidationRunner::new(db.clone()));
+        runner
+            .run_for_group_in_session(
+                djinn_db::DbNoteGroup {
+                    project_id: project.id.clone(),
+                    note_type: "pattern".to_string(),
+                    note_count: 3,
+                },
+                source_session.id.clone(),
+            )
+            .await
+            .unwrap();
+
+        let notes = consolidation_repo
+            .list_db_notes_in_group(&project.id, "pattern")
+            .await
+            .unwrap();
+        assert_eq!(
+            notes.len(),
+            5,
+            "session-scoped run should create one canonical note"
+        );
+        let canonical = notes
+            .iter()
+            .find(|note| {
+                ![
+                    &session_note_a.id,
+                    &session_note_b.id,
+                    &session_note_c.id,
+                    &cross_session_note.id,
+                ]
+                .contains(&&note.id)
+            })
+            .unwrap();
+        assert!(canonical.content.contains(&session_note_a.permalink));
+        assert!(canonical.content.contains(&session_note_b.permalink));
+        assert!(canonical.content.contains(&session_note_c.permalink));
+        assert!(
+            !canonical.content.contains(&cross_session_note.permalink),
+            "canonical content must exclude unrelated cross-session note"
+        );
+
+        let provenance = consolidation_repo
+            .list_provenance(&canonical.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            provenance
+                .iter()
+                .map(|entry| entry.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![source_session.id.as_str()],
+            "session-scoped canonical note should inherit only same-session provenance"
+        );
+
+        let metrics = consolidation_repo
+            .list_run_metrics(&project.id, Some("pattern"), 20)
+            .await
+            .unwrap();
+        assert_eq!(metrics.len(), 1);
+        let metric = &metrics[0];
+        assert_eq!(metric.status, "completed");
+        assert_eq!(metric.scanned_note_count, 3);
+        assert_eq!(metric.candidate_cluster_count, 1);
+        assert_eq!(metric.consolidated_cluster_count, 1);
+        assert_eq!(metric.consolidated_note_count, 1);
+        assert_eq!(metric.source_note_count, 3);
+        assert!(metric.completed_at.is_some());
+    }
+
     // ── Status ───────────────────────────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

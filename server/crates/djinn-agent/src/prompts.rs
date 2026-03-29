@@ -636,6 +636,10 @@ mod tests {
             prompt.contains("memory_orphans()"),
             "architect prompt should reference memory_orphans tool"
         );
+        assert!(
+            prompt.contains("create a planning task"),
+            "architect prompt should direct follow-up through planning tasks rather than direct note edits"
+        );
     }
 
     #[test]
@@ -655,6 +659,14 @@ mod tests {
         assert!(
             prompt.contains("canonical"),
             "architect prompt should mention canonicalization of conflicting notes"
+        );
+        assert!(
+            prompt.contains("Do NOT edit memory notes directly"),
+            "architect prompt should keep contradiction cleanup aligned with available tools"
+        );
+        assert!(
+            prompt.contains("planning task to either deprecate the outdated note or merge the two into a canonical version"),
+            "architect prompt should prescribe planner-routed contradiction resolution"
         );
     }
 }
