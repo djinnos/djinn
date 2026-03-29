@@ -7,6 +7,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::future::Future;
+#[cfg(test)]
+use std::pin::Pin;
+
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{Peer, RoleClient};
@@ -28,7 +33,17 @@ pub(crate) struct McpToolRegistry {
     peers: HashMap<String, Arc<Peer<RoleClient>>>,
     /// All discovered tool schemas ready to append to the session tool list.
     tool_schemas: Vec<serde_json::Value>,
+    #[cfg(test)]
+    test_dispatch: Option<Arc<TestDispatchFn>>,
 }
+
+#[cfg(test)]
+type TestDispatchFuture = Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>;
+
+#[cfg(test)]
+type TestDispatchFn = dyn Fn(&str, Option<serde_json::Map<String, serde_json::Value>>) -> TestDispatchFuture
+    + Send
+    + Sync;
 
 impl McpToolRegistry {
     /// Returns true if this registry has a tool with the given name.
@@ -49,6 +64,11 @@ impl McpToolRegistry {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<serde_json::Value, String> {
+        #[cfg(test)]
+        if let Some(dispatch) = &self.test_dispatch {
+            return dispatch(tool_name, arguments).await;
+        }
+
         let server_name = self
             .tool_to_server
             .get(tool_name)
@@ -232,6 +252,8 @@ pub(crate) async fn connect_and_discover(
         tool_to_server,
         peers,
         tool_schemas,
+        #[cfg(test)]
+        test_dispatch: None,
     })
 }
 
@@ -303,6 +325,7 @@ mod tests {
             tool_to_server: HashMap::new(),
             peers: HashMap::new(),
             tool_schemas: Vec::new(),
+            test_dispatch: None,
         };
         assert!(!registry.has_tool("anything"));
         assert!(registry.tool_schemas().is_empty());
@@ -317,6 +340,7 @@ mod tests {
             tool_to_server,
             peers: HashMap::new(),
             tool_schemas: vec![serde_json::json!({"name": "web_search"})],
+            test_dispatch: None,
         };
         assert!(registry.has_tool("web_search"));
         assert!(!registry.has_tool("unknown_tool"));
@@ -329,10 +353,39 @@ mod tests {
             tool_to_server: HashMap::new(),
             peers: HashMap::new(),
             tool_schemas: Vec::new(),
+            test_dispatch: None,
         };
         let result = registry.call_tool("nonexistent", None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found in registry"));
+    }
+
+    impl McpToolRegistry {
+        pub(crate) fn with_dispatch<I, F>(
+            mappings: I,
+            tool_schemas: Vec<serde_json::Value>,
+            dispatch: F,
+        ) -> Self
+        where
+            I: IntoIterator<Item = (String, String)>,
+            F: Fn(
+                    &str,
+                    Option<serde_json::Map<String, serde_json::Value>>,
+                ) -> Result<serde_json::Value, String>
+                + Send
+                + Sync
+                + 'static,
+        {
+            Self {
+                tool_to_server: mappings.into_iter().collect(),
+                peers: HashMap::new(),
+                tool_schemas,
+                test_dispatch: Some(Arc::new(move |tool_name, arguments| {
+                    let result = dispatch(tool_name, arguments);
+                    Box::pin(async move { result })
+                })),
+            }
+        }
     }
 
     #[tokio::test]
