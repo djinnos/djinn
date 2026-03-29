@@ -10,6 +10,7 @@ use super::sandbox;
 use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use crate::lsp::{SymbolQuery, parse_symbol_kind_filter};
+use crate::mcp_client::McpToolRegistry;
 use djinn_core::models::Task;
 use djinn_db::AgentRepository;
 use djinn_db::EpicRepository;
@@ -116,6 +117,7 @@ async fn dispatch_tool_call<T>(
     allowed_schemas: Option<&[serde_json::Value]>,
     session_task_id: Option<&str>,
     session_role: Option<&str>,
+    mcp_registry: Option<&McpToolRegistry>,
 ) -> Result<serde_json::Value, String>
 where
     T: Serialize,
@@ -208,7 +210,15 @@ where
         "apply_patch" => call_apply_patch(state, &call.arguments, worktree_path).await,
         "lsp" => call_lsp(state, &call.arguments, worktree_path).await,
         "code_graph" => call_code_graph(state, &call.arguments, &worktree_project_path).await,
-        other => Err(format!("unknown djinn frontend tool: {other}")),
+        other => {
+            if let Some(registry) = mcp_registry
+                && registry.has_tool(other)
+            {
+                registry.call_tool(other, call.arguments.clone()).await
+            } else {
+                Err(format!("unknown djinn frontend tool: {other}"))
+            }
+        }
     }
 }
 
@@ -3228,6 +3238,7 @@ pub(crate) async fn call_tool(
     worktree_path: &Path,
     session_task_id: Option<&str>,
     session_role: Option<&str>,
+    mcp_registry: Option<&McpToolRegistry>,
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
     dispatch_tool_call(
@@ -3237,6 +3248,7 @@ pub(crate) async fn call_tool(
         None,
         session_task_id,
         session_role,
+        mcp_registry,
     )
     .await
 }
@@ -3967,6 +3979,7 @@ mod tests {
             worktree,
             None,
             None,
+            None,
         )
         .await
     }
@@ -4405,6 +4418,7 @@ mod tests {
             Path::new(&project.path),
             None,
             Some("planner"),
+            None,
         )
         .await
         .expect("task_create dispatch should succeed");
@@ -4478,6 +4492,7 @@ mod tests {
             Path::new(&project.path),
             Some(&task.id),
             Some("planner"),
+            None,
         )
         .await
         .expect("task_update dispatch should succeed");
@@ -4561,6 +4576,7 @@ mod tests {
             Path::new(&project.path),
             Some(&task.id),
             Some("architect"),
+            None,
         )
         .await
         .expect("task_comment_add dispatch should succeed");
@@ -4604,6 +4620,7 @@ mod tests {
             Path::new(&project.path),
             Some(&task.id),
             Some("lead"),
+            None,
         )
         .await
         .expect("task_transition dispatch should succeed");
@@ -4651,6 +4668,7 @@ mod tests {
             Path::new(&project.path),
             None,
             Some("architect"),
+            None,
         )
         .await
         .expect("agent_create dispatch should succeed");
@@ -4695,6 +4713,7 @@ mod tests {
             Path::new(&project.path),
             None,
             Some("architect"),
+            None,
         )
         .await
         .expect("agent_metrics dispatch should succeed");
@@ -4780,6 +4799,7 @@ mod tests {
             Path::new(&project.path),
             Some(&task.id),
             Some("architect"),
+            None,
         )
         .await
         .expect("memory_search dispatch should succeed");
@@ -4811,6 +4831,7 @@ mod tests {
             Path::new(&project.path),
             Some(&task.id),
             Some("architect"),
+            None,
         )
         .await
         .expect("memory_read dispatch should succeed");
@@ -4843,6 +4864,7 @@ mod tests {
             Path::new(&project.path),
             Some(&task.id),
             Some("architect"),
+            None,
         )
         .await
         .expect("memory_list dispatch should succeed");
@@ -4876,6 +4898,7 @@ mod tests {
             Path::new(&project.path),
             Some(&task.id),
             Some("architect"),
+            None,
         )
         .await
         .expect("memory_build_context dispatch should succeed");
@@ -4892,6 +4915,96 @@ mod tests {
                 .map(|items| items.len()),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn call_tool_dispatches_registered_mcp_tool_success() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let state = agent_context_from_db(db, CancellationToken::new());
+        let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
+            [("web_search".to_string(), "search-server".to_string())],
+            vec![serde_json::json!({"name": "web_search"})],
+            move |tool_name, arguments| {
+                assert_eq!(tool_name, "web_search");
+                assert_eq!(
+                    arguments.as_ref().and_then(|args| args.get("query")),
+                    Some(&serde_json::json!("djinn"))
+                );
+                Ok(serde_json::json!({
+                    "items": [{"title": "Djinn", "url": "https://example.com/djinn"}]
+                }))
+            },
+        );
+
+        let response = call_tool(
+            &state,
+            "web_search",
+            Some(
+                serde_json::json!({
+                    "query": "djinn"
+                })
+                .as_object()
+                .expect("mcp args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            None,
+            Some("worker"),
+            Some(&registry),
+        )
+        .await
+        .expect("registered MCP tool should dispatch");
+
+        assert_eq!(
+            response
+                .get("items")
+                .and_then(|value| value.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("title"))
+                .and_then(|value| value.as_str()),
+            Some("Djinn")
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_dispatches_registered_mcp_tool_error() {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let state = agent_context_from_db(db, CancellationToken::new());
+        let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
+            [("web_fetch".to_string(), "fetch-server".to_string())],
+            vec![serde_json::json!({"name": "web_fetch"})],
+            move |tool_name, arguments| {
+                assert_eq!(tool_name, "web_fetch");
+                assert_eq!(
+                    arguments.as_ref().and_then(|args| args.get("url")),
+                    Some(&serde_json::json!("https://example.com/fail"))
+                );
+                Err("upstream MCP error".to_string())
+            },
+        );
+
+        let error = call_tool(
+            &state,
+            "web_fetch",
+            Some(
+                serde_json::json!({
+                    "url": "https://example.com/fail"
+                })
+                .as_object()
+                .expect("mcp args object")
+                .clone(),
+            ),
+            Path::new(&project.path),
+            None,
+            Some("worker"),
+            Some(&registry),
+        )
+        .await
+        .expect_err("MCP errors should flow through the normal tool error path");
+
+        assert!(error.contains("upstream MCP error"));
     }
 
     #[test]
@@ -5134,6 +5247,7 @@ mod tests {
                 .clone()
                 .into(),
             worktree,
+            None,
             None,
             None,
         )
