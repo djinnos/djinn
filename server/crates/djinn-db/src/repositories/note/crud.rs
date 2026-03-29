@@ -50,6 +50,28 @@ impl<'a> CreateNoteParams<'a> {
 }
 
 impl NoteRepository {
+    pub async fn find_by_content_hash(
+        &self,
+        project_id: &str,
+        content_hash: &str,
+    ) -> Result<Option<Note>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Note>(
+            "SELECT id, project_id, permalink, title, file_path,
+                        storage, note_type, folder, tags, content,
+                        created_at, updated_at, last_accessed,
+                        access_count, confidence, abstract as abstract_, overview
+                 FROM notes
+                 WHERE project_id = ?1 AND content_hash = ?2
+                 ORDER BY created_at ASC, id ASC
+                 LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(content_hash)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     pub async fn upsert_db_note_by_permalink(
         &self,
         project_id: &str,
@@ -97,6 +119,7 @@ impl NoteRepository {
         let permalink = permalink.to_owned();
         let title = title.to_owned();
         let content = content.to_owned();
+        let content_hash = note_content_hash(&content);
         let note_type = note_type.to_owned();
         let folder = folder_for_type(&note_type).to_owned();
         let tags = tags.to_owned();
@@ -106,8 +129,8 @@ impl NoteRepository {
         sqlx::query(
             "INSERT INTO notes
                 (id, project_id, permalink, title, file_path,
-                 storage, note_type, folder, tags, content)
-             VALUES (?1, ?2, ?3, ?4, '', 'db', ?5, ?6, ?7, ?8)",
+                 storage, note_type, folder, tags, content, content_hash)
+             VALUES (?1, ?2, ?3, ?4, '', 'db', ?5, ?6, ?7, ?8, ?9)",
         )
         .bind(&id)
         .bind(&project_id)
@@ -117,6 +140,7 @@ impl NoteRepository {
         .bind(&folder)
         .bind(&tags)
         .bind(&content)
+        .bind(&content_hash)
         .execute(&mut *tx)
         .await?;
 
@@ -204,6 +228,7 @@ impl NoteRepository {
         let project_id = project_id.to_owned();
         let title = title.to_owned();
         let content = content.to_owned();
+        let content_hash = note_content_hash(&content);
         let note_type = note_type.to_owned();
         let folder = folder_for_type(&note_type).to_owned();
         let tags = tags.to_owned();
@@ -222,8 +247,8 @@ impl NoteRepository {
             sqlx::query(
                 "INSERT INTO notes
                     (id, project_id, permalink, title, file_path,
-                     storage, note_type, folder, tags, content)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     storage, note_type, folder, tags, content, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .bind(&id)
             .bind(&project_id)
@@ -235,6 +260,7 @@ impl NoteRepository {
             .bind(&folder)
             .bind(&tags)
             .bind(&content)
+            .bind(&content_hash)
             .execute(&mut *tx)
             .await?;
 
@@ -360,6 +386,7 @@ impl NoteRepository {
         let id = id.to_owned();
         let title = title.to_owned();
         let content = content.to_owned();
+        let content_hash = note_content_hash(&content);
         let tags = tags.to_owned();
         let permalink = current.permalink.clone();
 
@@ -370,6 +397,7 @@ impl NoteRepository {
                 title   = ?2,
                 content = ?3,
                 tags    = ?4,
+                content_hash = ?5,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
         )
@@ -377,6 +405,7 @@ impl NoteRepository {
         .bind(&title)
         .bind(&content)
         .bind(&tags)
+        .bind(&content_hash)
         .execute(&mut *tx)
         .await?;
 

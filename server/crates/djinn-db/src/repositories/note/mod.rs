@@ -11,6 +11,7 @@ use djinn_core::models::{
 
 use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
+use crate::note_hash::note_content_hash;
 
 mod association;
 pub(crate) mod consolidation;
@@ -2851,11 +2852,30 @@ mod tests {
             .await
             .unwrap();
 
+        let found_before = repo
+            .find_by_content_hash(
+                &project.id,
+                &crate::note_hash::note_content_hash("Alpha\nBeta"),
+            )
+            .await
+            .unwrap();
+        assert!(found_before.is_none());
+
         let rebuilt = repo
             .rebuild_missing_content_hashes(&project.id)
             .await
             .unwrap();
         assert_eq!(rebuilt, 1);
+
+        let found_after = repo
+            .find_by_content_hash(
+                &project.id,
+                &crate::note_hash::note_content_hash("Alpha\nBeta"),
+            )
+            .await
+            .unwrap()
+            .expect("hash lookup should work after backfill");
+        assert_eq!(found_after.id, note.id);
 
         let stored_hash: Option<String> =
             sqlx::query_scalar("SELECT content_hash FROM notes WHERE id = ?1")

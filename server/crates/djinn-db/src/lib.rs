@@ -7,6 +7,7 @@ pub mod repositories;
 
 pub use database::{Database, default_db_path};
 pub use error::{DbError as Error, DbResult as Result};
+pub use note_hash::note_content_hash;
 pub use repositories::{
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,

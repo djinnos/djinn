@@ -4,7 +4,7 @@ use crate::tools::memory_tools::contradiction::ContradictionAnalysisInput;
 use crate::tools::memory_tools::summaries::NoteSummaryService;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::{Note, NoteDedupCandidate};
-use djinn_db::{folder_for_type, is_singleton};
+use djinn_db::{folder_for_type, is_singleton, note_content_hash};
 use djinn_provider::{CompletionRequest, CompletionResponse, complete, provider::LlmProvider};
 
 const DEDUP_CANDIDATE_LIMIT: usize = 5;
@@ -257,6 +257,31 @@ async fn maybe_apply_write_dedup(
         return None;
     }
 
+    let normalized_hash = note_content_hash(pending.content);
+    if let Ok(Some(existing)) = repo
+        .find_by_content_hash(pending.project_id, &normalized_hash)
+        .await
+    {
+        return Some(MemoryNoteResponse::from_note_with_deduplicated(
+            &existing, true,
+        ));
+    }
+
+    let rebuilt_hashes = repo
+        .rebuild_missing_content_hashes(pending.project_id)
+        .await
+        .ok()
+        .unwrap_or(0);
+    if rebuilt_hashes > 0
+        && let Ok(Some(existing)) = repo
+            .find_by_content_hash(pending.project_id, &normalized_hash)
+            .await
+    {
+        return Some(MemoryNoteResponse::from_note_with_deduplicated(
+            &existing, true,
+        ));
+    }
+
     let candidates =
         dedup_candidates_for_write(repo, pending.project_id, pending.note_type, pending.content)
             .await
@@ -289,7 +314,9 @@ async fn maybe_apply_write_dedup(
     };
 
     match decision.disposition {
-        DedupDisposition::Skip => Some(MemoryNoteResponse::from_note(&existing)),
+        DedupDisposition::Skip => Some(MemoryNoteResponse::from_note_with_deduplicated(
+            &existing, true,
+        )),
         DedupDisposition::Merge => {
             let merged_content = if existing.content.trim().is_empty() {
                 pending.content.to_string()
@@ -307,7 +334,7 @@ async fn maybe_apply_write_dedup(
                 )
                 .await
             {
-                Ok(note) => Some(MemoryNoteResponse::from_note(&note)),
+                Ok(note) => Some(MemoryNoteResponse::from_note_with_deduplicated(&note, true)),
                 Err(_) => None,
             }
         }

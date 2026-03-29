@@ -10,6 +10,7 @@ mod tests {
     use crate::{
         server::DjinnMcpServer, state::stubs::test_mcp_state, tools::memory_tools::WriteParams,
     };
+    use djinn_db::note_content_hash;
 
     async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
         ProjectRepository::new(db.clone(), EventBus::noop())
@@ -234,6 +235,79 @@ mod tests {
                 note_type
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeat_write_reuses_existing_note_after_backfilling_legacy_null_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        let Json(first) = server
+            .memory_write(Parameters(WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "Canonical Pattern".to_string(),
+                content: "Alpha\r\nBeta\n".to_string(),
+                note_type: "pattern".to_string(),
+                tags: None,
+            }))
+            .await;
+        assert!(
+            first.error.is_none(),
+            "first write failed: {:?}",
+            first.error
+        );
+        assert!(!first.deduplicated);
+        let first_id = first.id.clone().unwrap();
+
+        sqlx::query("UPDATE notes SET content_hash = NULL WHERE id = ?1")
+            .bind(&first_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let Json(second) = server
+            .memory_write(Parameters(WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "Duplicate Pattern".to_string(),
+                content: "  Alpha\nBeta  ".to_string(),
+                note_type: "pattern".to_string(),
+                tags: None,
+            }))
+            .await;
+
+        assert!(
+            second.error.is_none(),
+            "second write failed: {:?}",
+            second.error
+        );
+        assert_eq!(second.id.as_deref(), Some(first_id.as_str()));
+        assert!(second.deduplicated);
+
+        let note_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
+                .bind(&project.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(note_count, 1);
+
+        let stored_hash: Option<String> =
+            sqlx::query_scalar("SELECT content_hash FROM notes WHERE id = ?1")
+                .bind(&first_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            stored_hash.as_deref(),
+            Some(note_content_hash("Alpha\r\nBeta\n").as_str())
+        );
+
+        let fetched = repo.get(&first_id).await.unwrap().unwrap();
+        assert_eq!(fetched.title, "Canonical Pattern");
     }
 
     /// Integration test: two pattern notes with identical content → the second write
