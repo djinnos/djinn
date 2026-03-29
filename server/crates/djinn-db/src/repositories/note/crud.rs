@@ -1,4 +1,5 @@
 use super::*;
+use crate::note_hash::note_content_hash;
 
 struct CreateNoteParams<'a> {
     project_id: &'a str,
@@ -103,11 +104,13 @@ impl NoteRepository {
 
         let mut tx = self.db.pool().begin().await?;
 
+        let content_hash = note_content_hash(&content);
+
         sqlx::query(
             "INSERT INTO notes
                 (id, project_id, permalink, title, file_path,
-                 storage, note_type, folder, tags, content)
-             VALUES (?1, ?2, ?3, ?4, '', 'db', ?5, ?6, ?7, ?8)",
+                 storage, note_type, folder, tags, content, content_hash)
+             VALUES (?1, ?2, ?3, ?4, '', 'db', ?5, ?6, ?7, ?8, ?9)",
         )
         .bind(&id)
         .bind(&project_id)
@@ -117,6 +120,7 @@ impl NoteRepository {
         .bind(&folder)
         .bind(&tags)
         .bind(&content)
+        .bind(&content_hash)
         .execute(&mut *tx)
         .await?;
 
@@ -216,14 +220,16 @@ impl NoteRepository {
             write_note_file(file_path, &title, &note_type, &tags, &content)?;
         }
 
+        let content_hash = note_content_hash(&content);
+
         let note_result: Result<Note> = async {
             let mut tx = self.db.pool().begin().await?;
 
             sqlx::query(
                 "INSERT INTO notes
                     (id, project_id, permalink, title, file_path,
-                     storage, note_type, folder, tags, content)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     storage, note_type, folder, tags, content, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .bind(&id)
             .bind(&project_id)
@@ -235,6 +241,7 @@ impl NoteRepository {
             .bind(&folder)
             .bind(&tags)
             .bind(&content)
+            .bind(&content_hash)
             .execute(&mut *tx)
             .await?;
 
@@ -284,6 +291,28 @@ impl NoteRepository {
         )
         .bind(project_id)
         .bind(permalink)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    pub async fn find_by_content_hash(
+        &self,
+        project_id: &str,
+        content_hash: &str,
+    ) -> Result<Option<Note>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Note>(
+            "SELECT id, project_id, permalink, title, file_path,
+                        storage, note_type, folder, tags, content,
+                        created_at, updated_at, last_accessed,
+                        access_count, confidence, abstract as abstract_, overview
+                 FROM notes
+                 WHERE project_id = ?1 AND content_hash = ?2
+                 ORDER BY created_at ASC
+                 LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(content_hash)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -365,11 +394,14 @@ impl NoteRepository {
 
         let mut tx = self.db.pool().begin().await?;
 
+        let content_hash = note_content_hash(&content);
+
         sqlx::query(
             "UPDATE notes SET
                 title   = ?2,
                 content = ?3,
                 tags    = ?4,
+                content_hash = ?5,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
         )
@@ -377,6 +409,7 @@ impl NoteRepository {
         .bind(&title)
         .bind(&content)
         .bind(&tags)
+        .bind(&content_hash)
         .execute(&mut *tx)
         .await?;
 

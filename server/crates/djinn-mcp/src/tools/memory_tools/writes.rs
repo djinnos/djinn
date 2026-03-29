@@ -4,6 +4,7 @@ use crate::tools::memory_tools::contradiction::ContradictionAnalysisInput;
 use crate::tools::memory_tools::summaries::NoteSummaryService;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::{Note, NoteDedupCandidate};
+use djinn_db::note_hash::note_content_hash;
 use djinn_db::{folder_for_type, is_singleton};
 use djinn_provider::{CompletionRequest, CompletionResponse, complete, provider::LlmProvider};
 
@@ -156,24 +157,22 @@ impl MemoryWriteDedupDecider for LlmMemoryWriteDedupDecider {
 /// Mergeable types benefit from consolidation.
 /// Non-mergeable types (including singletons like brief, roadmap) get separate notes.
 pub(crate) fn mergeable_note_type(note_type: &str) -> bool {
-    !is_singleton(note_type)
-        && matches!(
-            note_type,
-            "adr"
-                | "pattern"
-                | "case"
-                | "pitfall"
-                | "research"
-                | "requirement"
-                | "reference"
-                | "design"
-                | "session"
-                | "persona"
-                | "journey"
-                | "design_spec"
-                | "competitive"
-                | "tech_spike"
-        )
+    matches!(
+        note_type,
+        "adr"
+            | "pattern"
+            | "case"
+            | "pitfall"
+            | "requirement"
+            | "reference"
+            | "design"
+            | "session"
+            | "persona"
+            | "journey"
+            | "design_spec"
+            | "competitive"
+            | "tech_spike"
+    )
 }
 
 fn render_dedup_prompt(
@@ -234,6 +233,18 @@ async fn dedup_candidates_for_write(
     .map_err(|error| error.to_string())
 }
 
+async fn exact_content_hash_match_for_write(
+    repo: &NoteRepository,
+    project_id: &str,
+    content: &str,
+) -> Option<Note> {
+    let content_hash = note_content_hash(content);
+    repo.find_by_content_hash(project_id, &content_hash)
+        .await
+        .ok()
+        .flatten()
+}
+
 struct PendingWriteDedup<'a> {
     project_path: &'a str,
     project_id: &'a str,
@@ -252,7 +263,13 @@ async fn maybe_apply_write_dedup(
     decider: &dyn MemoryWriteDedupDecider,
     pending: PendingWriteDedup<'_>,
 ) -> Option<MemoryNoteResponse> {
-    // Bypass dedup for non-mergeable note types
+    if let Some(existing) =
+        exact_content_hash_match_for_write(repo, pending.project_id, pending.content).await
+    {
+        return Some(MemoryNoteResponse::deduplicated_from_note(&existing));
+    }
+
+    // Bypass LLM/BM25 dedup for non-mergeable note types after exact-hash reuse.
     if !mergeable_note_type(pending.note_type) {
         return None;
     }
@@ -289,7 +306,7 @@ async fn maybe_apply_write_dedup(
     };
 
     match decision.disposition {
-        DedupDisposition::Skip => Some(MemoryNoteResponse::from_note(&existing)),
+        DedupDisposition::Skip => Some(MemoryNoteResponse::deduplicated_from_note(&existing)),
         DedupDisposition::Merge => {
             let merged_content = if existing.content.trim().is_empty() {
                 pending.content.to_string()
@@ -307,7 +324,7 @@ async fn maybe_apply_write_dedup(
                 )
                 .await
             {
-                Ok(note) => Some(MemoryNoteResponse::from_note(&note)),
+                Ok(note) => Some(MemoryNoteResponse::deduplicated_from_note(&note)),
                 Err(_) => None,
             }
         }

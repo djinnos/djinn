@@ -2672,6 +2672,9 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "deduplicated": {
+          "type": "boolean"
+        },
         "error": {
           "nullable": true,
           "type": "string"
@@ -2720,6 +2723,9 @@ expression: signatures
           "type": "string"
         }
       },
+      "required": [
+        "deduplicated"
+      ],
       "title": "MemoryNoteResponse",
       "type": "object"
     }
@@ -3087,6 +3093,9 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "deduplicated": {
+          "type": "boolean"
+        },
         "error": {
           "nullable": true,
           "type": "string"
@@ -3135,6 +3144,9 @@ expression: signatures
           "type": "string"
         }
       },
+      "required": [
+        "deduplicated"
+      ],
       "title": "MemoryNoteResponse",
       "type": "object"
     }
@@ -3240,6 +3252,9 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "deduplicated": {
+          "type": "boolean"
+        },
         "error": {
           "nullable": true,
           "type": "string"
@@ -3288,6 +3303,9 @@ expression: signatures
           "type": "string"
         }
       },
+      "required": [
+        "deduplicated"
+      ],
       "title": "MemoryNoteResponse",
       "type": "object"
     }
@@ -3625,6 +3643,9 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "deduplicated": {
+          "type": "boolean"
+        },
         "error": {
           "nullable": true,
           "type": "string"
@@ -3673,6 +3694,9 @@ expression: signatures
           "type": "string"
         }
       },
+      "required": [
+        "deduplicated"
+      ],
       "title": "MemoryNoteResponse",
       "type": "object"
     }

@@ -605,20 +605,22 @@ mod memory_tools {
         let app = create_test_app_with_db(db);
         let session_id = initialize_mcp_session(&app).await;
 
-        mcp_call_tool(
+        let adr = mcp_call_tool(
             &app,
             &session_id,
             "memory_write",
             json!({"project": project, "title": "A", "content": "x", "type": "adr"}),
         )
         .await;
-        mcp_call_tool(
+        assert_eq!(adr["deduplicated"], false);
+        let reference = mcp_call_tool(
             &app,
             &session_id,
             "memory_write",
-            json!({"project": project, "title": "B", "content": "x", "type": "reference"}),
+            json!({"project": project, "title": "B", "content": "different content", "type": "reference"}),
         )
         .await;
+        assert_eq!(reference["deduplicated"], false);
 
         let all = mcp_call_tool(
             &app,
@@ -627,7 +629,7 @@ mod memory_tools {
             json!({"project": project}),
         )
         .await;
-        assert!(all["notes"].as_array().unwrap().len() >= 2);
+        assert_eq!(all["notes"].as_array().unwrap().len(), 2);
 
         let folder = mcp_call_tool(
             &app,
