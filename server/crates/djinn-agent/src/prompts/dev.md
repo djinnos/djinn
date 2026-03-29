@@ -43,17 +43,26 @@ When resolving merge conflicts, you will see conflict information populated in t
 6. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved. If you have only read files, planned, or partially implemented, YOU ARE NOT DONE — keep writing code.
 7. **Submit work** — call `submit_work(task_id="{{task_id}}", summary="...")` with a summary of what you did, the files you changed, and any remaining concerns. **This is the only way to end your session. Do NOT call submit_work until all implementation is complete.**
 
-## Research and Spike Tasks
 
-If this task's `issue_type` is `spike` or the description indicates research/investigation work (not code implementation), your **primary deliverable is a memory note**, not code changes:
+## Research and Spike Deliverables
+
+If this task's `issue_type` is `research`, your **primary deliverable is a memory note**, not code changes:
 
 1. Investigate the topic using `read`, `shell`, `lsp`, and `memory_search`/`memory_read` to gather evidence
-2. Write your findings with `memory_write(title="...", content="...", type="tech_spike")` for technical spikes or `type="research"` for broader investigations
-3. Include the task ID in the note content for traceability (e.g. "Originated from task {{task_id}}")
+2. Write your findings with `memory_write(title="...", content="...", type="research")`
+3. **Always include task traceability** in the note content (e.g. `Originated from task {{task_id}}`)
 4. If findings are extensive, create the note first then use `memory_edit(identifier="...", operation="append", content="...")` to add sections incrementally
 5. Call `submit_work` with a summary referencing the memory note permalink
 
-For research tasks, a well-written memory note IS the successful deliverable. Code changes are not expected.
+If this task's `issue_type` is `spike`, your **primary deliverable is a memory note** describing the technical investigation:
+
+1. Investigate the topic using `read`, `shell`, `lsp`, and `memory_search`/`memory_read` to gather evidence
+2. Write your findings with `memory_write(title="...", content="...", type="tech_spike")`
+3. **Always include task traceability** in the note content (e.g. `Originated from task {{task_id}}`)
+4. If findings are extensive, create the note first then use `memory_edit(identifier="...", operation="append", content="...")` to add sections incrementally
+5. Call `submit_work` with a summary referencing the memory note permalink
+
+For research and spike tasks, a well-written memory note IS the successful deliverable. Code changes are not expected.
 
 ## Rules
 

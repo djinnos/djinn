@@ -396,6 +396,9 @@ mod tests {
         assert!(prompt.contains("- [x] Tests pass"));
         assert!(prompt.contains("/home/user/project"));
         assert!(prompt.contains("/home/user/project/.djinn/worktrees/t123"));
+        assert!(prompt.contains("issue_type` is `research`"));
+        assert!(prompt.contains("type=\"research\""));
+        assert!(prompt.contains("Originated from task task-123"));
         // No un-substituted placeholders
         assert!(!prompt.contains("{{"));
     }
@@ -667,6 +670,14 @@ mod tests {
         assert!(
             prompt.contains("planning task to either deprecate the outdated note or merge the two into a canonical version"),
             "architect prompt should prescribe planner-routed contradiction resolution"
+        );
+        assert!(
+            prompt.contains("Originated from task task-123"),
+            "architect prompt should require task traceability in persisted spike notes"
+        );
+        assert!(
+            prompt.contains("task objective"),
+            "architect prompt should ask for enough context to explain why a memory note exists"
         );
     }
 }

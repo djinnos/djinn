@@ -84,7 +84,7 @@ When you complete a spike investigation or research analysis, **write findings t
 
 - Use `memory_write(title="...", content="...", type="tech_spike")` for technical spike results (API feasibility, library evaluations, performance investigations)
 - Use `memory_write(title="...", content="...", type="research")` for broader research findings (competitive analysis, architecture surveys, design explorations)
-- **Always include task traceability**: reference the originating task ID in the note content (e.g. "Originated from task {{task_id}}" or link via `## Relations` section)
+- **Always include task traceability**: reference the originating task ID in the note content (e.g. `Originated from task {{task_id}}`) and include a short summary of the task objective so later planning sessions can understand why the note exists
 - Use `memory_edit` to append additional findings to an existing note if the spike spans multiple observations
 - After writing the note, attach it to the relevant epic or task with `task_update(id, memory_refs_add=["permalink"])` or `epic_update(id, memory_refs_add=["permalink"])`
 
