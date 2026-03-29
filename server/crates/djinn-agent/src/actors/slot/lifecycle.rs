@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -20,6 +21,7 @@ use djinn_db::repositories::session::CreateSessionParams;
 
 use super::reply_loop::{ReplyLoopContext, run_reply_loop};
 use super::*;
+use crate::AgentType;
 use crate::task_merge::interrupt_paused_worker_session;
 
 /// Standalone async function that runs the full per-task lifecycle:
@@ -56,6 +58,8 @@ pub(crate) struct TaskLifecycleParams {
     /// Override for the verification command from the DB role.
     /// When Some, used instead of the project's .djinn/settings.json verification.
     pub role_verification_command: Option<String>,
+    #[cfg(test)]
+    pub mcp_registry_override: Option<crate::mcp_client::McpToolRegistry>,
     /// Test-only: inject a pre-built provider, bypassing credential loading.
     /// When `Some`, `parse_model_id` and `load_provider_credential` are skipped.
     #[cfg(test)]
@@ -77,6 +81,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         mut mcp_servers,
         mut skills,
         mut role_verification_command,
+        #[cfg(test)]
+        mcp_registry_override,
         #[cfg(test)]
         provider_override,
     } = params;
@@ -137,7 +143,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     // ── Specialist override: if the task has an explicit agent_type, load that role ──
     // The actor already loaded the default DB role for system_prompt_extensions / skills.
-    // If the task carries a specialist name, reload role fields from that specialist.
+    // If the task carries a specialist name, reload role fields from that specialist,
+    // including the effective runtime role used for prompt identity and transitions.
+    let mut runtime_role = role.clone();
     if let Some(ref specialist_name) = task.agent_type
         && !specialist_name.is_empty()
     {
@@ -154,6 +162,16 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 base_role = %r.base_role,
                 "Lifecycle: overriding role config from specialist agent_type"
             );
+            if let Ok(agent_type) = AgentType::from_str(&r.base_role) {
+                runtime_role = crate::roles::role_impl_for(agent_type);
+            } else {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    specialist = %r.name,
+                    base_role = %r.base_role,
+                    "Lifecycle: specialist base_role is unknown; keeping injected role"
+                );
+            }
             system_prompt_extensions = r.system_prompt_extensions.clone();
             learned_prompt = r.learned_prompt.clone();
             mcp_servers = djinn_core::models::parse_json_array(&r.mcp_servers);
@@ -172,7 +190,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         task_uuid = %task.id,
         project_id = %task.project_id,
         model_id = %model_id,
-        role = %role.config().name,
+        role = %runtime_role.config().name,
         task_status = %task.status,
         has_conflict_context = conflict_ctx.is_some(),
         has_merge_validation_context = merge_validation_ctx.is_some(),
@@ -180,7 +198,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     );
 
     // ── Transition task to in-progress ────────────────────────────────────────
-    if let Err(e) = transition_start(&task, role.config().start_action, &app_state).await {
+    if let Err(e) = transition_start(&task, runtime_role.config().start_action, &app_state).await {
         tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: transition_start failed");
         return_free!();
     }
@@ -193,7 +211,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &task.project_id,
             &task.id,
             &model_id,
-            role.config().name,
+            runtime_role.config().name,
         ));
     tracing::info!(
         task_id = %task_id,
@@ -232,7 +250,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
                 transition_interrupted(
                     &task_id,
-                    role.config().release_action,
+                    runtime_role.config().release_action,
                     &e.to_string(),
                     &app_state,
                 )
@@ -251,7 +269,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
                 transition_interrupted(
                     &task_id,
-                    role.config().release_action,
+                    runtime_role.config().release_action,
                     &e.to_string(),
                     &app_state,
                 )
@@ -265,7 +283,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     // ── Prepare worktree / paused-session resume context ──────────────────────
     let project_dir = PathBuf::from(&project_path);
 
-    let paused = find_paused_session_record(&task_id, role.config().name, &app_state).await;
+    let paused = find_paused_session_record(&task_id, runtime_role.config().name, &app_state).await;
 
     // `resume_record_id` is set when we can resume a paused worker session
     // (same model, same agent type, worktree intact, conversation file present).
@@ -293,11 +311,11 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                         return_free!();
                     }
                 }
-            } else if paused.agent_type != role.config().name {
+            } else if paused.agent_type != runtime_role.config().name {
                 tracing::info!(
                     task_id = %task_id,
                     paused_agent_type = %paused.agent_type,
-                    needed_agent_type = %role.config().name,
+                    needed_agent_type = %runtime_role.config().name,
                     "Lifecycle: paused session agent type mismatch; starting fresh session"
                 );
                 match prepare_worktree(&project_dir, &task, &app_state).await {
@@ -405,7 +423,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     );
     emit_step(&task.id, "branch_created", serde_json::json!({}));
 
-    let _ = role
+    let _ = runtime_role
         .prepare_worktree(&worktree_path, &task, &app_state)
         .await;
 
@@ -415,7 +433,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         tracing::warn!(task_id = %task_id, diag = %diag, "Lifecycle: worktree preflight failed");
         transition_interrupted(
             &task_id,
-            role.config().release_action,
+            runtime_role.config().release_action,
             "worktree preflight failed",
             &app_state,
         )
@@ -434,13 +452,13 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         let registry = crate::verification::settings::load_mcp_server_registry(&worktree_path);
         let resolved = crate::verification::settings::resolve_mcp_servers(
             &task.short_id,
-            role.config().name,
+            runtime_role.config().name,
             &mcp_servers,
             &registry,
         );
         tracing::info!(
             task_id = %task.short_id,
-            role = %role.config().name,
+            role = %runtime_role.config().name,
             requested_count = mcp_servers.len(),
             resolved_count = resolved.len(),
             "Lifecycle: resolved role MCP servers"
@@ -455,15 +473,35 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     // Connect to resolved MCP servers and discover their tool definitions.
     // Unreachable or misconfigured servers are logged and skipped (non-fatal).
-    let mcp_registry = if !resolved_mcp_servers.is_empty() {
-        crate::mcp_client::connect_and_discover(
-            &task.short_id,
-            role.config().name,
-            &resolved_mcp_servers,
-        )
-        .await
-    } else {
-        None
+    let mcp_registry = {
+        #[cfg(test)]
+        {
+            if let Some(registry) = mcp_registry_override {
+                Some(registry)
+            } else if !resolved_mcp_servers.is_empty() {
+                crate::mcp_client::connect_and_discover(
+                    &task.short_id,
+                    runtime_role.config().name,
+                    &resolved_mcp_servers,
+                )
+                .await
+            } else {
+                None
+            }
+        }
+        #[cfg(not(test))]
+        {
+            if !resolved_mcp_servers.is_empty() {
+                crate::mcp_client::connect_and_discover(
+                    &task.short_id,
+                    runtime_role.config().name,
+                    &resolved_mcp_servers,
+                )
+                .await
+            } else {
+                None
+            }
+        }
     };
 
     // ── Load and resolve skills from worktree .djinn/skills/ ─────────────────
@@ -473,7 +511,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         let loaded = crate::skills::load_skills(&worktree_path, &skills);
         tracing::info!(
             task_id = %task.short_id,
-            role = %role.config().name,
+            role = %runtime_role.config().name,
             requested_count = skills.len(),
             resolved_count = loaded.len(),
             "Lifecycle: resolved role skills"
@@ -557,7 +595,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     let _ = task_repo
                         .transition(
                             &task.id,
-                            (role.config().release_action)(),
+                            (runtime_role.config().release_action)(),
                             "agent-supervisor",
                             "system",
                             Some(&reason),
@@ -602,7 +640,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                         let _ = task_repo
                             .transition(
                                 &task.id,
-                                (role.config().release_action)(),
+                                (runtime_role.config().release_action)(),
                                 "agent-supervisor",
                                 "system",
                                 Some(&reason),
@@ -761,7 +799,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         None
     };
 
-    let base_system_prompt = role.render_prompt(
+    let base_system_prompt = runtime_role.render_prompt(
         &task,
         &TaskContext {
             project_path: project_path.clone(),
@@ -848,7 +886,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     } else {
         let cred = provider_credential
             .expect("provider_credential must be Some when provider_override is None");
-        let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
+        let telemetry_meta = build_telemetry_meta(runtime_role.config().name, &task_id);
         let provider_config = match cred {
             ProviderCredential::OAuthConfig(mut cfg) => {
                 cfg.model_id = model_name.clone();
@@ -884,7 +922,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     };
     #[cfg(not(test))]
     let provider: Box<dyn LlmProvider> = {
-        let telemetry_meta = build_telemetry_meta(role.config().name, &task_id);
+        let telemetry_meta = build_telemetry_meta(runtime_role.config().name, &task_id);
         let cred =
             provider_credential.expect("provider_credential must be Some in non-test builds");
         let provider_config = match cred {
@@ -922,14 +960,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     };
 
     // ── Create or resume session record + build conversation ─────────────────
-    let mut tools = (role.config().tool_schemas)();
+    let mut tools = (runtime_role.config().tool_schemas)();
 
     // Append MCP-provided tool schemas to the session tool list.
     if let Some(ref registry) = mcp_registry {
         let mcp_schemas = registry.tool_schemas();
         tracing::info!(
             task_id = %task.short_id,
-            role = %role.config().name,
+            role = %runtime_role.config().name,
             mcp_tool_count = mcp_schemas.len(),
             "Lifecycle: appending MCP tool schemas to session"
         );
@@ -938,7 +976,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     // Workers include recent feedback in the initial message; other roles use
     // a generic kickoff (they read activity via tools themselves).
-    let fresh_user_message = role.initial_user_message(&task_id, &app_state).await;
+    let fresh_user_message = runtime_role
+        .initial_user_message(&task_id, &app_state)
+        .await;
 
     // Try to resume from a paused session's saved conversation.
     emit_step(
@@ -966,7 +1006,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     resume_id,
                     &task_id,
                     &app_state,
-                    crate::compaction::CompactionContext::PreResume(role.config().name.to_string()),
+                    crate::compaction::CompactionContext::PreResume(
+                        runtime_role.config().name.to_string(),
+                    ),
                     context_window,
                 )
                 .await;
@@ -1009,7 +1051,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                         project_id: &task.project_id,
                         task_id: Some(&task.id),
                         model: &model_id,
-                        agent_type: role.config().name,
+                        agent_type: runtime_role.config().name,
                         worktree_path: worktree_path.to_str(),
                         metadata_json: None,
                     })
@@ -1020,7 +1062,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                         tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
                         transition_interrupted(
                             &task_id,
-                            role.config().release_action,
+                            runtime_role.config().release_action,
                             &e.to_string(),
                             &app_state,
                         )
@@ -1060,7 +1102,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to create session record");
                 transition_interrupted(
                     &task_id,
-                    role.config().release_action,
+                    runtime_role.config().release_action,
                     &e.to_string(),
                     &app_state,
                 )
@@ -1166,7 +1208,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         .await;
         transition_interrupted(
             &task_id,
-            role.config().release_action,
+            runtime_role.config().release_action,
             "session cancelled",
             &app_state,
         )
