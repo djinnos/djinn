@@ -50,27 +50,22 @@ impl AnthropicProvider {
     ///
     /// # Anthropic prompt-cache semantics (ADR-043 §8)
     ///
-    /// Anthropic caches the longest prefix of the `system` array whose
-    /// blocks all carry `cache_control: {"type": "ephemeral"}`.  To
-    /// maximise the cache hit rate we:
+    /// The stable block order that must remain intact across prompt assembly is:
     ///
-    /// 1. Emit each *stable* content block (base prompt, project context,
-    ///    repo map) as a separate `{"type": "text", ...}` entry with
-    ///    `cache_control` attached.
-    /// 2. The *dynamic* tail (client system prompt) is emitted as the
-    ///    final block **without** `cache_control`, so it sits outside the
-    ///    cached prefix and can change freely without cache invalidation.
-    /// 3. Within a single system message, `cache_control` is applied to
-    ///    all blocks *except the last one*.  The last block is either the
-    ///    dynamic tail or, when there is no dynamic content, the final
-    ///    stable block (which still benefits from being part of the
-    ///    prefix -- Anthropic caches up to and including it).
+    ///   1. base system prompt
+    ///   2. tool definitions
+    ///   3. repo map
+    ///   4. dynamic task/request context tail
     ///
-    /// The upstream segmentation in `build_system_message`
-    /// (`server/src/server/chat.rs`) guarantees the block order:
-    ///   base system prompt -> project context -> repo map -> client system
+    /// This formatter only serializes the `system` blocks coming from
+    /// `server/src/server/chat.rs`, but it is part of the same invariant:
+    /// cache annotations are only valid on the stable prefix. Any trailing
+    /// dynamic task content must remain a final block without `cache_control`
+    /// so per-task variation does not poison Anthropic's cached prefix.
     ///
-    /// See also: `compose_system_prompt_segments` in `chat.rs`.
+    /// `chat.rs::build_system_message` creates separate stable blocks and a
+    /// trailing uncached dynamic block; this function preserves those block
+    /// boundaries and emits `cache_control` only for the stable-prefix portion.
     fn system_blocks(conversation: &Conversation) -> Vec<AnthropicSystemBlock> {
         conversation
             .messages

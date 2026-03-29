@@ -71,31 +71,27 @@ fn cached_prompt_segment(text: impl Into<String>) -> PromptSegment {
 ///
 /// # Segment ordering (ADR-043 §8, prompt-cache optimization)
 ///
-/// The segments are emitted in a fixed order chosen to maximise Anthropic
-/// prompt-cache hit rate.  Only *stable* segments (content that is identical
-/// across consecutive turns) carry `cache_control`; the dynamic tail does not.
+/// Anthropic prompt caching depends on keeping a stable prefix split into the
+/// same ordered content blocks every turn. The effective stable-prefix order is:
 ///
 /// ```text
-///   1. Base system prompt   (Stable)  — chat persona instructions
-///   2. Project context      (Stable)  — project name, brief, epic/task counts
-///   3. Repository map       (Stable)  — SCIP-powered structural overview
-///   4. Client system prompt  (Dynamic) — per-request caller-supplied context
+///   1. Base system prompt  — stable block emitted from this file
+///   2. Tool definitions    — stable block emitted later by the provider request body
+///   3. Repository map      — stable block emitted from this file
+///   4. Dynamic task/request context tail — must remain outside cache_control
 /// ```
 ///
-/// *Why this order?*  Anthropic caches the longest matching prefix of the
-/// system message.  By placing content that rarely changes first and content
-/// that varies per request last, we keep the cacheable prefix as long as
-/// possible.  Tool definitions are injected by the provider layer *between*
-/// the system message and the first user message, so they do not affect the
-/// system-block prefix here.
+/// In `chat.rs` we only assemble the system-message-owned pieces of that order:
+/// the base system prompt first, then any stable project/repository context, and
+/// finally any caller-supplied dynamic system/task context. The Anthropic
+/// formatter in `server/crates/djinn-provider/src/provider/format/anthropic.rs`
+/// preserves those block boundaries and keeps `cache_control` limited to the
+/// stable prefix so the dynamic tail can vary without invalidating cached
+/// prompt segments.
 ///
 /// Callers: [`build_system_message`] converts these segments into a single
 /// [`Message`] with the appropriate [`MessageMeta`] for Anthropic cache
 /// breakpoints.
-///
-/// Files changed for ADR-043 prompt-cache work:
-/// - `server/src/server/chat.rs` (this file)
-/// - `server/crates/djinn-provider/src/provider/format/anthropic.rs`
 fn compose_system_prompt_segments(
     base_prompt: &str,
     project_context: Option<&str>,
@@ -155,19 +151,19 @@ fn compose_system_prompt(
 ///
 /// # Content-block layout (ADR-043 §8)
 ///
-/// Each *stable* segment becomes its own [`ContentBlock::Text`] so the
-/// Anthropic formatter can attach `cache_control` to each one independently.
-/// All *dynamic* segments are collapsed into a single trailing text block
-/// **without** `cache_control` -- this ensures the dynamic tail never
-/// invalidates the cached prefix.
+/// The durable stable ordering for Anthropic caching is:
+/// base system prompt -> tool definitions -> repo map -> dynamic task/request
+/// context. This file owns the system-message portions of that sequence and
+/// therefore emits stable text blocks for the base prompt and repo map before
+/// collapsing any dynamic caller/task context into a single trailing block.
 ///
-/// When the model is an Anthropic model and at least one stable segment
-/// exists, the message carries [`MessageMeta`] with an
-/// `anthropic_cache_breakpoint` marker.  The Anthropic provider
-/// (`AnthropicProvider::system_blocks`) reads this marker and emits
-/// `cache_control: {"type": "ephemeral"}` on each stable block except the
-/// last one in the message, which marks the boundary between the cached
-/// prefix and the dynamic tail.
+/// `cache_control` must stay limited to the stable prefix. In practice that
+/// means the Anthropic formatter may annotate the stable blocks that represent
+/// the cacheable prefix, but it must never annotate the trailing dynamic task
+/// context block. Future prompt assembly changes in either
+/// `server/src/server/chat.rs` or
+/// `server/crates/djinn-provider/src/provider/format/anthropic.rs` must preserve
+/// those boundaries rather than merging the dynamic tail into a cached block.
 ///
 /// Non-Anthropic providers ignore the metadata entirely, receiving the
 /// content blocks as plain text.
