@@ -35,7 +35,7 @@ pub fn isolate_process_group(cmd: &mut Command) {
 
             // Nice level 10 — well below default 0, but not starved.
             // Errors are non-fatal: some containers restrict setpriority.
-            let _ = libc::setpriority(libc::PRIO_PROCESS as u32, 0, 10);
+            let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
 
             // I/O priority: best-effort class (2) with lowest priority (7).
             // ioprio_set is not in libc, use raw syscall.

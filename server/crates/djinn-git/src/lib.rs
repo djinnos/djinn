@@ -11,7 +11,7 @@ fn lower_process_priority(cmd: &mut tokio::process::Command) {
     unsafe {
         cmd.pre_exec(|| {
             // Nice level 10 — below default 0, yields to user processes under contention.
-            let _ = libc::setpriority(libc::PRIO_PROCESS as u32, 0, 10);
+            let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
 
             // I/O priority: best-effort class (2) with lowest priority (7).
             #[cfg(target_os = "linux")]
