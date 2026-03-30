@@ -54,6 +54,12 @@ struct PromptSegment {
     stability: PromptSegmentStability,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemPromptLayout {
+    stable_prefix: Vec<PromptSegment>,
+    dynamic_tail: Option<String>,
+}
+
 fn prompt_segment(text: impl Into<String>) -> PromptSegment {
     PromptSegment {
         text: text.into(),
@@ -104,17 +110,38 @@ fn compose_system_prompt_segments(
     repo_map_context: Option<&str>,
     client_system: Option<&str>,
 ) -> Vec<PromptSegment> {
-    let mut segments = vec![cached_prompt_segment(base_prompt.trim())];
+    let mut stable_prefix = vec![cached_prompt_segment(base_prompt.trim())];
     if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
-        segments.push(cached_prompt_segment(project_context));
+        stable_prefix.push(cached_prompt_segment(project_context));
     }
     if let Some(repo_map_context) = repo_map_context.filter(|s| !s.trim().is_empty()) {
-        segments.push(cached_prompt_segment(repo_map_context));
+        stable_prefix.push(cached_prompt_segment(repo_map_context));
     }
-    if let Some(client_system) = client_system.filter(|s| !s.trim().is_empty()) {
-        segments.push(prompt_segment(client_system));
+
+    let dynamic_tail = client_system
+        .filter(|s| !s.trim().is_empty())
+        .map(prompt_segment);
+
+    stable_prefix.into_iter().chain(dynamic_tail).collect()
+}
+
+fn partition_system_prompt_segments(segments: &[PromptSegment]) -> SystemPromptLayout {
+    let stable_prefix = segments
+        .iter()
+        .filter(|segment| segment.stability == PromptSegmentStability::Stable)
+        .cloned()
+        .collect();
+    let dynamic_tail = segments
+        .iter()
+        .filter(|segment| segment.stability == PromptSegmentStability::Dynamic)
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    SystemPromptLayout {
+        stable_prefix,
+        dynamic_tail: (!dynamic_tail.trim().is_empty()).then_some(dynamic_tail),
     }
-    segments
 }
 
 fn system_message_metadata(model: &str, has_stable_prefix: bool) -> Option<MessageMeta> {
@@ -194,26 +221,15 @@ fn build_system_message(
         repo_map_context,
         client_system,
     );
-    let metadata = system_message_metadata(
-        model,
-        segments
-            .iter()
-            .any(|segment| segment.stability == PromptSegmentStability::Stable),
-    );
+    let layout = partition_system_prompt_segments(&segments);
+    let metadata = system_message_metadata(model, !layout.stable_prefix.is_empty());
 
-    let stable_content = segments
-        .iter()
-        .filter(|segment| segment.stability == PromptSegmentStability::Stable)
-        .map(|segment| ContentBlock::text(segment.text.clone()));
-    let dynamic_tail = segments
-        .iter()
-        .filter(|segment| segment.stability == PromptSegmentStability::Dynamic)
-        .map(|segment| segment.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    let mut content: Vec<ContentBlock> = stable_content.collect();
-    if !dynamic_tail.trim().is_empty() {
+    let mut content: Vec<ContentBlock> = layout
+        .stable_prefix
+        .into_iter()
+        .map(|segment| ContentBlock::text(segment.text))
+        .collect();
+    if let Some(dynamic_tail) = layout.dynamic_tail {
         content.push(ContentBlock::text(dynamic_tail));
     }
 
@@ -811,8 +827,9 @@ mod tests {
         ANTHROPIC_CACHE_BREAKPOINT_KEY, ANTHROPIC_STABLE_PREFIX_KIND, DJINN_CHAT_SYSTEM_PROMPT,
         PromptSegmentStability, REPO_MAP_SYSTEM_HEADER, ToolCallPayload, build_system_message,
         compose_system_prompt, compose_system_prompt_segments, format_repo_map_block,
-        reinforce_repo_map_companion_notes, repo_map_companion_context, sse_json_event,
-        system_message_metadata, unique_companion_note_ids,
+        partition_system_prompt_segments, reinforce_repo_map_companion_notes,
+        repo_map_companion_context, sse_json_event, system_message_metadata,
+        unique_companion_note_ids,
     };
     use crate::server::AppState;
     use crate::test_helpers;
@@ -1299,20 +1316,75 @@ mod tests {
     }
 
     #[test]
-    fn build_system_message_with_all_optional_segments_empty() {
+    fn partition_system_prompt_segments_extracts_explicit_dynamic_tail_boundary() {
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
+        let segments = compose_system_prompt_segments(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some("project ctx"),
+            Some(&repo_map),
+            Some("client system\n\ntask context"),
+        );
+
+        let layout = partition_system_prompt_segments(&segments);
+
+        assert_eq!(layout.stable_prefix.len(), 3);
+        assert_eq!(
+            layout.stable_prefix[0].text,
+            DJINN_CHAT_SYSTEM_PROMPT.trim()
+        );
+        assert_eq!(layout.stable_prefix[1].text, "project ctx");
+        assert_eq!(layout.stable_prefix[2].text, repo_map);
+        assert_eq!(
+            layout.dynamic_tail.as_deref(),
+            Some("client system\n\ntask context")
+        );
+    }
+
+    #[test]
+    fn build_system_message_repo_map_remains_stable_prefix_when_project_context_missing() {
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
+
         let message = build_system_message(
             DJINN_CHAT_SYSTEM_PROMPT,
-            Some(""),
-            Some("   "),
-            Some("\n"),
+            None,
+            Some(&repo_map),
+            Some("client system\n\ntask context"),
             "anthropic/claude-3-5-sonnet",
         );
-        // Only the base prompt block should be present
-        assert_eq!(message.content.len(), 1);
+
+        assert_eq!(message.content.len(), 3);
         assert_eq!(
             message.content[0].as_text(),
             Some(DJINN_CHAT_SYSTEM_PROMPT.trim())
         );
+        assert_eq!(message.content[1].as_text(), Some(repo_map.as_str()));
+        assert_eq!(
+            message.content[2].as_text(),
+            Some("client system\n\ntask context")
+        );
+        assert!(message.metadata.is_some());
+    }
+
+    #[test]
+    fn build_system_message_only_dynamic_tail_never_creates_cacheable_trailing_block() {
+        let message = build_system_message(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            None,
+            None,
+            Some("client system\n\ntask context"),
+            "anthropic/claude-3-5-sonnet",
+        );
+
+        assert_eq!(message.content.len(), 2);
+        assert_eq!(
+            message.content[0].as_text(),
+            Some(DJINN_CHAT_SYSTEM_PROMPT.trim())
+        );
+        assert_eq!(
+            message.content[1].as_text(),
+            Some("client system\n\ntask context")
+        );
+        assert!(message.metadata.is_some());
     }
 
     #[test]
