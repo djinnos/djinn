@@ -10,18 +10,12 @@ import {
   type VerificationRun,
 } from "@/stores/verificationStore";
 
-interface LspWarning {
-  server: string;
-  message: string;
-}
-
 interface PrError {
   projectId: string;
   message: string;
 }
 
 interface BoardHealthData {
-  lspWarnings: LspWarning[];
   projectIssues: Record<string, string>;
   prErrors: PrError[];
   failedSteps: StepEntry[];
@@ -29,7 +23,6 @@ interface BoardHealthData {
 }
 
 function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
-  const [lspWarnings, setLspWarnings] = useState<LspWarning[]>([]);
   const [projectIssues, setProjectIssues] = useState<Record<string, string>>(
     {}
   );
@@ -77,13 +70,10 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
         )
       ).then((results) => {
         if (!active) return;
-        const allWarnings: LspWarning[] = [];
         const allIssues: Record<string, string> = {};
         const allPrErrors: PrError[] = [];
         for (const result of results) {
           if (!result) continue;
-          const w = result.lsp_warnings as LspWarning[] | undefined;
-          if (w) allWarnings.push(...w);
           const i = result.project_issues as Record<string, string> | undefined;
           if (i) Object.assign(allIssues, i);
           const pe = result.pr_errors as Record<string, string> | undefined;
@@ -93,7 +83,6 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
             }
           }
         }
-        setLspWarnings(allWarnings);
         setProjectIssues(allIssues);
         setPrErrors(allPrErrors);
       });
@@ -108,14 +97,13 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
   }, [stablePaths]);
 
   const hasIssues =
-    lspWarnings.length > 0 ||
     Object.keys(projectIssues).length > 0 ||
     prErrors.length > 0 ||
     failedSteps.length > 0;
 
   if (!hasIssues) return null;
 
-  return { lspWarnings, projectIssues, prErrors, failedSteps, failedRun };
+  return { projectIssues, prErrors, failedSteps, failedRun };
 }
 
 interface BoardHealthBannerProps {
@@ -132,10 +120,10 @@ export function BoardHealthBanner({ projectPaths }: BoardHealthBannerProps) {
 
   if (!health || dismissed) return null;
 
-  const { lspWarnings, projectIssues, prErrors, failedSteps, failedRun } = health;
+  const { projectIssues, prErrors, failedSteps, failedRun } = health;
   const issueEntries = Object.entries(projectIssues);
   const totalIssues =
-    lspWarnings.length + issueEntries.length + prErrors.length + failedSteps.length;
+    issueEntries.length + prErrors.length + failedSteps.length;
 
   return (
     <Card className="mx-4 border-amber-500/20 bg-amber-500/[0.04]">
@@ -202,19 +190,6 @@ export function BoardHealthBanner({ projectPaths }: BoardHealthBannerProps) {
               </div>
             );
           })}
-
-          {/* LSP warnings */}
-          {lspWarnings.map((w) => (
-            <div
-              key={w.server}
-              className="flex items-start gap-2 text-xs text-amber-300/80"
-            >
-              <span className="mt-px shrink-0 font-medium text-amber-400">
-                {w.server}:
-              </span>
-              <span>{w.message}</span>
-            </div>
-          ))}
 
           {/* Failed verification/setup steps */}
           {failedSteps.map((step) => (

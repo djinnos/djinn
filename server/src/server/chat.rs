@@ -658,7 +658,7 @@ pub(super) async fn completions_handler(
                 .stream(
                     &conversation,
                     &tool_schemas,
-                    Some(djinn_provider::provider::ToolChoice::Required),
+                    Some(djinn_provider::provider::ToolChoice::Auto),
                 )
                 .await
             {
