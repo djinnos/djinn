@@ -145,13 +145,16 @@ pub(crate) fn create_legacy_note_fixture_db(path: &Path) -> DbResult<LegacyNoteF
 
     let conn = rusqlite::Connection::open(path).map_err(|e| DbError::InvalidData(e.to_string()))?;
 
-    let project_id = uuid::Uuid::now_v7().to_string();
-    let note_id = uuid::Uuid::now_v7().to_string();
+    let project_id = uuid::Uuid::nil().to_string();
+    let note_id = uuid::Uuid::from_u128(1).to_string();
     let project_path = path.with_extension("project");
+    if project_path.exists() {
+        std::fs::remove_dir_all(&project_path).map_err(|e| DbError::InvalidData(e.to_string()))?;
+    }
     std::fs::create_dir_all(&project_path).map_err(|e| DbError::InvalidData(e.to_string()))?;
     let note_file = project_path.join("legacy-note.md");
-    std::fs::write(&note_file, "Legacy fixture body\n")
-        .map_err(|e| DbError::InvalidData(e.to_string()))?;
+    let note_content = "Legacy fixture body\n";
+    std::fs::write(&note_file, note_content).map_err(|e| DbError::InvalidData(e.to_string()))?;
 
     conn.execute(
         "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
@@ -177,7 +180,7 @@ pub(crate) fn create_legacy_note_fixture_db(path: &Path) -> DbResult<LegacyNoteF
             "reference",
             "reference",
             "[]",
-            "Legacy fixture body\n",
+            note_content,
         ],
     )
     .map_err(|e| DbError::InvalidData(e.to_string()))?;
@@ -346,6 +349,12 @@ mod tests {
                 .await
                 .unwrap();
         assert!(content_hash.is_none());
+
+        let normalized_fixture_hash = crate::note_hash::note_content_hash("Legacy fixture body\n");
+        assert_ne!(
+            content_hash.as_deref(),
+            Some(normalized_fixture_hash.as_str())
+        );
 
         let migration_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM refinery_schema_history WHERE name = 'add_note_content_hash'",
