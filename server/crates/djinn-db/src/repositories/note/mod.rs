@@ -2800,45 +2800,89 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn housekeeping_rebuild_missing_content_hashes_backfills_null_hashes() {
+    async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_without_creating_duplicates()
+     {
         let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
-        let note = repo
+        let canonical = repo
             .create_db_note(
                 &project.id,
-                "Hashless",
+                "Canonical",
                 "Alpha\r\nBeta\n",
                 "reference",
                 "[]",
             )
             .await
             .unwrap();
+        let legacy_duplicate = repo
+            .create_db_note(
+                &project.id,
+                "Legacy Duplicate",
+                " Alpha\nBeta ",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let unaffected = repo
+            .create_db_note(&project.id, "Unaffected", "Gamma", "reference", "[]")
+            .await
+            .unwrap();
 
-        sqlx::query("UPDATE notes SET content_hash = NULL WHERE id = ?1")
-            .bind(&note.id)
+        sqlx::query("UPDATE notes SET content_hash = NULL WHERE id IN (?1, ?2)")
+            .bind(&canonical.id)
+            .bind(&legacy_duplicate.id)
             .execute(db.pool())
             .await
             .unwrap();
+
+        let note_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
+                .bind(&project.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
 
         let rebuilt = repo
             .rebuild_missing_content_hashes(&project.id)
             .await
             .unwrap();
-        assert_eq!(rebuilt, 1);
+        assert_eq!(rebuilt, 2);
 
-        let stored_hash: Option<String> =
+        let note_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
+                .bind(&project.id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(note_count_after, note_count_before);
+
+        let rebuilt_hashes: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, content_hash FROM notes WHERE id IN (?1, ?2) ORDER BY id")
+                .bind(&canonical.id)
+                .bind(&legacy_duplicate.id)
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        let expected_hash = crate::note_hash::note_content_hash("Alpha\r\nBeta\n");
+        assert_eq!(rebuilt_hashes.len(), 2);
+        for (_id, content_hash) in rebuilt_hashes {
+            assert_eq!(content_hash.as_deref(), Some(expected_hash.as_str()));
+        }
+
+        let unaffected_hash: Option<String> =
             sqlx::query_scalar("SELECT content_hash FROM notes WHERE id = ?1")
-                .bind(&note.id)
+                .bind(&unaffected.id)
                 .fetch_one(db.pool())
                 .await
                 .unwrap();
         assert_eq!(
-            stored_hash.as_deref(),
-            Some(crate::note_hash::note_content_hash("Alpha\r\nBeta\n").as_str())
+            unaffected_hash.as_deref(),
+            Some(crate::note_hash::note_content_hash("Gamma").as_str())
         );
     }
 
