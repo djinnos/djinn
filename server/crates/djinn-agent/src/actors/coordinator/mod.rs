@@ -728,9 +728,7 @@ impl CoordinatorActor {
                     }
                     // When a patrol review task closes, reset the patrol timer
                     // so the next patrol is scheduled relative to completion.
-                    if task.issue_type == "review"
-                        && task.title.contains("patrol")
-                    {
+                    if task.issue_type == "review" && task.title.contains("patrol") {
                         tracing::info!(
                             task_id = %task.short_id,
                             "CoordinatorActor: patrol task closed — resetting patrol timer"

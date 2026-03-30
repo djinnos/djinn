@@ -981,10 +981,10 @@ impl CoordinatorActor {
                 })
                 .await;
             if let Ok(result) = &all_reviews {
-                let active_patrol = result.tasks.iter().find(|t| {
-                    t.status != "closed"
-                        && t.title.contains("patrol")
-                });
+                let active_patrol = result
+                    .tasks
+                    .iter()
+                    .find(|t| t.status != "closed" && t.title.contains("patrol"));
                 if let Some(existing) = active_patrol {
                     tracing::debug!(
                         project_id = %project_id,

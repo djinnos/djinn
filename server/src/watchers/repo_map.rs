@@ -15,12 +15,13 @@ use crate::repo_map::{RepoMapRenderOptions, render_repo_map, run_indexers};
 use crate::scip_parser::parse_scip_artifacts;
 use crate::server::AppState;
 use djinn_db::{
-    CachedRepoMap, Database, NoteRepository, ProjectRepository, RepoMapCacheInsert,
-    RepoMapCacheKey, RepoMapCacheRepository,
+    CachedRepoMap, Database, GitSettingsRepository, NoteRepository, ProjectRepository,
+    RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository,
 };
 
 const DEBOUNCE: Duration = Duration::from_secs(2);
 const DEFAULT_REPO_MAP_TOKEN_BUDGET: usize = 1200;
+const WORKTREE_REUSE_DIFF_FILE_THRESHOLD: usize = 20;
 
 struct RepoMapWatcherState {
     watchers: HashMap<PathBuf, Debouncer<notify::RecommendedWatcher>>,
@@ -54,7 +55,33 @@ struct RefreshIdentity {
     project_path: PathBuf,
     worktree_path: Option<PathBuf>,
     commit_sha: String,
-    reuse_base_commit_sha: Option<String>,
+    reuse_plan: WorktreeReusePlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorktreeReusePlan {
+    base_commit_sha: Option<String>,
+    diff_file_count: Option<usize>,
+}
+
+impl WorktreeReusePlan {
+    fn canonical() -> Self {
+        Self {
+            base_commit_sha: None,
+            diff_file_count: None,
+        }
+    }
+
+    fn reusable_base_commit(&self) -> Option<&str> {
+        match (self.base_commit_sha.as_deref(), self.diff_file_count) {
+            (Some(commit), Some(diff_count))
+                if diff_count <= WORKTREE_REUSE_DIFF_FILE_THRESHOLD =>
+            {
+                Some(commit)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,13 +102,13 @@ impl fmt::Display for RepoMapRefreshError {
 
 impl std::error::Error for RepoMapRefreshError {}
 
-/// Phase-1 worktree reuse policy from ADR-043:
-/// - directly reuse a canonical/base cached map when refresh planning finds one for the
-///   current commit lineage (for example the primary repo checkout or a merge-base-backed
-///   canonical entry), because branch-local ranking stays close enough for small worktree diffs;
-/// - fall back to a full index whenever no suitable cached base map exists;
-/// - defer diff-threshold heuristics and graph patching to a later wave once reuse semantics
-///   are validated end-to-end.
+/// ADR-043 worktree reuse policy:
+/// - reuse a cached map for the exact worktree HEAD commit when available;
+/// - otherwise, for worktrees only, compute the merge-base/default-branch diff and reuse the
+///   cached base commit when the changed-file count stays at or below
+///   `WORKTREE_REUSE_DIFF_FILE_THRESHOLD`;
+/// - fall back to a full index whenever the diff is too large, diff metadata is unavailable, or
+///   no reusable cached base map exists.
 pub fn spawn_repo_map_refresh_watchers(
     db: Database,
     events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
@@ -272,22 +299,80 @@ async fn repo_identity(
     let repo_path = worktree_path.as_deref().unwrap_or(project_path);
     let git = app_state.git_actor(repo_path).await.ok()?;
     let head = git.head_commit().await.ok()?;
-    let reuse_base_commit_sha = if worktree_path.is_some() {
-        git.run_command(vec!["merge-base".into(), "HEAD".into(), "main".into()])
-            .await
-            .ok()
-            .map(|output| output.stdout.trim().to_string())
-            .filter(|sha| !sha.is_empty() && sha != &head.sha)
-    } else {
-        None
-    };
+    let reuse_plan = worktree_reuse_plan(
+        app_state,
+        project_id,
+        repo_path,
+        worktree_path.is_some(),
+        &head.sha,
+    )
+    .await;
     Some(RefreshIdentity {
         project_id: project_id.to_string(),
         project_path: project_path.to_path_buf(),
         worktree_path,
         commit_sha: head.sha,
-        reuse_base_commit_sha,
+        reuse_plan,
     })
+}
+
+async fn worktree_reuse_plan(
+    app_state: &AppState,
+    project_id: &str,
+    repo_path: &Path,
+    is_worktree: bool,
+    head_sha: &str,
+) -> WorktreeReusePlan {
+    if !is_worktree {
+        return WorktreeReusePlan::canonical();
+    }
+
+    let git = match app_state.git_actor(repo_path).await {
+        Ok(git) => git,
+        Err(_) => return WorktreeReusePlan::canonical(),
+    };
+
+    let target_branch =
+        GitSettingsRepository::new(app_state.db().clone(), crate::events::EventBus::noop())
+            .get(project_id)
+            .await
+            .map(|settings| settings.target_branch)
+            .unwrap_or_else(|_| "main".to_string());
+
+    let base_commit_sha = git
+        .run_command(vec![
+            "merge-base".into(),
+            "HEAD".into(),
+            target_branch.into(),
+        ])
+        .await
+        .ok()
+        .map(|output| output.stdout.trim().to_string())
+        .filter(|sha| !sha.is_empty() && sha != head_sha);
+
+    let diff_file_count = match base_commit_sha.as_deref() {
+        Some(base_commit_sha) => git
+            .run_command(vec![
+                "diff".into(),
+                "--name-only".into(),
+                format!("{base_commit_sha}..HEAD"),
+            ])
+            .await
+            .ok()
+            .map(|output| {
+                output
+                    .stdout
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count()
+            }),
+        None => None,
+    };
+
+    WorktreeReusePlan {
+        base_commit_sha,
+        diff_file_count,
+    }
 }
 
 async fn maybe_refresh_identity(
@@ -334,11 +419,22 @@ async fn plan_refresh(
     }
 
     let project_path = identity.project_path.to_string_lossy().into_owned();
-    for commit_sha in std::iter::once(identity.commit_sha.as_str())
-        .chain(identity.reuse_base_commit_sha.as_deref())
+    if let Some(cached) = repo
+        .get_by_commit_prefer_canonical(&identity.project_id, &project_path, &identity.commit_sha)
+        .await
+        .ok()
+        .flatten()
     {
+        return Some(RefreshDecision {
+            target,
+            should_spawn: false,
+            reuse_from: Some(cached),
+        });
+    }
+
+    if let Some(base_commit_sha) = identity.reuse_plan.reusable_base_commit() {
         if let Some(cached) = repo
-            .get_by_commit_prefer_canonical(&identity.project_id, &project_path, commit_sha)
+            .get_by_commit_prefer_canonical(&identity.project_id, &project_path, base_commit_sha)
             .await
             .ok()
             .flatten()
@@ -536,12 +632,88 @@ mod tests {
             project_path: PathBuf::from("/tmp/project"),
             worktree_path: None,
             commit_sha: "abc".into(),
-            reuse_base_commit_sha: None,
+            reuse_plan: WorktreeReusePlan::canonical(),
         };
 
         let decision = plan_refresh(&db, in_flight.clone(), &identity).await;
         assert!(decision.is_none());
         assert!(in_flight.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_large_diff_falls_back_to_full_refresh_even_with_base_cache() {
+        let db = create_test_db();
+        let repo = RepoMapCacheRepository::new(db.clone());
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/tmp/project",
+                worktree_path: None,
+                commit_sha: "base-commit",
+            },
+            rendered_map: "cached-base",
+            token_estimate: 1,
+            included_entries: 1,
+        })
+        .await
+        .unwrap();
+
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let identity = RefreshIdentity {
+            project_id: "p1".into(),
+            project_path: PathBuf::from("/tmp/project"),
+            worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
+            commit_sha: "worktree-commit".into(),
+            reuse_plan: WorktreeReusePlan {
+                base_commit_sha: Some("base-commit".into()),
+                diff_file_count: Some(WORKTREE_REUSE_DIFF_FILE_THRESHOLD + 1),
+            },
+        };
+
+        let decision = plan_refresh(&db, in_flight.clone(), &identity)
+            .await
+            .expect("full refresh decision");
+        assert!(decision.should_spawn);
+        assert!(decision.reuse_from.is_none());
+        assert!(in_flight.lock().await.contains(&decision.target));
+    }
+
+    #[tokio::test]
+    async fn worktree_missing_diff_metadata_falls_back_to_full_refresh() {
+        let db = create_test_db();
+        let repo = RepoMapCacheRepository::new(db.clone());
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/tmp/project",
+                worktree_path: None,
+                commit_sha: "base-commit",
+            },
+            rendered_map: "cached-base",
+            token_estimate: 1,
+            included_entries: 1,
+        })
+        .await
+        .unwrap();
+
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let identity = RefreshIdentity {
+            project_id: "p1".into(),
+            project_path: PathBuf::from("/tmp/project"),
+            worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
+            commit_sha: "worktree-commit".into(),
+            reuse_plan: WorktreeReusePlan {
+                base_commit_sha: Some("base-commit".into()),
+                diff_file_count: None,
+            },
+        };
+
+        let decision = plan_refresh(&db, in_flight.clone(), &identity)
+            .await
+            .expect("full refresh decision");
+        assert!(decision.should_spawn);
+        assert!(decision.reuse_from.is_none());
+        assert!(in_flight.lock().await.contains(&decision.target));
     }
 
     #[tokio::test]
@@ -568,7 +740,7 @@ mod tests {
             project_path: PathBuf::from("/tmp/project"),
             worktree_path: None,
             commit_sha: "new-commit".into(),
-            reuse_base_commit_sha: None,
+            reuse_plan: WorktreeReusePlan::canonical(),
         };
 
         let decision = plan_refresh(&db, in_flight.clone(), &identity)
@@ -596,7 +768,7 @@ mod tests {
             project_path: PathBuf::from("/tmp/project"),
             worktree_path: None,
             commit_sha: "new-commit".into(),
-            reuse_base_commit_sha: None,
+            reuse_plan: WorktreeReusePlan::canonical(),
         };
 
         let decision = plan_refresh(&db, in_flight.clone(), &identity)
@@ -632,7 +804,10 @@ mod tests {
             project_path: PathBuf::from("/tmp/project"),
             worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
             commit_sha: "shared-commit".into(),
-            reuse_base_commit_sha: Some("base-commit".into()),
+            reuse_plan: WorktreeReusePlan {
+                base_commit_sha: Some("base-commit".into()),
+                diff_file_count: Some(3),
+            },
         };
 
         let decision = plan_refresh(&db, in_flight.clone(), &identity)
@@ -674,7 +849,10 @@ mod tests {
             project_path: PathBuf::from("/tmp/project"),
             worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
             commit_sha: "worktree-commit".into(),
-            reuse_base_commit_sha: Some("base-commit".into()),
+            reuse_plan: WorktreeReusePlan {
+                base_commit_sha: Some("base-commit".into()),
+                diff_file_count: Some(2),
+            },
         };
 
         let decision = plan_refresh(&db, in_flight.clone(), &identity)
@@ -960,7 +1138,7 @@ mod tests {
             project_path: dir.path().to_path_buf(),
             worktree_path: None,
             commit_sha: "different-commit-sha".into(),
-            reuse_base_commit_sha: None,
+            reuse_plan: WorktreeReusePlan::canonical(),
         };
         let first = plan_refresh(&db, in_flight.clone(), &fresh_identity)
             .await
