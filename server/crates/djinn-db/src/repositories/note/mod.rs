@@ -102,9 +102,15 @@ mod tests {
     async fn make_project(db: &Database, path: &Path) -> Project {
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
+        let path_slug = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("root");
+        let project_name = format!("test-project-{path_slug}-{id}");
         sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
             .bind(&id)
-            .bind("test-project")
+            .bind(&project_name)
             .bind(path.to_str().unwrap())
             .execute(db.pool())
             .await
@@ -2867,6 +2873,158 @@ mod tests {
             stored_hash.as_deref(),
             Some(crate::note_hash::note_content_hash("Alpha\r\nBeta\n").as_str())
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn housekeeping_prune_associations_returns_stable_multi_project_counts() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project_one_path = tmp.path().join("project-one");
+        let project_two_path = tmp.path().join("project-two");
+        std::fs::create_dir_all(&project_one_path).unwrap();
+        std::fs::create_dir_all(&project_two_path).unwrap();
+
+        let project_one = make_project(&db, &project_one_path).await;
+        let project_two = make_project(&db, &project_two_path).await;
+        let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+        let project_one_first = repo
+            .create(
+                &project_one.id,
+                &project_one_path,
+                "Project One First",
+                "content one",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let project_one_second = repo
+            .create(
+                &project_one.id,
+                &project_one_path,
+                "Project One Second",
+                "content two",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let project_one_recent = repo
+            .create(
+                &project_one.id,
+                &project_one_path,
+                "Project One Recent",
+                "content three",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let project_one_recent_partner = repo
+            .create(
+                &project_one.id,
+                &project_one_path,
+                "Project One Recent Partner",
+                "content four",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let project_two_first = repo
+            .create(
+                &project_two.id,
+                &project_two_path,
+                "Project Two First",
+                "content five",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let project_two_second = repo
+            .create(
+                &project_two.id,
+                &project_two_path,
+                "Project Two Second",
+                "content six",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        repo.upsert_association(&project_one_first.id, &project_one_second.id, 1)
+            .await
+            .unwrap();
+        repo.upsert_association(&project_one_recent.id, &project_one_recent_partner.id, 1)
+            .await
+            .unwrap();
+        repo.upsert_association(&project_two_first.id, &project_two_second.id, 1)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "UPDATE note_associations
+             SET last_co_access = datetime('now', '-100 days')
+             WHERE (note_a_id = ?1 AND note_b_id = ?2)
+                OR (note_a_id = ?3 AND note_b_id = ?4)",
+        )
+        .bind(&project_one_first.id)
+        .bind(&project_one_second.id)
+        .bind(&project_two_first.id)
+        .bind(&project_two_second.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "UPDATE note_associations
+             SET last_co_access = datetime('now', '-1 day')
+             WHERE note_a_id = ?1 AND note_b_id = ?2",
+        )
+        .bind(&project_one_recent.id)
+        .bind(&project_one_recent_partner.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let project_one_deleted = repo.prune_associations(&project_one.id).await.unwrap();
+        let project_two_deleted = repo.prune_associations(&project_two.id).await.unwrap();
+
+        assert_eq!(project_one_deleted, 1);
+        assert_eq!(project_two_deleted, 1);
+
+        let remaining_project_one_recent: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 AND note_b_id = ?2",
+        )
+        .bind(&project_one_recent.id)
+        .bind(&project_one_recent_partner.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let remaining_project_one_stale: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 AND note_b_id = ?2",
+        )
+        .bind(&project_one_first.id)
+        .bind(&project_one_second.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let remaining_project_two_stale: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ?1 AND note_b_id = ?2",
+        )
+        .bind(&project_two_first.id)
+        .bind(&project_two_second.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(remaining_project_one_recent, 1);
+        assert_eq!(remaining_project_one_stale, 0);
+        assert_eq!(remaining_project_two_stale, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
