@@ -32,6 +32,7 @@ const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/sr
 const MAX_TOOL_ITERATIONS: usize = 20;
 const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
 const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
+const ANTHROPIC_STABLE_PREFIX_KIND: &str = "stable_prefix";
 
 /// Whether a prompt segment's content is stable across consecutive turns.
 ///
@@ -69,25 +70,30 @@ fn cached_prompt_segment(text: impl Into<String>) -> PromptSegment {
 
 /// Assemble the system prompt into ordered segments with cache-stability markers.
 ///
-/// # Segment ordering (ADR-043 §8, prompt-cache optimization)
+/// # Segment taxonomy and ordering (ADR-043 §8, prompt-cache optimization)
 ///
 /// Anthropic prompt caching depends on keeping a stable prefix split into the
-/// same ordered content blocks every turn. The effective stable-prefix order is:
+/// same ordered content blocks every turn. The full ADR-043 ordering is:
 ///
 /// ```text
-///   1. Base system prompt  — stable block emitted from this file
-///   2. Tool definitions    — stable block emitted later by the provider request body
-///   3. Repository map      — stable block emitted from this file
-///   4. Dynamic task/request context tail — must remain outside cache_control
+///   1. Base system prompt                    — stable system-message block emitted here
+///   2. Tool definitions                      — stable request-level block emitted by provider assembly
+///   3. Project/repository context owned here — stable system-message blocks emitted here
+///   4. Dynamic task/request context tail     — uncached trailing system-message block emitted here
 /// ```
 ///
-/// In `chat.rs` we only assemble the system-message-owned pieces of that order:
-/// the base system prompt first, then any stable project/repository context, and
-/// finally any caller-supplied dynamic system/task context. The Anthropic
-/// formatter in `server/crates/djinn-provider/src/provider/format/anthropic.rs`
-/// preserves those block boundaries and keeps `cache_control` limited to the
-/// stable prefix so the dynamic tail can vary without invalidating cached
-/// prompt segments.
+/// `chat.rs` owns only the system-message segments in that order: the base
+/// prompt first, then stable project-owned context (`project_context` and
+/// `repo_map_context`), and finally caller-supplied dynamic task/client system
+/// text. Tool definitions are intentionally not emitted from this function;
+/// they are inserted later by provider request assembly as their own stable
+/// Anthropic block.
+///
+/// The Anthropic formatter in
+/// `server/crates/djinn-provider/src/provider/format/anthropic.rs` preserves
+/// these block boundaries and interprets the metadata from
+/// [`system_message_metadata`] as the signal that all but the final emitted
+/// system block belong to the cacheable stable prefix.
 ///
 /// Callers: [`build_system_message`] converts these segments into a single
 /// [`Message`] with the appropriate [`MessageMeta`] for Anthropic cache
@@ -119,7 +125,7 @@ fn system_message_metadata(model: &str, has_stable_prefix: bool) -> Option<Messa
             timestamp: None,
             provider_data: Some(serde_json::json!({
                 ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
-                    kind: Some("stable_prefix".to_string()),
+                    kind: Some(ANTHROPIC_STABLE_PREFIX_KIND.to_string()),
                 }
             })),
         })
@@ -151,19 +157,27 @@ fn compose_system_prompt(
 ///
 /// # Content-block layout (ADR-043 §8)
 ///
-/// The durable stable ordering for Anthropic caching is:
-/// base system prompt -> tool definitions -> repo map -> dynamic task/request
-/// context. This file owns the system-message portions of that sequence and
-/// therefore emits stable text blocks for the base prompt and repo map before
-/// collapsing any dynamic caller/task context into a single trailing block.
+/// The stable Anthropic prefix spans multiple surfaces. `chat.rs` emits the
+/// system-message-owned stable blocks in this order:
+///
+///   base system prompt -> project context -> repo map
+///
+/// Provider request assembly may then insert tool definitions as a separate
+/// stable Anthropic block between the base prompt and later stable context,
+/// yielding the full ADR-043 ordering:
+///
+///   base system prompt -> tool definitions -> project/repository context -> dynamic task/request context
+///
+/// This function therefore emits each stable system-message segment as its own
+/// [`ContentBlock`] and collapses any dynamic caller/task context into a single
+/// trailing block. The metadata from [`system_message_metadata`] explicitly uses
+/// the `anthropic_cache_breakpoint` / `stable_prefix` contract consumed by
+/// `AnthropicProvider::system_blocks`.
 ///
 /// `cache_control` must stay limited to the stable prefix. In practice that
 /// means the Anthropic formatter may annotate the stable blocks that represent
 /// the cacheable prefix, but it must never annotate the trailing dynamic task
-/// context block. Future prompt assembly changes in either
-/// `server/src/server/chat.rs` or
-/// `server/crates/djinn-provider/src/provider/format/anthropic.rs` must preserve
-/// those boundaries rather than merging the dynamic tail into a cached block.
+/// context block.
 ///
 /// Non-Anthropic providers ignore the metadata entirely, receiving the
 /// content blocks as plain text.
@@ -794,10 +808,11 @@ pub(super) async fn completions_handler(
 #[cfg(test)]
 mod tests {
     use super::{
-        DJINN_CHAT_SYSTEM_PROMPT, PromptSegmentStability, REPO_MAP_SYSTEM_HEADER, ToolCallPayload,
-        build_system_message, compose_system_prompt, compose_system_prompt_segments,
-        format_repo_map_block, reinforce_repo_map_companion_notes, repo_map_companion_context,
-        sse_json_event, unique_companion_note_ids,
+        ANTHROPIC_CACHE_BREAKPOINT_KEY, ANTHROPIC_STABLE_PREFIX_KIND, DJINN_CHAT_SYSTEM_PROMPT,
+        PromptSegmentStability, REPO_MAP_SYSTEM_HEADER, ToolCallPayload, build_system_message,
+        compose_system_prompt, compose_system_prompt_segments, format_repo_map_block,
+        reinforce_repo_map_companion_notes, repo_map_companion_context, sse_json_event,
+        system_message_metadata, unique_companion_note_ids,
     };
     use crate::server::AppState;
     use crate::test_helpers;
@@ -1034,6 +1049,54 @@ mod tests {
         assert_eq!(segments[2].stability, PromptSegmentStability::Stable);
         assert_eq!(segments[3].text, client_system);
         assert_eq!(segments[3].stability, PromptSegmentStability::Dynamic);
+    }
+
+    #[test]
+    fn compose_segments_document_chat_owned_stable_taxonomy() {
+        let repo_map = format_repo_map_block("src/lib.rs\n  pub fn run", None);
+        let segments = compose_system_prompt_segments(
+            DJINN_CHAT_SYSTEM_PROMPT,
+            Some("## Current Project\nproject"),
+            Some(&repo_map),
+            Some("volatile client system"),
+        );
+
+        let segment_texts: Vec<_> = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect();
+        assert_eq!(
+            segment_texts,
+            vec![
+                DJINN_CHAT_SYSTEM_PROMPT.trim(),
+                "## Current Project\nproject",
+                repo_map.as_str(),
+                "volatile client system",
+            ],
+            "chat.rs owns base prompt, project context, repo map, and dynamic tail; tool definitions are inserted later by provider request assembly"
+        );
+        assert_eq!(segments[0].stability, PromptSegmentStability::Stable);
+        assert_eq!(segments[1].stability, PromptSegmentStability::Stable);
+        assert_eq!(segments[2].stability, PromptSegmentStability::Stable);
+        assert_eq!(segments[3].stability, PromptSegmentStability::Dynamic);
+    }
+
+    #[test]
+    fn system_message_metadata_uses_explicit_anthropic_breakpoint_contract() {
+        let metadata = system_message_metadata("anthropic/claude-3-5-sonnet", true)
+            .expect("anthropic stable prefix should emit metadata");
+        let provider_data = metadata.provider_data.expect("provider data");
+
+        assert_eq!(
+            provider_data,
+            json!({
+                ANTHROPIC_CACHE_BREAKPOINT_KEY: {
+                    "kind": ANTHROPIC_STABLE_PREFIX_KIND,
+                }
+            })
+        );
+        assert!(system_message_metadata("openai/gpt-4o", true).is_none());
+        assert!(system_message_metadata("anthropic/claude-3-5-sonnet", false).is_none());
     }
 
     #[test]

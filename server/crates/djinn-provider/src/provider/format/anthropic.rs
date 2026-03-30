@@ -9,6 +9,8 @@ use crate::provider::client::ApiClient;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
+#[cfg(test)]
+const ANTHROPIC_STABLE_PREFIX_KIND: &str = "stable_prefix";
 
 #[derive(Debug, Clone, PartialEq)]
 struct AnthropicSystemBlock {
@@ -50,22 +52,24 @@ impl AnthropicProvider {
     ///
     /// # Anthropic prompt-cache semantics (ADR-043 §8)
     ///
-    /// The stable block order that must remain intact across prompt assembly is:
+    /// The full stable ordering spans both chat-layer system blocks and
+    /// provider-owned request blocks:
     ///
-    ///   1. base system prompt
-    ///   2. tool definitions
-    ///   3. repo map
-    ///   4. dynamic task/request context tail
+    ///   1. base system prompt                    (`chat.rs` system block)
+    ///   2. tool definitions                      (provider request assembly)
+    ///   3. project/repository context            (`chat.rs` system blocks)
+    ///   4. dynamic task/request context tail     (`chat.rs` trailing uncached block)
     ///
     /// This formatter only serializes the `system` blocks coming from
-    /// `server/src/server/chat.rs`, but it is part of the same invariant:
-    /// cache annotations are only valid on the stable prefix. Any trailing
-    /// dynamic task content must remain a final block without `cache_control`
-    /// so per-task variation does not poison Anthropic's cached prefix.
+    /// `server/src/server/chat.rs`, so its responsibility is narrower: preserve
+    /// the stable system-message taxonomy emitted there and consume the explicit
+    /// `anthropic_cache_breakpoint` / `stable_prefix` metadata contract. When that
+    /// metadata is present, every serialized system block except the last is part
+    /// of the cacheable prefix and receives `cache_control: {"type":"ephemeral"}`.
     ///
-    /// `chat.rs::build_system_message` creates separate stable blocks and a
-    /// trailing uncached dynamic block; this function preserves those block
-    /// boundaries and emits `cache_control` only for the stable-prefix portion.
+    /// The final system block must remain uncached because it represents the
+    /// dynamic tail. Non-Anthropic providers ignore this metadata and continue to
+    /// serialize the same content as plain text.
     fn system_blocks(conversation: &Conversation) -> Vec<AnthropicSystemBlock> {
         conversation
             .messages
@@ -535,6 +539,47 @@ mod tests {
     }
 
     #[test]
+    fn test_system_blocks_consume_explicit_stable_prefix_metadata_contract() {
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message {
+            role: crate::message::Role::System,
+            content: vec![
+                ContentBlock::text("base prompt"),
+                ContentBlock::text("project context"),
+                ContentBlock::text("repo map"),
+                ContentBlock::text("dynamic tail"),
+            ],
+            metadata: Some(crate::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: {
+                        "kind": ANTHROPIC_STABLE_PREFIX_KIND,
+                    }
+                })),
+            }),
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let blocks = AnthropicProvider::system_blocks(&conv);
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(
+            blocks[0].cache_control,
+            Some(json!({"type": "ephemeral", "kind": ANTHROPIC_STABLE_PREFIX_KIND}))
+        );
+        assert_eq!(
+            blocks[1].cache_control,
+            Some(json!({"type": "ephemeral", "kind": ANTHROPIC_STABLE_PREFIX_KIND}))
+        );
+        assert_eq!(
+            blocks[2].cache_control,
+            Some(json!({"type": "ephemeral", "kind": ANTHROPIC_STABLE_PREFIX_KIND}))
+        );
+        assert_eq!(blocks[3].cache_control, None);
+    }
+
+    #[test]
     fn test_build_request_preserves_separate_system_blocks_with_cache_control() {
         let provider = test_provider();
         let mut conv = Conversation::default();
@@ -546,7 +591,7 @@ mod tests {
                 timestamp: None,
                 provider_data: Some(json!({
                     ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
-                        kind: Some("stable_prefix".to_string()),
+                        kind: Some(ANTHROPIC_STABLE_PREFIX_KIND.to_string()),
                     }
                 })),
             },
@@ -566,8 +611,14 @@ mod tests {
         assert_eq!(system[1]["text"], "tool definitions");
         assert_eq!(system[2]["text"], "repo map");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
-        assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(
+            system[0]["cache_control"]["kind"],
+            ANTHROPIC_STABLE_PREFIX_KIND
+        );
+        assert_eq!(
+            system[1]["cache_control"]["kind"],
+            ANTHROPIC_STABLE_PREFIX_KIND
+        );
         assert!(system[2].get("cache_control").is_none());
     }
 
