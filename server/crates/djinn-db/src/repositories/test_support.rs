@@ -180,7 +180,7 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
             &project_one.id,
             &project_one_path,
             "Rust Ownership Guide",
-            "Rust ownership guide. Rust ownership guide. Rust ownership guide. Rust ownership guide. Borrowing and lifetimes details.",
+            "Rust Ownership. Rust Ownership. Rust Ownership. Rust Ownership. Borrowing and lifetimes details.",
             "reference",
             "[]",
         )
@@ -300,7 +300,7 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
             &project_two.id,
             &project_two_path,
             "Async Runtime Guide",
-            "Async runtime guide. Async runtime guide. Async runtime guide. Async runtime guide. Scheduling and executors details.",
+            "Async Runtime. Async Runtime. Async Runtime. Async Runtime. Scheduling and executors details.",
             "reference",
             "[]",
         )
