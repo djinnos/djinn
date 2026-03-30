@@ -292,12 +292,14 @@ struct CoordinatorActor {
     last_stale_sweep: StdInstant,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     prune_tick_counter: u32,
-    /// Tick counter for Architect patrol (fires every `next_patrol_ticks` ticks)
-    architect_tick_counter: u32,
-    /// Dynamic patrol interval in ticks, set by the architect's self-scheduling.
-    /// Defaults to `rules::ARCHITECT_PATROL_TICKS` (10 ticks = 5 min).
+    /// Timestamp of the last patrol completion (or actor start as initial baseline).
+    /// The next patrol is eligible only after `next_patrol_interval` has elapsed
+    /// since this instant.  Reset when a patrol task reaches a terminal state.
+    last_patrol_completed: StdInstant,
+    /// Dynamic patrol interval, set by the architect's self-scheduling.
+    /// Defaults to `rules::DEFAULT_ARCHITECT_PATROL_INTERVAL`.
     /// Updated when the coordinator reads a `patrol_schedule` activity entry.
-    next_patrol_ticks: u32,
+    next_patrol_interval: Duration,
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     throughput_events: HashMap<String, Vec<StdInstant>>,
     /// Per-task Lead escalation count (request_lead call count per task UUID).
@@ -378,8 +380,8 @@ impl CoordinatorActor {
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
             last_stale_sweep: StdInstant::now(),
             prune_tick_counter: 0,
-            architect_tick_counter: 0,
-            next_patrol_ticks: rules::ARCHITECT_PATROL_TICKS,
+            last_patrol_completed: StdInstant::now(),
+            next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
@@ -473,11 +475,10 @@ impl CoordinatorActor {
                         self.evict_throughput_events();
                         self.evaluate_prompt_amendments().await;
                     }
-                    // Architect patrol: dynamic interval set by self-scheduling,
-                    // falling back to ARCHITECT_PATROL_TICKS (5 min) by default.
-                    self.architect_tick_counter += 1;
-                    if self.architect_tick_counter >= self.next_patrol_ticks {
-                        self.architect_tick_counter = 0;
+                    // Architect patrol: completion-time-based scheduling.
+                    // Only attempt dispatch once `next_patrol_interval` has
+                    // elapsed since the last patrol completed (or actor start).
+                    if self.last_patrol_completed.elapsed() >= self.next_patrol_interval {
                         self.maybe_dispatch_architect_patrol().await;
                     }
                 }
@@ -724,6 +725,17 @@ impl CoordinatorActor {
                         && let Some(epic_id) = task.epic_id.as_deref()
                     {
                         self.record_merge_event(epic_id);
+                    }
+                    // When a patrol review task closes, reset the patrol timer
+                    // so the next patrol is scheduled relative to completion.
+                    if task.issue_type == "review"
+                        && task.title.contains("patrol")
+                    {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            "CoordinatorActor: patrol task closed — resetting patrol timer"
+                        );
+                        self.last_patrol_completed = StdInstant::now();
                     }
                     // Fire epic completion rules (spike/batch).
                     self.on_task_closed(&task).await;
@@ -1530,8 +1542,8 @@ mod tests {
             consolidation_runner: runner.clone(),
             last_stale_sweep: StdInstant::now(),
             prune_tick_counter: 0,
-            architect_tick_counter: 0,
-            next_patrol_ticks: rules::ARCHITECT_PATROL_TICKS,
+            last_patrol_completed: StdInstant::now(),
+            next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),

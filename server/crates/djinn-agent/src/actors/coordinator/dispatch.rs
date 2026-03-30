@@ -831,7 +831,7 @@ impl CoordinatorActor {
     ///
     /// The patrol interval is self-scheduled by the architect via the
     /// `next_patrol_minutes` field in `submit_work`.  When no schedule exists,
-    /// the default interval (ARCHITECT_PATROL_TICKS) is used.
+    /// the default interval (DEFAULT_ARCHITECT_PATROL_INTERVAL) is used.
     ///
     /// Creates a "review" task for visibility, then dispatches the Architect.
     pub(super) async fn maybe_dispatch_architect_patrol(&mut self) {
@@ -855,15 +855,15 @@ impl CoordinatorActor {
                     rules::MIN_ARCHITECT_PATROL_MINUTES,
                     rules::MAX_ARCHITECT_PATROL_MINUTES,
                 );
-                let ticks = minutes * 2;
-                if ticks != self.next_patrol_ticks {
+                let new_interval = Duration::from_secs(u64::from(minutes) * 60);
+                if new_interval != self.next_patrol_interval {
                     tracing::info!(
-                        old_ticks = self.next_patrol_ticks,
-                        new_ticks = ticks,
+                        old_secs = self.next_patrol_interval.as_secs(),
+                        new_secs = new_interval.as_secs(),
                         minutes,
                         "CoordinatorActor: patrol interval updated by architect"
                     );
-                    self.next_patrol_ticks = ticks;
+                    self.next_patrol_interval = new_interval;
                 }
             }
         }
@@ -961,36 +961,48 @@ impl CoordinatorActor {
             }
         }
 
-        // Check for an existing open patrol review task for this project.
-        // Avoid creating duplicates if the previous patrol task was never dispatched.
-        let existing_patrol = task_repo
-            .list_filtered(djinn_db::ListQuery {
-                project_id: Some(project_id.clone()),
-                status: Some("open".to_string()),
-                issue_type: Some("review".to_string()),
-                priority: None,
-                label: None,
-                text: None,
-                parent: None,
-                sort: "created_desc".to_string(),
-                limit: 1,
-                offset: 0,
-            })
-            .await;
-        if let Ok(result) = &existing_patrol
-            && !result.tasks.is_empty()
+        // Guard: never create a patrol if one already exists in any non-terminal
+        // state.  Query all review tasks for this project and check for any that
+        // are not yet closed.  This prevents duplicates regardless of status
+        // (open, in_progress, setting_up, verifying, etc.).
         {
-            tracing::debug!(
-                project_id = %project_id,
-                existing_task = %result.tasks[0].short_id,
-                "CoordinatorActor: patrol — open review task already exists, skipping creation"
-            );
-            #[cfg(test)]
-            eprintln!("[patrol] step 3: open review task already exists, skipping");
-            return;
+            let all_reviews = task_repo
+                .list_filtered(djinn_db::ListQuery {
+                    project_id: Some(project_id.clone()),
+                    status: None, // all statuses
+                    issue_type: Some("review".to_string()),
+                    priority: None,
+                    label: None,
+                    text: None,
+                    parent: None,
+                    sort: "created_desc".to_string(),
+                    limit: 50,
+                    offset: 0,
+                })
+                .await;
+            if let Ok(result) = &all_reviews {
+                let active_patrol = result.tasks.iter().find(|t| {
+                    t.status != "closed"
+                        && t.title.contains("patrol")
+                });
+                if let Some(existing) = active_patrol {
+                    tracing::debug!(
+                        project_id = %project_id,
+                        existing_task = %existing.short_id,
+                        status = %existing.status,
+                        "CoordinatorActor: patrol — non-closed patrol task exists, skipping"
+                    );
+                    #[cfg(test)]
+                    eprintln!(
+                        "[patrol] step 3: non-closed patrol task exists (status={}), skipping",
+                        existing.status
+                    );
+                    return;
+                }
+            }
         }
         #[cfg(test)]
-        eprintln!("[patrol] step 3: no existing open patrol task");
+        eprintln!("[patrol] step 3: no existing non-closed patrol task");
 
         // Resolve models for the "architect" role.
         let model_ids = self.resolve_dispatch_models_for_role("architect").await;
