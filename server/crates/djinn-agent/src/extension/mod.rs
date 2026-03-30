@@ -1144,6 +1144,7 @@ async fn call_memory_write(
     let p: MemoryWriteParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let worktree_root = Some(std::path::PathBuf::from(&project_path));
     let result = server
         .memory_write_with_worktree(
             rmcp::handler::server::wrapper::Parameters(SharedMemoryWriteParams {
@@ -1153,7 +1154,7 @@ async fn call_memory_write(
                 note_type: p.note_type,
                 tags: p.tags,
             }),
-            None,
+            worktree_root,
         )
         .await;
     Ok(serde_json::to_value(result.0).unwrap_or_else(
@@ -1169,6 +1170,7 @@ async fn call_memory_edit(
     let p: MemoryEditParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let worktree_root = Some(std::path::PathBuf::from(&project_path));
     let result = server
         .memory_edit_with_worktree(
             rmcp::handler::server::wrapper::Parameters(SharedMemoryEditParams {
@@ -1180,7 +1182,7 @@ async fn call_memory_edit(
                 section: p.section,
                 note_type: p.note_type,
             }),
-            None,
+            worktree_root,
         )
         .await;
     Ok(serde_json::to_value(result.0).unwrap_or_else(
