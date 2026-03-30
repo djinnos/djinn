@@ -19,9 +19,11 @@ use crate::actors::slot::SlotEvent;
 use crate::actors::slot::lifecycle::{TaskLifecycleParams, run_task_lifecycle};
 use crate::roles::role_impl_for;
 use crate::test_helpers::{
-    FailingProvider, FakeProvider, agent_context_from_db, create_test_db, create_test_epic,
+    CapturingProvider, FailingProvider, FakeProvider, agent_context_from_db, create_test_db,
+    create_test_epic,
 };
 use djinn_core::models::SessionStatus;
+use djinn_db::AgentCreateInput;
 use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 
 // ─── Git repo helpers ─────────────────────────────────────────────────────────
@@ -107,12 +109,178 @@ async fn create_open_task(
     task
 }
 
+async fn create_specialist_worker(
+    db: &djinn_db::Database,
+    project_id: &str,
+    name: &str,
+    mcp_servers: &str,
+) {
+    let repo = djinn_db::AgentRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    repo.create_for_project(
+        project_id,
+        AgentCreateInput {
+            name,
+            base_role: "worker",
+            description: "specialist lifecycle test agent",
+            system_prompt_extensions: "",
+            model_preference: None,
+            verification_command: None,
+            mcp_servers: Some(mcp_servers),
+            skills: Some("[]"),
+            is_default: false,
+        },
+    )
+    .await
+    .expect("create specialist agent");
+}
+
+fn tool_names(tools: &[serde_json::Value]) -> Vec<String> {
+    tools
+        .iter()
+        .filter_map(|tool| {
+            tool.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|v| v.as_str())
+                .or_else(|| tool.get("name").and_then(|v| v.as_str()))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 /// Collect the first SlotEvent from the channel with a 3-second deadline.
 async fn recv_slot_event(rx: &mut mpsc::Receiver<SlotEvent>) -> SlotEvent {
     tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
         .expect("slot event should arrive within 3s")
         .expect("slot event channel should stay open")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_specialist_appends_discovered_mcp_tools_to_provider_tool_list() {
+    let repo = create_git_repo().await;
+    let db = create_test_db();
+    let cancel = CancellationToken::new();
+    let app_state = agent_context_from_db(db.clone(), cancel.clone());
+
+    let project = register_project(&db, repo.path()).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    create_specialist_worker(&db, &project.id, "knowledge-harvester", r#"["web"]"#).await;
+    let task = create_open_task(&db, &project.id, &epic.id).await;
+    let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    task_repo
+        .update_agent_type(&task.id, Some("knowledge-harvester"))
+        .await
+        .expect("set specialist agent_type");
+
+    let provider = Arc::new(CapturingProvider::tool_call(
+        "finalize-1",
+        "submit_work",
+        serde_json::json!({
+            "task_id": task.short_id,
+            "summary": "specialist session complete"
+        }),
+    ));
+    let mcp_registry = crate::mcp_client::McpToolRegistry::with_dispatch(
+        [("web_search".to_string(), "web".to_string())],
+        vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        })],
+        |_tool_name, _arguments| Ok(serde_json::json!({"ok": true})),
+    );
+
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    run_task_lifecycle(TaskLifecycleParams {
+        task_id: task.id.clone(),
+        project_path: project.path.clone(),
+        model_id: "synthetic/test-model".to_string(),
+        role: role_impl_for(AgentType::Architect),
+        app_state: app_state.clone(),
+        cancel: cancel.clone(),
+        pause: CancellationToken::new(),
+        event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        role_verification_command: None,
+        mcp_registry_override: Some(mcp_registry),
+        provider_override: Some(provider.clone()),
+    })
+    .await
+    .expect("lifecycle should succeed");
+
+    recv_slot_event(&mut event_rx).await;
+    let captured = provider.captured_tools();
+    assert!(!captured.is_empty(), "provider should observe a tool list");
+    let names = tool_names(&captured[0]);
+    assert!(
+        names.contains(&"submit_work".to_string()),
+        "runtime role should resolve specialist base role toolset"
+    );
+    assert!(
+        names.contains(&"web_search".to_string()),
+        "discovered MCP tool should be appended"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_default_session_keeps_builtins_only_without_mcp_servers() {
+    let repo = create_git_repo().await;
+    let db = create_test_db();
+    let cancel = CancellationToken::new();
+    let app_state = agent_context_from_db(db.clone(), cancel.clone());
+
+    let project = register_project(&db, repo.path()).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_open_task(&db, &project.id, &epic.id).await;
+
+    let provider = Arc::new(CapturingProvider::tool_call(
+        "finalize-1",
+        "submit_work",
+        serde_json::json!({
+            "task_id": task.short_id,
+            "summary": "default session complete"
+        }),
+    ));
+
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    run_task_lifecycle(TaskLifecycleParams {
+        task_id: task.id.clone(),
+        project_path: project.path.clone(),
+        model_id: "synthetic/test-model".to_string(),
+        role: role_impl_for(AgentType::Worker),
+        app_state: app_state.clone(),
+        cancel: cancel.clone(),
+        pause: CancellationToken::new(),
+        event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        role_verification_command: None,
+        mcp_registry_override: None,
+        provider_override: Some(provider.clone()),
+    })
+    .await
+    .expect("lifecycle should succeed");
+
+    recv_slot_event(&mut event_rx).await;
+    let captured = provider.captured_tools();
+    assert!(!captured.is_empty(), "provider should observe a tool list");
+    let names = tool_names(&captured[0]);
+    assert!(names.contains(&"submit_work".to_string()));
+    assert!(!names.contains(&"web_search".to_string()));
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -158,6 +326,7 @@ async fn lifecycle_success_path_session_reaches_paused_and_slot_freed() {
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         role_verification_command: None,
+        mcp_registry_override: None,
         provider_override: Some(provider),
     };
 
@@ -232,6 +401,7 @@ async fn lifecycle_provider_failure_session_reaches_failed_and_slot_freed() {
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         role_verification_command: None,
+        mcp_registry_override: None,
         provider_override: Some(provider),
     };
 
@@ -299,6 +469,7 @@ async fn lifecycle_provider_failure_cleans_up_worktree() {
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         role_verification_command: None,
+        mcp_registry_override: None,
         provider_override: Some(provider),
     };
 

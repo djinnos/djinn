@@ -272,6 +272,8 @@ impl SlotHandle {
                         skills,
                         role_verification_command,
                         #[cfg(test)]
+                        mcp_registry_override: None,
+                        #[cfg(test)]
                         provider_override: None,
                     })
                     .await
