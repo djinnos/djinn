@@ -533,4 +533,109 @@ mod tests {
         let text = format!("{:?}", event);
         assert!(text.contains("lagged"));
     }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn adr_045_mixed_execution_traffic_reduces_frames_and_preserves_batching_contract() {
+        let mut accumulator = BatchAccumulator::new();
+
+        let immediate = accumulator.push(DjinnEventEnvelope::task_deleted("task-1"));
+        assert_eq!(immediate.len(), 1);
+        assert_eq!(immediate[0].entity_type(), "task");
+        assert_eq!(immediate[0].action(), "deleted");
+
+        let raw_source_events = vec![
+            task_updated_envelope("task-1", "oldest title"),
+            task_updated_envelope("task-1", "latest title"),
+            DjinnEventEnvelope {
+                entity_type: "session",
+                action: "token_update",
+                payload: json!({"session_id": "s1", "task_id": "task-1", "tokens": 1}),
+                id: Some("s1".to_string()),
+                project_id: None,
+                from_sync: false,
+            },
+            DjinnEventEnvelope {
+                entity_type: "session",
+                action: "token_update",
+                payload: json!({"session_id": "s1", "task_id": "task-1", "tokens": 2}),
+                id: Some("s1".to_string()),
+                project_id: None,
+                from_sync: false,
+            },
+            DjinnEventEnvelope::session_message(
+                "s1",
+                "task-1",
+                "worker",
+                &json!({"content": "first delta"}),
+            ),
+            DjinnEventEnvelope::session_message(
+                "s1",
+                "task-1",
+                "worker",
+                &json!({"content": "latest delta"}),
+            ),
+        ];
+
+        let mut emitted_frames = immediate.len();
+        let mut first_token_frame = None;
+        let mut first_message_frame = None;
+
+        for event in raw_source_events {
+            let ready = accumulator.push(event);
+            emitted_frames += ready.len();
+            for envelope in ready {
+                match (envelope.entity_type(), envelope.action()) {
+                    ("session", "token_update") => first_token_frame = Some(envelope),
+                    ("session", "message") => first_message_frame = Some(envelope),
+                    _ => {}
+                }
+            }
+        }
+
+        let first_token_frame = first_token_frame.expect("first token frame");
+        assert_eq!(first_token_frame.payload()["tokens"], 1);
+
+        let first_message_frame = first_message_frame.expect("first message frame");
+        assert_eq!(
+            first_message_frame.payload()["message"]["content"],
+            "first delta"
+        );
+
+        let initial_flush = accumulator.flush();
+        assert_eq!(initial_flush.len(), 1);
+        assert_eq!(initial_flush[0].entity_type(), "task");
+        assert_eq!(initial_flush[0].action(), "updated");
+        assert_eq!(initial_flush[0].payload()["task"]["title"], "latest title");
+
+        accumulator.throttled_last_sent.insert(
+            "session.message",
+            Instant::now() - SESSION_MESSAGE_MIN_INTERVAL,
+        );
+        let message_flush = accumulator.flush();
+        assert_eq!(message_flush.len(), 1);
+        assert_eq!(message_flush[0].entity_type(), "session");
+        assert_eq!(message_flush[0].action(), "message");
+        assert_eq!(
+            message_flush[0].payload()["message"]["content"],
+            "latest delta"
+        );
+
+        accumulator.throttled_last_sent.insert(
+            "session.token_update",
+            Instant::now() - SESSION_TOKEN_UPDATE_MIN_INTERVAL,
+        );
+        let token_flush = accumulator.flush();
+        assert_eq!(token_flush.len(), 1);
+        assert_eq!(token_flush[0].entity_type(), "session");
+        assert_eq!(token_flush[0].action(), "token_update");
+        assert_eq!(token_flush[0].payload()["tokens"], 2);
+
+        let total_emitted_frames =
+            emitted_frames + initial_flush.len() + message_flush.len() + token_flush.len();
+        assert_eq!(total_emitted_frames, 6);
+        assert!(
+            total_emitted_frames < 1 + 6,
+            "mixed burst should emit fewer frames than raw source events"
+        );
+    }
 }
