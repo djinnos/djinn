@@ -340,11 +340,7 @@ async fn worktree_reuse_plan(
             .unwrap_or_else(|_| "main".to_string());
 
     let base_commit_sha = git
-        .run_command(vec![
-            "merge-base".into(),
-            "HEAD".into(),
-            target_branch.into(),
-        ])
+        .run_command(vec!["merge-base".into(), "HEAD".into(), target_branch])
         .await
         .ok()
         .map(|output| output.stdout.trim().to_string())
@@ -432,19 +428,18 @@ async fn plan_refresh(
         });
     }
 
-    if let Some(base_commit_sha) = identity.reuse_plan.reusable_base_commit() {
-        if let Some(cached) = repo
+    if let Some(base_commit_sha) = identity.reuse_plan.reusable_base_commit()
+        && let Some(cached) = repo
             .get_by_commit_prefer_canonical(&identity.project_id, &project_path, base_commit_sha)
             .await
             .ok()
             .flatten()
-        {
-            return Some(RefreshDecision {
-                target,
-                should_spawn: false,
-                reuse_from: Some(cached),
-            });
-        }
+    {
+        return Some(RefreshDecision {
+            target,
+            should_spawn: false,
+            reuse_from: Some(cached),
+        });
     }
 
     let mut guard = in_flight.lock().await;
