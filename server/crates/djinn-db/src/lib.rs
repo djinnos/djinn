@@ -5,6 +5,13 @@ pub mod migrations;
 pub mod note_hash;
 pub mod repositories;
 
+pub mod test_support {
+    pub use crate::repositories::test_support::{
+        HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
+        build_multi_project_housekeeping_fixture, event_bus_for, make_project,
+    };
+}
+
 pub use database::{Database, default_db_path};
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{

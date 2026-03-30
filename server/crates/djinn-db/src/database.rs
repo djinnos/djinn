@@ -121,7 +121,6 @@ impl Database {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn test_tempdir() -> DbResult<tempfile::TempDir> {
     let base = workspace_test_tmp_dir()?;
     tempfile::Builder::new()

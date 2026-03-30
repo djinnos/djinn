@@ -11,6 +11,5 @@ pub mod session;
 pub mod session_message;
 pub mod settings;
 pub mod task;
-#[cfg(test)]
 pub mod test_support;
 pub mod verification_cache;
