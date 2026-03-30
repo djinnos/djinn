@@ -97,22 +97,8 @@ pub fn spawn_repo_map_refresh_watchers(
 
     let state_clone = state.clone();
     tokio::spawn(async move {
-        {
-            let project_repo =
-                ProjectRepository::new(db.clone(), crate::events::event_bus_for(&events_tx));
-            match project_repo.list().await {
-                Ok(projects) => {
-                    let mut guard = state_clone.lock().await;
-                    for project in projects {
-                        let path = PathBuf::from(&project.path);
-                        add_watch(&mut guard, &project.id, &path);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to list projects for repo-map watcher setup")
-                }
-            }
-        }
+        bootstrap_repo_map_refresh_watchers(state_clone.clone(), db.clone(), events_tx.clone())
+            .await;
 
         let mut events_rx = events_tx.subscribe();
         loop {
@@ -173,6 +159,51 @@ pub fn spawn_repo_map_refresh_watchers(
             }
         }
     });
+}
+
+async fn bootstrap_repo_map_refresh_watchers(
+    state: Arc<Mutex<RepoMapWatcherState>>,
+    db: Database,
+    events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
+) {
+    let project_repo = ProjectRepository::new(db, crate::events::event_bus_for(&events_tx));
+    let projects = match project_repo.list().await {
+        Ok(projects) => projects,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to list projects for repo-map watcher setup");
+            return;
+        }
+    };
+
+    let mut startup_refreshes = Vec::with_capacity(projects.len());
+    let mut guard = state.lock().await;
+    for project in projects {
+        let path = PathBuf::from(&project.path);
+        add_watch(&mut guard, &project.id, &path);
+        startup_refreshes.push((project.id, path));
+    }
+    let app_state = guard.app_state.clone();
+    let events_bus = crate::events::event_bus_for(&guard.events_tx);
+    let in_flight = guard.in_flight.clone();
+    drop(guard);
+
+    for (project_id, project_path) in startup_refreshes {
+        if let Err(error) = refresh_project_and_worktrees(
+            &app_state,
+            &events_bus,
+            in_flight.clone(),
+            &project_id,
+            &project_path,
+        )
+        .await
+        {
+            tracing::warn!(
+                project = %project_path.display(),
+                error = %error,
+                "repo-map startup refresh failed"
+            );
+        }
+    }
 }
 
 fn add_watch(state: &mut RepoMapWatcherState, project_id: &str, project_path: &Path) {
@@ -724,6 +755,95 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         project_repo.delete(&project.id).await.unwrap();
         cancel.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_bootstrap_schedules_refresh_when_head_cache_missing() {
+        let db = create_test_db();
+        let (events_tx, _) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        init_git_repo(dir.path());
+
+        let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
+        let project = project_repo
+            .create("startup-refresh-project", &dir.path().to_string_lossy())
+            .await
+            .unwrap();
+
+        let state = Arc::new(Mutex::new(RepoMapWatcherState {
+            watchers: HashMap::new(),
+            app_state: AppState::new(db.clone(), cancel.clone()),
+            events_tx: events_tx.clone(),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
+        }));
+
+        bootstrap_repo_map_refresh_watchers(state.clone(), db.clone(), events_tx.clone()).await;
+
+        let app_state = AppState::new(db.clone(), cancel.clone());
+        let identity = repo_identity(&app_state, &project.id, dir.path(), None)
+            .await
+            .expect("startup identity must resolve");
+        let target = refresh_target(&identity);
+
+        let guard = state.lock().await;
+        assert!(guard.watchers.contains_key(dir.path()));
+        assert!(guard.in_flight.lock().await.contains(&target));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_bootstrap_skips_refresh_when_head_cache_exists() {
+        let db = create_test_db();
+        let (events_tx, _) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        init_git_repo(dir.path());
+
+        let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
+        let project = project_repo
+            .create("startup-cache-hit-project", &dir.path().to_string_lossy())
+            .await
+            .unwrap();
+
+        let app_state = AppState::new(db.clone(), cancel.clone());
+        let identity = repo_identity(&app_state, &project.id, dir.path(), None)
+            .await
+            .expect("startup identity must resolve");
+        let target = refresh_target(&identity);
+
+        RepoMapCacheRepository::new(db.clone())
+            .insert(RepoMapCacheInsert {
+                key: RepoMapCacheKey {
+                    project_id: &project.id,
+                    project_path: &dir.path().to_string_lossy(),
+                    worktree_path: None,
+                    commit_sha: &identity.commit_sha,
+                },
+                rendered_map: "cached",
+                token_estimate: 1,
+                included_entries: 1,
+            })
+            .await
+            .unwrap();
+
+        let state = Arc::new(Mutex::new(RepoMapWatcherState {
+            watchers: HashMap::new(),
+            app_state: AppState::new(db.clone(), cancel.clone()),
+            events_tx: events_tx.clone(),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
+        }));
+
+        bootstrap_repo_map_refresh_watchers(state.clone(), db.clone(), events_tx.clone()).await;
+
+        let guard = state.lock().await;
+        assert!(guard.watchers.contains_key(dir.path()));
+        assert!(!guard.in_flight.lock().await.contains(&target));
     }
 
     /// Verifies that creating a project while repo-map watchers are running
