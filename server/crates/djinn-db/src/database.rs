@@ -130,6 +130,66 @@ pub(crate) fn test_tempdir() -> DbResult<tempfile::TempDir> {
         .map_err(|e| DbError::InvalidData(e.to_string()))
 }
 
+#[cfg(test)]
+pub(crate) fn create_legacy_note_fixture_db(path: &Path) -> DbResult<LegacyNoteFixture> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| DbError::InvalidData(e.to_string()))?;
+    }
+
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| DbError::InvalidData(e.to_string()))?;
+    }
+
+    migrations::run_until(path, "add_note_content_hash")
+        .map_err(|e| DbError::InvalidData(e.to_string()))?;
+
+    let conn = rusqlite::Connection::open(path).map_err(|e| DbError::InvalidData(e.to_string()))?;
+
+    let project_id = uuid::Uuid::now_v7().to_string();
+    let note_id = uuid::Uuid::now_v7().to_string();
+    let project_path = path.with_extension("project");
+    std::fs::create_dir_all(&project_path).map_err(|e| DbError::InvalidData(e.to_string()))?;
+    let note_file = project_path.join("legacy-note.md");
+    std::fs::write(&note_file, "Legacy fixture body\n")
+        .map_err(|e| DbError::InvalidData(e.to_string()))?;
+
+    conn.execute(
+        "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            project_id,
+            "legacy-project",
+            project_path.display().to_string()
+        ],
+    )
+    .map_err(|e| DbError::InvalidData(e.to_string()))?;
+
+    conn.execute(
+        "INSERT INTO notes (
+            id, project_id, permalink, title, file_path, storage, note_type, folder, tags, content
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            note_id,
+            project_id,
+            "reference/legacy-note",
+            "Legacy Note",
+            note_file.display().to_string(),
+            "file",
+            "reference",
+            "reference",
+            "[]",
+            "Legacy fixture body\n",
+        ],
+    )
+    .map_err(|e| DbError::InvalidData(e.to_string()))?;
+
+    Ok(LegacyNoteFixture { note_id })
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyNoteFixture {
+    pub note_id: String,
+}
+
 fn workspace_test_tmp_dir() -> DbResult<PathBuf> {
     // Prefer an explicit override for constrained CI/dev environments.
     if let Some(override_dir) = std::env::var_os("DJINN_TEST_TMPDIR") {
@@ -253,5 +313,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(val, "hello");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_note_fixture_is_accepted_by_current_initialization() {
+        let dir = crate::database::test_tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+        let fixture = create_legacy_note_fixture_db(&db_path).unwrap();
+
+        let pre_migration_columns: Vec<String> = {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let mut query = conn.prepare("PRAGMA table_info(notes)").unwrap();
+            query
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(
+            !pre_migration_columns
+                .iter()
+                .any(|column| column == "content_hash")
+        );
+
+        let db = Database::open(&db_path).unwrap();
+        db.ensure_initialized().await.unwrap();
+
+        let content_hash: Option<String> =
+            sqlx::query_scalar("SELECT content_hash FROM notes WHERE id = ?1")
+                .bind(&fixture.note_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert!(content_hash.is_none());
+
+        let migration_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM refinery_schema_history WHERE name = 'add_note_content_hash'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(migration_count, 1);
+
+        let index_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'notes_project_content_hash_idx'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(index_count, 1);
     }
 }
