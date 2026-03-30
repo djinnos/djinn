@@ -174,59 +174,62 @@ impl CoordinatorActor {
 
             // ── CI checks ─────────────────────────────────────────────────────
             if checks.check_runs.is_empty() {
-                // No checks registered yet — skip, wait for next tick.
-                continue;
-            }
-
-            let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
-
-            if !all_completed {
-                // CI checks still running — skip, check next tick.
-                continue;
-            }
-
-            // All checks completed — check for failures.
-            let failed_checks: Vec<&CheckRun> = checks
-                .check_runs
-                .iter()
-                .filter(|cr| {
-                    matches!(
-                        cr.conclusion.as_deref(),
-                        Some("failure") | Some("timed_out") | Some("cancelled")
-                    )
-                })
-                .collect();
-
-            if !failed_checks.is_empty() {
+                // No checks exist — repo has no CI configured.  Since the
+                // minimum-age guard above already elapsed, treat as green.
                 tracing::info!(
                     task_id = %task.short_id,
                     pr = pull_number,
-                    sha = %current_sha,
-                    failed_count = failed_checks.len(),
-                    "PR poller: CI check failed on draft PR → reopening task for rework"
+                    "PR poller: no CI check-runs found after min-age guard — treating as passed"
                 );
-                self.apply_pr_transition(
-                    &task.id,
-                    TransitionAction::PrCiFailed,
-                    Some("CI checks failed on PR"),
-                )
-                .await;
-                self.log_ci_failure_comment(
-                    &task.id,
-                    &failed_checks,
-                    pr_url,
-                    &current_sha,
-                    gh_client,
-                    &owner,
-                    &repo,
-                )
-                .await;
-                self.pr_status_cache.remove(&task.id);
-                self.pr_draft_first_seen.remove(&task.id);
-                continue;
+            } else {
+                let all_completed =
+                    checks.check_runs.iter().all(|cr| cr.status == "completed");
+                if !all_completed {
+                    // CI checks still running — skip, check next tick.
+                    continue;
+                }
+                // All completed — check for failures.
+                let failed_checks: Vec<&CheckRun> = checks
+                    .check_runs
+                    .iter()
+                    .filter(|cr| {
+                        matches!(
+                            cr.conclusion.as_deref(),
+                            Some("failure") | Some("timed_out") | Some("cancelled")
+                        )
+                    })
+                    .collect();
+                if !failed_checks.is_empty() {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        sha = %current_sha,
+                        failed_count = failed_checks.len(),
+                        "PR poller: CI check failed on draft PR → reopening task for rework"
+                    );
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::PrCiFailed,
+                        Some("CI checks failed on PR"),
+                    )
+                    .await;
+                    self.log_ci_failure_comment(
+                        &task.id,
+                        &failed_checks,
+                        pr_url,
+                        &current_sha,
+                        gh_client,
+                        &owner,
+                        &repo,
+                    )
+                    .await;
+                    self.pr_status_cache.remove(&task.id);
+                    self.pr_draft_first_seen.remove(&task.id);
+                    continue;
+                }
             }
 
-            // All CI checks passed. Check for merge conflicts before undrafting.
+            // CI passed (or no CI configured). Check for merge conflicts before undrafting.
             if pr.mergeable == Some(false) {
                 tracing::info!(
                     task_id = %task.short_id,
