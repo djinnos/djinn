@@ -9,6 +9,7 @@ doctest = false
 [dependencies]
 anyhow = "1"
 git2 = "0.20"
+libc = "0.2"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"

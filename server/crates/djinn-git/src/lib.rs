@@ -1,5 +1,35 @@
 use std::path::{Path, PathBuf};
 
+/// Lower CPU and I/O priority for a child process so djinn operations do not
+/// starve interactive user applications (browser, editor, etc.).
+///
+/// Errors are intentionally ignored — some containers restrict these calls.
+#[cfg(unix)]
+fn lower_process_priority(cmd: &mut tokio::process::Command) {
+    // SAFETY: pre_exec runs in the forked child before exec.
+    // All calls here are async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            // Nice level 10 — below default 0, yields to user processes under contention.
+            let _ = libc::setpriority(libc::PRIO_PROCESS as u32, 0, 10);
+
+            // I/O priority: best-effort class (2) with lowest priority (7).
+            #[cfg(target_os = "linux")]
+            {
+                const IOPRIO_WHO_PROCESS: i32 = 1;
+                const IOPRIO_CLASS_BE: i32 = 2;
+                let ioprio_val = (IOPRIO_CLASS_BE << 13) | 7;
+                let _ = libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, ioprio_val);
+            }
+
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn lower_process_priority(_cmd: &mut tokio::process::Command) {}
+
 pub const PUSH_MAX_ATTEMPTS: u32 = 3;
 pub const REBASE_MAX_ATTEMPTS: u32 = 3;
 
@@ -167,6 +197,7 @@ pub async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<Command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    lower_process_priority(&mut cmd);
     let output = cmd.output().await?;
 
     let code = output.status.code().unwrap_or(-1);
@@ -200,13 +231,14 @@ pub async fn run_git_command_with_timeout(
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
 
-    let mut child = tokio::process::Command::new("git")
-        .args(&args)
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(&args)
         .current_dir(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    lower_process_priority(&mut cmd);
+    let mut child = cmd.spawn()?;
 
     // Take stdout/stderr handles so we can read them concurrently with wait,
     // avoiding deadlocks if the child fills a pipe buffer, while still being

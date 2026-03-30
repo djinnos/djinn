@@ -24,14 +24,31 @@ use wait_timeout::ChildExt;
 pub fn isolate_process_group(cmd: &mut Command) {
     // SAFETY: pre_exec runs in the child process right before exec.
     // setpgid(0, 0) places that child in a new process group.
+    // We also lower CPU and I/O priority so spawned verification / session
+    // commands do not starve interactive user applications (browser, editor).
     unsafe {
         cmd.pre_exec(|| {
             let rc = libc::setpgid(0, 0);
-            if rc == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
             }
+
+            // Nice level 10 — well below default 0, but not starved.
+            // Errors are non-fatal: some containers restrict setpriority.
+            let _ = libc::setpriority(libc::PRIO_PROCESS as u32, 0, 10);
+
+            // I/O priority: best-effort class (2) with lowest priority (7).
+            // ioprio_set is not in libc, use raw syscall.
+            #[cfg(target_os = "linux")]
+            {
+                const IOPRIO_WHO_PROCESS: i32 = 1;
+                const IOPRIO_CLASS_BE: i32 = 2;
+                // Encoding: (class << 13) | level
+                let ioprio_val = (IOPRIO_CLASS_BE << 13) | 7;
+                let _ = libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, ioprio_val);
+            }
+
+            Ok(())
         });
     }
 }

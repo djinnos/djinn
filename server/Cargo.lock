@@ -741,6 +741,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "git2",
+ "libc",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
