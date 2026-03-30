@@ -910,20 +910,21 @@ mod tests {
 
     // ─── End-to-end prompt assembly → Anthropic request coverage ──────────────
 
-    /// Helper that replicates the chat-layer `build_system_message` logic:
-    /// stable-prefix segments become individual ContentBlocks in a single System
-    /// message with `cache_control` metadata, while dynamic segments are merged
-    /// into a trailing block without cache metadata.
+    /// Helper that mirrors the current formatter contract coming out of
+    /// `server/src/server/chat.rs::build_system_message`: the base system prompt,
+    /// project/tool-definition context, and repo map are preserved as distinct
+    /// stable-prefix `ContentBlock::Text` entries, while any dynamic client/task
+    /// context remains a single trailing block.
     fn build_system_message_for_test(
         base_prompt: &str,
-        tool_definitions: Option<&str>,
+        project_context: Option<&str>,
         repo_map: Option<&str>,
         client_system: Option<&str>,
         is_anthropic: bool,
     ) -> Message {
         let mut stable_texts: Vec<String> = vec![base_prompt.trim().to_string()];
-        if let Some(tools) = tool_definitions.filter(|s| !s.trim().is_empty()) {
-            stable_texts.push(tools.to_string());
+        if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
+            stable_texts.push(project_context.to_string());
         }
         if let Some(rm) = repo_map.filter(|s| !s.trim().is_empty()) {
             stable_texts.push(rm.to_string());
@@ -963,20 +964,22 @@ mod tests {
         }
     }
 
-    /// E2E: with repo map present, Anthropic system blocks preserve ordering
-    /// (base → tool definitions → repo map → dynamic tail) and stable-prefix
-    /// `cache_control` appears only on the stable prefix, not on the dynamic tail.
+    /// E2E: with repo map present, Anthropic system blocks preserve the same
+    /// formatter-visible ordering that `chat.rs::build_system_message` produces
+    /// for stable system content (base → project/tool-definition context → repo
+    /// map → dynamic tail), and stable-prefix `cache_control` appears only on the
+    /// stable prefix, not on the dynamic tail.
     #[test]
     fn e2e_repo_map_present_system_blocks_ordered_with_cache_control() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
-        let tool_definitions = "## Tool Definitions\nshell(cmd: string)\nread(path: string)";
+        let project_context = "## Tool Definitions\nshell(cmd: string)\nread(path: string)";
         let repo_map = "## Repository Map\nsrc/lib.rs\n  pub fn run()";
         let client = "Be concise.";
 
         let sys_msg = build_system_message_for_test(
             base,
-            Some(tool_definitions),
+            Some(project_context),
             Some(repo_map),
             Some(client),
             true,
@@ -993,9 +996,19 @@ mod tests {
 
         assert_eq!(system.len(), 4, "expected 4 system blocks");
         assert_eq!(system[0]["text"], base.trim());
-        assert_eq!(system[1]["text"], tool_definitions);
+        assert_eq!(system[1]["text"], project_context);
         assert_eq!(system[2]["text"], repo_map);
         assert_eq!(system[3]["text"], client);
+
+        let stable_texts: Vec<_> = system[..3]
+            .iter()
+            .map(|block| block["text"].as_str().expect("system block text"))
+            .collect();
+        assert_eq!(
+            stable_texts,
+            vec![base.trim(), project_context, repo_map],
+            "stable Anthropic prefix should remain base -> tool definitions -> repo map"
+        );
 
         for stable_block in &system[..3] {
             assert_eq!(stable_block["cache_control"]["type"], "ephemeral");
@@ -1053,18 +1066,20 @@ mod tests {
         assert_eq!(req["system"], base.trim());
     }
 
-    /// E2E: repo-map session with tools verifies that request-level tool
-    /// definitions coexist with the ordered Anthropic system blocks.
+    /// E2E: repo-map session with request-level tools verifies that Anthropic
+    /// keeps the stable system prefix ordered as base -> project/tool-definition
+    /// context -> repo map, preserves the uncached dynamic tail, and still emits
+    /// the separate request `tools` array unchanged.
     #[test]
     fn e2e_repo_map_with_tools_preserves_both_system_and_tools() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
-        let tool_definitions = "## Tool Definitions\nshell(cmd: string)";
+        let project_context = "## Tool Definitions\nshell(cmd: string)";
         let repo_map = "## Repository Map\nsrc/main.rs\n  fn main()";
 
         let sys_msg = build_system_message_for_test(
             base,
-            Some(tool_definitions),
+            Some(project_context),
             Some(repo_map),
             Some("be brief"),
             true,
@@ -1086,9 +1101,12 @@ mod tests {
             .expect("system should be array with cache_control");
         assert_eq!(system.len(), 4);
         assert_eq!(system[0]["text"], base.trim());
-        assert_eq!(system[1]["text"], tool_definitions);
+        assert_eq!(system[1]["text"], project_context);
         assert_eq!(system[2]["text"], repo_map);
         assert_eq!(system[3]["text"], "be brief");
+        assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[2]["cache_control"]["kind"], "stable_prefix");
         assert!(system[3].get("cache_control").is_none());
 
         let req_tools = req["tools"].as_array().expect("tools array");
