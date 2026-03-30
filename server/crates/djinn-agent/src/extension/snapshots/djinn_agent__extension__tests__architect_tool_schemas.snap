@@ -619,6 +619,17 @@ expression: tool_schemas_architect()
         "id": {
           "description": "Task UUID or short ID",
           "type": "string"
+        },
+        "reason": {
+          "description": "Reason for the transition. Required for force_close when no replacement_task_ids are provided.",
+          "type": "string"
+        },
+        "replacement_task_ids": {
+          "description": "UUIDs or short IDs of replacement tasks. Required for force_close when no reason is provided.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [

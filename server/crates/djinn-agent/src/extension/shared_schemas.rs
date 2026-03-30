@@ -384,7 +384,9 @@ pub(crate) fn tool_task_transition() -> RmcpTool {
             "required": ["id", "action"],
             "properties": {
                 "id": {"type": "string", "description": "Task UUID or short ID"},
-                "action": {"type": "string", "description": "Transition action name"}
+                "action": {"type": "string", "description": "Transition action name"},
+                "reason": {"type": "string", "description": "Reason for the transition. Required for force_close when no replacement_task_ids are provided."},
+                "replacement_task_ids": {"type": "array", "items": {"type": "string"}, "description": "UUIDs or short IDs of replacement tasks. Required for force_close when no reason is provided."}
             }
         }),
     )

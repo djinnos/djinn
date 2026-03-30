@@ -79,10 +79,18 @@ impl TaskRepository {
         // tasks. The lead/architect must reassign blockers to replacement tasks before
         // closing incomplete work. Closures from post-approval states (Approved, PrDraft,
         // PrReview) and PrMerge are exempt because the work actually landed.
+        // Simple-lifecycle tasks (spikes, research, planning, review) are also exempt
+        // when closed via Close — closing IS their completion, they never go through
+        // approval/merge states.
+        let simple_lifecycle_close = IssueType::parse(&current.issue_type)
+            .map(|it| it.uses_simple_lifecycle())
+            .unwrap_or(false)
+            && action == TransitionAction::Close;
         let work_landed = matches!(
             from,
             TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview
-        ) || action == TransitionAction::PrMerge;
+        ) || action == TransitionAction::PrMerge
+            || simple_lifecycle_close;
         if apply.set_closed_at && !work_landed {
             let downstream = sqlx::query_as::<_, BlockerRef>(
                 "SELECT t.id AS task_id, t.short_id, t.title, t.status

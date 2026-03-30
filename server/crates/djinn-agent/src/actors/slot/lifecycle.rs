@@ -1633,7 +1633,7 @@ async fn apply_transition_and_dispatch(
         if let Err(e) = task_repo
             .transition(
                 task_id,
-                action,
+                action.clone(),
                 "agent-supervisor",
                 "system",
                 reason.as_deref(),
@@ -1642,6 +1642,30 @@ async fn apply_transition_and_dispatch(
             .await
         {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to transition task after session");
+            // If the intended transition failed (e.g. Close blocked by
+            // downstream blockers), fall back to Release so the task doesn't
+            // get stuck in in_progress with no session — which causes the
+            // coordinator's stuck-task recovery to loop indefinitely.
+            if action != TransitionAction::Release {
+                let fallback_reason = format!("Fallback release: {e}");
+                if let Err(e2) = task_repo
+                    .transition(
+                        task_id,
+                        TransitionAction::Release,
+                        "agent-supervisor",
+                        "system",
+                        Some(&fallback_reason),
+                        None,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        task_id = %task_id,
+                        error = %e2,
+                        "Lifecycle: fallback Release also failed; task may be stuck"
+                    );
+                }
+            }
         }
         if is_conflict_rejection {
             interrupt_paused_worker_session(task_id, app_state).await;
