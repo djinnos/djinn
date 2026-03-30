@@ -10,6 +10,7 @@ tags: []
 
 
 
+
 # Roadmap — Djinn Server Rust Rewrite
 
 Phased delivery plan for v1 requirements. Each phase builds on the previous and has testable success criteria. Phases are sequenced by real dependencies — later phases require earlier foundations.
@@ -618,7 +619,7 @@ _Updated: 2026-03-18_
 
 ## Phase 19: Agent Role Hierarchy — ADR-034
 
-**Goal**: Replace the flat agent hierarchy with a structured role model: rename existing roles (Groomer→Planner, PM→Lead), add Architect role with 5-minute patrol, introduce task types (spike, research, decomposition, review), implement Scrum Master deterministic coordinator rules, and enable wave-based epic decomposition. **See [[ADR-034: Agent Role Hierarchy — Architect Patrol, Scrum Master Rules, and Task Types]].**
+**Goal**: Replace the flat agent hierarchy with a structured role model: rename existing roles (Groomer→Planner, PM→Lead), add Architect role with 5-minute patrol, introduce task types (spike, research, decomposition, review), implement Scrum Master deterministic coordinator rules, and enable wave-based epic decomposition. **See [[ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]].**
 
 **Progress**: Not started. ADR-034 written and accepted. Depends on Phase 17 (cognitive memory) for full Planner wave integration with session reflection and confidence signals.
 

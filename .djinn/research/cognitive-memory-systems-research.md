@@ -1,3 +1,9 @@
+---
+title: Cognitive Memory Systems Research
+type: research
+tags: []
+---
+
 # Cognitive Memory Systems Research
 
 Comparative analysis of four approaches to agent memory/context, evaluated for Djinn's multi-agent coordinator architecture (hundreds of concurrent agents, thousands of tasks).
@@ -133,6 +139,6 @@ LLM-summarized commits co-embedded with code. Enables pattern reuse ("show me a 
 - [[Project Brief]]
 - [[Roadmap]]
 - [[V1 Requirements]]
-- [[ADR-006: Project .djinn Directory — Notes Only, Git-Tracked]]
+- [["ADR-030: Repo-Committed Verification and Commit-Hash Caching"]]
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
 - [[ADR-015: Session Continuity & Resume]]

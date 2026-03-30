@@ -4,6 +4,7 @@ type: adr
 tags: ["adr","session-viewer","ui"]
 ---
 
+
 ## Context
 
 When a task executes, multiple agents participate (worker, task_reviewer, conflict_resolver) across multiple sessions, with compaction boundaries, setup/verification command runs, and system events (submitted for review, reopened, merged). Users need to see what happened during execution — not just the final status, but the full story.
@@ -40,7 +41,7 @@ Render task execution as a **single unified chat thread** — not segmented by s
 - Tasks without sessions: current slide-over modal (TaskDetailPanel)
 
 ### Data Sources
-- Agent chat content: new Goose session messages API (see [[ADR-020: Goose Session Messages API]])
+- Agent chat content: new Goose session messages API (see [[Roadmap]])
 - Setup/verification results: new structured activity events (see [[ADR-020: Structured Activity Events for Command Runs]])
 - Status transitions, reviewer comments, compaction events: existing `task_activity_list` MCP tool
 - Session metadata and continuation chains: existing `session_list(chain_ordered=true)` MCP tool

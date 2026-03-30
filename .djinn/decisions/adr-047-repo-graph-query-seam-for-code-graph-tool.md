@@ -4,6 +4,7 @@ type: adr
 tags: ["adr-044","code-graph","architecture"]
 ---
 
+
 # ADR-047: Repo-graph query seam for `code_graph` tool
 
 ## Status
@@ -91,5 +92,5 @@ Response types (`GraphNeighbor`, `RankedNode`) are defined in `djinn-mcp` as ser
 
 ## Relations
 
-- [[ADR-044 Phase 3 — code_graph tool]]
+- [[ADR-044: Interactive Code Intelligence — LSP Enhancements, NamePath Addressing, and Repo Graph Queries]]
 - [[ADR-041 MCP tool bridge architecture]]

@@ -5,12 +5,14 @@ tags: ["adr","agent-loop","session","tool-choice","roles"]
 ---
 
 
+
+
 # ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice
 
 **Status:** Complete
 **Date:** 2026-03-18
 **Supersedes:** ADR-022 (Outcome-Based Session Validation & Agent Role Redesign)
-**Related:** [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]], [[ADR-034: Agent Role Hierarchy — Architect Patrol, Scrum Master Rules, and Task Types]]
+**Related:** [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]], [[Roadmap]]
 
 ---
 
@@ -228,7 +230,7 @@ Add `tool_choice: Option<ToolChoice>` as a parameter to `LlmProvider::stream()`.
 
 - [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — SUPERSEDED
 - [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]] — provider abstraction extended
-- [[ADR-034: Agent Role Hierarchy — Architect Patrol, Scrum Master Rules, and Task Types]] — new roles will also need finalize tools
+- [[Roadmap]] — new roles will also need finalize tools
 - [[Roadmap]] — new phase or integrated into Phase 16 (Operational Reliability)
 
 

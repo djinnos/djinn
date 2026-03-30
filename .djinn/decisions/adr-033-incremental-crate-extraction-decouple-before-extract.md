@@ -4,6 +4,7 @@ type: adr
 tags: ["adr","architecture","workspace","cargo","migration","events","repositories"]
 ---
 
+
 # ADR-033: Incremental Crate Extraction — Decouple Before Extract
 
 ## Status: Accepted
@@ -109,5 +110,5 @@ Steps:
 
 ## Relations
 
-- [[ADR-029: Vertical Workspace Splitting and Agent Role Trait]] — superseded (workspace portion)
+- [["ADR-029: Vertical Workspace Splitting and Agent Role Trait"]] — superseded (workspace portion)
 - [[ADR-028: Module Visibility Enforcement and Deep Module Architecture]] — complementary

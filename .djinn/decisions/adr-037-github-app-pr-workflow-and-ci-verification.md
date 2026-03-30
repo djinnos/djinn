@@ -5,11 +5,13 @@ tags: ["adr","architecture","github","verification","ci","oauth"]
 ---
 
 
+
+
 # ADR-037: GitHub App PR Workflow and CI-Based Verification
 
 **Status:** Draft
 **Date:** 2026-03-19
-**Related:** [[ADR-030: Repo-Committed Verification and Commit Hash Caching]], [[ADR-009: No Phases/Stacked Branches]]
+**Related:** [["ADR-030: Repo-Committed Verification and Commit-Hash Caching"]], [['ADR-009: Simplified Execution — No Phases, Direct Task Dispatch']]
 
 ---
 

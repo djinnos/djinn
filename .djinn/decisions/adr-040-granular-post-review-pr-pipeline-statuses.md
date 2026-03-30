@@ -4,11 +4,13 @@ type: adr
 tags: ["adr","architecture","task-lifecycle","pr-workflow"]
 ---
 
+
+
 # ADR-040: Granular Post-Review PR Pipeline Statuses
 
 **Status:** Accepted
 **Date:** 2026-03-22
-**Related:** [[ADR-037: GitHub App PR Workflow and CI-Based Verification]], [[ADR-039: Replace Clerk and GitHub App with GitHub OAuth App]]
+**Related:** [[ADR-037: GitHub App PR Workflow and CI-Based Verification]], [["ADR-039: Replace Clerk and GitHub App with GitHub OAuth App"]]
 
 ---
 
@@ -103,5 +105,5 @@ This is a project-level configuration decision, not a per-task one.
 ## Relations
 
 - [[ADR-037: GitHub App PR Workflow and CI-Based Verification]]
-- [[ADR-039: Replace Clerk and GitHub App with GitHub OAuth App]]
+- [["ADR-039: Replace Clerk and GitHub App with GitHub OAuth App"]]
 - [[Roadmap]]

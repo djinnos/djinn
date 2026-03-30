@@ -1,11 +1,9 @@
 ---
-tags:
-    - scope
-    - milestone-2
-    - reference
 title: Milestone 2 Scope
 type: reference
+tags: []
 ---
+
 # Milestone 2 Scope
 
 ## In Scope
@@ -45,6 +43,6 @@ type: reference
 ## Relations
 - [[Roadmap]] — Phase 2 (Auth & Onboarding)
 - [[V1 Requirements]] — AUTH and ONBOARD requirements
-- [[ADR-001: Desktop-Only Clerk Authentication via System Browser PKCE]] — auth architecture
+- [['ADR-001: Desktop-Only Clerk Authentication via System Browser PKCE']] — auth architecture
 - [[ADR-002: Feature Licensing Deferred — Metabase-Style Open Core]] — licensing out of scope
 - [[Architecture Research]] — original auth design (superseded by ADR-001)
