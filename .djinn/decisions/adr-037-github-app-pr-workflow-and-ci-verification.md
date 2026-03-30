@@ -7,6 +7,7 @@ tags: ["adr","architecture","github","verification","ci","oauth"]
 
 
 
+
 # ADR-037: GitHub App PR Workflow and CI-Based Verification
 
 **Status:** Draft
@@ -236,4 +237,4 @@ Two options for receiving GitHub webhooks when running locally:
 ## Relations
 
 - [[ADR-030: Repo-Committed Verification and Commit Hash Caching]] — current verification model being extended
-- [[ADR-009: No Phases/Stacked Branches]] — task branches merge to target; PR is the merge mechanism now
+- [['ADR-009: Simplified Execution — No Phases, Direct Task Dispatch']] — task branches merge to target; PR is the merge mechanism now

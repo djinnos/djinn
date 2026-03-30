@@ -6,13 +6,14 @@ tags: ["adr","architecture","agent","lsp","scip","repo-graph","code-intelligence
 
 
 
+
 # ADR-044: Interactive Code Intelligence — LSP Enhancements, NamePath Addressing, and Repo Graph Queries
 
 ## Status: Draft
 
 Date: 2026-03-27
 
-Related: [["ADR-043: Repository Map — SCIP-Powered Structural Context for Agent Sessions"]], [[ADR-041 Unified Tool Service Layer in djinn-mcp]]
+Related: [["ADR-043: Repository Map — SCIP-Powered Structural Context for Agent Sessions"]], [[ADR-041: Unified Tool Service Layer in djinn-mcp]]
 
 ## Context
 
