@@ -910,10 +910,10 @@ mod tests {
 
     // ─── End-to-end prompt assembly → Anthropic request coverage ──────────────
 
-    /// Helper that replicates the chat-layer `build_system_message` logic:
-    /// stable-prefix segments become individual ContentBlocks in a single System
-    /// message with `cache_control` metadata, while dynamic segments are merged
-    /// into a trailing block without cache metadata.
+    /// Build a system message using the current chat-layer production contract:
+    /// trim the base prompt, keep project context and repo map as stable blocks,
+    /// collapse dynamic client/task text into a trailing block, and attach
+    /// Anthropic cache metadata only for Anthropic models.
     fn build_system_message_for_test(
         base_prompt: &str,
         project_context: Option<&str>,
@@ -921,43 +921,27 @@ mod tests {
         client_system: Option<&str>,
         is_anthropic: bool,
     ) -> Message {
-        // Stable segments: base, project, repo-map
-        let mut stable_texts: Vec<String> = vec![base_prompt.trim().to_string()];
-        if let Some(ctx) = project_context.filter(|s| !s.trim().is_empty()) {
-            stable_texts.push(ctx.to_string());
+        let mut content = vec![ContentBlock::text(base_prompt.trim())];
+        if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
+            content.push(ContentBlock::text(project_context));
         }
-        if let Some(rm) = repo_map.filter(|s| !s.trim().is_empty()) {
-            stable_texts.push(rm.to_string());
+        if let Some(repo_map) = repo_map.filter(|s| !s.trim().is_empty()) {
+            content.push(ContentBlock::text(repo_map));
+        }
+        if let Some(client_system) = client_system.filter(|s| !s.trim().is_empty()) {
+            content.push(ContentBlock::text(client_system));
         }
 
-        // Dynamic tail
-        let dynamic_tail = client_system
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.to_string());
-
-        let has_stable_prefix = true; // base prompt always present
-        let metadata = if is_anthropic && has_stable_prefix {
-            Some(crate::message::MessageMeta {
-                input_tokens: None,
-                output_tokens: None,
-                timestamp: None,
-                provider_data: Some(json!({
-                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
-                        kind: Some("stable_prefix".to_string()),
-                    }
-                })),
-            })
-        } else {
-            None
-        };
-
-        let mut content: Vec<ContentBlock> = stable_texts
-            .into_iter()
-            .map(|text| ContentBlock::Text { text })
-            .collect();
-        if let Some(tail) = dynamic_tail {
-            content.push(ContentBlock::Text { text: tail });
-        }
+        let metadata = is_anthropic.then(|| crate::message::MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(json!({
+                ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                    kind: Some("stable_prefix".to_string()),
+                }
+            })),
+        });
 
         Message {
             role: crate::message::Role::System,
@@ -966,19 +950,26 @@ mod tests {
         }
     }
 
-    /// E2E: with repo map present, Anthropic system blocks preserve ordering
-    /// (base → project → repo map → dynamic tail) and stable-prefix
-    /// `cache_control` appears only on the non-final stable blocks.
+    /// E2E: with repo map present, Anthropic system blocks preserve the same
+    /// formatter-visible ordering that `chat.rs::build_system_message` produces
+    /// for stable system content (base → project/tool-definition context → repo
+    /// map → dynamic tail), and stable-prefix `cache_control` appears only on the
+    /// stable prefix, not on the dynamic tail.
     #[test]
     fn e2e_repo_map_present_system_blocks_ordered_with_cache_control() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
-        let project = "## Current Project\n**Name**: Demo\n**Path**: /tmp/demo";
+        let project_context = "## Tool Definitions\nshell(cmd: string)\nread(path: string)";
         let repo_map = "## Repository Map\nsrc/lib.rs\n  pub fn run()";
         let client = "Be concise.";
 
-        let sys_msg =
-            build_system_message_for_test(base, Some(project), Some(repo_map), Some(client), true);
+        let sys_msg = build_system_message_for_test(
+            base,
+            Some(project_context),
+            Some(repo_map),
+            Some(client),
+            true,
+        );
 
         let mut conv = Conversation::new();
         conv.push(sys_msg);
@@ -989,50 +980,39 @@ mod tests {
             .as_array()
             .expect("system should be an array when cache_control is present");
 
-        // Ordering: base, project, repo_map, dynamic tail
         assert_eq!(system.len(), 4, "expected 4 system blocks");
         assert_eq!(system[0]["text"], base.trim());
-        assert_eq!(system[1]["text"], project);
+        assert_eq!(system[1]["text"], project_context);
         assert_eq!(system[2]["text"], repo_map);
         assert_eq!(system[3]["text"], client);
 
-        // cache_control on all stable-prefix blocks except the last content block
-        assert!(
-            system[0].get("cache_control").is_some(),
-            "base prompt block should have cache_control"
+        let stable_texts: Vec<_> = system[..3]
+            .iter()
+            .map(|block| block["text"].as_str().expect("system block text"))
+            .collect();
+        assert_eq!(
+            stable_texts,
+            vec![base.trim(), project_context, repo_map],
+            "stable Anthropic prefix should remain base -> tool definitions -> repo map"
         );
-        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
 
-        assert!(
-            system[1].get("cache_control").is_some(),
-            "project context block should have cache_control"
-        );
-        assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
-
-        assert!(
-            system[2].get("cache_control").is_some(),
-            "repo map block should have cache_control"
-        );
-        assert_eq!(system[2]["cache_control"]["kind"], "stable_prefix");
-
-        // Dynamic tail (last block) has no cache_control
+        for stable_block in &system[..3] {
+            assert_eq!(stable_block["cache_control"]["type"], "ephemeral");
+            assert_eq!(stable_block["cache_control"]["kind"], "stable_prefix");
+        }
         assert!(
             system[3].get("cache_control").is_none(),
             "dynamic tail block must not have cache_control"
         );
     }
 
-    /// E2E: without repo map or project context, a single non-cacheable system
-    /// block collapses to a plain string (no array, no cache_control).
+    /// E2E: without repo map, tools, or dynamic context, a single non-cacheable
+    /// system block collapses to a plain string (no array, no cache_control).
     #[test]
     fn e2e_no_repo_map_single_block_no_cache_control() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
 
-        // No project context, no repo map, no client system — just the base prompt.
-        // When there is only one content block, the chat layer omits cache metadata
-        // when the model is non-Anthropic OR when the prompt is trivially simple.
         let sys_msg = build_system_message_for_test(base, None, None, None, false);
 
         let mut conv = Conversation::new();
@@ -1041,7 +1021,6 @@ mod tests {
 
         let req = provider.build_request(&conv, &[], None);
 
-        // Single block without cache_control → serialized as plain string
         assert!(
             req["system"].is_string(),
             "single-block system without cache_control should serialize as a plain string"
@@ -1050,17 +1029,13 @@ mod tests {
     }
 
     /// E2E: Anthropic model with base prompt only (no optional contexts) still
-    /// uses array format when cache metadata is attached, and cache_control
-    /// is on the non-final block only (here: there is only one block which is
-    /// also the final block, so no cache_control on it).
+    /// serializes as a plain string because the only block is also the dynamic
+    /// cache boundary and therefore receives no `cache_control`.
     #[test]
     fn e2e_anthropic_base_only_with_cache_metadata_formats_as_single_block() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
 
-        // Anthropic model, base prompt only — metadata says stable_prefix but
-        // there is only 1 content block. The cache_control logic attaches it to
-        // all blocks except the last, so with 1 block there is no cache_control.
         let sys_msg = build_system_message_for_test(base, None, None, None, true);
 
         let mut conv = Conversation::new();
@@ -1069,8 +1044,6 @@ mod tests {
 
         let req = provider.build_request(&conv, &[], None);
 
-        // Single content block (even with metadata present) → last-block rule
-        // means no cache_control → serialized as plain string.
         assert!(
             req["system"].is_string(),
             "single-block anthropic system should still be a plain string \
@@ -1079,16 +1052,24 @@ mod tests {
         assert_eq!(req["system"], base.trim());
     }
 
-    /// E2E: repo-map session with tools verifies that system blocks and tool
-    /// definitions coexist correctly in the request body.
+    /// E2E: repo-map session with request-level tools verifies that Anthropic
+    /// keeps the stable system prefix ordered as base -> project/tool-definition
+    /// context -> repo map, preserves the uncached dynamic tail, and still emits
+    /// the separate request `tools` array unchanged.
     #[test]
     fn e2e_repo_map_with_tools_preserves_both_system_and_tools() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
+        let project_context = "## Tool Definitions\nshell(cmd: string)";
         let repo_map = "## Repository Map\nsrc/main.rs\n  fn main()";
 
-        let sys_msg =
-            build_system_message_for_test(base, None, Some(repo_map), Some("be brief"), true);
+        let sys_msg = build_system_message_for_test(
+            base,
+            Some(project_context),
+            Some(repo_map),
+            Some("be brief"),
+            true,
+        );
 
         let mut conv = Conversation::new();
         conv.push(sys_msg);
@@ -1104,9 +1085,16 @@ mod tests {
         let system = req["system"]
             .as_array()
             .expect("system should be array with cache_control");
-        assert_eq!(system.len(), 3); // base, repo_map, dynamic tail
+        assert_eq!(system.len(), 4);
+        assert_eq!(system[0]["text"], base.trim());
+        assert_eq!(system[1]["text"], project_context);
+        assert_eq!(system[2]["text"], repo_map);
+        assert_eq!(system[3]["text"], "be brief");
+        assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[2]["cache_control"]["kind"], "stable_prefix");
+        assert!(system[3].get("cache_control").is_none());
 
-        // Tools appear in the request body alongside system blocks
         let req_tools = req["tools"].as_array().expect("tools array");
         assert_eq!(req_tools.len(), 1);
         assert_eq!(req_tools[0]["name"], "shell");
