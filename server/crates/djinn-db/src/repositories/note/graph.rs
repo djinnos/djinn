@@ -94,7 +94,7 @@ impl NoteRepository {
     }
 
     /// Notes with zero inbound wikilinks (potential dead-ends).
-    /// Singleton types (`brief`, `roadmap`) are excluded.
+    /// Singleton types and generated catalog notes are excluded.
     /// Optionally filtered by `folder`.
     pub async fn orphans(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<OrphanNote>> {
         self.db.ensure_initialized().await?;
@@ -103,7 +103,7 @@ impl NoteRepository {
             "SELECT n.id, n.permalink, n.title, n.note_type, n.folder
              FROM notes n
              WHERE n.project_id = ?1
-               AND n.note_type NOT IN ('brief', 'roadmap')
+               AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND (?2 IS NULL OR n.folder = ?2)
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id

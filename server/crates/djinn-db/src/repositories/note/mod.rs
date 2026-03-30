@@ -1381,6 +1381,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_health() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Project Brief",
+            "brief body",
+            "brief",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Project Roadmap",
+            "roadmap body",
+            "roadmap",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create_db_note(&project.id, "Catalog", "generated catalog", "catalog", "[]")
+            .await
+            .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Reachable Target",
+            "body",
+            "adr",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Linked Source",
+            "See [[Reachable Target]].",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project.id,
+            tmp.path(),
+            "Real Orphan",
+            "no inbound links",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let orphans = repo.orphans(&project.id, None).await.unwrap();
+        let orphan_titles: Vec<&str> = orphans.iter().map(|o| o.title.as_str()).collect();
+        assert!(orphan_titles.contains(&"Linked Source"));
+        assert!(orphan_titles.contains(&"Real Orphan"));
+
+        let health = repo.health(&project.id).await.unwrap();
+        assert_eq!(health.orphan_note_count, orphans.len() as i64);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_previously_broken_links_on_create() {
         let tmp = crate::database::test_tempdir().unwrap();
         let db = Database::open_in_memory().unwrap();
