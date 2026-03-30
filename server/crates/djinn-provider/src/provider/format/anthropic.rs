@@ -133,6 +133,38 @@ impl AnthropicProvider {
         ))
     }
 
+    fn tool_definition_cache_control(conversation: &Conversation) -> Option<Value> {
+        conversation
+            .messages
+            .iter()
+            .find(|message| message.role == djinn_core::message::Role::System)
+            .and_then(Self::maybe_cache_control)
+    }
+
+    fn serialize_tools_for_request(conversation: &Conversation, tools: &[Value]) -> Option<Value> {
+        if tools.is_empty() {
+            return None;
+        }
+
+        let cache_control = Self::tool_definition_cache_control(conversation);
+        Some(Value::Array(
+            tools
+                .iter()
+                .enumerate()
+                .map(|(index, tool)| {
+                    let mut tool_obj = tool.clone();
+                    if index == 0
+                        && let Some(cache_control) = &cache_control
+                        && let Some(obj) = tool_obj.as_object_mut()
+                    {
+                        obj.insert("cache_control".to_string(), cache_control.clone());
+                    }
+                    tool_obj
+                })
+                .collect(),
+        ))
+    }
+
     fn build_request(
         &self,
         conversation: &Conversation,
@@ -154,12 +186,8 @@ impl AnthropicProvider {
             body["system"] = system_value;
         }
 
-        if self.config.capabilities.streaming {
-            body["stream"] = json!(true);
-        }
-
-        if !tools.is_empty() {
-            body["tools"] = json!(tools);
+        if let Some(serialized_tools) = Self::serialize_tools_for_request(conversation, tools) {
+            body["tools"] = serialized_tools;
 
             let thinking_enabled = body
                 .get("thinking")
@@ -174,6 +202,10 @@ impl AnthropicProvider {
                     ToolChoice::None => body["tool_choice"] = json!({"type": "none"}),
                 }
             }
+        }
+
+        if self.config.capabilities.streaming {
+            body["stream"] = json!(true);
         }
 
         body
@@ -597,29 +629,32 @@ mod tests {
             },
         ));
         conv.messages[0].content.push(ContentBlock::Text {
-            text: "tool definitions".to_string(),
-        });
-        conv.messages[0].content.push(ContentBlock::Text {
             text: "repo map".to_string(),
         });
         conv.push(crate::message::Message::user("hello"));
 
-        let req = provider.build_request(&conv, &[], None);
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "input_schema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
         let system = req["system"].as_array().expect("system block array");
-        assert_eq!(system.len(), 3);
+        assert_eq!(system.len(), 2);
         assert_eq!(system[0]["text"], "base prompt");
-        assert_eq!(system[1]["text"], "tool definitions");
-        assert_eq!(system[2]["text"], "repo map");
+        assert_eq!(system[1]["text"], "repo map");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(
             system[0]["cache_control"]["kind"],
             ANTHROPIC_STABLE_PREFIX_KIND
         );
+        assert!(system[1].get("cache_control").is_none());
+        assert_eq!(req["tools"][0]["name"], "shell");
         assert_eq!(
-            system[1]["cache_control"]["kind"],
+            req["tools"][0]["cache_control"]["kind"],
             ANTHROPIC_STABLE_PREFIX_KIND
         );
-        assert!(system[2].get("cache_control").is_none());
     }
 
     #[test]
@@ -940,23 +975,25 @@ mod tests {
             },
         ));
         conv.messages[0].content.push(ContentBlock::Text {
-            text: "tool definitions".to_string(),
-        });
-        conv.messages[0].content.push(ContentBlock::Text {
             text: "repo map".to_string(),
         });
         conv.push(crate::message::Message::user("hello"));
 
-        let req = provider.build_request(&conv, &[], None);
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "input_schema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
         let system = req["system"].as_array().expect("system block array");
-        assert_eq!(system.len(), 3);
+        assert_eq!(system.len(), 2);
         assert_eq!(system[0]["text"], "base prompt");
-        assert_eq!(system[1]["text"], "tool definitions");
-        assert_eq!(system[2]["text"], "repo map");
+        assert_eq!(system[1]["text"], "repo map");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
-        assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
-        assert!(system[2].get("cache_control").is_none());
+        assert!(system[1].get("cache_control").is_none());
+        assert_eq!(req["tools"][0]["cache_control"]["kind"], "stable_prefix");
     }
 
     // ─── End-to-end prompt assembly → Anthropic request coverage ──────────────
@@ -1001,16 +1038,16 @@ mod tests {
         }
     }
 
-    /// E2E: with repo map present, Anthropic system blocks preserve the same
-    /// formatter-visible ordering that `chat.rs::build_system_message` produces
-    /// for stable system content (base → project/tool-definition context → repo
-    /// map → dynamic tail), and stable-prefix `cache_control` appears only on the
-    /// stable prefix, not on the dynamic tail.
+    /// E2E: with repo map present, Anthropic keeps tool definitions in the
+    /// dedicated request-level `tools` block while preserving the system block
+    /// ordering from `chat.rs` (base -> project context -> repo map -> dynamic
+    /// tail). Stable-prefix `cache_control` appears on the stable system prefix
+    /// and on the first tool-definition entry, but not on the dynamic tail.
     #[test]
     fn e2e_repo_map_present_system_blocks_ordered_with_cache_control() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
-        let project_context = "## Tool Definitions\nshell(cmd: string)\nread(path: string)";
+        let project_context = "## Project Context\nworkspace: demo";
         let repo_map = "## Repository Map\nsrc/lib.rs\n  pub fn run()";
         let client = "Be concise.";
 
@@ -1026,7 +1063,13 @@ mod tests {
         conv.push(sys_msg);
         conv.push(Message::user("What does this project do?"));
 
-        let req = provider.build_request(&conv, &[], None);
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run a shell command",
+            "input_schema": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
         let system = req["system"]
             .as_array()
             .expect("system should be an array when cache_control is present");
@@ -1044,7 +1087,7 @@ mod tests {
         assert_eq!(
             stable_texts,
             vec![base.trim(), project_context, repo_map],
-            "stable Anthropic prefix should remain base -> tool definitions -> repo map"
+            "stable Anthropic system prefix should remain base -> project context -> repo map"
         );
 
         for stable_block in &system[..3] {
@@ -1055,6 +1098,7 @@ mod tests {
             system[3].get("cache_control").is_none(),
             "dynamic tail block must not have cache_control"
         );
+        assert_eq!(req["tools"][0]["cache_control"]["kind"], "stable_prefix");
     }
 
     /// E2E: without repo map, tools, or dynamic context, a single non-cacheable
