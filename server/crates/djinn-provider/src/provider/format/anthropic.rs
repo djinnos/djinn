@@ -910,11 +910,10 @@ mod tests {
 
     // ─── End-to-end prompt assembly → Anthropic request coverage ──────────────
 
-    /// Helper that mirrors the current formatter contract coming out of
-    /// `server/src/server/chat.rs::build_system_message`: the base system prompt,
-    /// project/tool-definition context, and repo map are preserved as distinct
-    /// stable-prefix `ContentBlock::Text` entries, while any dynamic client/task
-    /// context remains a single trailing block.
+    /// Build a system message using the current chat-layer production contract:
+    /// trim the base prompt, keep project context and repo map as stable blocks,
+    /// collapse dynamic client/task text into a trailing block, and attach
+    /// Anthropic cache metadata only for Anthropic models.
     fn build_system_message_for_test(
         base_prompt: &str,
         project_context: Option<&str>,
@@ -922,40 +921,27 @@ mod tests {
         client_system: Option<&str>,
         is_anthropic: bool,
     ) -> Message {
-        let mut stable_texts: Vec<String> = vec![base_prompt.trim().to_string()];
+        let mut content = vec![ContentBlock::text(base_prompt.trim())];
         if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
-            stable_texts.push(project_context.to_string());
+            content.push(ContentBlock::text(project_context));
         }
-        if let Some(rm) = repo_map.filter(|s| !s.trim().is_empty()) {
-            stable_texts.push(rm.to_string());
+        if let Some(repo_map) = repo_map.filter(|s| !s.trim().is_empty()) {
+            content.push(ContentBlock::text(repo_map));
+        }
+        if let Some(client_system) = client_system.filter(|s| !s.trim().is_empty()) {
+            content.push(ContentBlock::text(client_system));
         }
 
-        let dynamic_tail = client_system
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.to_string());
-
-        let metadata = if is_anthropic {
-            Some(crate::message::MessageMeta {
-                input_tokens: None,
-                output_tokens: None,
-                timestamp: None,
-                provider_data: Some(json!({
-                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
-                        kind: Some("stable_prefix".to_string()),
-                    }
-                })),
-            })
-        } else {
-            None
-        };
-
-        let mut content: Vec<ContentBlock> = stable_texts
-            .into_iter()
-            .map(|text| ContentBlock::Text { text })
-            .collect();
-        if let Some(tail) = dynamic_tail {
-            content.push(ContentBlock::Text { text: tail });
-        }
+        let metadata = is_anthropic.then(|| crate::message::MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(json!({
+                ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                    kind: Some("stable_prefix".to_string()),
+                }
+            })),
+        });
 
         Message {
             role: crate::message::Role::System,
