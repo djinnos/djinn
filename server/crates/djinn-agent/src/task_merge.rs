@@ -207,19 +207,6 @@ async fn try_create_github_pr(
         ));
     }
 
-    // Build diff stat via `git diff --stat origin/{merge_target}..{base_branch}`.
-    let diff_stat = djinn_git::run_git_command(
-        project_dir.to_path_buf(),
-        vec![
-            "diff".into(),
-            "--stat".into(),
-            format!("origin/{merge_target}..{base_branch}"),
-        ],
-    )
-    .await
-    .map(|o| o.stdout.trim().to_string())
-    .unwrap_or_else(|_| String::new());
-
     // Build acceptance criteria checklist from the JSON array.
     let criteria_lines: String = {
         #[derive(serde::Deserialize)]
@@ -249,10 +236,9 @@ async fn try_create_github_pr(
     };
 
     let pr_body = format!(
-        "## Summary\n{description}\n\n## Acceptance Criteria\n{criteria}## Files Changed\n```\n{diff_stat}\n```\n\n---\nDjinn task: {short_id}",
+        "## Summary\n{description}\n\n## Acceptance Criteria\n{criteria}\n---\nDjinn task: {short_id}",
         description = task.description,
         criteria = criteria_lines,
-        diff_stat = diff_stat,
         short_id = task.short_id,
     );
 
