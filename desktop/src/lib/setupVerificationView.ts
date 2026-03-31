@@ -48,6 +48,7 @@ export function buildSetupVerificationView(taskId: string, state: ReturnType<typ
   const lifecycleOffset = mappedLifecycle.length;
   const verificationSteps: StepEntry[] = (run?.steps ?? []).map((step, index) => ({
     ...step,
+    phase: "verification",
     index: lifecycleOffset + index,
   }));
 

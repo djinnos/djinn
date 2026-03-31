@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { callMcpTool } from "@/api/mcpClient";
 import { sseStore } from "@/stores/sseStore";
+import { verificationStore } from "@/stores/verificationStore";
+import type { StepEntry } from "@/stores/verificationStore";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -276,6 +278,34 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
             });
             i += 1;
           }
+        }
+      }
+
+      // Seed verification store from persisted results
+      if (taskId && result.verification_steps?.length) {
+        const store = verificationStore.getState();
+        const key = taskId;
+        // Only seed if the store doesn't already have data (SSE may have populated it)
+        if (!store.runs.has(key)) {
+          const steps: StepEntry[] = result.verification_steps.map((s: { name: string; command?: string; phase: string; exit_code: number; duration_ms: number; stdout?: string; stderr?: string }, i: number) => ({
+            index: i,
+            name: s.name,
+            command: s.command || undefined,
+            phase: s.phase as "setup" | "verification",
+            status: (s.exit_code === 0 ? "passed" : "failed") as StepEntry["status"],
+            exitCode: s.exit_code,
+            durationMs: s.duration_ms,
+            stdout: s.stdout || undefined,
+            stderr: s.stderr || undefined,
+          }));
+          for (const step of steps) {
+            store.addStep(key, step, {
+              projectId: "",
+              taskId,
+            });
+          }
+          const allPassed = steps.every((s) => s.status === "passed");
+          store.setRunStatus(key, allPassed ? "passed" : "failed");
         }
       }
 

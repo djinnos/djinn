@@ -13,3 +13,4 @@ pub mod settings;
 pub mod task;
 pub mod test_support;
 pub mod verification_cache;
+pub mod verification_result;

@@ -235,14 +235,22 @@ pub(crate) async fn prepare_worktree(
         // is needed for an in-flight or upcoming PR push.  Deleting the branch
         // in these states causes `process_approved_tasks` to fail with
         // "src refspec does not match any" because the local ref is gone.
+        //
+        // Also preserve the branch when a PR already exists on GitHub
+        // (pr_url is set).  When a PR gets conflicts, CI failure, or review
+        // changes-requested, the task transitions back to `open` but the PR
+        // stays open.  Deleting the branch would force the worker to
+        // reimplement from scratch and force-push over the existing PR.
         let branch_needed_for_pr =
             matches!(task.status.as_str(), "approved" | "pr_draft" | "pr_review");
-        if branch_needed_for_pr {
+        let has_existing_pr = task.pr_url.is_some();
+        if branch_needed_for_pr || has_existing_pr {
             tracing::info!(
                 task_id = %task.short_id,
                 branch = %branch,
                 status = %task.status,
-                "Lifecycle: preserving task branch needed for PR (worktree gone, recreating worktree only)"
+                has_pr = has_existing_pr,
+                "Lifecycle: preserving task branch (worktree gone, recreating worktree only)"
             );
             // Recreate the worktree from the existing branch without deleting it.
             let path = git

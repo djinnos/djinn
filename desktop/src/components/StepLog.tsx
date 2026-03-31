@@ -3,6 +3,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import { Fragment } from "react";
 import { cn } from "@/lib/utils";
 import type { StepEntry, VerificationRun } from "@/stores/verificationStore";
 
@@ -140,6 +141,8 @@ export function StepLog({ steps, status, label, originalDurationMs, emphasizedSt
     .filter((step) => step.status === "failed")
     .map((step) => getStepValue(step.index));
 
+  const hasBothPhases = steps.some((s) => s.phase === "setup") && steps.some((s) => s.phase === "verification");
+
   return (
     <div className={cn("overflow-hidden rounded-lg border border-border bg-card", className)}>
       {label && (
@@ -150,45 +153,32 @@ export function StepLog({ steps, status, label, originalDurationMs, emphasizedSt
       <StepSummary steps={steps} status={status} originalDurationMs={originalDurationMs} />
       <div className="px-2 pb-2">
         <Accordion defaultValue={failedStepValues} multiple>
-          {steps.map((step) => {
+          {steps.map((step, idx) => {
+            const isFirstOfPhase = idx === 0 || steps[idx - 1].phase !== step.phase;
+            const phaseLabel = hasBothPhases && isFirstOfPhase
+              ? step.phase === "setup" ? "Setup" : "Verification"
+              : null;
             const durationLabel = step.status === "skipped" ? "skipped" : formatDuration(step.durationMs);
             const hasOutput = Boolean(step.command || step.stdout || step.stderr);
             const stepValue = getStepValue(step.index);
             const isEmphasized = emphasizedStepId === stepValue;
 
+            const phaseDivider = phaseLabel ? (
+              <div className="px-3 pt-3 pb-1">
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{phaseLabel}</span>
+              </div>
+            ) : null;
+
             if (!hasOutput) {
               return (
-                <div
-                  key={step.index}
-                  className={cn(
-                    "flex items-center gap-2.5 rounded-md border border-transparent px-3 py-2.5 text-sm",
-                    isEmphasized && "border-red-500/40 bg-red-500/5",
-                  )}
-                >
-                  <StepStatusIcon stepStatus={step.status} />
-                  <span className={cn(
-                    "truncate font-medium",
-                    step.status === "skipped" && "text-muted-foreground",
-                    isEmphasized && "text-red-400",
-                  )}>
-                    {step.name}
-                  </span>
-                  <span className="ml-auto text-xs text-muted-foreground">{durationLabel}</span>
-                </div>
-              );
-            }
-
-            return (
-              <AccordionItem
-                key={step.index}
-                value={stepValue}
-                className={cn(
-                  "rounded-md border border-transparent px-3",
-                  isEmphasized && "border-red-500/40 bg-red-500/5",
-                )}
-              >
-                <AccordionTrigger className="py-2.5 hover:no-underline">
-                  <div className="flex w-full items-center gap-2.5 text-sm">
+                <Fragment key={step.index}>
+                  {phaseDivider}
+                  <div
+                    className={cn(
+                      "flex items-center gap-2.5 rounded-md border border-transparent px-3 py-2.5 text-sm",
+                      isEmphasized && "border-red-500/40 bg-red-500/5",
+                    )}
+                  >
                     <StepStatusIcon stepStatus={step.status} />
                     <span className={cn(
                       "truncate font-medium",
@@ -199,26 +189,53 @@ export function StepLog({ steps, status, label, originalDurationMs, emphasizedSt
                     </span>
                     <span className="ml-auto text-xs text-muted-foreground">{durationLabel}</span>
                   </div>
-                </AccordionTrigger>
+                </Fragment>
+              );
+            }
 
-                <AccordionContent>
-                  {step.stderr && (
-                    <div className="mb-2 rounded-md bg-red-500/10 px-3 py-2.5">
-                      <pre className="font-mono text-xs text-red-300 whitespace-pre-wrap break-words">
-                        {step.stderr}
-                      </pre>
+            return (
+              <Fragment key={step.index}>
+                {phaseDivider}
+                <AccordionItem
+                  value={stepValue}
+                  className={cn(
+                    "rounded-md border border-transparent px-3",
+                    isEmphasized && "border-red-500/40 bg-red-500/5",
+                  )}
+                >
+                  <AccordionTrigger className="py-2.5 hover:no-underline">
+                    <div className="flex w-full items-center gap-2.5 text-sm">
+                      <StepStatusIcon stepStatus={step.status} />
+                      <span className={cn(
+                        "truncate font-medium",
+                        step.status === "skipped" && "text-muted-foreground",
+                        isEmphasized && "text-red-400",
+                      )}>
+                        {step.name}
+                      </span>
+                      <span className="ml-auto text-xs text-muted-foreground">{durationLabel}</span>
                     </div>
-                  )}
-                  {(step.command || step.stdout) && (
-                    <ScrollArea className="max-h-48 rounded-md bg-muted/50">
-                      <pre className="p-3 font-mono text-xs text-foreground/70 whitespace-pre-wrap break-words">
-                        {step.command ? `$ ${step.command}\n` : ""}
-                        {step.stdout ?? ""}
-                      </pre>
-                    </ScrollArea>
-                  )}
-                </AccordionContent>
-              </AccordionItem>
+                  </AccordionTrigger>
+
+                  <AccordionContent>
+                    {step.stderr && (
+                      <div className="mb-2 rounded-md bg-red-500/10 px-3 py-2.5">
+                        <pre className="font-mono text-xs text-red-300 whitespace-pre-wrap break-words">
+                          {step.stderr}
+                        </pre>
+                      </div>
+                    )}
+                    {(step.command || step.stdout) && (
+                      <ScrollArea className="max-h-48 rounded-md bg-muted/50">
+                        <pre className="p-3 font-mono text-xs text-foreground/70 whitespace-pre-wrap break-words">
+                          {step.command ? `$ ${step.command}\n` : ""}
+                          {step.stdout ?? ""}
+                        </pre>
+                      </ScrollArea>
+                    )}
+                  </AccordionContent>
+                </AccordionItem>
+              </Fragment>
             );
           })}
         </Accordion>

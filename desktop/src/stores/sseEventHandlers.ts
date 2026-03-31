@@ -302,13 +302,38 @@ export function initSSEEventHandlers(): () => void {
     if (variant === "Finished" && body) {
       const index = Number(body.index ?? 0);
       const exitCode = typeof body.exit_code === "number" ? body.exit_code : undefined;
-      verificationStore.getState().updateStep(key, index, {
-        exitCode,
-        durationMs: typeof body.duration_ms === "number" ? body.duration_ms : undefined,
-        stdout: typeof body.stdout === "string" ? body.stdout : undefined,
-        stderr: typeof body.stderr === "string" ? body.stderr : undefined,
-        status: exitCode === 0 ? "passed" : "failed",
-      });
+      const store = verificationStore.getState();
+      const run = store.runs.get(key);
+      const stepExists = run?.steps.some((s) => s.index === index);
+
+      if (!stepExists) {
+        // Backend may emit Finished without a prior Started (e.g. emit_verification_steps).
+        // Create the step so it appears in the UI.
+        const step: StepEntry = {
+          index,
+          name: String(body.name ?? "step"),
+          command: typeof body.command === "string" ? body.command : undefined,
+          phase: payload.phase,
+          status: exitCode === 0 ? "passed" : "failed",
+          exitCode,
+          durationMs: typeof body.duration_ms === "number" ? body.duration_ms : undefined,
+          stdout: typeof body.stdout === "string" ? body.stdout : undefined,
+          stderr: typeof body.stderr === "string" ? body.stderr : undefined,
+        };
+        store.addStep(key, step, {
+          projectId: payload.project_id,
+          taskId: payload.task_id,
+          startedAt: new Date().toISOString(),
+        });
+      } else {
+        store.updateStep(key, index, {
+          exitCode,
+          durationMs: typeof body.duration_ms === "number" ? body.duration_ms : undefined,
+          stdout: typeof body.stdout === "string" ? body.stdout : undefined,
+          stderr: typeof body.stderr === "string" ? body.stderr : undefined,
+          status: exitCode === 0 ? "passed" : "failed",
+        });
+      }
       return;
     }
 

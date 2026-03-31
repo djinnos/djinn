@@ -47,4 +47,5 @@ pub use repositories::{
         ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
     },
     verification_cache::{CachedVerification, VerificationCacheRepository},
+    verification_result::{VerificationResultRepository, VerificationStepInsert, VerificationStepRow},
 };

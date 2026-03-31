@@ -8,6 +8,7 @@ use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::TransitionAction;
 use djinn_db::TaskRepository;
 use djinn_db::VerificationCacheRepository;
+use djinn_db::{VerificationResultRepository, VerificationStepInsert};
 
 use super::*;
 
@@ -410,6 +411,10 @@ async fn emit_verification_steps(
     result: &crate::verification::service::VerificationResult,
     app_state: &AgentContext,
 ) {
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let mut db_rows: Vec<VerificationStepInsert> = Vec::new();
+    let mut step_index: i32 = 1;
+
     for (idx, r) in result.setup_results.iter().enumerate() {
         app_state
             .event_bus
@@ -426,6 +431,20 @@ async fn emit_verification_steps(
                     stderr: r.stderr.clone(),
                 },
             ));
+        db_rows.push(VerificationStepInsert {
+            project_id: project_id.to_string(),
+            task_id: task_id.map(|s| s.to_string()),
+            run_id: run_id.clone(),
+            phase: "setup".to_string(),
+            step_index,
+            name: r.name.clone(),
+            command: r.command.clone(),
+            exit_code: r.exit_code,
+            stdout: r.stdout.clone(),
+            stderr: r.stderr.clone(),
+            duration_ms: r.duration_ms as i64,
+        });
+        step_index += 1;
     }
     for (idx, r) in result.verification_results.iter().enumerate() {
         app_state
@@ -443,6 +462,28 @@ async fn emit_verification_steps(
                     stderr: r.stderr.clone(),
                 },
             ));
+        db_rows.push(VerificationStepInsert {
+            project_id: project_id.to_string(),
+            task_id: task_id.map(|s| s.to_string()),
+            run_id: run_id.clone(),
+            phase: "verification".to_string(),
+            step_index,
+            name: r.name.clone(),
+            command: r.command.clone(),
+            exit_code: r.exit_code,
+            stdout: r.stdout.clone(),
+            stderr: r.stderr.clone(),
+            duration_ms: r.duration_ms as i64,
+        });
+        step_index += 1;
+    }
+
+    // Persist to DB so the frontend can load results on page open.
+    if let Some(tid) = task_id {
+        let repo = VerificationResultRepository::new(app_state.db.clone());
+        if let Err(e) = repo.replace_for_task(tid, &db_rows).await {
+            tracing::warn!(task_id = %tid, error = %e, "Failed to persist verification results");
+        }
     }
 }
 
