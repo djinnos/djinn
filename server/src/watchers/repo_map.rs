@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Test-only hook: when set, the watcher sends the project ID through this
+/// channel each time a `project.created` event schedules an initial repo-map
+/// refresh.  The sender is installed by test code before spawning watchers.
+#[cfg(test)]
+pub(crate) static REFRESH_SCHEDULED_TX: std::sync::Mutex<
+    Option<tokio::sync::mpsc::UnboundedSender<String>>,
+> = std::sync::Mutex::new(None);
+
 use anyhow::Result;
 use notify_debouncer_mini::{DebouncedEventKind, Debouncer, new_debouncer};
 use tokio::sync::Mutex;
@@ -145,6 +153,13 @@ pub fn spawn_repo_map_refresh_watchers(
                             let in_flight = guard.in_flight.clone();
                             let project_id = project.id.clone();
                             drop(guard);
+
+                            // Test-only: signal that refresh was scheduled for this project.
+                            #[cfg(test)]
+                            if let Some(tx) = REFRESH_SCHEDULED_TX.lock().unwrap().as_ref() {
+                                let _ = tx.send(project_id.clone());
+                            }
+
                             tokio::spawn(async move {
                                 if let Err(error) = refresh_project_and_worktrees(
                                     &app_state,
