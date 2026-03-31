@@ -215,6 +215,14 @@ async fn bootstrap_repo_map_refresh_watchers(
     drop(guard);
 
     for (project_id, project_path) in startup_refreshes {
+        if !startup_needs_refresh(&app_state, &project_id, &project_path).await {
+            tracing::debug!(
+                project = %project_path.display(),
+                "repo-map cache hit on startup, skipping refresh"
+            );
+            continue;
+        }
+
         if let Err(error) = refresh_project_and_worktrees(
             &app_state,
             &events_bus,
@@ -231,6 +239,41 @@ async fn bootstrap_repo_map_refresh_watchers(
             );
         }
     }
+}
+
+/// Check whether a project needs a repo-map refresh at startup by resolving
+/// the current HEAD commit and looking for an existing cache entry. Returns
+/// `true` when no cached repo-map exists for the HEAD commit (i.e. a refresh
+/// is needed), and `false` when the cache is already populated.
+async fn startup_needs_refresh(
+    app_state: &AppState,
+    project_id: &str,
+    project_path: &Path,
+) -> bool {
+    let head_sha = match resolve_head_sha(app_state, project_path).await {
+        Some(sha) => sha,
+        // Cannot determine HEAD; schedule a refresh to be safe.
+        None => return true,
+    };
+
+    let cache_repo = RepoMapCacheRepository::new(app_state.db().clone());
+    let project_path_str = project_path.to_string_lossy();
+
+    match cache_repo
+        .get_by_commit_prefer_canonical(project_id, &project_path_str, &head_sha)
+        .await
+    {
+        Ok(Some(_)) => false, // cache hit
+        _ => true,            // cache miss or lookup error
+    }
+}
+
+/// Resolve the HEAD commit SHA for a project path, returning `None` on any
+/// git error (e.g. path does not exist or is not a git repo).
+async fn resolve_head_sha(app_state: &AppState, project_path: &Path) -> Option<String> {
+    let git = app_state.git_actor(project_path).await.ok()?;
+    let head = git.head_commit().await.ok()?;
+    Some(head.sha)
 }
 
 fn add_watch(state: &mut RepoMapWatcherState, project_id: &str, project_path: &Path) {
@@ -1269,5 +1312,78 @@ mod tests {
         );
 
         cancel.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_needs_refresh_returns_true_when_cache_missing() {
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let app_state = AppState::new(db.clone(), cancel);
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        init_git_repo(dir.path());
+
+        let needs = startup_needs_refresh(&app_state, "p1", dir.path()).await;
+        assert!(
+            needs,
+            "startup_needs_refresh must return true when no cache entry exists for HEAD"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_needs_refresh_returns_false_when_cache_hit() {
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let app_state = AppState::new(db.clone(), cancel);
+
+        let dir = tempfile::Builder::new()
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        init_git_repo(dir.path());
+
+        // Resolve HEAD so we can pre-populate the cache.
+        let head_sha = resolve_head_sha(&app_state, dir.path())
+            .await
+            .expect("HEAD must resolve in a git repo with a commit");
+
+        let cache_repo = RepoMapCacheRepository::new(db.clone());
+        cache_repo
+            .insert(RepoMapCacheInsert {
+                key: RepoMapCacheKey {
+                    project_id: "p1",
+                    project_path: &dir.path().to_string_lossy(),
+                    worktree_path: None,
+                    commit_sha: &head_sha,
+                },
+                rendered_map: "cached-map",
+                token_estimate: 10,
+                included_entries: 2,
+            })
+            .await
+            .unwrap();
+
+        let needs = startup_needs_refresh(&app_state, "p1", dir.path()).await;
+        assert!(
+            !needs,
+            "startup_needs_refresh must return false when a cache entry exists for HEAD"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_needs_refresh_returns_true_for_nonexistent_path() {
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let app_state = AppState::new(db, cancel);
+
+        // Non-existent path: cannot resolve HEAD, so should need refresh (safe default).
+        let needs =
+            startup_needs_refresh(&app_state, "p1", Path::new("/tmp/nonexistent-repo-12345"))
+                .await;
+        assert!(
+            needs,
+            "startup_needs_refresh must return true when HEAD cannot be resolved"
+        );
     }
 }
