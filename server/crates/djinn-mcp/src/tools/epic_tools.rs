@@ -144,7 +144,7 @@ pub struct EpicUpdateParams {
     pub owner: Option<String>,
     /// Memory reference URLs for this epic (e.g. ADR paths).
     pub memory_refs: Option<Vec<String>>,
-    /// Target lifecycle status: "drafting" or "open".
+    /// Target lifecycle status: "drafting", "open", or "closed".
     pub status: Option<String>,
 }
 
@@ -377,7 +377,7 @@ impl DjinnMcpServer {
 
     /// Update allowed fields of an epic.
     #[tool(
-        description = "Update allowed fields of an epic (title, description, emoji, color, owner). Accepts epic UUID or short_id."
+        description = "Update allowed fields of an epic (title, description, emoji, color, owner, status). Accepts epic UUID or short_id. Status can be \"drafting\", \"open\", or \"closed\"."
     )]
     pub async fn epic_update(
         &self,
