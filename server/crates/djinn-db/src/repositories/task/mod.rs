@@ -379,6 +379,83 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_force_close_succeeds_with_downstream_blockers() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        // Create two tasks: task_a blocks task_b.
+        let task_a = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+        let task_b = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac2"}]"#)).await;
+
+        // task_b is blocked by task_a  (i.e. task_a blocks task_b).
+        repo.add_blocker(&task_b.id, &task_a.id).await.unwrap();
+
+        // Move task_a to in_lead_intervention so ForceClose is reachable.
+        repo.set_status(&task_a.id, "in_lead_intervention")
+            .await
+            .unwrap();
+
+        // ForceClose should succeed even though task_a still blocks task_b.
+        let closed = repo
+            .transition(
+                &task_a.id,
+                TransitionAction::ForceClose,
+                "lead-1",
+                "lead",
+                Some("decomposed into subtasks"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed.status, TaskStatus::Closed.as_str());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_close_rejects_with_downstream_blockers() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        let task_a = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+        let task_b = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac2"}]"#)).await;
+
+        // task_b is blocked by task_a.
+        repo.add_blocker(&task_b.id, &task_a.id).await.unwrap();
+
+        // Move task_a to in_progress so Close is valid.
+        repo.transition(
+            &task_a.id,
+            TransitionAction::Start,
+            "worker",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Normal Close should be rejected because task_a blocks task_b.
+        let err = repo
+            .transition(
+                &task_a.id,
+                TransitionAction::Close,
+                "worker",
+                "worker",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTransition(_)));
+        assert!(err.to_string().contains("blocks"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transition_allows_simple_lifecycle_start_without_acceptance_criteria() {
         let db = Database::open_in_memory().unwrap();
         let (bus, _captured) = capturing_bus();

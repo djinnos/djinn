@@ -90,7 +90,8 @@ impl TaskRepository {
             from,
             TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview
         ) || action == TransitionAction::PrMerge
-            || simple_lifecycle_close;
+            || simple_lifecycle_close
+            || action == TransitionAction::ForceClose;
         if apply.set_closed_at && !work_landed {
             let downstream = sqlx::query_as::<_, BlockerRef>(
                 "SELECT t.id AS task_id, t.short_id, t.title, t.status
