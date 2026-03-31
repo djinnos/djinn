@@ -7,6 +7,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { InlineError } from "@/components/InlineError";
 import { cn } from "@/lib/utils";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   type BaseRole,
   type CreateAgentRequest,
@@ -146,29 +148,32 @@ function formatMetricDelta(before: number, after: number): string {
 
 function AmendmentEntry({ amendment }: { amendment: LearnedPromptAmendment }) {
   const isKeep = amendment.action === "keep";
-  const metricKeys = Object.keys(amendment.metrics_before);
+  const HIDDEN_METRICS = new Set(["agent_name", "completed_task_count"]);
+  const metricKeys = Object.keys(amendment.metrics_before).filter((key) => {
+    if (HIDDEN_METRICS.has(key)) return false;
+    const before = Number(amendment.metrics_before[key]);
+    const after = Number(amendment.metrics_after[key]);
+    return !Number.isNaN(before) && !Number.isNaN(after);
+  });
 
   return (
-    <div className="border border-border rounded-md p-3 space-y-2 text-xs">
+    <div className="rounded-lg border border-border/40 p-3 space-y-2 text-xs">
       <div className="flex items-center gap-2">
-        <span
-          className={cn(
-            "shrink-0 rounded-full px-2 py-0.5 font-medium",
-            isKeep
-              ? "bg-green-500/15 text-green-700 dark:text-green-400"
-              : "bg-red-500/15 text-red-700 dark:text-red-400",
-          )}
-        >
-          {isKeep ? "kept" : "discarded"}
-        </span>
         <span className="text-muted-foreground">
           {new Date(amendment.created_at).toLocaleString()}
         </span>
+        {amendment.metrics_after.completed_task_count != null && (
+          <span className="text-muted-foreground/60 font-mono">
+            {Number(amendment.metrics_after.completed_task_count)} tasks
+          </span>
+        )}
       </div>
 
-      <pre className="whitespace-pre-wrap font-mono text-xs text-foreground bg-muted rounded px-2 py-1.5 leading-relaxed">
-        {amendment.proposed_text}
-      </pre>
+      <div className="prose prose-sm max-w-none dark:prose-invert text-xs leading-relaxed">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {amendment.proposed_text}
+        </ReactMarkdown>
+      </div>
 
       {metricKeys.length > 0 && (
         <div className="flex flex-wrap gap-3 text-muted-foreground">
@@ -197,6 +202,30 @@ function AmendmentEntry({ amendment }: { amendment: LearnedPromptAmendment }) {
               </span>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiscardedSection({ discarded }: { discarded: LearnedPromptAmendment[] }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        Discarded ({discarded.length})
+        <span className="text-muted-foreground/60">{open ? "▴" : "▾"}</span>
+      </button>
+      {open && (
+        <div className="mt-1 space-y-4">
+          {discarded.map((amendment) => (
+            <AmendmentEntry key={amendment.id} amendment={amendment} />
+          ))}
         </div>
       )}
     </div>
@@ -288,39 +317,44 @@ function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionProps) {
 
       {expanded && (
         <div className="mt-3 space-y-3">
-          {/* Current learned prompt */}
-          <div>
-            <p className="text-xs font-medium text-muted-foreground mb-1">Current</p>
-            {role.learned_prompt ? (
-              <pre className="whitespace-pre-wrap font-mono text-xs text-foreground bg-muted rounded px-3 py-2 leading-relaxed">
-                {role.learned_prompt}
-              </pre>
-            ) : (
-              <p className="text-xs text-muted-foreground italic">No learned prompt yet.</p>
-            )}
-          </div>
+          {loadingHistory && (
+            <p className="text-xs text-muted-foreground">Loading history...</p>
+          )}
+          {historyError && (
+            <p className="text-xs text-red-500">{historyError}</p>
+          )}
+          {history && !loadingHistory && (() => {
+            const kept = [...history.amendments]
+              .filter((a) => a.action === "keep")
+              .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+            const discarded = [...history.amendments]
+              .filter((a) => a.action !== "keep")
+              .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-          {/* Amendment history */}
-          <div>
-            <p className="text-xs font-medium text-muted-foreground mb-1">Amendment history</p>
-            {loadingHistory && (
-              <p className="text-xs text-muted-foreground">Loading history...</p>
-            )}
-            {historyError && (
-              <p className="text-xs text-red-500">{historyError}</p>
-            )}
-            {history && !loadingHistory && (
-              history.amendments.length === 0 ? (
-                <p className="text-xs text-muted-foreground italic">No amendments yet.</p>
-              ) : (
-                <div className="space-y-2">
-                  {history.amendments.map((amendment) => (
-                    <AmendmentEntry key={amendment.id} amendment={amendment} />
-                  ))}
-                </div>
-              )
-            )}
-          </div>
+            if (kept.length === 0 && discarded.length === 0) {
+              return <p className="text-xs text-muted-foreground italic">No amendments yet.</p>;
+            }
+
+            return (
+              <>
+                {kept.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground mb-1">
+                      Kept ({kept.length})
+                    </p>
+                    <div className="space-y-4">
+                      {kept.map((amendment) => (
+                        <AmendmentEntry key={amendment.id} amendment={amendment} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {discarded.length > 0 && (
+                  <DiscardedSection discarded={discarded} />
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
     </div>

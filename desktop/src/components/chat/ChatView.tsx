@@ -32,6 +32,10 @@ export function ChatView() {
   const updateSessionTitle = useChatStore((state) => state.updateSessionTitle);
   const clearStreaming = useChatStore((state) => state.clearStreaming);
   const setThinkingStartTime = useChatStore((state) => state.setThinkingStartTime);
+  const setDraft = useChatStore((state) => state.setDraft);
+  const draft = useChatStore((state) =>
+    state.activeSessionId ? state.draftBySession[state.activeSessionId] ?? '' : state.globalDraft
+  );
   const messages = useChatStore((state) => (state.activeSessionId ? state.messagesBySession[state.activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
   const streamingText = useChatStore((state) => (state.activeSessionId ? state.streamingBySession[state.activeSessionId] ?? '' : ''));
   const loading = useChatStore((state) => (state.activeSessionId ? state.loadingBySession[state.activeSessionId] ?? false : false));
@@ -39,7 +43,6 @@ export function ChatView() {
     state.activeSessionId ? state.thinkingStartTimeBySession[state.activeSessionId] ?? null : null
   );
 
-  const [promptSeed, setPromptSeed] = useState<string | undefined>(undefined);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   const [toolCalls, setToolCalls] = useState<string[]>([]);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -219,7 +222,6 @@ export function ChatView() {
             {isEmpty ? (
               <ChatEmptyState
                 onPromptClick={(prompt) => {
-                  setPromptSeed(prompt);
                   void send(prompt);
                 }}
               />
@@ -270,7 +272,8 @@ export function ChatView() {
           }
         }}
         streaming={loading}
-        prefillValue={promptSeed}
+        draft={draft}
+        onDraftChange={(text) => setDraft(activeSessionId, text)}
         selectedModel={selectedModel}
         modelNameById={modelNameById}
         groupedModels={groupedModels}

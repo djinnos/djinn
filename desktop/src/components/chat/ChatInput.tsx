@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { ModelSelector } from './ModelSelector';
 
 import { Sent02Icon, StopIcon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
@@ -18,7 +18,8 @@ interface ChatInputProps {
   onStop: () => void;
   streaming: boolean;
   placeholder?: string;
-  prefillValue?: string;
+  draft: string;
+  onDraftChange: (text: string) => void;
   selectedModel: string;
   modelNameById: Map<string, string>;
   groupedModels: ModelGroup[];
@@ -30,23 +31,17 @@ export function ChatInput({
   onStop,
   streaming,
   placeholder = 'Ask Djinn…',
-  prefillValue,
+  draft,
+  onDraftChange,
   selectedModel,
   modelNameById,
   groupedModels,
   onModelChange,
 }: ChatInputProps) {
-  const [value, setValue] = useState(prefillValue ?? '');
   const [textareaHeight, setTextareaHeight] = useState(56);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  useEffect(() => {
-    if (prefillValue !== undefined) {
-      setValue(prefillValue);
-    }
-  }, [prefillValue]);
-
-  const canSend = useMemo(() => value.trim().length > 0 && !streaming, [value, streaming]);
+  const canSend = useMemo(() => draft.trim().length > 0 && !streaming, [draft, streaming]);
 
   const resizeTextarea = () => {
     const el = textareaRef.current;
@@ -62,13 +57,13 @@ export function ChatInput({
 
   useEffect(() => {
     resizeTextarea();
-  }, [value]);
+  }, [draft]);
 
   const handleSend = () => {
-    const trimmed = value.trim();
+    const trimmed = draft.trim();
     if (!trimmed || streaming) return;
     onSend(trimmed);
-    setValue('');
+    onDraftChange('');
   };
 
   return (
@@ -85,8 +80,8 @@ export function ChatInput({
         >
           <Textarea
             ref={textareaRef}
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
+            value={draft}
+            onChange={(event) => onDraftChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
                 event.preventDefault();
@@ -95,8 +90,8 @@ export function ChatInput({
                 event.preventDefault();
                 const start = event.currentTarget.selectionStart;
                 const end = event.currentTarget.selectionEnd;
-                const newValue = value.slice(0, start) + '\n' + value.slice(end);
-                setValue(newValue);
+                const newValue = draft.slice(0, start) + '\n' + draft.slice(end);
+                onDraftChange(newValue);
                 requestAnimationFrame(() => {
                   if (textareaRef.current) {
                     textareaRef.current.selectionStart = start + 1;
@@ -110,25 +105,12 @@ export function ChatInput({
           />
         </motion.div>
         <div className="flex items-center justify-between px-2 pb-2">
-          <Select value={selectedModel} onValueChange={onModelChange}>
-            <SelectTrigger showIcon className="h-7 w-auto min-w-0 gap-1 rounded-lg border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0">
-              <SelectValue placeholder="Select a model">
-                {selectedModel !== 'unknown/model' ? modelNameById.get(selectedModel) ?? selectedModel : undefined}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {groupedModels.map((group) => (
-                <SelectGroup key={group.providerId}>
-                  <SelectLabel>{group.providerLabel}</SelectLabel>
-                  {group.models.map((model) => (
-                    <SelectItem key={model.id} value={model.id}>
-                      {model.name}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              ))}
-            </SelectContent>
-          </Select>
+          <ModelSelector
+            selectedModel={selectedModel}
+            modelNameById={modelNameById}
+            groupedModels={groupedModels}
+            onModelChange={onModelChange}
+          />
           <Button
             type="button"
             size="icon"

@@ -27,6 +27,8 @@ export interface ChatState {
   streamingBySession: Record<string, string>;
   loadingBySession: Record<string, boolean>;
   thinkingStartTimeBySession: Record<string, number | null>;
+  draftBySession: Record<string, string>;
+  globalDraft: string;
   activeSessionId: string | null;
 
   createSession: (projectPath?: string | null, model?: string | null) => string;
@@ -39,6 +41,7 @@ export interface ChatState {
   updateSessionTitle: (sessionId: string, title: string) => void;
   clearStreaming: (sessionId: string) => void;
   setThinkingStartTime: (sessionId: string, startTime: number | null) => void;
+  setDraft: (sessionId: string | null, text: string) => void;
   getSessionsForProject: (projectPath: string | null) => ChatSession[];
 }
 
@@ -65,6 +68,8 @@ export const useChatStore = create<ChatState>()(
       streamingBySession: {},
       loadingBySession: {},
       thinkingStartTimeBySession: {},
+      draftBySession: {},
+      globalDraft: '',
       activeSessionId: null,
 
       createSession: (projectPath = null, model = null) => {
@@ -257,6 +262,19 @@ export const useChatStore = create<ChatState>()(
             [sessionId]: startTime,
           },
         }));
+      },
+
+      setDraft: (sessionId, text) => {
+        if (sessionId === null) {
+          set({ globalDraft: text });
+        } else {
+          set((state) => ({
+            draftBySession: {
+              ...state.draftBySession,
+              [sessionId]: text,
+            },
+          }));
+        }
       },
 
       getSessionsForProject: (projectPath) => {

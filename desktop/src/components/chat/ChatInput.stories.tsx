@@ -53,9 +53,9 @@ type Story = StoryObj<typeof ChatInput>;
 
 export const Default: Story = {};
 
-export const WithPrefill: Story = {
+export const WithDraft: Story = {
   args: {
-    prefillValue: 'Show me my epics and their current status',
+    draft: 'Show me my epics and their current status',
   },
 };
 
