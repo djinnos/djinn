@@ -357,7 +357,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
     >
       <CardContent className="flex min-h-[3.5rem] flex-col gap-1.5">
         {/* Row 1: ID, priority, badges, pipeline */}
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-2 overflow-hidden text-[11px] text-muted-foreground">
           <TaskIdLabel taskId={task.id} shortId={task.short_id} />
           <ProjectBadge projectId={task.project_id ?? undefined} />
           <PriorityBadge priority={task.priority} />
@@ -416,7 +416,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
                 e.stopPropagation();
                 openUrl(task.pr_url!);
               }}
-              className="inline-flex items-center gap-0.5 text-[10px] font-medium text-violet-400 hover:text-violet-300 hover:underline"
+              className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-violet-400 hover:text-violet-300 hover:underline"
               title={task.pr_url}
             >
               <HugeiconsIcon icon={LinkSquare02Icon} size={10} className="shrink-0" />
@@ -448,7 +448,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
             <span className="text-[10px]">{formatCompactDuration(totalTrackedSeconds)}</span>
           )}
           {task.active_session?.model_id && !isSettingUp && (
-            <span className="max-w-[80px] truncate text-[10px]" title={task.active_session.model_id}>
+            <span className="min-w-0 shrink truncate text-[10px]" title={task.active_session.model_id}>
               {task.active_session.model_id}
             </span>
           )}
