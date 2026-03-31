@@ -154,10 +154,12 @@ impl CoordinatorActor {
              The Planner should:\n\
              1. Read the epic's memory_refs for context and prior roadmap notes.\n\
              2. Review any previous wave results (closed tasks, session reflections).\n\
-             3. Write or update the epic roadmap design note.\n\
-             4. Create 3–5 worker tasks (or a spike if uncertainty is high).\n\
+             3. Decide: is the epic's goal fully met? If YES → call `epic_close({})`, \
+             then `submit_grooming`. Do NOT create new tasks.\n\
+             4. If NO → write or update the epic roadmap design note, \
+             create 3–5 worker tasks (or a spike if uncertainty is high).\n\
              5. Call `submit_grooming` when done.",
-            epic.title, epic.short_id
+            epic.title, epic.short_id, epic.short_id
         );
         let design = format!(
             "Epic: {} ({})\nEpic memory_refs: {}\n\n\
@@ -168,8 +170,8 @@ impl CoordinatorActor {
         );
 
         let ac = serde_json::json!([
-            {"criterion": "Epic roadmap/design note reviewed and updated with next-wave plan", "met": false},
-            {"criterion": "3–5 worker tasks (or a spike) created under the epic with acceptance criteria", "met": false},
+            {"criterion": "Epic state assessed: either closed via epic_close (if goal fully met) or roadmap updated with next-wave plan", "met": false},
+            {"criterion": "If epic remains open: 3–5 worker tasks (or a spike) created with acceptance criteria", "met": false},
             {"criterion": "submit_grooming called to finalize the wave", "met": false},
         ]).to_string();
 

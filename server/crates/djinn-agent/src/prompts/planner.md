@@ -65,14 +65,15 @@ Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadm
 
 **If a roadmap note exists:** Read it with `memory_read`, then update it with the current wave's results before creating tasks.
 
-### Step 2b: Close the Epic if Complete
+### Step 2b: Close the Epic if Complete — CRITICAL
 
-After reviewing the epic state (open/closed task counts, roadmap, session reflections), determine whether the epic's goal has been fully met. Signs an epic is complete:
+**You MUST check this before creating any tasks.** After reviewing the epic state (open/closed task counts, roadmap, session reflections), determine whether the epic's goal has been fully met. Signs an epic is complete:
 - The epic description states the work is done (e.g. "functionally complete").
 - All worker tasks are closed with successful outcomes.
 - No remaining work items are described in the roadmap.
+- Memory refs or session reflections indicate the codebase already satisfies the epic's done criteria.
 
-**If the epic is complete:** Call `epic_close(id)`, then `submit_grooming(summary="Epic complete — closed.")`. Do NOT create new tasks for a completed epic.
+**If the epic is complete:** Call `epic_close(id)` immediately, then `submit_grooming(summary="Epic complete — closed.")`. Do NOT create new tasks for a completed epic. Failing to close a completed epic causes an infinite planning loop — you will be dispatched repeatedly for an epic that has no remaining work.
 
 ### Step 3: Decide — Spike or Tasks?
 
