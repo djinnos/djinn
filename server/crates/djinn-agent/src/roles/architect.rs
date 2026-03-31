@@ -66,7 +66,7 @@ impl AgentRole for ArchitectRole {
                 }
             }
 
-            Some((TransitionAction::Close, None))
+            Some((TransitionAction::SubmitForMerge, None))
         })
     }
 }

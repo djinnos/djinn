@@ -244,6 +244,9 @@ pub enum TransitionAction {
     PrMerge,
     /// GitHub App signals changes requested on PR — transitions pr_review → open.
     PrChangesRequested,
+    /// Non-worker role (planner/architect) completed with file changes —
+    /// route through the approved → PR pipeline instead of closing directly.
+    SubmitForMerge,
 }
 
 impl TransitionAction {
@@ -298,6 +301,7 @@ impl TransitionAction {
             "pr_conflict" => Ok(Self::PrConflict),
             "pr_merge" => Ok(Self::PrMerge),
             "pr_changes_requested" => Ok(Self::PrChangesRequested),
+            "submit_for_merge" => Ok(Self::SubmitForMerge),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -687,6 +691,13 @@ pub fn compute_transition(
                 ..Default::default()
             }
         }
+
+        TransitionAction::SubmitForMerge => {
+            if *from != TaskStatus::InProgress {
+                return bad("submit_for_merge is only valid from in_progress");
+            }
+            TransitionApply::simple(TaskStatus::Approved)
+        }
     })
 }
 
@@ -725,6 +736,13 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::LeadInterventionComplete
                 | TransitionAction::LeadApprove
                 | TransitionAction::LeadApproveConflict
+                | TransitionAction::SubmitForMerge
+                | TransitionAction::PrCreated
+                | TransitionAction::PrUndraft
+                | TransitionAction::PrCiFailed
+                | TransitionAction::PrConflict
+                | TransitionAction::PrMerge
+                | TransitionAction::PrChangesRequested
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(
@@ -858,6 +876,9 @@ mod tests {
             ) => Some(TaskStatus::Open),
             (TransitionAction::PrMerge, TaskStatus::PrReview) => Some(TaskStatus::Closed),
             (TransitionAction::PrChangesRequested, TaskStatus::PrReview) => Some(TaskStatus::Open),
+            (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
+                Some(TaskStatus::Approved)
+            }
             _ => None,
         }
     }

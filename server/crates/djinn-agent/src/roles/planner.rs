@@ -26,12 +26,15 @@ impl AgentRole for PlannerRole {
         app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
-            // Planning tasks use the simple lifecycle: close on completion.
+            // Planning tasks route through the approved → PR pipeline so that
+            // any file changes (ADRs, briefs, roadmaps) get a PR.  If the
+            // branch has no unique commits, process_approved_tasks will close
+            // the task directly.
             let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
             if let Ok(Some(task)) = repo.get(task_id).await
                 && matches!(task.issue_type.as_str(), "planning" | "decomposition")
             {
-                return Some((TransitionAction::Close, None));
+                return Some((TransitionAction::SubmitForMerge, None));
             }
             None
         })

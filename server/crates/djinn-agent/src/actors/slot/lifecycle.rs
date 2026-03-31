@@ -1356,6 +1356,31 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             });
         }
 
+        // Commit any file changes before tearing down the worktree so the
+        // branch preserves them for the PR pipeline.
+        if final_result.is_ok() {
+            let commit_msg = final_output
+                .finalize_payload
+                .as_ref()
+                .and_then(|p| p.get("summary"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            if let Err(e) = commit_final_work_if_needed(
+                &task_id,
+                &worktree_path,
+                &app_state,
+                commit_msg.as_deref(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "Lifecycle: failed to commit non-worker final work"
+                );
+            }
+        }
+
         teardown_worktree(
             &task.short_id,
             &worktree_path,
