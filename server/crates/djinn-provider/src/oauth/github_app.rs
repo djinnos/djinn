@@ -154,7 +154,7 @@ pub async fn start_device_flow() -> Result<DeviceCodeSession> {
         .header("Accept", "application/json")
         .json(&DeviceCodeRequest {
             client_id: CLIENT_ID,
-            scope: "repo",
+            scope: "repo workflow",
         })
         .send()
         .await
