@@ -1,9 +1,5 @@
 import type { Epic, Task } from "@/api/types";
-import workerAvatar from "@/assets/worker.png";
-import reviewerAvatar from "@/assets/reviewer.png";
-import leadAvatar from "@/assets/lead.png";
-import plannerAvatar from "@/assets/planner.png";
-import architectAvatar from "@/assets/architect.png";
+import { getAgentAvatar } from "@/lib/agentIdentity";
 
 import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { Card, CardContent } from "@/components/ui/card";
@@ -165,16 +161,8 @@ function getCardTint(task: Task): { ring: string; bg: string; hover: string; act
   return null;
 }
 
-const AGENT_AVATARS: Record<string, string> = {
-  worker: workerAvatar,
-  reviewer: reviewerAvatar,
-  lead: leadAvatar,
-  planner: plannerAvatar,
-  architect: architectAvatar,
-};
-
 function agentAvatar(agentType?: string): string {
-  return AGENT_AVATARS[agentType ?? "worker"] ?? workerAvatar;
+  return getAgentAvatar(agentType);
 }
 
 function acProgressIcon(met: number, total: number) {

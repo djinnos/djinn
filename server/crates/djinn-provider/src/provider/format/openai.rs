@@ -80,6 +80,8 @@ impl OpenAIProvider {
                             "content": text
                         }));
                     }
+                    // Thinking blocks are display-only; not sent to OpenAI.
+                    ContentBlock::Thinking { .. } => {}
                 }
             }
 

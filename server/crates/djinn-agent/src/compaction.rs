@@ -458,6 +458,8 @@ fn format_messages_as_text(messages: &[Message]) -> String {
                         .join("");
                     format!("[{role}]: tool_response: {result}")
                 }
+                // Thinking blocks are not relevant for compaction summaries.
+                ContentBlock::Thinking { .. } => continue,
             };
             out.push_str(&line);
             out.push('\n');
@@ -492,6 +494,7 @@ fn estimate_message_chars(msg: &Message) -> usize {
                     _ => 64,
                 })
                 .sum(),
+            ContentBlock::Thinking { thinking } => thinking.len(),
         })
         .sum()
 }

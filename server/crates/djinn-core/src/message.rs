@@ -43,6 +43,13 @@ pub enum ContentBlock {
         content: Vec<ContentBlock>,
         is_error: bool,
     },
+
+    /// Model reasoning/thinking content (extended thinking, chain-of-thought).
+    ///
+    /// Stored for display but stripped when serializing back to provider APIs
+    /// (providers that need round-tripping, like Anthropic extended thinking
+    /// with signatures, are not yet supported).
+    Thinking { thinking: String },
 }
 
 impl ContentBlock {
@@ -207,6 +214,7 @@ impl Conversation {
                     .filter_map(|c| c.as_text())
                     .map(|t| t.len())
                     .sum(),
+                ContentBlock::Thinking { thinking } => thinking.len(),
             })
             .sum();
         chars / 4
@@ -299,6 +307,7 @@ impl Conversation {
                         .iter()
                         .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
                         .collect();
+                    // Thinking blocks are display-only; not sent back to OpenAI.
 
                     if tool_uses.is_empty() {
                         // Plain assistant message.
@@ -377,13 +386,21 @@ impl Conversation {
                     }
                 }
                 Role::User => {
-                    let content: Vec<serde_json::Value> =
-                        msg.content.iter().map(content_block_to_anthropic).collect();
+                    let content: Vec<serde_json::Value> = msg
+                        .content
+                        .iter()
+                        .filter(|b| !is_thinking(b))
+                        .map(content_block_to_anthropic)
+                        .collect();
                     msgs.push(json!({"role": "user", "content": content}));
                 }
                 Role::Assistant => {
-                    let content: Vec<serde_json::Value> =
-                        msg.content.iter().map(content_block_to_anthropic).collect();
+                    let content: Vec<serde_json::Value> = msg
+                        .content
+                        .iter()
+                        .filter(|b| !is_thinking(b))
+                        .map(content_block_to_anthropic)
+                        .collect();
                     msgs.push(json!({"role": "assistant", "content": content}));
                 }
             }
@@ -427,6 +444,10 @@ impl Conversation {
                             }
                             ContentBlock::ToolUse { name, input, .. } => {
                                 vec![json!({"functionCall": {"name": name, "args": input}})]
+                            }
+                            ContentBlock::Thinking { .. } => {
+                                // Thinking blocks are display-only; skip for Google.
+                                vec![]
                             }
                             ContentBlock::ToolResult { content, .. } => content
                                 .iter()
@@ -596,7 +617,15 @@ fn content_block_to_anthropic(block: &ContentBlock) -> serde_json::Value {
                 "is_error": is_error,
             })
         }
+        // Thinking blocks are display-only; skip when serializing for the API.
+        ContentBlock::Thinking { .. } => json!({"type": "text", "text": ""}),
     }
+}
+
+/// Returns `true` if the block is a `Thinking` variant (used to filter
+/// before serializing for provider APIs).
+fn is_thinking(block: &ContentBlock) -> bool {
+    matches!(block, ContentBlock::Thinking { .. })
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

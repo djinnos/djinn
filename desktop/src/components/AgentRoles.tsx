@@ -147,7 +147,6 @@ function formatMetricDelta(before: number, after: number): string {
 }
 
 function AmendmentEntry({ amendment }: { amendment: LearnedPromptAmendment }) {
-  const isKeep = amendment.action === "keep";
   const HIDDEN_METRICS = new Set(["agent_name", "completed_task_count"]);
   const metricKeys = Object.keys(amendment.metrics_before).filter((key) => {
     if (HIDDEN_METRICS.has(key)) return false;

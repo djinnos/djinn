@@ -123,9 +123,10 @@ function AgentMetricsCard({ metrics }: { metrics: AgentMetrics }) {
           No task history — metrics will appear once this role completes tasks.
         </p>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 pt-1 border-t border-border">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 pt-1 border-t border-border">
           <MetricCell label="Success rate" value={fmtPct(metrics.success_rate)} />
-          <MetricCell label="Avg tokens" value={fmtTokens(metrics.avg_token_usage)} />
+          <MetricCell label="Avg tokens in" value={fmtTokens(metrics.avg_tokens_in)} />
+          <MetricCell label="Avg tokens out" value={fmtTokens(metrics.avg_tokens_out)} />
           <MetricCell label="Avg time" value={fmtDuration(metrics.avg_time_to_complete_seconds)} />
           <MetricCell label="Verification ✓" value={fmtPct(metrics.verification_pass_rate)} />
           <MetricCell label="Reopen rate" value={fmtPct(metrics.reopen_rate)} />

@@ -113,6 +113,8 @@ export interface AgentMetrics {
   task_count: number;
   success_rate: number | null;
   avg_token_usage: number | null;
+  avg_tokens_in: number | null;
+  avg_tokens_out: number | null;
   avg_time_to_complete_seconds: number | null;
   verification_pass_rate: number | null;
   reopen_rate: number | null;

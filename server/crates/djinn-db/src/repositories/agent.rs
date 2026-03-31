@@ -55,6 +55,10 @@ pub struct AgentMetrics {
     pub completed_task_count: i64,
     /// Average total tokens (in + out) per completed session in the window.
     pub avg_tokens: f64,
+    /// Average input tokens per completed session in the window.
+    pub avg_tokens_in: f64,
+    /// Average output tokens per completed session in the window.
+    pub avg_tokens_out: f64,
     /// Average session duration in seconds (completed sessions in the window).
     pub avg_time_seconds: f64,
     /// Aggregated extraction-quality counters across sessions in the window.
@@ -445,9 +449,11 @@ impl AgentRepository {
         .unwrap_or((0.0, 0.0, 0.0, 0));
 
         // Session-level metrics: completed sessions within the lookback window.
-        let session_row: (f64, f64, i64, i64, i64, i64) = sqlx::query_as(
+        let session_row: (f64, f64, f64, f64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
                 COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS REAL)), 0.0),
+                COALESCE(AVG(CAST(s.tokens_in AS REAL)), 0.0),
+                COALESCE(AVG(CAST(s.tokens_out AS REAL)), 0.0),
                 COALESCE(AVG(
                     CASE WHEN s.ended_at IS NOT NULL
                         THEN CAST((julianday(s.ended_at) - julianday(s.started_at)) * 86400 AS REAL)
@@ -469,7 +475,7 @@ impl AgentRepository {
         .bind(window_days)
         .fetch_one(self.db.pool())
         .await
-        .unwrap_or((0.0, 0.0, 0, 0, 0, 0));
+        .unwrap_or((0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0));
 
         Ok(AgentMetrics {
             success_rate: task_row.0,
@@ -477,12 +483,14 @@ impl AgentRepository {
             verification_pass_rate: task_row.2,
             completed_task_count: task_row.3,
             avg_tokens: session_row.0,
-            avg_time_seconds: session_row.1,
+            avg_tokens_in: session_row.1,
+            avg_tokens_out: session_row.2,
+            avg_time_seconds: session_row.3,
             extraction_quality: ExtractionQualityMetrics {
-                extracted: session_row.2,
-                dedup_skipped: session_row.3,
-                novelty_skipped: session_row.4,
-                written: session_row.5,
+                extracted: session_row.4,
+                dedup_skipped: session_row.5,
+                novelty_skipped: session_row.6,
+                written: session_row.7,
             },
         })
     }

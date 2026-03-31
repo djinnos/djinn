@@ -5,23 +5,29 @@
  * Right panel: unified chat thread (ADR-007)
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { taskStore } from "@/stores/taskStore";
-import { useEpicStore } from "@/stores/useEpicStore";
-import { useSessionMessages, type SessionInfo } from "@/hooks/useSessionMessages";
+import { useSessionMessages } from "@/hooks/useSessionMessages";
 import { SessionThread } from "@/components/SessionThread";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import type { AcceptanceCriterion, Task } from "@/api/types";
-import { ArrowLeft02Icon } from "@hugeicons/core-free-icons";
+import {
+  AlertDiamondIcon,
+  ArrowLeft02Icon,
+  FullSignalIcon,
+  LowSignalIcon,
+  MediumSignalIcon,
+  NoSignalIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { verificationStore } from "@/stores/verificationStore";
-import { StepLog } from "@/components/StepLog";
 import {
   areSetupVerificationViewsEqual,
   buildSetupVerificationView,
@@ -52,19 +58,33 @@ const STATUS_COLORS: Record<string, string> = {
   closed: "bg-muted text-muted-foreground",
 };
 
+// ── Priority badge ──────────────────────────────────────────────────────────
+
+const PRIORITY_CONFIG: Record<number, { icon: typeof NoSignalIcon; color: string }> = {
+  [-1]: { icon: AlertDiamondIcon, color: "text-orange-400" },
+  0: { icon: FullSignalIcon, color: "text-[#D1D5DB]" },
+  1: { icon: MediumSignalIcon, color: "text-[#9CA3AF]" },
+  2: { icon: LowSignalIcon, color: "text-[#6B7280]" },
+  3: { icon: NoSignalIcon, color: "text-[#4B5563]" },
+};
+
+function PriorityBadge({ priority }: { priority: number }) {
+  const config = PRIORITY_CONFIG[priority] ?? PRIORITY_CONFIG[Math.min(Math.max(priority ?? 3, 0), 3)];
+  return (
+    <HugeiconsIcon
+      icon={config.icon}
+      size={14}
+      className={`shrink-0 ${config.color}`}
+      aria-label={priority === -1 ? "Priority Critical" : `Priority P${priority}`}
+    />
+  );
+}
+
 // ── Helper components ────────────────────────────────────────────────────────
 
 function parseCriterion(raw: string | AcceptanceCriterion): { criterion: string; met: boolean } {
   if (typeof raw === "string") return { criterion: raw, met: false };
   return { criterion: raw.criterion, met: Boolean(raw.met) };
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const m = Math.floor(seconds / 60);
-  const h = Math.floor(m / 60);
-  if (h > 0) return `${h}h ${m % 60}m`;
-  return `${m}m`;
 }
 
 function formatTokens(n: number): string {
@@ -81,147 +101,12 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ── Session list sidebar item ────────────────────────────────────────────────
-
-const AGENT_COLORS: Record<string, string> = {
-  worker: "text-blue-400",
-  reviewer: "text-amber-400",
-  pm: "text-purple-400",
-  epic_reviewer: "text-teal-400",
-};
-
-function SessionListItem({ session }: { session: SessionInfo }) {
-  const isActive = session.status === "running" || session.status === "active";
-  const color = AGENT_COLORS[session.agentType] ?? "text-muted-foreground";
-
-  return (
-    <div className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/30">
-      <span className={cn("font-medium", color)}>{session.agentType}</span>
-      <span className="flex-1" />
-      {isActive && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />}
-      <span className="text-muted-foreground">
-        {formatTokens(session.tokensIn + session.tokensOut)} tok
-      </span>
-    </div>
-  );
-}
-
 // ── Left panel ───────────────────────────────────────────────────────────────
 
-function TaskSidebar({ task, sessions }: { task: Task; sessions: SessionInfo[] }) {
-  const epics = useEpicStore((s) => s.epics);
-  const epic = task.epic_id ? epics.get(task.epic_id) : undefined;
+function TaskSidebar({ task }: { task: Task }) {
   const criteria = (task.acceptance_criteria ?? []).map(parseCriterion);
-  const acMet = criteria.filter((c: { met: boolean }) => c.met).length;
-  const totalDuration = task.duration_seconds ?? 0;
-  const setupVerification = useStore(verificationStore, (state) => {
-    const next = buildSetupVerificationView(task.id, state);
-    const storeState = state as ReturnType<typeof verificationStore.getState> & {
-      _taskSessionSetupVerificationCache?: Map<string, typeof EMPTY_SETUP_VERIFICATION>;
-    };
-
-    if (!storeState._taskSessionSetupVerificationCache) {
-      storeState._taskSessionSetupVerificationCache = new Map();
-    }
-
-    const prev = storeState._taskSessionSetupVerificationCache.get(task.id);
-    if (prev && areSetupVerificationViewsEqual(prev, next)) {
-      return prev;
-    }
-
-    storeState._taskSessionSetupVerificationCache.set(task.id, next);
-    return next;
-  });
-
-  const [isSetupVerificationCollapsed, setIsSetupVerificationCollapsed] = useState(
-    setupVerification.allPassed
-  );
-
-  const setupVerificationDefaultCollapsed = useMemo(
-    () => setupVerification.allPassed,
-    [setupVerification.allPassed]
-  );
-
-  useEffect(() => {
-    setIsSetupVerificationCollapsed(setupVerificationDefaultCollapsed);
-  }, [setupVerificationDefaultCollapsed]);
-
   return (
     <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-border p-4">
-      {/* Title & status */}
-      <div>
-        <div className="flex items-center gap-2">
-          <span
-            className={cn(
-              "rounded px-1.5 py-0.5 text-[10px] font-semibold",
-              STATUS_COLORS[task.status] ?? "bg-muted text-muted-foreground"
-            )}
-          >
-            {STATUS_LABELS[task.status] ?? task.status}
-          </span>
-          {task.short_id && (
-            <span className="text-[10px] font-medium text-muted-foreground">{task.short_id}</span>
-          )}
-          {task.reopen_count > 0 && (
-            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
-              {task.reopen_count}x reopened
-            </span>
-          )}
-        </div>
-        <h1 className="mt-2 text-lg font-semibold leading-tight">{task.title}</h1>
-        {epic && (
-          <p className="mt-1 text-xs text-muted-foreground">{epic.title}</p>
-        )}
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 gap-2 text-xs">
-        <div className="rounded bg-muted/30 px-2 py-1.5">
-          <div className="text-[10px] text-muted-foreground">Duration</div>
-          <div className="font-medium">{totalDuration > 0 ? formatDuration(totalDuration) : "—"}</div>
-        </div>
-        <div className="rounded bg-muted/30 px-2 py-1.5">
-          <div className="text-[10px] text-muted-foreground">Sessions</div>
-          <div className="font-medium">{sessions.length}</div>
-        </div>
-        <div className="rounded bg-muted/30 px-2 py-1.5">
-          <div className="text-[10px] text-muted-foreground">AC Progress</div>
-          <div className="font-medium">
-            {criteria.length > 0 ? `${acMet}/${criteria.length}` : "—"}
-          </div>
-        </div>
-        <div className="rounded bg-muted/30 px-2 py-1.5">
-          <div className="text-[10px] text-muted-foreground">Priority</div>
-          <div className="font-medium">P{task.priority}</div>
-        </div>
-      </div>
-
-      {/* Setup & Verification */}
-      {setupVerification.hasData && (
-        <div className="space-y-2">
-          <button
-            type="button"
-            className="flex w-full items-center justify-between rounded px-1 py-1 text-left hover:bg-muted/30"
-            onClick={() => setIsSetupVerificationCollapsed((prev) => !prev)}
-          >
-            <SectionHeader>Setup & Verification</SectionHeader>
-            <span className="text-xs text-muted-foreground">
-              {isSetupVerificationCollapsed ? "Show" : "Hide"}
-            </span>
-          </button>
-
-          {!isSetupVerificationCollapsed && (
-            <StepLog
-              steps={setupVerification.steps}
-              status={setupVerification.status}
-              originalDurationMs={setupVerification.totalDuration}
-              emphasizedStepId={setupVerification.failedStepId}
-              className="bg-background p-1"
-            />
-          )}
-        </div>
-      )}
-
       {/* Acceptance Criteria */}
       {criteria.length > 0 && (
         <div className="space-y-2">
@@ -258,17 +143,6 @@ function TaskSidebar({ task, sessions }: { task: Task; sessions: SessionInfo[] }
         </div>
       )}
 
-      {/* Sessions */}
-      {sessions.length > 0 && (
-        <div className="space-y-2">
-          <SectionHeader>Sessions</SectionHeader>
-          <div className="space-y-0.5">
-            {sessions.map((s) => (
-              <SessionListItem key={s.id} session={s} />
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -300,10 +174,21 @@ export function TaskSessionPage() {
     return unsub;
   }, [taskId]);
 
-  const { timeline, sessions, loading, error, streamingText } = useSessionMessages(
+  const { timeline, sessions, loading, error, streamingText, streamingThinking } = useSessionMessages(
     taskId ?? null,
     projectPath
   );
+
+  // Build setup verification view for the session thread
+  const setupVerificationRaw = useStore(verificationStore);
+  const setupVerificationRef = useRef(EMPTY_SETUP_VERIFICATION);
+  if (taskId) {
+    const next = buildSetupVerificationView(taskId, setupVerificationRaw);
+    if (!areSetupVerificationViewsEqual(setupVerificationRef.current, next)) {
+      setupVerificationRef.current = next;
+    }
+  }
+  const setupVerification = setupVerificationRef.current;
 
   // Determine active agent type for streaming display
   const activeSession = sessions.find(
@@ -330,9 +215,21 @@ export function TaskSessionPage() {
         >
           <HugeiconsIcon icon={ArrowLeft02Icon} size={16} />
         </button>
+        <PriorityBadge priority={task.priority} />
         <span className="text-sm font-medium">{task.title}</span>
-        <span className="text-xs text-muted-foreground">{task.short_id}</span>
+        <TaskIdLabel taskId={task.id} shortId={task.short_id} />
         <span className="flex-1" />
+        {sessions.length > 0 && (() => {
+          const totalIn = sessions.reduce((sum, s) => sum + s.tokensIn, 0);
+          const totalOut = sessions.reduce((sum, s) => sum + s.tokensOut, 0);
+          return (
+            <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              <span>{formatTokens(totalIn)} in</span>
+              <span>/</span>
+              <span>{formatTokens(totalOut)} out</span>
+            </span>
+          );
+        })()}
         <span
           className={cn(
             "rounded px-1.5 py-0.5 text-[10px] font-semibold",
@@ -345,14 +242,16 @@ export function TaskSessionPage() {
 
       {/* Content: sidebar + thread */}
       <div className="flex min-h-0 flex-1">
-        <TaskSidebar task={task} sessions={sessions} />
+        <TaskSidebar task={task} />
         <div className="flex min-w-0 flex-1 flex-col">
           <SessionThread
             timeline={timeline}
             streamingText={streamingText}
+            streamingThinking={streamingThinking}
             loading={loading}
             error={error}
             activeAgentType={activeSession?.agentType}
+            setupVerification={setupVerification}
           />
         </div>
       </div>

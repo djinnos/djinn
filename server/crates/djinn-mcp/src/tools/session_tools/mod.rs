@@ -144,6 +144,7 @@ pub struct TimelineMessage {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TimelineActivity {
     pub event_type: String,
+    pub actor_role: String,
     pub payload: super::json_object::AnyJson,
     pub timestamp: String,
 }
@@ -506,6 +507,7 @@ impl DjinnMcpServer {
                 .iter()
                 .map(|e| TimelineActivity {
                     event_type: e.event_type.clone(),
+                    actor_role: e.actor_role.clone(),
                     payload: super::json_object::AnyJson(
                         serde_json::from_str(&e.payload).unwrap_or_else(|_| serde_json::json!({})),
                     ),

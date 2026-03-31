@@ -267,22 +267,28 @@ pub(crate) fn parse_anthropic_event(
                     .pointer("/content_block/type")
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
-                if block_type == "tool_use" {
-                    let id = v
-                        .pointer("/content_block/id")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = v
-                        .pointer("/content_block/name")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    *tool_acc = Some(ToolAcc {
-                        id,
-                        name,
-                        input_json: String::new(),
-                    });
+                match block_type {
+                    "tool_use" => {
+                        let id = v
+                            .pointer("/content_block/id")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = v
+                            .pointer("/content_block/name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        *tool_acc = Some(ToolAcc {
+                            id,
+                            name,
+                            input_json: String::new(),
+                        });
+                    }
+                    "thinking" => {
+                        // Extended thinking block — nothing to accumulate at start.
+                    }
+                    _ => {}
                 }
             }
         }
@@ -303,6 +309,16 @@ pub(crate) fn parse_anthropic_event(
                             .to_string();
                         if !text.is_empty() {
                             events.push(StreamEvent::Delta(ContentBlock::Text { text }));
+                        }
+                    }
+                    "thinking_delta" => {
+                        let thinking = v
+                            .pointer("/delta/thinking")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !thinking.is_empty() {
+                            events.push(StreamEvent::Thinking(thinking));
                         }
                     }
                     "input_json_delta" => {

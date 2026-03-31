@@ -319,6 +319,7 @@ pub(super) async fn run_reply_loop(
 
             // Accumulate the assistant turn from stream events.
             let mut turn_text = String::new();
+            let mut turn_thinking = String::new();
             let mut turn_tool_calls: Vec<ContentBlock> = Vec::new();
             let mut turn_tokens_in: u32 = 0;
             let mut turn_tokens_out: u32 = 0;
@@ -384,13 +385,24 @@ pub(super) async fn run_reply_loop(
                             StreamEvent::Delta(tool_use @ ContentBlock::ToolUse { .. }) => {
                                 turn_tool_calls.push(tool_use);
                             }
-                            StreamEvent::Delta(ContentBlock::ToolResult { .. }) => {
-                                // Provider should not be streaming tool results; ignore.
+                            StreamEvent::Delta(ContentBlock::ToolResult { .. })
+                            | StreamEvent::Delta(ContentBlock::Thinking { .. }) => {
+                                // ToolResult: provider should not be streaming tool results.
+                                // Thinking via Delta: handled by StreamEvent::Thinking above.
                             }
-                            StreamEvent::Thinking(_) => {
-                                // Reasoning tokens (Kimi K2.5, DeepSeek-R1, GLM, etc.)
-                                // Activity timestamp already updated above — nothing else
-                                // to do; thinking tokens aren't stored in conversation.
+                            StreamEvent::Thinking(thinking) => {
+                                // Stream thinking deltas to the desktop UI.
+                                app_state.event_bus.send(DjinnEventEnvelope::session_message(
+                                    session_id,
+                                    task_id,
+                                    role_name,
+                                    &serde_json::json!({
+                                        "type": "thinking_delta",
+                                        "role": "assistant",
+                                        "text": thinking,
+                                    }),
+                                ));
+                                turn_thinking.push_str(&thinking);
                             }
                             StreamEvent::Usage(usage) => {
                                 turn_tokens_in = usage.input;
@@ -500,6 +512,9 @@ pub(super) async fn run_reply_loop(
 
             // ── Build the assistant message from this turn ───────────────────
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
+            if !turn_thinking.is_empty() {
+                assistant_content.push(ContentBlock::Thinking { thinking: turn_thinking.clone() });
+            }
             if !turn_text.is_empty() {
                 push_fragment(&mut assistant_fragments, format!("text:{}", turn_text));
                 last_assistant_text = turn_text.clone();

@@ -16,6 +16,7 @@ import { sseStore } from "@/stores/sseStore";
 export interface ContentBlock {
   type: string;
   text?: string;
+  thinking?: string;
   name?: string;
   input?: Record<string, unknown>;
   tool_use_id?: string;
@@ -44,6 +45,33 @@ export interface CommandBlock {
   name: string;
   body: string;
   passed: boolean;
+  exitCode?: number;
+  command?: string;
+  timestamp: string;
+}
+
+export interface CommentBlock {
+  kind: "comment";
+  body: string;
+  actorRole: string;
+  timestamp: string;
+}
+
+export interface VerificationStep {
+  command: string;
+  phase: "setup" | "verification";
+  passed: boolean;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  durationMs?: number;
+}
+
+export interface VerificationBlock {
+  kind: "verification";
+  steps: VerificationStep[];
+  passed: boolean;
+  totalDurationMs: number;
   timestamp: string;
 }
 
@@ -54,7 +82,7 @@ export interface StreamingDelta {
   text: string;
 }
 
-export type TimelineEntry = ChatMessage | SystemDivider | CommandBlock | StreamingDelta;
+export type TimelineEntry = ChatMessage | SystemDivider | CommandBlock | CommentBlock | VerificationBlock | StreamingDelta;
 
 export interface SessionInfo {
   id: string;
@@ -75,6 +103,7 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState<Map<string, string>>(new Map());
+  const [streamingThinking, setStreamingThinking] = useState<Map<string, string>>(new Map());
 
   const fetchData = useCallback(async () => {
     if (!taskId || !projectPath) return;
@@ -111,6 +140,7 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
 
       // Build timeline entries
       const entries: TimelineEntry[] = [];
+      const pendingCommandRuns: Array<{ steps: VerificationStep[]; timestamp: string }> = [];
 
       // Add session messages (already sorted by timestamp from server)
       for (const msg of result.messages ?? []) {
@@ -133,13 +163,52 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
           const to = payload?.to_status as string | undefined;
           const reason = payload?.reason as string | undefined;
           if (from && to) {
-            let label = `${formatStatus(from)} → ${formatStatus(to)}`;
-            if (reason) label += ` — ${reason}`;
+            // Always emit the status transition divider
             entries.push({
               kind: "divider",
-              label,
+              label: `${formatStatus(from)} → ${formatStatus(to)}`,
               timestamp: entry.timestamp,
             });
+
+            // If there's a reason, parse it as a command result
+            if (reason) {
+              const setupFailMatch = reason.match(/^(Setup|Verification) command '([^']+)' failed(?: \(exit (\d+)\))?\s*(.*)/s);
+              if (setupFailMatch) {
+                const [, phase, command, exitCodeStr, body] = setupFailMatch;
+                entries.push({
+                  kind: "command",
+                  name: phase?.toLowerCase() ?? "setup",
+                  body: body?.trim() ?? "",
+                  passed: false,
+                  exitCode: exitCodeStr ? Number(exitCodeStr) : undefined,
+                  command,
+                  timestamp: entry.timestamp,
+                });
+              }
+              // Generic reasons (e.g. review rejections) are already visible
+              // in the agent's submit_review / submit_decision cards — skip them.
+            }
+          }
+        } else if (entry.event_type === "commands_run") {
+          const payload = entry.payload as Record<string, unknown>;
+          const phase = (payload?.phase as string) ?? "verification";
+          const commands = payload?.commands as Array<Record<string, unknown>> | undefined;
+
+          if (commands?.length) {
+            const steps: VerificationStep[] = commands.map((cmd) => {
+              const name = (cmd.name as string) || (cmd.command as string) || "unknown";
+              const exitCode = cmd.exit_code as number | undefined;
+              return {
+                command: name,
+                phase: phase as "setup" | "verification",
+                passed: exitCode === 0,
+                exitCode: exitCode ?? undefined,
+                stdout: (cmd.stdout as string) || undefined,
+                stderr: (cmd.stderr as string) || undefined,
+                durationMs: cmd.duration_ms as number | undefined,
+              };
+            });
+            pendingCommandRuns.push({ steps, timestamp: entry.timestamp });
           }
         } else if (entry.event_type === "verification" || entry.event_type === "setup") {
           const body = ((entry.payload as Record<string, unknown>)?.body as string) ?? "";
@@ -154,10 +223,58 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
           const body = ((entry.payload as Record<string, unknown>)?.body as string) ?? "";
           if (body) {
             entries.push({
-              kind: "divider",
-              label: body,
+              kind: "comment",
+              body,
+              actorRole: (entry as Record<string, unknown>).actor_role as string ?? "system",
               timestamp: entry.timestamp,
             });
+          }
+        }
+      }
+
+      // Group commands_run events into verification blocks.
+      // A setup event followed by a verification event (within 60s) = one cycle.
+      // Consecutive events with the same phase = separate cycles.
+      if (pendingCommandRuns.length > 0) {
+        pendingCommandRuns.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+        let i = 0;
+        while (i < pendingCommandRuns.length) {
+          const current = pendingCommandRuns[i];
+          const currentPhases = new Set(current.steps.map((s) => s.phase));
+
+          // Check if next event is a different phase within 60s (same cycle)
+          const next = pendingCommandRuns[i + 1];
+          const nextPhases = next ? new Set(next.steps.map((s) => s.phase)) : null;
+          const timeDiff = next
+            ? new Date(next.timestamp).getTime() - new Date(current.timestamp).getTime()
+            : Infinity;
+
+          const shouldMerge = next
+            && timeDiff <= 60_000
+            && !setsOverlap(currentPhases, nextPhases!);
+
+          if (shouldMerge) {
+            const allSteps = [...current.steps, ...next!.steps];
+            const totalDuration = allSteps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0);
+            entries.push({
+              kind: "verification",
+              steps: allSteps,
+              passed: allSteps.every((s) => s.passed),
+              totalDurationMs: totalDuration,
+              timestamp: current.timestamp,
+            });
+            i += 2;
+          } else {
+            const totalDuration = current.steps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0);
+            entries.push({
+              kind: "verification",
+              steps: current.steps,
+              passed: current.steps.every((s) => s.passed),
+              totalDurationMs: totalDuration,
+              timestamp: current.timestamp,
+            });
+            i += 1;
           }
         }
       }
@@ -196,8 +313,21 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
           next.set(data.session_id as string, current + ((msg.text as string) ?? ""));
           return next;
         });
+      } else if (msg.type === "thinking_delta") {
+        setStreamingThinking((prev) => {
+          const next = new Map(prev);
+          const current = next.get(data.session_id as string) ?? "";
+          next.set(data.session_id as string, current + ((msg.text as string) ?? ""));
+          return next;
+        });
       } else {
+        // Full message — clear streaming state and append to timeline.
         setStreamingText((prev) => {
+          const next = new Map(prev);
+          next.delete(data.session_id as string);
+          return next;
+        });
+        setStreamingThinking((prev) => {
           const next = new Map(prev);
           next.delete(data.session_id as string);
           return next;
@@ -227,7 +357,7 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
     fetchData();
   }, [fetchData]);
 
-  return { timeline, sessions, loading, error, streamingText, refetch: fetchData };
+  return { timeline, sessions, loading, error, streamingText, streamingThinking, refetch: fetchData };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -242,6 +372,11 @@ const STATUS_LABELS: Record<string, string> = {
   in_lead_intervention: "Lead Intervening",
   closed: "Done",
 };
+
+function setsOverlap(a: Set<string>, b: Set<string>): boolean {
+  for (const v of a) if (b.has(v)) return true;
+  return false;
+}
 
 function formatStatus(status: string): string {
   return STATUS_LABELS[status] ?? status;
