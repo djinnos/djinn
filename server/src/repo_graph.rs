@@ -654,24 +654,25 @@ impl RepoDependencyGraph {
         // nodes (e.g. symbols defined in unchanged files that are referenced
         // by changed files).
         let base = Self::from_artifact(&filtered_artifact);
-        let mut builder = RepoDependencyGraphBuilder::default();
-        // Seed the builder with the surviving graph state.
-        builder.graph = base.graph;
-        builder.node_lookup = base.node_lookup;
+        let mut builder = RepoDependencyGraphBuilder {
+            graph: base.graph,
+            node_lookup: base.node_lookup,
+            ..Default::default()
+        };
         // Reconstruct declared_symbols and symbol_file from the surviving nodes.
         for node_index in builder.graph.node_indices() {
             let node = &builder.graph[node_index];
-            if let RepoGraphNodeKind::Symbol = node.kind {
-                if let Some(sym) = &node.symbol {
-                    if !node.is_external {
-                        builder.declared_symbols.insert(sym.clone());
-                    }
-                    if let Some(fp) = &node.file_path {
-                        builder.symbol_file.insert(sym.clone(), fp.clone());
-                    }
-                    if let Some(lang) = &node.language {
-                        builder.symbol_language.insert(sym.clone(), lang.clone());
-                    }
+            if let RepoGraphNodeKind::Symbol = node.kind
+                && let Some(sym) = &node.symbol
+            {
+                if !node.is_external {
+                    builder.declared_symbols.insert(sym.clone());
+                }
+                if let Some(fp) = &node.file_path {
+                    builder.symbol_file.insert(sym.clone(), fp.clone());
+                }
+                if let Some(lang) = &node.language {
+                    builder.symbol_language.insert(sym.clone(), lang.clone());
                 }
             }
         }

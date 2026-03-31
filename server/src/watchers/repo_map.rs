@@ -493,28 +493,27 @@ async fn maybe_refresh_identity(
         // Attempt small-diff graph patching when the base cache entry has a
         // graph artifact and the worktree reuse plan identified specific
         // changed files.
-        if let Some(changed_files) = &identity.reuse_plan.changed_files {
-            if let Some(artifact_json) = &cached.graph_artifact {
-                if !changed_files.is_empty() {
-                    match patch_cached_repo_map(
-                        db,
-                        events,
-                        &identity,
-                        artifact_json,
-                        changed_files,
-                    )
-                    .await
-                    {
-                        Ok(()) => return,
-                        Err(error) => {
-                            tracing::warn!(
-                                project = %identity.project_path.display(),
-                                commit = %identity.commit_sha,
-                                error = %error,
-                                "small-diff graph patch failed; falling back to cache clone"
-                            );
-                        }
-                    }
+        if let Some(changed_files) = &identity.reuse_plan.changed_files
+            && let Some(artifact_json) = &cached.graph_artifact
+            && !changed_files.is_empty()
+        {
+            match patch_cached_repo_map(
+                db,
+                events,
+                &identity,
+                artifact_json,
+                changed_files,
+            )
+            .await
+            {
+                Ok(()) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        project = %identity.project_path.display(),
+                        commit = %identity.commit_sha,
+                        error = %error,
+                        "small-diff graph patch failed; falling back to cache clone"
+                    );
                 }
             }
         }
