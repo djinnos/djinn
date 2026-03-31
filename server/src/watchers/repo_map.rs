@@ -585,6 +585,14 @@ async fn generate_and_store_repo_map(
     )
     .map_err(|error| RepoMapRefreshError(format!("{error:?}")))?;
 
+    let artifact_json = match graph.serialize_artifact() {
+        Ok(json) => Some(json),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to serialize repo graph artifact, proceeding without it");
+            None
+        }
+    };
+
     let project_path = identity.project_path.to_string_lossy().into_owned();
     let worktree_path = identity
         .worktree_path
@@ -602,6 +610,7 @@ async fn generate_and_store_repo_map(
             rendered_map: &rendered.content,
             token_estimate: rendered.token_estimate as i64,
             included_entries: rendered.included_entries as i64,
+            graph_artifact: artifact_json.as_deref(),
         })
         .await?;
 
@@ -640,6 +649,7 @@ async fn clone_cached_repo_map(
             rendered_map: &cached.rendered_map,
             token_estimate: cached.token_estimate,
             included_entries: cached.included_entries,
+            graph_artifact: cached.graph_artifact.as_deref(),
         })
         .await?;
 
@@ -706,6 +716,7 @@ mod tests {
             rendered_map: "cached",
             token_estimate: 1,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .unwrap();
@@ -738,6 +749,7 @@ mod tests {
             rendered_map: "cached-base",
             token_estimate: 1,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .unwrap();
@@ -776,6 +788,7 @@ mod tests {
             rendered_map: "cached-base",
             token_estimate: 1,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .unwrap();
@@ -814,6 +827,7 @@ mod tests {
             rendered_map: "cached",
             token_estimate: 1,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .unwrap();
@@ -878,6 +892,7 @@ mod tests {
             rendered_map: "cached",
             token_estimate: 1,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .unwrap();
@@ -923,6 +938,7 @@ mod tests {
             rendered_map: "cached-base",
             token_estimate: 1,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .unwrap();
@@ -1059,6 +1075,7 @@ mod tests {
                 rendered_map: "cached",
                 token_estimate: 1,
                 included_entries: 1,
+                graph_artifact: None,
             })
             .await
             .unwrap();
@@ -1293,6 +1310,7 @@ mod tests {
                 rendered_map: "test-map-content",
                 token_estimate: 42,
                 included_entries: 5,
+                graph_artifact: None,
             })
             .await
             .unwrap();
@@ -1375,6 +1393,7 @@ mod tests {
                 rendered_map: "cached-map",
                 token_estimate: 10,
                 included_entries: 2,
+                graph_artifact: None,
             })
             .await
             .unwrap();

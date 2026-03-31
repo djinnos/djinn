@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use petgraph::Direction::{Incoming, Outgoing};
 use petgraph::algo::page_rank;
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef as PetgraphEdgeRef;
 use serde::{Deserialize, Serialize};
 
 use crate::scip_parser::{
@@ -500,6 +501,96 @@ impl RepoDependencyGraphBuilder {
     }
 }
 
+/// Minimal serializable artifact capturing the per-file and per-symbol graph
+/// relationships needed for incremental changed-file patch planning.
+///
+/// This is persisted alongside the rendered repo-map cache so that later
+/// operations can recover the dependency graph without re-parsing raw SCIP
+/// outputs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoGraphArtifact {
+    pub nodes: Vec<RepoGraphNode>,
+    pub edges: Vec<RepoGraphArtifactEdge>,
+}
+
+/// A serializable directed edge between two graph nodes, identified by their
+/// position in the `nodes` vec of the parent [`RepoGraphArtifact`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoGraphArtifactEdge {
+    pub source: usize,
+    pub target: usize,
+    pub kind: RepoGraphEdgeKind,
+    pub weight: f64,
+    pub evidence_count: usize,
+}
+
+impl RepoDependencyGraph {
+    /// Serialize the graph into a compact JSON artifact suitable for DB
+    /// persistence.
+    pub fn to_artifact(&self) -> RepoGraphArtifact {
+        let mut index_map: BTreeMap<NodeIndex, usize> = BTreeMap::new();
+        let mut nodes = Vec::with_capacity(self.graph.node_count());
+        for (i, node_index) in self.graph.node_indices().enumerate() {
+            index_map.insert(node_index, i);
+            nodes.push(self.graph[node_index].clone());
+        }
+
+        let mut edges = Vec::with_capacity(self.graph.edge_count());
+        for edge_ref in self.graph.edge_references() {
+            let source = index_map[&edge_ref.source()];
+            let target = index_map[&edge_ref.target()];
+            let w = edge_ref.weight();
+            edges.push(RepoGraphArtifactEdge {
+                source,
+                target,
+                kind: w.kind,
+                weight: w.weight,
+                evidence_count: w.evidence_count,
+            });
+        }
+
+        RepoGraphArtifact { nodes, edges }
+    }
+
+    /// Rebuild a `RepoDependencyGraph` from a previously persisted artifact.
+    pub fn from_artifact(artifact: &RepoGraphArtifact) -> Self {
+        let mut graph = DiGraph::new();
+        let mut node_lookup = BTreeMap::new();
+        let mut index_map = Vec::with_capacity(artifact.nodes.len());
+
+        for node in &artifact.nodes {
+            let node_index = graph.add_node(node.clone());
+            node_lookup.insert(node.id.clone(), node_index);
+            index_map.push(node_index);
+        }
+
+        for edge in &artifact.edges {
+            graph.add_edge(
+                index_map[edge.source],
+                index_map[edge.target],
+                RepoGraphEdge {
+                    kind: edge.kind,
+                    weight: edge.weight,
+                    evidence_count: edge.evidence_count,
+                },
+            );
+        }
+
+        RepoDependencyGraph { graph, node_lookup }
+    }
+
+    /// Serialize the graph artifact to a JSON string for DB storage.
+    pub fn serialize_artifact(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.to_artifact())
+    }
+
+    /// Deserialize a graph from a previously stored JSON artifact string.
+    pub fn deserialize_artifact(json: &str) -> Result<Self, serde_json::Error> {
+        let artifact: RepoGraphArtifact = serde_json::from_str(json)?;
+        Ok(Self::from_artifact(&artifact))
+    }
+}
+
 fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
     match kind {
         RepoGraphEdgeKind::ContainsDefinition => EDGE_WEIGHT_DEFINITION_TO_FILE,
@@ -695,5 +786,84 @@ mod tests {
             syntax_kind: None,
             override_documentation: vec![],
         }
+    }
+
+    #[test]
+    fn artifact_round_trip_preserves_graph_structure() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let original_node_count = graph.node_count();
+        let original_edge_count = graph.edge_count();
+
+        let artifact = graph.to_artifact();
+        assert_eq!(artifact.nodes.len(), original_node_count);
+        assert_eq!(artifact.edges.len(), original_edge_count);
+
+        let restored = RepoDependencyGraph::from_artifact(&artifact);
+        assert_eq!(restored.node_count(), original_node_count);
+        assert_eq!(restored.edge_count(), original_edge_count);
+
+        // Verify file and symbol lookups still work after round-trip.
+        assert!(restored.file_node("src/app.rs").is_some());
+        assert!(restored.file_node("src/helper.rs").is_some());
+        assert!(
+            restored
+                .symbol_node("scip-rust pkg src/helper.rs `helper`().")
+                .is_some()
+        );
+        assert!(
+            restored
+                .symbol_node("scip-rust pkg src/app.rs `main`().")
+                .is_some()
+        );
+
+        // Verify ranking still produces valid results.
+        let ranking = restored.rank();
+        assert!(!ranking.nodes.is_empty());
+    }
+
+    #[test]
+    fn artifact_json_round_trip_preserves_graph() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let json = graph.serialize_artifact().expect("serialize");
+        let restored =
+            RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize");
+
+        assert_eq!(restored.node_count(), graph.node_count());
+        assert_eq!(restored.edge_count(), graph.edge_count());
+
+        // Verify node metadata survived serialization.
+        let helper_idx = restored
+            .symbol_node("scip-rust pkg src/helper.rs `helper`().")
+            .expect("helper symbol");
+        let helper_node = restored.node(helper_idx);
+        assert_eq!(helper_node.symbol_kind, Some(ScipSymbolKind::Function));
+        assert_eq!(helper_node.display_name, "helper");
+        assert_eq!(
+            helper_node.file_path.as_deref(),
+            Some(Path::new("src/helper.rs"))
+        );
+
+        // Verify edge metadata survived.
+        let app_idx = restored
+            .file_node("src/app.rs")
+            .expect("app file");
+        let has_contains_def = restored
+            .graph()
+            .edges(app_idx)
+            .any(|e| e.weight().kind == RepoGraphEdgeKind::ContainsDefinition);
+        assert!(has_contains_def, "expected ContainsDefinition edge from app file");
+    }
+
+    #[test]
+    fn empty_artifact_round_trip() {
+        let empty = RepoGraphArtifact {
+            nodes: vec![],
+            edges: vec![],
+        };
+        let json = serde_json::to_string(&empty).expect("serialize empty");
+        let restored =
+            RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
+        assert_eq!(restored.node_count(), 0);
+        assert_eq!(restored.edge_count(), 0);
     }
 }

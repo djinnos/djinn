@@ -10,6 +10,7 @@ pub struct CachedRepoMap {
     pub rendered_map: String,
     pub token_estimate: i64,
     pub included_entries: i64,
+    pub graph_artifact: Option<String>,
     pub created_at: String,
 }
 
@@ -27,6 +28,7 @@ pub struct RepoMapCacheInsert<'a> {
     pub rendered_map: &'a str,
     pub token_estimate: i64,
     pub included_entries: i64,
+    pub graph_artifact: Option<&'a str>,
 }
 
 pub struct RepoMapCacheRepository {
@@ -41,7 +43,7 @@ impl RepoMapCacheRepository {
     pub async fn get(&self, key: RepoMapCacheKey<'_>) -> Result<Option<CachedRepoMap>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, CachedRepoMap>(
-            "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, created_at
+            "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
              FROM repo_map_cache
              WHERE project_id = ?1
                AND project_path = ?2
@@ -64,7 +66,7 @@ impl RepoMapCacheRepository {
     ) -> Result<Option<CachedRepoMap>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, CachedRepoMap>(
-            "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, created_at
+            "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
              FROM repo_map_cache
              WHERE project_id = ?1
                AND project_path = ?2
@@ -89,8 +91,9 @@ impl RepoMapCacheRepository {
                 commit_sha,
                 rendered_map,
                 token_estimate,
-                included_entries
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                included_entries,
+                graph_artifact
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(entry.key.project_id)
         .bind(entry.key.project_path)
@@ -99,6 +102,7 @@ impl RepoMapCacheRepository {
         .bind(entry.rendered_map)
         .bind(entry.token_estimate)
         .bind(entry.included_entries)
+        .bind(entry.graph_artifact)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -128,6 +132,7 @@ mod tests {
             rendered_map: "src/main.rs\n  fn main()",
             token_estimate: 24,
             included_entries: 2,
+            graph_artifact: None,
         })
         .await
         .expect("insert");
@@ -165,6 +170,7 @@ mod tests {
             rendered_map: "map",
             token_estimate: 10,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .expect("insert");
@@ -194,6 +200,7 @@ mod tests {
             rendered_map: "map",
             token_estimate: 10,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .expect("insert");
@@ -223,6 +230,7 @@ mod tests {
             rendered_map: "worktree-map",
             token_estimate: 10,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .expect("insert worktree entry");
@@ -236,6 +244,7 @@ mod tests {
             rendered_map: "canonical-map",
             token_estimate: 12,
             included_entries: 2,
+            graph_artifact: None,
         })
         .await
         .expect("insert canonical entry");
@@ -263,6 +272,7 @@ mod tests {
             rendered_map: "worktree-map",
             token_estimate: 10,
             included_entries: 1,
+            graph_artifact: None,
         })
         .await
         .expect("insert worktree entry");
@@ -293,6 +303,7 @@ mod tests {
             rendered_map: "canonical-map",
             token_estimate: 12,
             included_entries: 2,
+            graph_artifact: None,
         })
         .await
         .expect("insert canonical entry");
@@ -309,5 +320,68 @@ mod tests {
                 .expect("lookup other project path")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn entry_without_graph_artifact_returns_none_artifact() {
+        let repo = test_repo().await;
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: None,
+                commit_sha: "abc123",
+            },
+            rendered_map: "map",
+            token_estimate: 10,
+            included_entries: 1,
+            graph_artifact: None,
+        })
+        .await
+        .expect("insert");
+
+        let cached = repo
+            .get(RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: None,
+                commit_sha: "abc123",
+            })
+            .await
+            .expect("get")
+            .expect("hit");
+        assert!(cached.graph_artifact.is_none());
+    }
+
+    #[tokio::test]
+    async fn graph_artifact_persisted_and_loaded() {
+        let repo = test_repo().await;
+        let artifact_json = r#"{"nodes":[],"edges":[]}"#;
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: None,
+                commit_sha: "abc123",
+            },
+            rendered_map: "map",
+            token_estimate: 10,
+            included_entries: 1,
+            graph_artifact: Some(artifact_json),
+        })
+        .await
+        .expect("insert");
+
+        let cached = repo
+            .get(RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/repo",
+                worktree_path: None,
+                commit_sha: "abc123",
+            })
+            .await
+            .expect("get")
+            .expect("hit");
+        assert_eq!(cached.graph_artifact.as_deref(), Some(artifact_json));
     }
 }
