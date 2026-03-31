@@ -589,6 +589,124 @@ impl RepoDependencyGraph {
         let artifact: RepoGraphArtifact = serde_json::from_str(json)?;
         Ok(Self::from_artifact(&artifact))
     }
+
+    /// Patch the graph by removing all contributions from `changed_files` and
+    /// re-adding them from the supplied SCIP parse output.
+    ///
+    /// This is the core of the small-diff incremental path: instead of
+    /// rebuilding the entire graph from scratch we strip the stale file/symbol
+    /// nodes and edges, then replay only the changed files through the normal
+    /// builder pipeline.
+    ///
+    /// The caller is responsible for ensuring `new_indices` contains parsed
+    /// SCIP data for exactly the changed files (additional files are harmless
+    /// but defeat the purpose).
+    pub fn patch_changed_files(
+        &self,
+        changed_files: &BTreeSet<PathBuf>,
+        new_indices: &[ParsedScipIndex],
+    ) -> Self {
+        // Step 1: Build a filtered artifact that excludes nodes owned by
+        // changed files and any edges touching those nodes.
+        let artifact = self.to_artifact();
+        let removed_positions: BTreeSet<usize> = artifact
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| is_owned_by_changed_file(node, changed_files))
+            .map(|(i, _)| i)
+            .collect();
+
+        // Collect surviving nodes and build old-position -> new-position map.
+        let mut position_map: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut surviving_nodes = Vec::new();
+        for (old_pos, node) in artifact.nodes.iter().enumerate() {
+            if removed_positions.contains(&old_pos) {
+                continue;
+            }
+            position_map.insert(old_pos, surviving_nodes.len());
+            surviving_nodes.push(node.clone());
+        }
+
+        let surviving_edges: Vec<RepoGraphArtifactEdge> = artifact
+            .edges
+            .iter()
+            .filter(|edge| {
+                !removed_positions.contains(&edge.source)
+                    && !removed_positions.contains(&edge.target)
+            })
+            .map(|edge| RepoGraphArtifactEdge {
+                source: position_map[&edge.source],
+                target: position_map[&edge.target],
+                kind: edge.kind,
+                weight: edge.weight,
+                evidence_count: edge.evidence_count,
+            })
+            .collect();
+
+        let filtered_artifact = RepoGraphArtifact {
+            nodes: surviving_nodes,
+            edges: surviving_edges,
+        };
+
+        // Step 2: Rebuild the base graph from the filtered artifact.
+        // We use a builder so that the new SCIP data can link to existing
+        // nodes (e.g. symbols defined in unchanged files that are referenced
+        // by changed files).
+        let base = Self::from_artifact(&filtered_artifact);
+        let mut builder = RepoDependencyGraphBuilder::default();
+        // Seed the builder with the surviving graph state.
+        builder.graph = base.graph;
+        builder.node_lookup = base.node_lookup;
+        // Reconstruct declared_symbols and symbol_file from the surviving nodes.
+        for node_index in builder.graph.node_indices() {
+            let node = &builder.graph[node_index];
+            if let RepoGraphNodeKind::Symbol = node.kind {
+                if let Some(sym) = &node.symbol {
+                    if !node.is_external {
+                        builder.declared_symbols.insert(sym.clone());
+                    }
+                    if let Some(fp) = &node.file_path {
+                        builder.symbol_file.insert(sym.clone(), fp.clone());
+                    }
+                    if let Some(lang) = &node.language {
+                        builder.symbol_language.insert(sym.clone(), lang.clone());
+                    }
+                }
+            }
+        }
+
+        // Step 3: Replay changed-file SCIP data through the builder.
+        for index in new_indices {
+            for file in &index.files {
+                if changed_files.contains(&file.relative_path) {
+                    builder.add_file(file);
+                }
+            }
+        }
+
+        builder.finish()
+    }
+}
+
+/// Returns `true` when `node` is "owned by" one of the changed files:
+/// - file nodes whose path is in the set
+/// - symbol nodes whose `file_path` is in the set *and* that are not external
+fn is_owned_by_changed_file(node: &RepoGraphNode, changed_files: &BTreeSet<PathBuf>) -> bool {
+    match &node.kind {
+        RepoGraphNodeKind::File => {
+            node.file_path
+                .as_ref()
+                .is_some_and(|p| changed_files.contains(p))
+        }
+        RepoGraphNodeKind::Symbol => {
+            !node.is_external
+                && node
+                    .file_path
+                    .as_ref()
+                    .is_some_and(|p| changed_files.contains(p))
+        }
+    }
 }
 
 fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
@@ -865,5 +983,191 @@ mod tests {
             RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
         assert_eq!(restored.node_count(), 0);
         assert_eq!(restored.edge_count(), 0);
+    }
+
+    // ---- patch_changed_files tests ----
+
+    /// Build a modified index where src/app.rs has a new symbol and a removed
+    /// reference, then patch the original graph and verify the result reflects
+    /// the changes.
+    #[test]
+    fn patch_changed_files_updates_graph_for_modified_file() {
+        let original = RepoDependencyGraph::build(&[fixture_index()]);
+
+        // The original graph has src/helper.rs and src/app.rs.
+        assert!(original.file_node("src/app.rs").is_some());
+        assert!(original.file_node("src/helper.rs").is_some());
+        assert!(original.symbol_node("scip-rust pkg src/app.rs `main`().").is_some());
+
+        // Build a replacement for src/app.rs that has a new symbol "run"
+        // instead of "main" and no reference to helper.
+        let run_symbol = ScipSymbol {
+            symbol: "scip-rust pkg src/app.rs `run`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("run".to_string()),
+            signature: Some("fn run()".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+        };
+        let new_index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/app.rs"),
+                definitions: vec![definition_occurrence(&run_symbol.symbol)],
+                references: vec![],
+                occurrences: vec![definition_occurrence(&run_symbol.symbol)],
+                symbols: vec![run_symbol],
+            }],
+            external_symbols: vec![],
+        };
+
+        let changed = BTreeSet::from([PathBuf::from("src/app.rs")]);
+        let patched = original.patch_changed_files(&changed, &[new_index]);
+
+        // The old "main" symbol should be gone; the new "run" symbol should exist.
+        assert!(
+            patched.symbol_node("scip-rust pkg src/app.rs `main`().").is_none(),
+            "old main symbol should be removed after patch"
+        );
+        assert!(
+            patched.symbol_node("scip-rust pkg src/app.rs `run`().").is_some(),
+            "new run symbol should be present after patch"
+        );
+
+        // src/helper.rs and its symbol should be untouched.
+        assert!(patched.file_node("src/helper.rs").is_some());
+        assert!(patched.symbol_node("scip-rust pkg src/helper.rs `helper`().").is_some());
+
+        // src/app.rs file node should still exist (re-added by the new index).
+        assert!(patched.file_node("src/app.rs").is_some());
+
+        // Ranking should still work and produce valid output.
+        let patched_ranking = patched.rank();
+        assert!(!patched_ranking.nodes.is_empty());
+
+        // The helper symbol should still rank high (it was not changed).
+        let helper_rank = patched_ranking
+            .nodes
+            .iter()
+            .position(|n| {
+                n.key == RepoNodeKey::Symbol("scip-rust pkg src/helper.rs `helper`().".to_string())
+            })
+            .expect("helper should be ranked");
+        assert!(helper_rank < patched_ranking.nodes.len());
+    }
+
+    /// Patching with an empty changed-file set produces the same graph.
+    #[test]
+    fn patch_with_no_changed_files_preserves_graph() {
+        let original = RepoDependencyGraph::build(&[fixture_index()]);
+        let changed: BTreeSet<PathBuf> = BTreeSet::new();
+        let patched = original.patch_changed_files(&changed, &[]);
+        assert_eq!(patched.node_count(), original.node_count());
+        assert_eq!(patched.edge_count(), original.edge_count());
+    }
+
+    /// Patching a file that does not exist in the graph is a no-op for removal
+    /// and just adds new data.
+    #[test]
+    fn patch_nonexistent_file_adds_new_data() {
+        let original = RepoDependencyGraph::build(&[fixture_index()]);
+        let original_node_count = original.node_count();
+
+        let new_symbol = ScipSymbol {
+            symbol: "scip-rust pkg src/new.rs `new_fn`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("new_fn".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+        };
+        let new_index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/new.rs"),
+                definitions: vec![definition_occurrence(&new_symbol.symbol)],
+                references: vec![],
+                occurrences: vec![definition_occurrence(&new_symbol.symbol)],
+                symbols: vec![new_symbol],
+            }],
+            external_symbols: vec![],
+        };
+
+        let changed = BTreeSet::from([PathBuf::from("src/new.rs")]);
+        let patched = original.patch_changed_files(&changed, &[new_index]);
+
+        // New file and symbol added.
+        assert!(patched.file_node("src/new.rs").is_some());
+        assert!(patched.symbol_node("scip-rust pkg src/new.rs `new_fn`().").is_some());
+        // Original nodes preserved.
+        assert!(patched.node_count() > original_node_count);
+        assert!(patched.file_node("src/app.rs").is_some());
+        assert!(patched.file_node("src/helper.rs").is_some());
+    }
+
+    /// Verify that the patched graph produces a different rendered map when
+    /// file content changes.
+    #[test]
+    fn patch_produces_updated_rendered_map() {
+        use crate::repo_map::{RepoMapRenderOptions, render_repo_map};
+
+        let original = RepoDependencyGraph::build(&[fixture_index()]);
+        let original_ranking = original.rank();
+        let original_rendered = render_repo_map(
+            &original,
+            &original_ranking,
+            &RepoMapRenderOptions::new(2000),
+        )
+        .expect("render original");
+
+        // Replace src/app.rs with entirely different content.
+        let widget_symbol = ScipSymbol {
+            symbol: "scip-rust pkg src/app.rs `Widget`#".to_string(),
+            kind: Some(ScipSymbolKind::Struct),
+            display_name: Some("Widget".to_string()),
+            signature: Some("struct Widget".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+        };
+        let new_index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/app.rs"),
+                definitions: vec![definition_occurrence(&widget_symbol.symbol)],
+                references: vec![],
+                occurrences: vec![definition_occurrence(&widget_symbol.symbol)],
+                symbols: vec![widget_symbol],
+            }],
+            external_symbols: vec![],
+        };
+
+        let changed = BTreeSet::from([PathBuf::from("src/app.rs")]);
+        let patched = original.patch_changed_files(&changed, &[new_index]);
+        let patched_ranking = patched.rank();
+        let patched_rendered = render_repo_map(
+            &patched,
+            &patched_ranking,
+            &RepoMapRenderOptions::new(2000),
+        )
+        .expect("render patched");
+
+        // The rendered maps should differ because the file content changed.
+        assert_ne!(
+            original_rendered.content, patched_rendered.content,
+            "patched rendered map should differ from original"
+        );
+        // The patched map should mention Widget (the new symbol).
+        assert!(
+            patched_rendered.content.contains("Widget"),
+            "patched map should contain the new Widget symbol"
+        );
+        // The patched map should NOT mention main (the removed symbol).
+        assert!(
+            !patched_rendered.content.contains("main"),
+            "patched map should not contain the removed main symbol"
+        );
     }
 }

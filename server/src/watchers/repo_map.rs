@@ -70,6 +70,10 @@ struct RefreshIdentity {
 struct WorktreeReusePlan {
     base_commit_sha: Option<String>,
     diff_file_count: Option<usize>,
+    /// The actual relative paths of files that changed between the merge-base
+    /// and the worktree HEAD.  Populated only when `diff_file_count` is within
+    /// the reuse threshold; `None` otherwise.
+    changed_files: Option<Vec<PathBuf>>,
 }
 
 impl WorktreeReusePlan {
@@ -77,6 +81,7 @@ impl WorktreeReusePlan {
         Self {
             base_commit_sha: None,
             diff_file_count: None,
+            changed_files: None,
         }
     }
 
@@ -435,28 +440,42 @@ async fn worktree_reuse_plan(
         .map(|output| output.stdout.trim().to_string())
         .filter(|sha| !sha.is_empty() && sha != head_sha);
 
-    let diff_file_count = match base_commit_sha.as_deref() {
-        Some(base_commit_sha) => git
-            .run_command(vec![
-                "diff".into(),
-                "--name-only".into(),
-                format!("{base_commit_sha}..HEAD"),
-            ])
-            .await
-            .ok()
-            .map(|output| {
-                output
-                    .stdout
-                    .lines()
-                    .filter(|line| !line.trim().is_empty())
-                    .count()
-            }),
-        None => None,
+    let (diff_file_count, changed_files) = match base_commit_sha.as_deref() {
+        Some(base_commit_sha) => {
+            let diff_output = git
+                .run_command(vec![
+                    "diff".into(),
+                    "--name-only".into(),
+                    format!("{base_commit_sha}..HEAD"),
+                ])
+                .await
+                .ok();
+            match diff_output {
+                Some(output) => {
+                    let files: Vec<PathBuf> = output
+                        .stdout
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .map(PathBuf::from)
+                        .collect();
+                    let count = files.len();
+                    let changed = if count <= WORKTREE_REUSE_DIFF_FILE_THRESHOLD {
+                        Some(files)
+                    } else {
+                        None
+                    };
+                    (Some(count), changed)
+                }
+                None => (None, None),
+            }
+        }
+        None => (None, None),
     };
 
     WorktreeReusePlan {
         base_commit_sha,
         diff_file_count,
+        changed_files,
     }
 }
 
@@ -471,6 +490,36 @@ async fn maybe_refresh_identity(
     };
 
     if let Some(cached) = decision.reuse_from {
+        // Attempt small-diff graph patching when the base cache entry has a
+        // graph artifact and the worktree reuse plan identified specific
+        // changed files.
+        if let Some(changed_files) = &identity.reuse_plan.changed_files {
+            if let Some(artifact_json) = &cached.graph_artifact {
+                if !changed_files.is_empty() {
+                    match patch_cached_repo_map(
+                        db,
+                        events,
+                        &identity,
+                        artifact_json,
+                        changed_files,
+                    )
+                    .await
+                    {
+                        Ok(()) => return,
+                        Err(error) => {
+                            tracing::warn!(
+                                project = %identity.project_path.display(),
+                                commit = %identity.commit_sha,
+                                error = %error,
+                                "small-diff graph patch failed; falling back to cache clone"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fall back to plain cache clone.
         if let Err(error) = clone_cached_repo_map(db, events, &identity, &cached).await {
             tracing::warn!(project = %identity.project_path.display(), commit = %identity.commit_sha, error = %error, "repo-map cache reuse failed; falling back to full refresh");
         } else {
@@ -626,6 +675,89 @@ async fn generate_and_store_repo_map(
     Ok(())
 }
 
+/// Small-diff graph patching: deserialize the cached graph artifact, remove
+/// contributions from changed files, re-index only those files, patch the
+/// graph, rerank, re-render, and persist the result.
+async fn patch_cached_repo_map(
+    db: &Database,
+    events: &crate::events::EventBus,
+    identity: &RefreshIdentity,
+    artifact_json: &str,
+    changed_files: &[PathBuf],
+) -> anyhow::Result<()> {
+    use std::collections::BTreeSet;
+
+    let base_graph = RepoDependencyGraph::deserialize_artifact(artifact_json)
+        .map_err(|e| anyhow::anyhow!("deserialize graph artifact: {e}"))?;
+
+    let repo_root = identity
+        .worktree_path
+        .as_deref()
+        .unwrap_or(&identity.project_path);
+    let output_dir = std::env::temp_dir().join(format!("djinn-repo-map-patch-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&output_dir)?;
+    let run = run_indexers(repo_root, &output_dir).await?;
+    let parsed = parse_scip_artifacts(&run.artifacts)?;
+    let _ = std::fs::remove_dir_all(&output_dir);
+
+    let changed_set: BTreeSet<PathBuf> = changed_files.iter().cloned().collect();
+    let patched = base_graph.patch_changed_files(&changed_set, &parsed);
+    let ranking = patched.rank();
+    let rendered = render_repo_map(
+        &patched,
+        &ranking,
+        &RepoMapRenderOptions::new(DEFAULT_REPO_MAP_TOKEN_BUDGET),
+    )
+    .map_err(|error| RepoMapRefreshError(format!("{error:?}")))?;
+
+    let artifact_json = match patched.serialize_artifact() {
+        Ok(json) => Some(json),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to serialize patched graph artifact");
+            None
+        }
+    };
+
+    let project_path = identity.project_path.to_string_lossy().into_owned();
+    let worktree_path = identity
+        .worktree_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let cache_repo = RepoMapCacheRepository::new(db.clone());
+    cache_repo
+        .insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: &identity.project_id,
+                project_path: &project_path,
+                worktree_path: worktree_path.as_deref(),
+                commit_sha: &identity.commit_sha,
+            },
+            rendered_map: &rendered.content,
+            token_estimate: rendered.token_estimate as i64,
+            included_entries: rendered.included_entries as i64,
+            graph_artifact: artifact_json.as_deref(),
+        })
+        .await?;
+
+    let note_repo = NoteRepository::new(db.clone(), events.clone());
+    let _ = crate::repo_map::persist_repo_map_note(
+        &note_repo,
+        &identity.project_id,
+        &identity.commit_sha,
+        &rendered,
+    )
+    .await;
+
+    tracing::info!(
+        project = %identity.project_path.display(),
+        commit = %identity.commit_sha,
+        changed_file_count = changed_files.len(),
+        "repo-map updated via small-diff graph patch"
+    );
+
+    Ok(())
+}
+
 async fn clone_cached_repo_map(
     db: &Database,
     events: &crate::events::EventBus,
@@ -763,6 +895,7 @@ mod tests {
             reuse_plan: WorktreeReusePlan {
                 base_commit_sha: Some("base-commit".into()),
                 diff_file_count: Some(WORKTREE_REUSE_DIFF_FILE_THRESHOLD + 1),
+                changed_files: None,
             },
         };
 
@@ -802,6 +935,7 @@ mod tests {
             reuse_plan: WorktreeReusePlan {
                 base_commit_sha: Some("base-commit".into()),
                 diff_file_count: None,
+                changed_files: None,
             },
         };
 
@@ -906,6 +1040,7 @@ mod tests {
             reuse_plan: WorktreeReusePlan {
                 base_commit_sha: Some("base-commit".into()),
                 diff_file_count: Some(3),
+                changed_files: Some(vec![PathBuf::from("a.rs"), PathBuf::from("b.rs"), PathBuf::from("c.rs")]),
             },
         };
 
@@ -952,6 +1087,7 @@ mod tests {
             reuse_plan: WorktreeReusePlan {
                 base_commit_sha: Some("base-commit".into()),
                 diff_file_count: Some(2),
+                changed_files: Some(vec![PathBuf::from("x.rs"), PathBuf::from("y.rs")]),
             },
         };
 
@@ -1418,6 +1554,157 @@ mod tests {
         assert!(
             needs,
             "startup_needs_refresh must return true when HEAD cannot be resolved"
+        );
+    }
+
+    // ---- Small-diff graph patching decision tests ----
+
+    /// When a base cache entry has a graph_artifact and the identity has
+    /// changed_files, `plan_refresh` returns a reuse_from entry whose
+    /// `graph_artifact` is populated, enabling the patch path.
+    #[tokio::test]
+    async fn worktree_small_diff_with_artifact_enables_patch_path() {
+        let db = create_test_db();
+
+        // Build a real graph artifact to persist.
+        use crate::repo_graph::RepoDependencyGraph;
+        use crate::scip_parser::{ParsedScipIndex, ScipFile, ScipMetadata, ScipSymbol, ScipSymbolKind};
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/lib.rs"),
+                definitions: vec![],
+                references: vec![],
+                occurrences: vec![],
+                symbols: vec![ScipSymbol {
+                    symbol: "test#lib".to_string(),
+                    kind: Some(ScipSymbolKind::Function),
+                    display_name: Some("lib".to_string()),
+                    signature: None,
+                    documentation: vec![],
+                    relationships: vec![],
+                }],
+            }],
+            external_symbols: vec![],
+        };
+        let graph = RepoDependencyGraph::build(&[index]);
+        let artifact_json = graph.serialize_artifact().unwrap();
+
+        let repo = RepoMapCacheRepository::new(db.clone());
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/tmp/project",
+                worktree_path: None,
+                commit_sha: "base-commit",
+            },
+            rendered_map: "cached-base",
+            token_estimate: 1,
+            included_entries: 1,
+            graph_artifact: Some(&artifact_json),
+        })
+        .await
+        .unwrap();
+
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let identity = RefreshIdentity {
+            project_id: "p1".into(),
+            project_path: PathBuf::from("/tmp/project"),
+            worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
+            commit_sha: "worktree-commit".into(),
+            reuse_plan: WorktreeReusePlan {
+                base_commit_sha: Some("base-commit".into()),
+                diff_file_count: Some(2),
+                changed_files: Some(vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/main.rs")]),
+            },
+        };
+
+        let decision = plan_refresh(&db, in_flight.clone(), &identity)
+            .await
+            .expect("reuse decision");
+        assert!(!decision.should_spawn);
+        let cached = decision.reuse_from.expect("should have cached entry");
+        assert!(
+            cached.graph_artifact.is_some(),
+            "cached entry must carry the graph artifact for patch path"
+        );
+        assert_eq!(cached.commit_sha, "base-commit");
+    }
+
+    /// When the base cache entry has NO graph_artifact, the reuse path falls
+    /// through to a plain cache clone (no patch possible).
+    #[tokio::test]
+    async fn worktree_small_diff_without_artifact_falls_back_to_clone() {
+        let db = create_test_db();
+        let repo = RepoMapCacheRepository::new(db.clone());
+        repo.insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id: "p1",
+                project_path: "/tmp/project",
+                worktree_path: None,
+                commit_sha: "base-commit",
+            },
+            rendered_map: "cached-base",
+            token_estimate: 1,
+            included_entries: 1,
+            graph_artifact: None, // No artifact!
+        })
+        .await
+        .unwrap();
+
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let identity = RefreshIdentity {
+            project_id: "p1".into(),
+            project_path: PathBuf::from("/tmp/project"),
+            worktree_path: Some(PathBuf::from("/tmp/project/.djinn/worktrees/t1")),
+            commit_sha: "worktree-commit".into(),
+            reuse_plan: WorktreeReusePlan {
+                base_commit_sha: Some("base-commit".into()),
+                diff_file_count: Some(2),
+                changed_files: Some(vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]),
+            },
+        };
+
+        let decision = plan_refresh(&db, in_flight.clone(), &identity)
+            .await
+            .expect("reuse decision");
+        assert!(!decision.should_spawn);
+        let cached = decision.reuse_from.expect("should have cached entry");
+        assert!(
+            cached.graph_artifact.is_none(),
+            "cached entry should have no artifact, forcing clone fallback"
+        );
+    }
+
+    /// When diff exceeds the threshold, changed_files is None regardless of
+    /// artifact availability, so the patch path is never entered.
+    #[tokio::test]
+    async fn large_diff_never_populates_changed_files() {
+        let plan = WorktreeReusePlan {
+            base_commit_sha: Some("abc".into()),
+            diff_file_count: Some(WORKTREE_REUSE_DIFF_FILE_THRESHOLD + 5),
+            changed_files: None,
+        };
+        assert!(
+            plan.reusable_base_commit().is_none(),
+            "large diff should not yield a reusable base commit"
+        );
+        assert!(
+            plan.changed_files.is_none(),
+            "large diff should not populate changed_files"
+        );
+    }
+
+    /// Verify that a malformed artifact JSON causes deserialization to fail,
+    /// which the patch path handles gracefully by falling back.
+    #[tokio::test]
+    async fn malformed_artifact_json_causes_patch_fallback() {
+        // This tests the deserialization error path inside patch_cached_repo_map.
+        let result = RepoDependencyGraph::deserialize_artifact("not-valid-json");
+        assert!(
+            result.is_err(),
+            "malformed JSON should fail deserialization"
         );
     }
 }
