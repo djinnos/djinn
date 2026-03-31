@@ -15,8 +15,8 @@ type SettingsGetToolResponse = McpToolOutput<"settings_get">;
 
 interface ParsedSettingsGet {
   settings?: {
-    models?: string[];
-    max_sessions?: Record<string, number>;
+    model_priority?: Record<string, string[]> | null;
+    max_sessions?: Record<string, number> | null;
   };
   error?: string;
 }
@@ -46,15 +46,37 @@ export async function fetchSettings(): Promise<SettingsResponse> {
     throw new Error(parsed.error);
   }
 
-  const modelsList = parsed.settings?.models ?? [];
+  const modelPriority = parsed.settings?.model_priority ?? {};
   const maxSessions = parsed.settings?.max_sessions ?? {};
 
-  const models: ModelEntry[] = modelsList.map((modelId) => {
+  // Collect unique model IDs from all role priorities, preserving order
+  const seen = new Set<string>();
+  const modelIds: string[] = [];
+  for (const roleModels of Object.values(modelPriority ?? {})) {
+    for (const id of roleModels) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        modelIds.push(id);
+      }
+    }
+  }
+
+  // Fall back to max_sessions keys if no model_priority entries exist
+  if (modelIds.length === 0) {
+    for (const id of Object.keys(maxSessions ?? {})) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        modelIds.push(id);
+      }
+    }
+  }
+
+  const models: ModelEntry[] = modelIds.map((modelId) => {
     const { provider, model } = splitModelId(modelId);
     return {
       provider,
       model,
-      max_concurrent: maxSessions[modelId] ?? 1,
+      max_concurrent: (maxSessions ?? {})[modelId] ?? 1,
     };
   });
 
@@ -69,7 +91,10 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
   }, {});
 
   const response = await callMcpTool("settings_set", {
-    models: modelIds,
+    model_priority_worker: modelIds,
+    model_priority_lead: modelIds,
+    model_priority_planner: modelIds,
+    model_priority_reviewer: modelIds,
     max_sessions: maxSessions,
   });
 
