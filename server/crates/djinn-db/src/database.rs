@@ -107,18 +107,55 @@ impl Database {
         }
 
         let db_path = self.db_path.clone();
+        let pool = self.pool.clone();
         self.initialized
             .get_or_try_init(|| async {
                 tokio::task::spawn_blocking(move || migrations::run(&db_path))
                     .await
                     .expect("migration task panicked")
                     .map_err(|e| DbError::InvalidData(e.to_string()))?;
+
+                backfill_missing_content_hashes(&pool).await?;
+
                 Ok::<(), DbError>(())
             })
             .await?;
 
         Ok(())
     }
+}
+
+/// Backfill NULL `content_hash` values for any notes that lack them.
+///
+/// Runs during initialization so legacy notes created before the
+/// `content_hash` column was populated get a deterministic hash.
+async fn backfill_missing_content_hashes(pool: &SqlitePool) -> DbResult<()> {
+    use crate::note_hash::note_content_hash;
+
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, content FROM notes WHERE content_hash IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| DbError::InvalidData(e.to_string()))?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await.map_err(|e| DbError::InvalidData(e.to_string()))?;
+    for (id, content) in &rows {
+        let hash = note_content_hash(content);
+        sqlx::query("UPDATE notes SET content_hash = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::InvalidData(e.to_string()))?;
+    }
+    tx.commit().await.map_err(|e| DbError::InvalidData(e.to_string()))?;
+
+    Ok(())
 }
 
 pub(crate) fn test_tempdir() -> DbResult<tempfile::TempDir> {
@@ -347,12 +384,12 @@ mod tests {
                 .fetch_one(db.pool())
                 .await
                 .unwrap();
-        assert!(content_hash.is_none());
 
         let normalized_fixture_hash = crate::note_hash::note_content_hash("Legacy fixture body\n");
-        assert_ne!(
+        assert_eq!(
             content_hash.as_deref(),
-            Some(normalized_fixture_hash.as_str())
+            Some(normalized_fixture_hash.as_str()),
+            "ensure_initialized should backfill content_hash for legacy notes"
         );
 
         let migration_count: i64 = sqlx::query_scalar(
