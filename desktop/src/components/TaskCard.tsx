@@ -491,8 +491,6 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
 
       </CardContent>
 
-      {/* Actions overlay (hover only) */}
-      <TaskCardActions task={task} actionsBg={cardTint?.actionsBg} />
     </Card>
   );
 }
