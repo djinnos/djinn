@@ -111,7 +111,9 @@ function isRetryableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return (
     error.message.includes("timed out") ||
+    error.message.includes("-32000") ||
     error.message.includes("-32001") ||
+    error.message.includes("Connection closed") ||
     error.message.includes("Session not found") ||
     error.message.includes("Unauthorized")
   );
