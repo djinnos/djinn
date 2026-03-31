@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Button } from '@/components/ui/button';
+import { Edit02Icon } from '@hugeicons/core-free-icons';
+import { HugeiconsIcon } from '@hugeicons/react';
 import { Input } from '@/components/ui/input';
 import { useChatStore } from '@/stores/chatStore';
 import { useSelectedProject, useIsAllProjects } from '@/stores/useProjectStore';
@@ -76,7 +77,6 @@ export function ChatSessionList({ onSelectSession, onNewChat }: ChatSessionListP
 
   return (
     <aside className="w-72 border-r border-border p-3">
-      <Button className="mb-3 w-full" onClick={onNewChat}>New chat</Button>
       <Input
         value={search}
         onChange={(event) => setSearch(event.target.value)}
@@ -85,18 +85,27 @@ export function ChatSessionList({ onSelectSession, onNewChat }: ChatSessionListP
         aria-label="Search chats"
       />
 
+      <button
+        type="button"
+        onClick={onNewChat}
+        className="mb-2 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+      >
+        <HugeiconsIcon icon={Edit02Icon} size={14} />
+        New chat
+      </button>
+
       {groupedSessions.length === 0 ? (
         <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
           No chats found.
         </p>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {groupedSessions.map((group) => (
             <div key={group.label}>
-              <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              <p className="mb-1 px-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 {group.label}
               </p>
-              <div className="space-y-2">
+              <div className="space-y-0.5">
                 {group.sessions.map((session) => {
                   const isStreaming = Boolean(streamingBySession[session.id]);
                   return (
@@ -105,15 +114,14 @@ export function ChatSessionList({ onSelectSession, onNewChat }: ChatSessionListP
                       type="button"
                       onClick={() => onSelectSession(session.id)}
                       className={cn(
-                        'w-full rounded-md border border-border p-3 text-left hover:bg-muted',
+                        'w-full rounded-md px-2 py-1.5 text-left hover:bg-muted transition-colors',
                         activeSessionId === session.id && 'bg-muted'
                       )}
                     >
-                      <p className="truncate text-sm font-medium">{session.title}</p>
-                      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                        <span>{relativeTime(session.updatedAt)}</span>
+                      <div className="flex items-center gap-2">
+                        <p className="min-w-0 flex-1 truncate text-sm">{session.title}</p>
                         {isStreaming && (
-                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse" aria-label="Streaming" />
+                          <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-primary animate-pulse" aria-label="Streaming" />
                         )}
                       </div>
                     </button>

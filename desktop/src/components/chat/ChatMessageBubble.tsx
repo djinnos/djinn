@@ -4,9 +4,7 @@ import type { ChatMessage } from '@/stores/chatStore';
 import { ArrowRight01Icon, Copy01Icon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { AnimatePresence, motion } from 'framer-motion';
-import ReactMarkdown from 'react-markdown';
-import rehypeHighlight from 'rehype-highlight';
-import remarkGfm from 'remark-gfm';
+import { Streamdown } from 'streamdown';
 import { useState } from 'react';
 
 interface ChatMessageBubbleProps {
@@ -33,7 +31,7 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
           'relative max-w-[80%] px-4 py-3 text-sm',
           isUser
             ? 'rounded-2xl bg-foreground/5 text-foreground'
-            : 'rounded-lg border border-border bg-card text-foreground'
+            : 'text-foreground'
         )}
       >
         {isUser && (
@@ -49,11 +47,9 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
         {isUser ? (
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
-          <div className="prose prose-sm max-w-none break-words dark:prose-invert">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-              {message.content}
-            </ReactMarkdown>
-          </div>
+          <Streamdown className="prose prose-sm max-w-none break-words dark:prose-invert">
+            {message.content}
+          </Streamdown>
         )}
 
         {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
@@ -86,7 +82,7 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
                   <div className="flex flex-wrap gap-1.5 px-2 pb-2">
                     {message.toolCalls.map((tool, idx) => (
                       <Badge key={`${tool.name}-${idx}`} variant="secondary" className="text-[11px]">
-                        Used {tool.name}
+                        {tool.name}
                       </Badge>
                     ))}
                   </div>

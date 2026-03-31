@@ -213,56 +213,55 @@ export function ChatView() {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      <header className="border-b border-border px-4 py-3 text-sm text-muted-foreground">
-        {activeSession?.title ?? 'New Chat'}
-      </header>
-
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        {isEmpty ? (
-          <ChatEmptyState
-            onPromptClick={(prompt) => {
-              setPromptSeed(prompt);
-              void send(prompt);
-            }}
-          />
-        ) : (
-          <div className="space-y-3">
-            {messages.map((message) => (
-              <ChatMessageBubble key={message.id} message={message} />
-            ))}
-            {streamingText && (
-              <ChatMessageBubble
-                message={{
-                  id: 'streaming',
-                  role: 'assistant',
-                  content: streamingText,
-                  createdAt: Date.now(),
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto flex min-h-full max-w-3xl flex-col px-4">
+          <div className="flex-1 pt-4 pb-32">
+            {isEmpty ? (
+              <ChatEmptyState
+                onPromptClick={(prompt) => {
+                  setPromptSeed(prompt);
+                  void send(prompt);
                 }}
               />
+            ) : (
+              <div className="space-y-3">
+                {messages.map((message) => (
+                  <ChatMessageBubble key={message.id} message={message} />
+                ))}
+                {streamingText && (
+                  <ChatMessageBubble
+                    message={{
+                      id: 'streaming',
+                      role: 'assistant',
+                      content: streamingText,
+                      createdAt: Date.now(),
+                    }}
+                  />
+                )}
+                <AnimatePresence>
+                  {loading && !streamingText && thinkingStartTime !== null && (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+                      className="pl-3"
+                    >
+                      <div className="inline-flex items-center gap-2 text-[13px] text-muted-foreground/70">
+                        <Spinner size="xs" />
+                        <span>Thinking...</span>
+                        <span>{elapsedSeconds}s</span>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <div ref={bottomRef} />
+              </div>
             )}
-            <AnimatePresence>
-              {loading && !streamingText && thinkingStartTime !== null && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-                  className="pl-3"
-                >
-                  <div className="inline-flex items-center gap-2 text-[13px] text-muted-foreground/70">
-                    <Spinner size="xs" />
-                    <span>Thinking...</span>
-                    <span>{elapsedSeconds}s</span>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-            <div ref={bottomRef} />
           </div>
-        )}
-      </div>
 
-      <ChatInput
+          <div className="sticky bottom-0 bg-background pb-2">
+            <ChatInput
         onSend={(message) => void send(message)}
         onStop={() => {
           abortController?.abort();
@@ -283,6 +282,9 @@ export function ChatView() {
           }
         }}
       />
+          </div>
+        </div>
+      </div>
     </section>
   );
 }
