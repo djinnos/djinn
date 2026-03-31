@@ -1,5 +1,6 @@
 ---
 source: src/server/mod.rs
+assertion_line: 482
 expression: signatures
 ---
 [
@@ -1691,7 +1692,7 @@ expression: signatures
           "type": "string"
         },
         "status": {
-          "description": "Target lifecycle status: \"drafting\" or \"open\".",
+          "description": "Target lifecycle status: \"drafting\", \"open\", or \"closed\".",
           "nullable": true,
           "type": "string"
         },
@@ -6825,6 +6826,48 @@ expression: signatures
             "timestamp"
           ],
           "type": "object"
+        },
+        "TimelineVerificationStep": {
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "duration_ms": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "exit_code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "index": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "stderr": {
+              "type": "string"
+            },
+            "stdout": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "phase",
+            "index",
+            "name",
+            "command",
+            "exit_code",
+            "stdout",
+            "stderr",
+            "duration_ms"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6850,6 +6893,13 @@ expression: signatures
         "sessions": {
           "items": {
             "$ref": "#/$defs/SessionToolSession"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "verification_steps": {
+          "items": {
+            "$ref": "#/$defs/TimelineVerificationStep"
           },
           "nullable": true,
           "type": "array"
