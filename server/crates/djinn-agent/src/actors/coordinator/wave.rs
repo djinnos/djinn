@@ -22,6 +22,12 @@ use djinn_db::EpicRepository;
 /// not in this list is treated as a planner/meta task and excluded.
 const WORKER_ISSUE_TYPES: &[&str] = &["task", "research", "feature"];
 
+/// Returns `true` if the given issue_type is a worker type that counts
+/// toward batch-completion (and should trigger next-wave planning on close).
+pub fn is_worker_issue_type(issue_type: &str) -> bool {
+    WORKER_ISSUE_TYPES.contains(&issue_type)
+}
+
 impl CoordinatorActor {
     /// Called when an epic is created.  Creates the first planning task
     /// unless one already exists for the epic (idempotent).
