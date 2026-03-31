@@ -99,7 +99,12 @@ impl SupportedIndexer {
     fn command_args(self, output_path: &Path) -> Vec<String> {
         let output = output_path.to_string_lossy().into_owned();
         match self {
-            Self::RustAnalyzer => vec!["scip".to_string(), output],
+            Self::RustAnalyzer => vec![
+                "scip".to_string(),
+                ".".to_string(),
+                "--output".to_string(),
+                output,
+            ],
             Self::TypeScript => vec!["index".to_string(), output],
             Self::Python => vec!["index".to_string(), output],
             Self::Go => vec!["index".to_string(), output],
@@ -1018,6 +1023,8 @@ mod tests {
             plans[0].args,
             vec![
                 "scip",
+                ".",
+                "--output",
                 "/tmp/example-project/.djinn/scip/example-project-rust-root.scip"
             ]
         );
@@ -1287,7 +1294,12 @@ mod tests {
         );
         assert_eq!(
             plans[0].args,
-            vec!["scip", "/workspace/repo/.djinn/scip/repo-rust-root.scip"]
+            vec![
+                "scip",
+                ".",
+                "--output",
+                "/workspace/repo/.djinn/scip/repo-rust-root.scip"
+            ]
         );
         assert_eq!(
             plans[1].args,
