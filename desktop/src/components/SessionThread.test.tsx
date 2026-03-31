@@ -15,7 +15,7 @@ function makeMessage(overrides: Partial<Extract<TimelineEntry, { kind: 'message'
 }
 
 describe('SessionThread', () => {
-  it('renders message list including user and assistant messages', () => {
+  it('renders assistant messages and hides user messages', () => {
     const timeline: TimelineEntry[] = [
       makeMessage({
         role: 'user',
@@ -38,7 +38,8 @@ describe('SessionThread', () => {
       />
     );
 
-    expect(screen.getByText('User prompt')).toBeInTheDocument();
+    // User messages are hidden in the session thread
+    expect(screen.queryByText('User prompt')).not.toBeInTheDocument();
     expect(screen.getByText('Assistant response')).toBeInTheDocument();
     expect(screen.getByText('Worker')).toBeInTheDocument();
   });
@@ -74,10 +75,10 @@ describe('SessionThread', () => {
     expect(screen.getByText('No session activity yet.')).toBeInTheDocument();
   });
 
-  it('renders tool call message with tool name', () => {
+  it('renders final tool call as a formatted card', () => {
     const timeline: TimelineEntry[] = [
       makeMessage({
-        content: [{ type: 'tool_use', name: 'shell', input: { command: 'ls -la' } }],
+        content: [{ type: 'tool_use', name: 'submit_work', input: { summary: 'Implemented feature X' } }],
       }),
     ];
 
@@ -90,7 +91,8 @@ describe('SessionThread', () => {
       />
     );
 
-    expect(screen.getByRole('button', { name: /shell/i })).toBeInTheDocument();
+    expect(screen.getByText('Work Submitted')).toBeInTheDocument();
+    expect(screen.getByText('Implemented feature X')).toBeInTheDocument();
   });
 
   it('shows loading state when loading and no timeline yet', () => {

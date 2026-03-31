@@ -1,6 +1,5 @@
 ---
 source: src/server/mod.rs
-assertion_line: 482
 expression: signatures
 ---
 [
@@ -323,6 +322,14 @@ expression: signatures
               "format": "double",
               "type": "number"
             },
+            "avg_tokens_in": {
+              "format": "double",
+              "type": "number"
+            },
+            "avg_tokens_out": {
+              "format": "double",
+              "type": "number"
+            },
             "base_role": {
               "type": "string"
             },
@@ -352,6 +359,8 @@ expression: signatures
             "base_role",
             "success_rate",
             "avg_tokens",
+            "avg_tokens_in",
+            "avg_tokens_out",
             "avg_time_seconds",
             "verification_pass_rate",
             "avg_reopens",
@@ -6762,6 +6771,9 @@ expression: signatures
         },
         "TimelineActivity": {
           "properties": {
+            "actor_role": {
+              "type": "string"
+            },
             "event_type": {
               "type": "string"
             },
@@ -6774,6 +6786,7 @@ expression: signatures
           },
           "required": [
             "event_type",
+            "actor_role",
             "payload",
             "timestamp"
           ],

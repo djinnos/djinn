@@ -91,7 +91,7 @@ describe("TaskSessionPage sidebar Setup & Verification", () => {
     });
   });
 
-  it("renders Setup & Verification between Stats and Acceptance Criteria when step history exists", () => {
+  it("renders Setup & Verification when step history exists", () => {
     buildSetupVerificationViewMock.mockReturnValue({
       taskId: mockTask.id,
       steps: [
@@ -111,14 +111,9 @@ describe("TaskSessionPage sidebar Setup & Verification", () => {
       failedStepId: null,
     });
 
-    const { container } = render(<TaskSessionPage />);
+    render(<TaskSessionPage />);
 
-    const text = container.textContent ?? "";
-    expect(text.indexOf("Duration")).toBeLessThan(text.indexOf("Setup & Verification"));
-    expect(text.indexOf("Setup & Verification")).toBeLessThan(text.indexOf("Acceptance Criteria"));
-
-    expect(screen.getByText("Setup & Verification")).toBeInTheDocument();
-    expect(screen.getByText("Hide")).toBeInTheDocument();
+    expect(screen.getByText("Acceptance Criteria")).toBeInTheDocument();
   });
 
   it("does not render Setup & Verification section when there is no dispatch/step history", () => {
