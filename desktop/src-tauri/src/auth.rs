@@ -7,7 +7,7 @@ pub const GITHUB_CLIENT_ID: &str = "Ov23liBIL080Vt6WJs69";
 pub const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 pub const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 pub const GITHUB_API_URL: &str = "https://api.github.com";
-pub const GITHUB_SCOPES: &str = "repo read:org user:email";
+pub const GITHUB_SCOPES: &str = "repo read:org user:email workflow";
 
 /// File-based token storage path (~/.djinn/auth_token.json).
 /// Avoids macOS Keychain permission prompts while keeping tokens local and
