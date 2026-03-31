@@ -7,7 +7,7 @@ use crate::context::AgentContext;
 use djinn_core::models::{SessionStatus, TransitionAction};
 use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 use djinn_git::GitError;
-use djinn_provider::github_api::{CreatePrParams, GitHubApiClient};
+use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
 use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 use djinn_provider::repos::CredentialRepository;
 
@@ -264,55 +264,91 @@ async fn try_create_github_pr(
     let pr_title = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
     let github_client = GitHubApiClient::new(cred_repo);
-    let pr = match github_client
-        .create_pull_request(
-            &owner,
-            &repo_name,
-            CreatePrParams {
-                title: pr_title,
-                body: pr_body,
-                head: base_branch.to_string(),
-                base: merge_target.to_string(),
-                maintainer_can_modify: Some(true),
-                draft: Some(true),
-            },
-        )
+    let head_ref = format!("{owner}:{base_branch}");
+
+    // Before creating a new PR, check if one already exists (open or closed)
+    // for this branch.  If a closed PR exists, reopen it instead of creating
+    // a duplicate — this preserves the review conversation and avoids PR churn.
+    let existing_pr = match github_client
+        .list_pulls_by_head_with_state(&owner, &repo_name, &head_ref, "all")
         .await
     {
-        Ok(pr) => pr,
+        Ok(prs) => prs.into_iter().next(),
         Err(e) => {
-            let err_msg = e.to_string();
-            // If a PR already exists for this head branch, adopt it instead of failing.
-            if err_msg.contains("A pull request already exists") {
-                let head_ref = format!("{owner}:{base_branch}");
-                match github_client
-                    .list_pulls_by_head(&owner, &repo_name, &head_ref)
-                    .await
-                {
-                    Ok(prs) if !prs.is_empty() => {
-                        tracing::info!(
-                            task_id = %task_id,
-                            pr_url = %prs[0].html_url,
-                            pr_number = prs[0].number,
-                            "Lifecycle: adopting existing GitHub PR"
-                        );
-                        prs.into_iter().next().unwrap()
-                    }
-                    Ok(_) => {
-                        return Err(format!(
-                            "GitHub PR creation failed (already exists) but could not find existing PR for {head_ref}"
-                        ));
-                    }
-                    Err(list_err) => {
-                        return Err(format!(
-                            "GitHub PR creation failed: {err_msg}; failed to look up existing PR: {list_err}"
-                        ));
-                    }
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "Failed to check for existing PRs, will attempt to create new"
+            );
+            None
+        }
+    };
+
+    let pr = if let Some(existing) = existing_pr {
+        if existing.state == PrState::Open {
+            tracing::info!(
+                task_id = %task_id,
+                pr_url = %existing.html_url,
+                pr_number = existing.number,
+                "Lifecycle: adopting existing open GitHub PR"
+            );
+            existing
+        } else {
+            // Closed PR — reopen it.
+            match github_client
+                .reopen_pull_request(&owner, &repo_name, existing.number)
+                .await
+            {
+                Ok(reopened) => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        pr_url = %reopened.html_url,
+                        pr_number = reopened.number,
+                        "Lifecycle: reopened existing closed GitHub PR"
+                    );
+                    reopened
                 }
-            } else {
-                return Err(format!("GitHub PR creation failed: {err_msg}"));
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        pr_number = existing.number,
+                        error = %e,
+                        "Failed to reopen closed PR, creating new one"
+                    );
+                    github_client
+                        .create_pull_request(
+                            &owner,
+                            &repo_name,
+                            CreatePrParams {
+                                title: pr_title,
+                                body: pr_body,
+                                head: base_branch.to_string(),
+                                base: merge_target.to_string(),
+                                maintainer_can_modify: Some(true),
+                                draft: Some(true),
+                            },
+                        )
+                        .await
+                        .map_err(|e| format!("GitHub PR creation failed: {e}"))?
+                }
             }
         }
+    } else {
+        github_client
+            .create_pull_request(
+                &owner,
+                &repo_name,
+                CreatePrParams {
+                    title: pr_title,
+                    body: pr_body,
+                    head: base_branch.to_string(),
+                    base: merge_target.to_string(),
+                    maintainer_can_modify: Some(true),
+                    draft: Some(true),
+                },
+            )
+            .await
+            .map_err(|e| format!("GitHub PR creation failed: {e}"))?
     };
 
     // Store the PR URL on the task record.

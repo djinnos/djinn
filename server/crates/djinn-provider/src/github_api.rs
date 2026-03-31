@@ -374,6 +374,95 @@ impl GitHubApiClient {
         Ok(resp.json().await?)
     }
 
+    /// List pull requests whose head branch matches `head`, filtering by state.
+    ///
+    /// `state` should be `"open"`, `"closed"`, or `"all"`.
+    /// `head` should be in `owner:branch` format (e.g. `"djinnos:task/453b"`).
+    pub async fn list_pulls_by_head_with_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        head: &str,
+        state: &str,
+    ) -> Result<Vec<PullRequest>> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls?state={}&head={}",
+            self.base_url, owner, repo, state, head
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "list_pulls_by_head_with_state failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Reopen a closed pull request by setting its state back to `"open"`.
+    pub async fn reopen_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<PullRequest> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}",
+            self.base_url, owner, repo, pull_number
+        );
+        let body = serde_json::json!({ "state": "open" });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .patch(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "reopen_pull_request failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        Ok(resp.json().await?)
+    }
+
     /// Enable auto-merge on an existing pull request.
     ///
     /// Uses the GitHub GraphQL `enablePullRequestAutoMerge` mutation so that the

@@ -230,46 +230,23 @@ pub(crate) async fn prepare_worktree(
     };
 
     if branch_exists {
-        // The worktree is gone but the branch still exists.  Before deleting,
-        // check whether the task is in a post-approval state where the branch
-        // is needed for an in-flight or upcoming PR push.  Deleting the branch
-        // in these states causes `process_approved_tasks` to fail with
-        // "src refspec does not match any" because the local ref is gone.
-        //
-        // Also preserve the branch when a PR already exists on GitHub
-        // (pr_url is set).  When a PR gets conflicts, CI failure, or review
-        // changes-requested, the task transitions back to `open` but the PR
-        // stays open.  Deleting the branch would force the worker to
-        // reimplement from scratch and force-push over the existing PR.
-        let branch_needed_for_pr =
-            matches!(task.status.as_str(), "approved" | "pr_draft" | "pr_review");
-        let has_existing_pr = task.pr_url.is_some();
-        if branch_needed_for_pr || has_existing_pr {
-            tracing::info!(
-                task_id = %task.short_id,
-                branch = %branch,
-                status = %task.status,
-                has_pr = has_existing_pr,
-                "Lifecycle: preserving task branch (worktree gone, recreating worktree only)"
-            );
-            // Recreate the worktree from the existing branch without deleting it.
-            let path = git
-                .create_worktree(&task.short_id, &branch, false)
-                .await
-                .map_err(|e| anyhow::anyhow!("create worktree from existing branch: {e}"))?;
-            return Ok((path, None));
-        }
-        // For other statuses this is a stale leftover from a previous session
-        // (killed, failed, or intervention reset).  Rebasing it would carry
-        // forward dirty commits from the old attempt, contaminating the new
-        // session's diff.  Delete it so the worker starts from a clean target
-        // branch.
+        // The branch already exists — always preserve it and recreate the
+        // worktree on top.  Deleting the branch also deletes the remote ref
+        // (`git push origin --delete`), which causes GitHub to auto-close any
+        // open PR for that branch.  The worker will rebase/sync against the
+        // target branch when the worktree is resumed, so stale commits are
+        // handled by the sync path rather than by nuking the branch.
         tracing::info!(
             task_id = %task.short_id,
             branch = %branch,
-            "Lifecycle: deleting stale task branch (worktree already removed)"
+            status = %task.status,
+            "Lifecycle: preserving existing task branch (recreating worktree only)"
         );
-        let _ = git.delete_branch(&branch).await;
+        let path = git
+            .create_worktree(&task.short_id, &branch, false)
+            .await
+            .map_err(|e| anyhow::anyhow!("create worktree from existing branch: {e}"))?;
+        return Ok((path, None));
     }
 
     git.create_branch(&task.short_id, &target_branch)
