@@ -201,11 +201,7 @@ export function KanbanBoard({
   const IN_FLIGHT = new Set(["in_progress", "verifying", "needs_task_review", "in_task_review", "needs_lead_intervention", "in_lead_intervention"]);
 
   const handleTaskClick = (task: Task) => {
-    if (IN_FLIGHT.has(task.status) || (task.session_count ?? 0) > 0 || task.active_session) {
-      navigate(`/task/${task.id}`);
-    } else {
-      setSelectedTask(task);
-    }
+    navigate(`/task/${task.id}`);
   };
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId);

@@ -72,7 +72,7 @@ describe('SessionThread', () => {
       />
     );
 
-    expect(screen.getByText('No session activity yet.')).toBeInTheDocument();
+    expect(screen.getByText('Not dispatched yet')).toBeInTheDocument();
   });
 
   it('renders final tool call as a formatted card', () => {

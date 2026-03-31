@@ -624,7 +624,7 @@ export function SessionThread({
   if (timeline.length === 0 && streamingText.size === 0) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        No session activity yet.
+        Not dispatched yet
       </div>
     );
   }
