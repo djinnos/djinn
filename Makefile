@@ -7,7 +7,8 @@ DAEMON_FILE := $(HOME)/.djinn/daemon.json
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-dev: ## Kill server daemon and start Tauri desktop app
+dev: ## Build server, kill daemon, and start Tauri desktop app
+	cd $(SERVER_DIR) && cargo build
 	@if [ -f "$(DAEMON_FILE)" ]; then \
 		PID=$$(jq -r '.pid' "$(DAEMON_FILE)" 2>/dev/null); \
 		if [ -n "$$PID" ] && [ "$$PID" != "null" ] && kill -0 "$$PID" 2>/dev/null; then \
