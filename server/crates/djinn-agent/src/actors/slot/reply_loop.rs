@@ -21,6 +21,52 @@ use error_handling::{
 
 const MAX_TURNS: u32 = 1000;
 
+/// Maximum number of concurrent-safe tools that can execute in parallel within
+/// a single batch (ADR-048 §1A).
+const MAX_TOOL_CONCURRENCY: usize = 8;
+
+/// Returns `true` if the named tool is read-only and safe to execute
+/// concurrently with other concurrent-safe tools.
+fn is_concurrent_safe(name: &str) -> bool {
+    matches!(
+        name,
+        "memory_read"
+            | "memory_search"
+            | "memory_list"
+            | "memory_build_context"
+            | "memory_associations"
+            | "task_show"
+            | "task_list"
+            | "task_count"
+            | "task_ready"
+            | "task_blocked_list"
+            | "task_blockers_list"
+            | "task_activity_list"
+            | "task_memory_refs"
+            | "task_timeline"
+            | "epic_show"
+            | "epic_list"
+            | "epic_count"
+            | "epic_tasks"
+            | "agent_show"
+            | "agent_list"
+            | "agent_metrics"
+            | "session_show"
+            | "session_list"
+            | "session_messages"
+            | "provider_catalog"
+            | "provider_models"
+            | "provider_connected"
+            | "board_health"
+            | "model_health"
+            | "code_graph"
+            | "output_view"
+            | "output_grep"
+            | "lsp"
+            | "read"
+    )
+}
+
 fn serialize_message(msg: &Message) -> serde_json::Value {
     serde_json::to_value(msg).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "failed to serialize Message for SessionMessage event");
@@ -707,74 +753,168 @@ pub(super) async fn run_reply_loop(
             // ~30k chars ≈ 7.5k tokens — enough for diagnosis, safe with multiple calls.
             const MAX_TOOL_RESULT_CHARS: usize = 30_000;
 
-            // Dispatch tool calls concurrently and collect results.
-            // Each tool call gets its own OTel span as a child of the session.
-            let tool_futures: Vec<_> = turn_tool_calls
+            // ── Partition tool calls into concurrent-safe / serial batches ──
+            // (ADR-048 §1A) Consecutive concurrent_safe tools form a parallel
+            // batch; any non-safe tool becomes a single-item serial batch.
+            // Batches are processed in order, parallel batches via join_all
+            // bounded by MAX_TOOL_CONCURRENCY, serial batches one-at-a-time.
+
+            // Prepare (original_index, tool_call) pairs, filtering non-ToolUse.
+            let indexed_tool_calls: Vec<(usize, &ContentBlock)> = turn_tool_calls
                 .iter()
-                .filter_map(|tool_call| {
-                    let ContentBlock::ToolUse { id, name, input } = tool_call else {
-                        return None;
-                    };
-                    tracing::debug!(
-                        task_id = %task_id,
-                        tool = %name,
-                        tool_use_id = %id,
-                        "ReplyLoop: dispatching tool call"
-                    );
-                    let id = id.clone();
-                    let name = name.clone();
-                    let input_json = input.clone();
-                    let args = match input {
-                        serde_json::Value::Object(map) => Some(map.clone()),
-                        _ => None,
-                    };
+                .enumerate()
+                .filter(|(_, b)| matches!(b, ContentBlock::ToolUse { .. }))
+                .collect();
 
-                    // Start tool span before the async block so it parents correctly.
-                    let tool_span = otel_session.as_ref().map(|session| {
-                        let ts = telemetry::ToolSpan::start(session.context(), &name, &id);
-                        ts.record_input(&input_json.to_string());
-                        ts
-                    });
+            // Partition into batches: Parallel(Vec<indices>) or Serial(index).
+            enum ToolBatch {
+                Parallel(Vec<usize>),
+                Serial(usize),
+            }
+            let mut batches: Vec<ToolBatch> = Vec::new();
+            {
+                let mut current_parallel: Vec<usize> = Vec::new();
+                for &(idx, block) in &indexed_tool_calls {
+                    let name = match block {
+                        ContentBlock::ToolUse { name, .. } => name.as_str(),
+                        _ => unreachable!(),
+                    };
+                    if is_concurrent_safe(name) {
+                        current_parallel.push(idx);
+                    } else {
+                        // Flush any accumulated parallel batch first.
+                        if !current_parallel.is_empty() {
+                            batches.push(ToolBatch::Parallel(std::mem::take(&mut current_parallel)));
+                        }
+                        batches.push(ToolBatch::Serial(idx));
+                    }
+                }
+                if !current_parallel.is_empty() {
+                    batches.push(ToolBatch::Parallel(current_parallel));
+                }
+            }
 
-                    let stash = Arc::clone(&output_stash);
-                    Some(async move {
-                        // ── Intercept stash-navigation tools (no extension dispatch needed) ──
-                        if name == "output_view" || name == "output_grep" {
-                            let result = {
-                                let guard = stash.lock().unwrap();
-                                let args_map = args.as_ref();
-                                if name == "output_view" {
-                                    let tid = args_map
-                                        .and_then(|m| m.get("tool_use_id"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let offset = args_map
-                                        .and_then(|m| m.get("offset"))
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0) as usize;
-                                    let limit = args_map
-                                        .and_then(|m| m.get("limit"))
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(200) as usize;
-                                    guard.view(tid, offset, limit)
-                                } else {
-                                    let tid = args_map
-                                        .and_then(|m| m.get("tool_use_id"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let pattern = args_map
-                                        .and_then(|m| m.get("pattern"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let ctx_lines = args_map
-                                        .and_then(|m| m.get("context_lines"))
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(3) as usize;
-                                    guard.grep(tid, pattern, ctx_lines)
+            if !batches.is_empty() {
+                let safe_count: usize = batches.iter().map(|b| match b {
+                    ToolBatch::Parallel(v) => v.len(),
+                    ToolBatch::Serial(_) => 0,
+                }).sum();
+                let serial_count = indexed_tool_calls.len() - safe_count;
+                tracing::debug!(
+                    task_id = %task_id,
+                    total = indexed_tool_calls.len(),
+                    concurrent_safe = safe_count,
+                    serial = serial_count,
+                    batch_count = batches.len(),
+                    "ReplyLoop: tool call batching (ADR-048)"
+                );
+            }
+
+            // Closure that builds the dispatch future for a single tool call.
+            // Returns (original_index, ContentBlock::ToolResult).
+            let make_tool_future = |idx: usize, tool_call: &ContentBlock| {
+                let ContentBlock::ToolUse { id, name, input } = tool_call else {
+                    unreachable!("filtered above");
+                };
+                tracing::debug!(
+                    task_id = %task_id,
+                    tool = %name,
+                    tool_use_id = %id,
+                    "ReplyLoop: dispatching tool call"
+                );
+                let id = id.clone();
+                let name = name.clone();
+                let input_json = input.clone();
+                let args = match input {
+                    serde_json::Value::Object(map) => Some(map.clone()),
+                    _ => None,
+                };
+
+                // Start tool span before the async block so it parents correctly.
+                let tool_span = otel_session.as_ref().map(|session| {
+                    let ts = telemetry::ToolSpan::start(session.context(), &name, &id);
+                    ts.record_input(&input_json.to_string());
+                    ts
+                });
+
+                let stash = Arc::clone(&output_stash);
+                async move {
+                    // ── Intercept stash-navigation tools (no extension dispatch needed) ──
+                    if name == "output_view" || name == "output_grep" {
+                        let result = {
+                            let guard = stash.lock().unwrap();
+                            let args_map = args.as_ref();
+                            if name == "output_view" {
+                                let tid = args_map
+                                    .and_then(|m| m.get("tool_use_id"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let offset = args_map
+                                    .and_then(|m| m.get("offset"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as usize;
+                                let limit = args_map
+                                    .and_then(|m| m.get("limit"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(200) as usize;
+                                guard.view(tid, offset, limit)
+                            } else {
+                                let tid = args_map
+                                    .and_then(|m| m.get("tool_use_id"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let pattern = args_map
+                                    .and_then(|m| m.get("pattern"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let ctx_lines = args_map
+                                    .and_then(|m| m.get("context_lines"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(3) as usize;
+                                guard.grep(tid, pattern, ctx_lines)
+                            }
+                        };
+                        let (content, is_error) = match result {
+                            Ok(text) => {
+                                if let Some(ts) = &tool_span {
+                                    ts.record_output(&text, false);
                                 }
-                            };
-                            let (content, is_error) = match result {
-                                Ok(text) => {
+                                (vec![ContentBlock::Text { text }], false)
+                            }
+                            Err(err) => {
+                                if let Some(ts) = &tool_span {
+                                    ts.record_output(&err, true);
+                                }
+                                (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
+                            }
+                        };
+                        if let Some(ts) = tool_span {
+                            if is_error { ts.end_error("tool returned error"); } else { ts.end_ok(); }
+                        }
+                        return (idx, ContentBlock::ToolResult {
+                            tool_use_id: id,
+                            content,
+                            is_error,
+                        });
+                    }
+
+                    // ── MCP tool dispatch (takes priority for MCP-registered names) ──
+                    if let Some(registry) = mcp_registry
+                        && registry.has_tool(&name) {
+                            tracing::debug!(
+                                task_id = %task_id,
+                                tool = %name,
+                                "ReplyLoop: dispatching to MCP server"
+                            );
+                            let mcp_result = registry.call_tool(&name, args.clone()).await;
+                            let (content, is_error) = match mcp_result {
+                                Ok(value) => {
+                                    let text = if value.is_string() {
+                                        value.as_str().unwrap_or("").to_string()
+                                    } else {
+                                        serde_json::to_string_pretty(&value)
+                                            .unwrap_or_else(|_| value.to_string())
+                                    };
                                     if let Some(ts) = &tool_span {
                                         ts.record_output(&text, false);
                                     }
@@ -788,182 +928,156 @@ pub(super) async fn run_reply_loop(
                                 }
                             };
                             if let Some(ts) = tool_span {
-                                if is_error { ts.end_error("tool returned error"); } else { ts.end_ok(); }
+                                if is_error { ts.end_error("MCP tool returned error"); } else { ts.end_ok(); }
                             }
-                            return ContentBlock::ToolResult {
+                            return (idx, ContentBlock::ToolResult {
                                 tool_use_id: id,
                                 content,
                                 is_error,
-                            };
+                            });
                         }
 
-                        // ── MCP tool dispatch (takes priority for MCP-registered names) ──
-                        // If the MCP registry knows this tool, dispatch directly
-                        // to the owning MCP server — skip the built-in extension
-                        // dispatch entirely.
-                        if let Some(registry) = mcp_registry
-                            && registry.has_tool(&name) {
-                                tracing::debug!(
-                                    task_id = %task_id,
-                                    tool = %name,
-                                    "ReplyLoop: dispatching to MCP server"
-                                );
-                                let mcp_result = registry.call_tool(&name, args.clone()).await;
-                                let (content, is_error) = match mcp_result {
-                                    Ok(value) => {
-                                        let text = if value.is_string() {
-                                            value.as_str().unwrap_or("").to_string()
-                                        } else {
-                                            serde_json::to_string_pretty(&value)
-                                                .unwrap_or_else(|_| value.to_string())
-                                        };
-                                        if let Some(ts) = &tool_span {
-                                            ts.record_output(&text, false);
-                                        }
-                                        (vec![ContentBlock::Text { text }], false)
-                                    }
-                                    Err(err) => {
-                                        if let Some(ts) = &tool_span {
-                                            ts.record_output(&err, true);
-                                        }
-                                        (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
-                                    }
-                                };
-                                if let Some(ts) = tool_span {
-                                    if is_error { ts.end_error("MCP tool returned error"); } else { ts.end_ok(); }
-                                }
-                                return ContentBlock::ToolResult {
-                                    tool_use_id: id,
-                                    content,
-                                    is_error,
-                                };
-                            }
-
-                        // ── Normal tool dispatch ────────────────────────────────
-                        // Retry logic for SQLite BUSY errors (concurrent tool
-                        // calls from the same generation can contend on the
-                        // write lock).
-                        let mut result =
-                            extension::call_tool(
-                                app_state,
-                                &name,
-                                args.clone(),
-                                worktree_path,
-                                Some(task_id),
-                                Some(role_name),
-                                mcp_registry,
-                            )
-                                .await;
-                        {
-                            let mut retries = 0u32;
-                            while retries < 5 {
-                                match &result {
-                                    Err(e) if e.contains("database is locked") => {
-                                        retries += 1;
-                                        let backoff = std::time::Duration::from_millis(
-                                            100 * (1 << retries.min(4)),
-                                        );
-                                        tracing::warn!(
-                                            task_id = %task_id,
-                                            tool = %name,
-                                            retry = retries,
-                                            backoff_ms = backoff.as_millis() as u64,
-                                            "ReplyLoop: database locked, retrying"
-                                        );
-                                        tokio::time::sleep(backoff).await;
-                                        result = extension::call_tool(
-                                            app_state,
-                                            &name,
-                                            args.clone(),
-                                            worktree_path,
-                                            Some(task_id),
-                                            Some(role_name),
-                                            mcp_registry,
-                                        )
-                                        .await;
-                                    }
-                                    _ => break,
-                                }
-                            }
-                        }
-                        let (content, is_error) =
-                            match result {
-                                Ok(value) => {
-                                    let mut text = if value.is_string() {
-                                        value.as_str().unwrap_or("").to_string()
-                                    } else {
-                                        // Pretty-print JSON so truncation and stash
-                                        // navigation have real line structure (not a
-                                        // single compact JSON line).
-                                        serde_json::to_string_pretty(&value)
-                                            .unwrap_or_else(|_| value.to_string())
-                                    };
-                                    if text.len() > MAX_TOOL_RESULT_CHARS {
-                                        // Stash the browsable content before truncating.
-                                        // For shell results, extract raw stdout+stderr
-                                        // (the LLM wants to browse command output, not
-                                        // the JSON envelope). For other tools, stash
-                                        // the pretty-printed JSON as-is.
-                                        let stash_text = extract_stash_content(&name, &value)
-                                            .unwrap_or_else(|| text.clone());
-                                        stash.lock().unwrap().insert(
-                                            id.clone(),
-                                            name.clone(),
-                                            stash_text,
-                                        );
-                                        let full_bytes = text.len();
-                                        text = crate::truncate::smart_truncate(
-                                            &text,
-                                            MAX_TOOL_RESULT_CHARS,
-                                        );
-                                        // Append navigation hint so the agent knows it can browse.
-                                        text.push_str(&format!(
-                                            "\n\n[Full output stashed ({full_bytes} bytes). \
-                                             Use output_view(tool_use_id=\"{id}\") to paginate \
-                                             or output_grep(tool_use_id=\"{id}\", pattern=\"...\") to search.]"
-                                        ));
-                                    }
-                                    if let Some(ts) = &tool_span {
-                                        ts.record_output(&text, false);
-                                    }
-                                    (vec![ContentBlock::Text { text }], false)
-                                }
-                                Err(err) => {
+                    // ── Normal tool dispatch ────────────────────────────────
+                    // Retry logic for SQLite BUSY errors.
+                    let mut result =
+                        extension::call_tool(
+                            app_state,
+                            &name,
+                            args.clone(),
+                            worktree_path,
+                            Some(task_id),
+                            Some(role_name),
+                            mcp_registry,
+                        )
+                            .await;
+                    {
+                        let mut retries = 0u32;
+                        while retries < 5 {
+                            match &result {
+                                Err(e) if e.contains("database is locked") => {
+                                    retries += 1;
+                                    let backoff = std::time::Duration::from_millis(
+                                        100 * (1 << retries.min(4)),
+                                    );
                                     tracing::warn!(
                                         task_id = %task_id,
                                         tool = %name,
-                                        error = %err,
-                                        "ReplyLoop: tool call returned error"
+                                        retry = retries,
+                                        backoff_ms = backoff.as_millis() as u64,
+                                        "ReplyLoop: database locked, retrying"
                                     );
-                                    let err_text = format!("error: {err}");
-                                    if let Some(ts) = &tool_span {
-                                        ts.record_output(&err_text, true);
-                                    }
-                                    (
-                                        vec![ContentBlock::Text {
-                                            text: err_text,
-                                        }],
-                                        true,
+                                    tokio::time::sleep(backoff).await;
+                                    result = extension::call_tool(
+                                        app_state,
+                                        &name,
+                                        args.clone(),
+                                        worktree_path,
+                                        Some(task_id),
+                                        Some(role_name),
+                                        mcp_registry,
                                     )
+                                    .await;
                                 }
-                            };
-                        // End tool span.
-                        if let Some(ts) = tool_span {
-                            if is_error {
-                                ts.end_error("tool returned error");
-                            } else {
-                                ts.end_ok();
+                                _ => break,
                             }
                         }
-                        ContentBlock::ToolResult {
-                            tool_use_id: id,
-                            content,
-                            is_error,
+                    }
+                    let (content, is_error) =
+                        match result {
+                            Ok(value) => {
+                                let mut text = if value.is_string() {
+                                    value.as_str().unwrap_or("").to_string()
+                                } else {
+                                    serde_json::to_string_pretty(&value)
+                                        .unwrap_or_else(|_| value.to_string())
+                                };
+                                if text.len() > MAX_TOOL_RESULT_CHARS {
+                                    let stash_text = extract_stash_content(&name, &value)
+                                        .unwrap_or_else(|| text.clone());
+                                    stash.lock().unwrap().insert(
+                                        id.clone(),
+                                        name.clone(),
+                                        stash_text,
+                                    );
+                                    let full_bytes = text.len();
+                                    text = crate::truncate::smart_truncate(
+                                        &text,
+                                        MAX_TOOL_RESULT_CHARS,
+                                    );
+                                    text.push_str(&format!(
+                                        "\n\n[Full output stashed ({full_bytes} bytes). \
+                                         Use output_view(tool_use_id=\"{id}\") to paginate \
+                                         or output_grep(tool_use_id=\"{id}\", pattern=\"...\") to search.]"
+                                    ));
+                                }
+                                if let Some(ts) = &tool_span {
+                                    ts.record_output(&text, false);
+                                }
+                                (vec![ContentBlock::Text { text }], false)
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    tool = %name,
+                                    error = %err,
+                                    "ReplyLoop: tool call returned error"
+                                );
+                                let err_text = format!("error: {err}");
+                                if let Some(ts) = &tool_span {
+                                    ts.record_output(&err_text, true);
+                                }
+                                (
+                                    vec![ContentBlock::Text {
+                                        text: err_text,
+                                    }],
+                                    true,
+                                )
+                            }
+                        };
+                    if let Some(ts) = tool_span {
+                        if is_error {
+                            ts.end_error("tool returned error");
+                        } else {
+                            ts.end_ok();
                         }
+                    }
+                    (idx, ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content,
+                        is_error,
                     })
-                })
-                .collect();
-            let tool_result_blocks = futures::future::join_all(tool_futures).await;
+                }
+            };
+
+            // ── Execute batches in order ────────────────────────────────────
+            let mut indexed_results: Vec<(usize, ContentBlock)> =
+                Vec::with_capacity(indexed_tool_calls.len());
+
+            for batch in &batches {
+                match batch {
+                    ToolBatch::Parallel(indices) => {
+                        // Execute concurrent-safe tools in parallel, bounded by
+                        // MAX_TOOL_CONCURRENCY via chunking.
+                        for chunk in indices.chunks(MAX_TOOL_CONCURRENCY) {
+                            let futures: Vec<_> = chunk
+                                .iter()
+                                .map(|&idx| make_tool_future(idx, &turn_tool_calls[idx]))
+                                .collect();
+                            let results = futures::future::join_all(futures).await;
+                            indexed_results.extend(results);
+                        }
+                    }
+                    ToolBatch::Serial(idx) => {
+                        let result = make_tool_future(*idx, &turn_tool_calls[*idx]).await;
+                        indexed_results.push(result);
+                    }
+                }
+            }
+
+            // Sort by original submission order.
+            indexed_results.sort_by_key(|(idx, _)| *idx);
+            let tool_result_blocks: Vec<ContentBlock> =
+                indexed_results.into_iter().map(|(_, block)| block).collect();
 
             // Touch activity after tool execution — tool calls are legitimate
             // work and can take a while (e.g. cargo build).
