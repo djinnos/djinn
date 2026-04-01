@@ -165,7 +165,13 @@ pub async fn retry_connection<R: Runtime>(app: &AppHandle<R>) -> Result<String, 
         }
     }
 
-    let mode = crate::connection_mode::load();
+    // When DJINN_SERVER_BIN is set, force local daemon mode regardless of
+    // saved config. This lets `make dev` always use the local debug binary.
+    let mode = if std::env::var("DJINN_SERVER_BIN").is_ok() {
+        crate::connection_mode::ConnectionMode::Daemon
+    } else {
+        crate::connection_mode::load()
+    };
     let base_url = match mode {
         crate::connection_mode::ConnectionMode::Daemon => ensure_daemon().await?,
         crate::connection_mode::ConnectionMode::Remote { url } => {
