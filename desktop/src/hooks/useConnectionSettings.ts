@@ -30,7 +30,7 @@ export function useConnectionSettings() {
       setHosts(list);
     } catch (err) {
       showToast.error("Failed to load SSH hosts", {
-        description: err instanceof Error ? err.message : "Unknown error",
+        description: err instanceof Error ? err.message : String(err),
       });
     }
   }, []);
@@ -57,7 +57,7 @@ export function useConnectionSettings() {
       }
     } catch (err) {
       showToast.error("Failed to load connection settings", {
-        description: err instanceof Error ? err.message : "Unknown error",
+        description: err instanceof Error ? err.message : String(err),
       });
     } finally {
       setLoading(false);
@@ -82,11 +82,18 @@ export function useConnectionSettings() {
     try {
       await setConnectionMode(newMode);
       setMode(newMode);
+    } catch (err) {
+      showToast.error("Failed to save connection mode", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    try {
       await retryServerConnection();
       showToast.success("Connection mode updated");
     } catch (err) {
-      showToast.error("Failed to switch connection mode", {
-        description: err instanceof Error ? err.message : "Unknown error",
+      showToast.error("Failed to connect after switching mode", {
+        description: err instanceof Error ? err.message : String(err),
       });
     }
   }, []);
@@ -98,7 +105,7 @@ export function useConnectionSettings() {
       showToast.success("SSH host saved");
     } catch (err) {
       showToast.error("Failed to save SSH host", {
-        description: err instanceof Error ? err.message : "Unknown error",
+        description: err instanceof Error ? err.message : String(err),
       });
     }
   }, [loadHosts]);
@@ -110,7 +117,7 @@ export function useConnectionSettings() {
       showToast.success("SSH host updated");
     } catch (err) {
       showToast.error("Failed to update SSH host", {
-        description: err instanceof Error ? err.message : "Unknown error",
+        description: err instanceof Error ? err.message : String(err),
       });
     }
   }, [loadHosts]);
@@ -122,7 +129,7 @@ export function useConnectionSettings() {
       showToast.success("SSH host removed");
     } catch (err) {
       showToast.error("Failed to remove SSH host", {
-        description: err instanceof Error ? err.message : "Unknown error",
+        description: err instanceof Error ? err.message : String(err),
       });
     }
   }, [loadHosts]);
@@ -147,7 +154,7 @@ export function useConnectionSettings() {
       return result;
     } catch (err) {
       showToast.error("Failed to deploy server", {
-        description: err instanceof Error ? err.message : "Unknown error",
+        description: err instanceof Error ? err.message : String(err),
       });
       throw err;
     }
