@@ -13,7 +13,7 @@ install: ## Install all dependencies (JS + server build)
 dev: ## Run frontend only (browser, no Tauri)
 	pnpm dev
 
-desktop: ## Run full Tauri desktop app (builds server sidecar)
+desktop: ## Run full Tauri desktop app
 	pnpm tauri:dev
 
 server: ## Start the djinn server daemon
@@ -45,7 +45,7 @@ halt: stop server-stop ## Stop everything (desktop + server)
 	-@pkill -f "djinn-server" 2>/dev/null || true
 	@echo "All processes halted."
 
-run-all: server-link ## Start desktop app (server runs as sidecar)
+run-all: ## Start desktop app (server auto-downloads if needed)
 	-@pkill -f "djinn-server" 2>/dev/null || true
 	@sleep 0.5
 	pnpm tauri:dev
@@ -60,20 +60,11 @@ reset: ## Kill everything and restart fresh
 	@echo "Restarting..."
 	$(MAKE) run-all
 
-server-link: ## Symlink local server repo to skip sidecar re-cloning
-	mkdir -p .cache
-	@if [ -e .cache/server-src ]; then \
-		echo ".cache/server-src already exists — remove it first if you want to re-link"; \
-	else \
-		ln -s $(SERVER_DIR) .cache/server-src; \
-		echo "Linked .cache/server-src -> $(SERVER_DIR)"; \
-	fi
-
 storybook: ## Run Storybook
 	pnpm storybook
 
 build: ## Build production Tauri app
 	pnpm tauri:build
 
-clean: ## Remove sidecar binaries and server cache
-	rm -rf src-tauri/binaries .cache/server-src/target
+clean: ## Remove build artifacts
+	rm -rf .cache/server-src/target

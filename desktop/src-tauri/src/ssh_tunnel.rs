@@ -159,13 +159,29 @@ pub fn is_alive(tunnel: &mut SshTunnel) -> bool {
 
 /// Ensure the remote djinn-server daemon is running on the host.
 ///
-/// SSH in and start it if `pgrep` doesn't find it.
+/// If the binary isn't present on the remote, downloads the latest
+/// Linux x64 release from GitHub before starting the daemon.
 pub async fn ensure_remote_daemon(host: &SshHost) -> Result<(), String> {
-    let cmd = format!(
-        "pgrep -f djinn-server || (nohup ~/.djinn/bin/djinn-server --port {} &>/dev/null &)",
+    let download_and_start = format!(
+        r#"
+if ! command -v ~/.djinn/bin/djinn-server &>/dev/null; then
+    echo "Downloading djinn-server on remote…" >&2
+    mkdir -p ~/.djinn/bin
+    ASSET_URL=$(curl -sL "https://api.github.com/repos/djinnos/djinn/releases" \
+        | grep -o '"browser_download_url":\s*"[^"]*djinn-server-linux-x64[^"]*"' \
+        | head -1 | cut -d'"' -f4)
+    if [ -z "$ASSET_URL" ]; then
+        echo "Failed to find server release asset" >&2
+        exit 1
+    fi
+    curl -sL "$ASSET_URL" -o ~/.djinn/bin/djinn-server
+    chmod +x ~/.djinn/bin/djinn-server
+fi
+pgrep -f djinn-server || (nohup ~/.djinn/bin/djinn-server --port {} &>/dev/null &)
+"#,
         host.remote_daemon_port
     );
-    let output = ssh_exec(host, &cmd)?;
+    let output = ssh_exec(host, &download_and_start)?;
     log::info!("ensure_remote_daemon output: {}", output.trim());
     Ok(())
 }

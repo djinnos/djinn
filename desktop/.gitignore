@@ -24,7 +24,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# Local cache for sidecar source clone
+# Local cache
 .cache/
 .npm-cache/
 

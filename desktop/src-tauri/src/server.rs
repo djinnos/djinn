@@ -76,7 +76,10 @@ const DEFAULT_PORT: u16 = 8372;
 /// (or the recorded PID is dead), spawns a new `djinn-server` process that
 /// detaches into its own session. The daemon survives desktop restarts.
 pub async fn ensure_daemon() -> Result<String, String> {
-    let server_bin = resolve_server_binary()?;
+    let server_bin = match resolve_server_binary() {
+        Ok(bin) => bin,
+        Err(_) => download_server_binary().await?,
+    };
     let info =
         djinn_daemon::ensure_running(DEFAULT_PORT, None, &server_bin).await?;
     let base_url = format!("http://127.0.0.1:{}", info.port);
@@ -316,12 +319,16 @@ pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve the `djinn-server` binary path.
+const GITHUB_REPO: &str = "djinnos/djinn";
+
+/// Resolve the `djinn-server` binary path, downloading if necessary.
 ///
 /// Search order:
 /// 1. `DJINN_SERVER_BIN` environment variable
-/// 2. Tauri sidecar path (for bundled production builds)
-/// 3. `djinn-server` on `PATH`
+/// 2. Co-located binary (dev builds — same Cargo target dir)
+/// 3. `~/.djinn/bin/djinn-server`
+/// 4. `djinn-server` on `PATH`
+/// 5. Download from GitHub releases → `~/.djinn/bin/djinn-server`
 fn resolve_server_binary() -> Result<PathBuf, String> {
     // 1. Explicit override via env var.
     if let Ok(path) = std::env::var("DJINN_SERVER_BIN") {
@@ -334,16 +341,16 @@ fn resolve_server_binary() -> Result<PathBuf, String> {
         ));
     }
 
-    // 2. Tauri sidecar location (production builds).
-    if let Some(path) = resolve_sidecar_path() {
+    // 2. Co-located binary in the same Cargo target directory (dev builds).
+    if let Some(path) = resolve_colocated_binary() {
         return Ok(path);
     }
 
-    // 3. Co-located binary in the same Cargo target directory (dev builds).
-    //    During `tauri dev`, the desktop exe and djinn-server are both built
-    //    into the same target/debug (or target/release) directory.
-    if let Some(path) = resolve_colocated_binary() {
-        return Ok(path);
+    // 3. Managed binary at ~/.djinn/bin/djinn-server.
+    if let Some(path) = managed_binary_path() {
+        if path.is_file() {
+            return Ok(path);
+        }
     }
 
     // 4. Search PATH.
@@ -351,46 +358,112 @@ fn resolve_server_binary() -> Result<PathBuf, String> {
         return Ok(path);
     }
 
+    // 5. Download from GitHub releases.
     Err(
-        "djinn-server binary not found. Set DJINN_SERVER_BIN, \
-         place it in PATH, or build with `cargo build -p djinn-server`."
+        "djinn-server binary not found. It will be downloaded on first connection."
             .to_string(),
     )
 }
 
-/// Try to locate the sidecar binary next to the running executable.
-///
-/// Tauri bundles sidecars at `<exe_dir>/binaries/<name>-<target_triple>[.exe]`
-/// on macOS (inside the .app bundle) and at `<exe_dir>/<name>-<target_triple>`
-/// on Linux/Windows.
-fn resolve_sidecar_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
-
-    let triple = target_triple();
-    let name = format!("djinn-server-{triple}");
-
-    // macOS .app bundle: Contents/MacOS/<exe> → Contents/Resources/binaries/
-    #[cfg(target_os = "macos")]
-    {
-        let resources = exe_dir.parent()?.join("Resources").join("binaries");
-        let candidate = resources.join(&name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    // Flat layout (Linux / Windows / dev):
-    let candidate = exe_dir.join("binaries").join(&name);
-    if candidate.exists() {
-        return Some(candidate);
-    }
-
-    None
+/// Return the path where the managed server binary lives: `~/.djinn/bin/djinn-server`.
+fn managed_binary_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let name = if cfg!(windows) {
+        "djinn-server.exe"
+    } else {
+        "djinn-server"
+    };
+    Some(home.join(".djinn").join("bin").join(name))
 }
 
-fn target_triple() -> &'static str {
-    env!("DJINN_TARGET_TRIPLE")
+/// Download the latest server binary from GitHub releases to `~/.djinn/bin/`.
+pub async fn download_server_binary() -> Result<PathBuf, String> {
+    let dest = managed_binary_path()
+        .ok_or_else(|| "cannot determine home directory".to_string())?;
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create ~/.djinn/bin: {e}"))?;
+    }
+
+    let asset_name = server_asset_name()
+        .ok_or_else(|| "unsupported platform for server download".to_string())?;
+
+    log::info!("Downloading djinn-server ({asset_name}) from GitHub releases…");
+
+    // Find the latest server-v* release.
+    let client = reqwest::Client::builder()
+        .user_agent("djinn-desktop")
+        .build()
+        .map_err(|e| format!("create HTTP client: {e}"))?;
+
+    let releases_url = format!(
+        "https://api.github.com/repos/{GITHUB_REPO}/releases"
+    );
+    let releases: Vec<serde_json::Value> = client
+        .get(&releases_url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch releases: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("parse releases: {e}"))?;
+
+    let release = releases
+        .iter()
+        .find(|r| {
+            r.get("tag_name")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| t.starts_with("server-v"))
+        })
+        .ok_or_else(|| "no server release found on GitHub".to_string())?;
+
+    let assets = release
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| "release has no assets".to_string())?;
+
+    let asset = assets
+        .iter()
+        .find(|a| {
+            a.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| n == asset_name)
+        })
+        .ok_or_else(|| format!("asset {asset_name} not found in release"))?;
+
+    let download_url = asset
+        .get("browser_download_url")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| "asset has no download URL".to_string())?;
+
+    let bytes = client
+        .get(download_url)
+        .send()
+        .await
+        .map_err(|e| format!("download {asset_name}: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("read {asset_name}: {e}"))?;
+
+    std::fs::write(&dest, &bytes)
+        .map_err(|e| format!("write {}: {e}", dest.display()))?;
+
+    ensure_executable(&dest);
+
+    log::info!("Downloaded djinn-server to {}", dest.display());
+    Ok(dest)
+}
+
+/// Map the current platform to the server release asset name.
+fn server_asset_name() -> Option<&'static str> {
+    if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        Some("djinn-server-linux-x64")
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        Some("djinn-server-macos-arm64")
+    } else {
+        None
+    }
 }
 
 /// During `tauri dev`, both the desktop app and `djinn-server` are compiled
@@ -408,7 +481,6 @@ fn resolve_colocated_binary() -> Option<PathBuf> {
     if meta.len() < 1024 {
         return None;
     }
-    // Tauri dev may copy the sidecar without execute permission — fix it.
     ensure_executable(&candidate);
     Some(candidate)
 }
