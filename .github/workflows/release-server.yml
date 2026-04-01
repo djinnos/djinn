@@ -19,6 +19,9 @@ jobs:
     defaults:
       run:
         working-directory: server
+    env:
+      RUSTC_WRAPPER: ""
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
