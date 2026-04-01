@@ -24,6 +24,22 @@ use super::*;
 use crate::AgentType;
 use crate::task_merge::interrupt_paused_worker_session;
 
+/// Sort tool schemas deterministically for prompt-cache stability (ADR-048
+/// §2C).  Built-in tools (indices `0..builtin_count`) are sorted
+/// alphabetically among themselves, then MCP tools (`builtin_count..`) are
+/// sorted alphabetically among themselves, keeping the two groups in order.
+fn sort_tool_schemas(tools: &mut [serde_json::Value], builtin_count: usize) {
+    let key = |v: &serde_json::Value| -> String {
+        v.get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let split = builtin_count.min(tools.len());
+    tools[..split].sort_by(|a, b| key(a).cmp(&key(b)));
+    tools[split..].sort_by(|a, b| key(a).cmp(&key(b)));
+}
+
 /// Build a git commit message from an optional title and body.
 /// Truncates the title to 72 characters. Returns `None` if both are empty.
 fn format_commit_message(title: Option<&str>, body: Option<&str>) -> Option<String> {
@@ -1021,6 +1037,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     // ── Create or resume session record + build conversation ─────────────────
     let mut tools = (runtime_role.config().tool_schemas)();
+    let builtin_count = tools.len();
 
     // Append MCP-provided tool schemas to the session tool list.
     if let Some(ref registry) = mcp_registry {
@@ -1033,6 +1050,11 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         );
         tools.extend_from_slice(mcp_schemas);
     }
+
+    // ADR-048 §2C: Sort tool schemas deterministically for prompt-cache
+    // stability.  Built-in tools stay first (sorted among themselves),
+    // followed by MCP tools (sorted among themselves).
+    sort_tool_schemas(&mut tools, builtin_count);
 
     // Workers include recent feedback in the initial message; other roles use
     // a generic kickoff (they read activity via tools themselves).
