@@ -1,6 +1,15 @@
 {
   "setup": [
-    {"name": "cargo-build", "command": "cd server && cargo build --workspace --tests", "timeout_secs": 300}
+    {
+      "name": "server-shared-target",
+      "command": "mkdir -p server/.cargo && sed -i \"s|^target-dir.*|target-dir = \\\"/tmp/djinn-targets/$(basename $PWD)-server\\\"|\" server/.cargo/config.toml",
+      "timeout_secs": 5
+    },
+    {
+      "name": "tauri-shared-target",
+      "command": "mkdir -p desktop/src-tauri/.cargo && sed -i \"s|^target-dir.*|target-dir = \\\"/tmp/djinn-targets/$(basename $PWD)-tauri\\\"|\" desktop/src-tauri/.cargo/config.toml",
+      "timeout_secs": 5
+    }
   ],
   "verification_rules": [
     {
