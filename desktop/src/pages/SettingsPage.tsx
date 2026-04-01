@@ -6,6 +6,7 @@ import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { AgentConfig } from '@/components/AgentConfig';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { ConnectionSettings } from '@/components/ConnectionSettings';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -97,7 +98,9 @@ function ProvidersSettings() {
 export function SettingsPage() {
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
-      <section className="min-h-0 min-w-0 flex-1 flex flex-col overflow-x-hidden overflow-y-auto pb-6">
+      <section className="min-h-0 min-w-0 flex-1 flex flex-col gap-6 overflow-x-hidden overflow-y-auto pb-6">
+        <ConnectionSettings />
+        <div className="border-t border-border" />
         <ProvidersSettings />
       </section>
     </div>
