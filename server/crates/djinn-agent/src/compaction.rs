@@ -35,6 +35,17 @@ const PARTIAL_COMPACTION_PIVOT: f64 = 0.6;
 /// context window.
 const PARTIAL_COMPACTION_MIN_RECLAIM: f64 = 0.2;
 
+/// Maximum retries when the compaction request itself overflows the context.
+/// On each retry the oldest 20% of message groups are dropped from the input.
+const COMPACTION_OVERFLOW_MAX_RETRIES: usize = 3;
+
+/// Fraction of message groups dropped from the oldest end on each overflow retry.
+const COMPACTION_OVERFLOW_DROP_FRACTION: f64 = 0.2;
+
+/// Aggressive microcompaction: tool results older than this many turns are
+/// cleared when all overflow retries have been exhausted.
+const AGGRESSIVE_MICROCOMPACT_AGE: usize = 2;
+
 // ─── Compaction context ──────────────────────────────────────────────────────
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
@@ -222,6 +233,23 @@ pub(crate) fn needs_compaction(total_tokens_in: u32, context_window: i64) -> boo
 ///
 /// Returns the estimated number of tokens reclaimed (chars / 4 heuristic).
 pub(crate) fn microcompact(conversation: &mut Conversation, current_turn: usize) -> usize {
+    microcompact_with_thresholds(
+        conversation,
+        current_turn,
+        MICROCOMPACT_AGE_THRESHOLD,
+        MICROCOMPACT_EXEMPT_RECENT,
+    )
+}
+
+/// Microcompaction with caller-supplied thresholds. Used by the normal
+/// pre-pass (with module-level defaults) and the aggressive fallback (with
+/// tighter settings).
+fn microcompact_with_thresholds(
+    conversation: &mut Conversation,
+    current_turn: usize,
+    age_threshold: usize,
+    exempt_recent: usize,
+) -> usize {
     use crate::message::ContentBlock;
 
     let messages = &mut conversation.messages;
@@ -252,13 +280,13 @@ pub(crate) fn microcompact(conversation: &mut Conversation, current_turn: usize)
         let msg_turn = turn_map[i];
 
         // Exempt recent turns.
-        if msg_turn < MICROCOMPACT_EXEMPT_RECENT {
+        if msg_turn < exempt_recent {
             continue;
         }
 
         // Only clear if the turn is old enough.
         let age = effective_current.saturating_sub(msg_turn);
-        if age < MICROCOMPACT_AGE_THRESHOLD {
+        if age < age_threshold {
             continue;
         }
 
@@ -433,8 +461,19 @@ pub(crate) async fn compact_conversation(
             if t.is_empty() { None } else { Some(t) }
         });
 
-    // 3. Ask the LLM to summarise.
-    match do_compact(provider, &conversation.messages, &ctx).await {
+    // 3. Ask the LLM to summarise, with overflow retry logic.
+    //    If do_compact fails because the compaction input itself exceeds the
+    //    model's context, progressively drop the oldest message groups and retry.
+    let compact_result = do_compact_with_overflow_retry(
+        provider,
+        conversation,
+        &ctx,
+        task_id,
+        session_id,
+    )
+    .await;
+
+    match compact_result {
         Ok(summary) => {
             // 4. Replace conversation.
             let mut new_messages: Vec<Message> = Vec::new();
@@ -516,6 +555,139 @@ pub(crate) async fn compact_conversation(
             false
         }
     }
+}
+
+// ─── Compaction overflow retry ──────────────────────────────────────────────
+
+/// Wrapper around `do_compact` that retries on context-length errors by
+/// progressively dropping the oldest message groups from the compaction input.
+///
+/// Strategy:
+/// 1. Try `do_compact` on the full message list.
+/// 2. On context-length error, drop the oldest 20% of message groups and retry
+///    (up to `COMPACTION_OVERFLOW_MAX_RETRIES` attempts).
+/// 3. If all retries fail, run aggressive microcompaction (clear ALL tool
+///    results older than 2 turns) and retry once more.
+async fn do_compact_with_overflow_retry(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    ctx: &CompactionContext,
+    task_id: &str,
+    session_id: &str,
+) -> anyhow::Result<String> {
+    // First attempt on the full conversation.
+    let mut messages_for_compact = conversation.messages.clone();
+
+    match do_compact(provider, &messages_for_compact, ctx).await {
+        Ok(summary) => return Ok(summary),
+        Err(e) if is_compaction_context_error(&e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                session_id = %session_id,
+                error = %e,
+                "compaction overflow: initial do_compact hit context limit, starting retry loop"
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Retry loop: drop oldest 20% of message groups on each attempt.
+    for attempt in 1..=COMPACTION_OVERFLOW_MAX_RETRIES {
+        drop_oldest_message_groups(&mut messages_for_compact, COMPACTION_OVERFLOW_DROP_FRACTION);
+
+        tracing::info!(
+            task_id = %task_id,
+            session_id = %session_id,
+            attempt,
+            remaining_messages = messages_for_compact.len(),
+            "compaction overflow: retrying after dropping oldest message groups"
+        );
+
+        match do_compact(provider, &messages_for_compact, ctx).await {
+            Ok(summary) => return Ok(summary),
+            Err(e) if is_compaction_context_error(&e) => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    attempt,
+                    error = %e,
+                    "compaction overflow: still over limit after dropping groups"
+                );
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // All retries exhausted — aggressive microcompaction fallback.
+    tracing::warn!(
+        task_id = %task_id,
+        session_id = %session_id,
+        "compaction overflow: all retries exhausted, running aggressive microcompaction"
+    );
+
+    let current_turn = conversation
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .count();
+
+    let tokens_reclaimed = microcompact_with_thresholds(
+        conversation,
+        current_turn,
+        AGGRESSIVE_MICROCOMPACT_AGE, // age_threshold: 2 turns
+        0,                           // exempt_recent: only spare the very latest turn
+    );
+
+    tracing::info!(
+        task_id = %task_id,
+        session_id = %session_id,
+        tokens_reclaimed,
+        "compaction overflow: aggressive microcompaction reclaimed tokens"
+    );
+
+    // Final attempt with the aggressively cleaned conversation.
+    do_compact(provider, &conversation.messages, ctx).await
+}
+
+/// Check whether an error is a context-length / token-limit error.
+/// Same heuristic used in `do_compact`'s inner retry loop.
+fn is_compaction_context_error(e: &anyhow::Error) -> bool {
+    let msg = e.to_string().to_lowercase();
+    msg.contains("context_length")
+        || msg.contains("context limit")
+        || msg.contains("too many tokens")
+        || msg.contains("maximum context")
+        || msg.contains("context window")
+        || msg.contains("prompt is too long")
+        || msg.contains("max_tokens")
+        || msg.contains("token limit")
+}
+
+/// Drop the oldest `fraction` of message groups from a message list.
+///
+/// A "message group" is a pair of consecutive messages (typically user + assistant
+/// or assistant + user). The system prompt (first message, if role == System) is
+/// always preserved.
+fn drop_oldest_message_groups(messages: &mut Vec<Message>, fraction: f64) {
+    // Preserve system prompt.
+    let start = if messages.first().map(|m| m.role == Role::System).unwrap_or(false) {
+        1
+    } else {
+        0
+    };
+
+    let droppable = messages.len().saturating_sub(start);
+    if droppable == 0 {
+        return;
+    }
+
+    // Calculate how many messages to drop (group size = 2 messages).
+    let groups = droppable / 2;
+    let groups_to_drop = ((groups as f64 * fraction).ceil() as usize).max(1);
+    let messages_to_drop = (groups_to_drop * 2).min(droppable);
+
+    // Remove from the oldest end (right after system prompt).
+    messages.drain(start..start + messages_to_drop);
 }
 
 // ─── Partial compaction ─────────────────────────────────────────────────────
@@ -1789,5 +1961,151 @@ mod tests {
     #[test]
     fn partial_compaction_prompt_has_messages_placeholder() {
         assert!(PARTIAL_COMPACTION_PROMPT.contains("{messages}"));
+    }
+
+    // ── Compaction overflow retry helpers ───────────────────────────────────
+
+    #[test]
+    fn drop_oldest_message_groups_preserves_system() {
+        let mut messages = vec![
+            Message::system("sys"),
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+            Message::assistant("a2"),
+            Message::user("u3"),
+            Message::assistant("a3"),
+        ];
+
+        drop_oldest_message_groups(&mut messages, 0.2);
+
+        // System prompt must survive.
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].text_content(), "sys");
+
+        // Should have dropped at least 1 group (2 messages).
+        assert!(
+            messages.len() <= 5,
+            "expected at most 5 messages after dropping 20%, got {}",
+            messages.len()
+        );
+    }
+
+    #[test]
+    fn drop_oldest_message_groups_drops_from_oldest_end() {
+        let mut messages = vec![
+            Message::system("sys"),
+            Message::user("old1"),
+            Message::assistant("old_resp1"),
+            Message::user("old2"),
+            Message::assistant("old_resp2"),
+            Message::user("recent"),
+            Message::assistant("recent_resp"),
+        ];
+
+        // Drop 50% of groups (3 groups total -> drop 2 -> 4 messages).
+        drop_oldest_message_groups(&mut messages, 0.5);
+
+        // System + remaining messages.
+        assert_eq!(messages[0].role, Role::System);
+
+        // The most recent messages should survive.
+        let last = messages.last().unwrap();
+        assert_eq!(last.text_content(), "recent_resp");
+    }
+
+    #[test]
+    fn drop_oldest_message_groups_no_op_on_empty_or_system_only() {
+        let mut messages = vec![Message::system("sys")];
+        drop_oldest_message_groups(&mut messages, 0.5);
+        assert_eq!(messages.len(), 1);
+
+        let mut empty: Vec<Message> = vec![];
+        drop_oldest_message_groups(&mut empty, 0.5);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn drop_oldest_message_groups_multiple_rounds() {
+        let mut messages = vec![
+            Message::system("sys"),
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+            Message::assistant("a2"),
+            Message::user("u3"),
+            Message::assistant("a3"),
+            Message::user("u4"),
+            Message::assistant("a4"),
+            Message::user("u5"),
+            Message::assistant("a5"),
+        ];
+        // 5 groups, drop 20% each time -> drop 1 group (2 messages) per round.
+        let original_len = messages.len();
+
+        drop_oldest_message_groups(&mut messages, COMPACTION_OVERFLOW_DROP_FRACTION);
+        assert!(messages.len() < original_len);
+
+        let after_first = messages.len();
+        drop_oldest_message_groups(&mut messages, COMPACTION_OVERFLOW_DROP_FRACTION);
+        assert!(messages.len() < after_first);
+
+        // System prompt still there.
+        assert_eq!(messages[0].role, Role::System);
+    }
+
+    #[test]
+    fn is_compaction_context_error_detects_variants() {
+        let cases = [
+            "context_length exceeded",
+            "too many tokens in prompt",
+            "maximum context reached",
+            "context window overflow",
+            "prompt is too long",
+            "max_tokens exceeded",
+            "token limit reached",
+            "context limit exceeded",
+        ];
+        for msg in cases {
+            let e = anyhow::anyhow!("{msg}");
+            assert!(
+                is_compaction_context_error(&e),
+                "should detect: {msg}"
+            );
+        }
+
+        // Non-context errors should not match.
+        let e = anyhow::anyhow!("rate limited");
+        assert!(!is_compaction_context_error(&e));
+    }
+
+    #[test]
+    fn aggressive_microcompact_clears_more_than_default() {
+        let mut conv_default = build_tool_conversation(10);
+        let mut conv_aggressive = build_tool_conversation(10);
+
+        let tokens_default = microcompact(&mut conv_default, 10);
+        let tokens_aggressive = microcompact_with_thresholds(
+            &mut conv_aggressive,
+            10,
+            AGGRESSIVE_MICROCOMPACT_AGE,
+            0,
+        );
+
+        // Aggressive should clear more than default.
+        assert!(
+            tokens_aggressive >= tokens_default,
+            "aggressive ({tokens_aggressive}) should reclaim >= default ({tokens_default})"
+        );
+    }
+
+    #[test]
+    fn overflow_constants_are_reasonable() {
+        assert!(COMPACTION_OVERFLOW_MAX_RETRIES >= 1);
+        assert!(COMPACTION_OVERFLOW_MAX_RETRIES <= 5);
+        assert!(COMPACTION_OVERFLOW_DROP_FRACTION > 0.0);
+        assert!(COMPACTION_OVERFLOW_DROP_FRACTION < 0.5);
+        assert!(AGGRESSIVE_MICROCOMPACT_AGE <= MICROCOMPACT_AGE_THRESHOLD);
+        assert!(AGGRESSIVE_MICROCOMPACT_AGE >= 1);
     }
 }
