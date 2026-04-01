@@ -242,3 +242,27 @@ export async function checkWslAvailable(): Promise<boolean> {
 export async function selectFile(title?: string): Promise<string | null> {
   return invoke<string | null>("select_file", { title });
 }
+
+/**
+ * Download the server binary from GitHub releases.
+ * @returns The path to the downloaded binary
+ */
+export async function downloadServerBinary(): Promise<string> {
+  return invoke<string>("download_server_binary");
+}
+
+/**
+ * Check if a saved connection mode exists (first-launch detection).
+ */
+export async function hasSavedConnectionMode(): Promise<boolean> {
+  return invoke<boolean>("has_saved_connection_mode");
+}
+
+/**
+ * Attempt silent authentication using stored refresh tokens.
+ * Called after the server is connected.
+ * @returns true if authentication succeeded
+ */
+export async function attemptSilentAuth(): Promise<boolean> {
+  return invoke<boolean>("attempt_silent_auth");
+}

@@ -321,14 +321,12 @@ pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
 
 const GITHUB_REPO: &str = "djinnos/djinn";
 
-/// Resolve the `djinn-server` binary path, downloading if necessary.
+/// Resolve the `djinn-server` binary path.
 ///
 /// Search order:
-/// 1. `DJINN_SERVER_BIN` environment variable
-/// 2. Co-located binary (dev builds — same Cargo target dir)
-/// 3. `~/.djinn/bin/djinn-server`
-/// 4. `djinn-server` on `PATH`
-/// 5. Download from GitHub releases → `~/.djinn/bin/djinn-server`
+/// 1. `DJINN_SERVER_BIN` environment variable (explicit override)
+/// 2. `~/.djinn/bin/djinn-server` (previously downloaded)
+/// 3. Return Err — caller should download via `download_server_binary()`
 fn resolve_server_binary() -> Result<PathBuf, String> {
     // 1. Explicit override via env var.
     if let Ok(path) = std::env::var("DJINN_SERVER_BIN") {
@@ -341,24 +339,14 @@ fn resolve_server_binary() -> Result<PathBuf, String> {
         ));
     }
 
-    // 2. Co-located binary in the same Cargo target directory (dev builds).
-    if let Some(path) = resolve_colocated_binary() {
-        return Ok(path);
-    }
-
-    // 3. Managed binary at ~/.djinn/bin/djinn-server.
+    // 2. Managed binary at ~/.djinn/bin/djinn-server.
     if let Some(path) = managed_binary_path() {
         if path.is_file() {
             return Ok(path);
         }
     }
 
-    // 4. Search PATH.
-    if let Some(path) = find_in_path("djinn-server") {
-        return Ok(path);
-    }
-
-    // 5. Download from GitHub releases.
+    // 3. Not found — caller should download.
     Err(
         "djinn-server binary not found. It will be downloaded on first connection."
             .to_string(),
@@ -366,7 +354,7 @@ fn resolve_server_binary() -> Result<PathBuf, String> {
 }
 
 /// Return the path where the managed server binary lives: `~/.djinn/bin/djinn-server`.
-fn managed_binary_path() -> Option<PathBuf> {
+pub fn managed_binary_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let name = if cfg!(windows) {
         "djinn-server.exe"
@@ -466,25 +454,6 @@ fn server_asset_name() -> Option<&'static str> {
     }
 }
 
-/// During `tauri dev`, both the desktop app and `djinn-server` are compiled
-/// into the same Cargo target directory (e.g. `target/debug/`).  Look for the
-/// server binary next to the running executable.
-fn resolve_colocated_binary() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
-    let candidate = exe_dir.join("djinn-server");
-    if !candidate.is_file() {
-        return None;
-    }
-    // Skip tiny placeholder files created by build.rs for cargo check/clippy.
-    let meta = std::fs::metadata(&candidate).ok()?;
-    if meta.len() < 1024 {
-        return None;
-    }
-    ensure_executable(&candidate);
-    Some(candidate)
-}
-
 /// Ensure a file has executable permission (u+x).
 #[cfg(unix)]
 fn ensure_executable(path: &PathBuf) {
@@ -499,18 +468,6 @@ fn ensure_executable(path: &PathBuf) {
 
 #[cfg(not(unix))]
 fn ensure_executable(_path: &PathBuf) {}
-
-/// Search `PATH` for a binary by name.
-fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
 
 /// Best-effort port extraction from a URL string.
 fn parse_port(url: &str) -> Option<u16> {

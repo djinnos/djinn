@@ -1,5 +1,5 @@
 import { useAuthStore } from "@/stores/authStore";
-import { startGithubLogin, type AuthUser } from "@/tauri/commands";
+import { startGithubLogin, attemptSilentAuth, type AuthUser } from "@/tauri/commands";
 import { listen } from "@tauri-apps/api/event";
 import { type ReactNode, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -22,10 +22,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
   useEffect(() => {
     const listeners: Array<() => void> = [];
 
-    // Don't call fetchState() eagerly — the backend drives initial state via
-    // events (auth:state-changed, auth:login-required, auth:silent-refresh-failed).
-    // This avoids the race where fetchState() returns { isAuthenticated: false }
-    // before the silent refresh has completed.
+    // Attempt silent auth now that the server is connected.
+    // This replaces the backend-driven approach that was removed from lib.rs.
+    attemptSilentAuth().catch(() => {
+      // If silent auth fails, fall through to show login screen
+      useAuthStore.setState({ isLoading: false, isAuthenticated: false });
+    });
 
     listen<{ isAuthenticated: boolean; user: AuthUser | null }>("auth:state-changed", (event) => {
       const state = event.payload;

@@ -3,10 +3,13 @@
  * This ensures the auth gate is wired in correctly at the entry point.
  */
 import { screen, waitFor, act } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
 import { renderWithProviders } from "@/test/helpers";
 import { AuthGate } from "@/components/AuthGate";
 import { useAuthStore } from "@/stores/authStore";
 import { emitTauriEvent, clearTauriListeners } from "@/test/setup";
+
+const mockInvoke = vi.mocked(invoke);
 
 // Mock the actual App to avoid pulling in the entire dependency tree
 vi.mock("./App", () => ({
@@ -26,6 +29,11 @@ describe("main entry point (AuthGate + App integration)", () => {
   beforeEach(() => {
     resetStore();
     clearTauriListeners();
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "attempt_silent_auth") return false;
+      throw new Error(`Unexpected invoke: ${cmd}`);
+    });
   });
 
   it("blocks app rendering when unauthenticated", async () => {

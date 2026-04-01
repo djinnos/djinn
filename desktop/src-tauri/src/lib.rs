@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 mod auth;
 mod commands;
@@ -30,139 +30,11 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Mutex::new(server::init_server_state()))
         .setup(move |app| {
-            let app_handle = app.handle().clone();
-
-            // Start or connect to server based on configured connection mode.
-            tauri::async_runtime::spawn(async move {
-                let mode = connection_mode::load();
-
-                let startup_result = match mode.clone() {
-                    connection_mode::ConnectionMode::Daemon => {
-                        log::info!("Connection mode: daemon — ensuring server is running");
-                        server::ensure_daemon().await
-                    }
-                    connection_mode::ConnectionMode::Remote { ref url } => {
-                        log::info!("Connection mode: remote — connecting to {url}");
-                        if server::check_remote(url).await {
-                            Ok(url.clone())
-                        } else {
-                            Err(format!("Remote server at {url} is not reachable"))
-                        }
-                    }
-                    connection_mode::ConnectionMode::Ssh { ref host_id } => {
-                        log::info!("Connection mode: ssh — tunnelling via host {host_id}");
-                        let host = ssh_hosts::find_host(host_id);
-                        match host {
-                            Some(host) => {
-                                if let Err(e) = ssh_tunnel::ensure_remote_daemon(&host).await {
-                                    log::warn!("Could not ensure remote daemon: {e}");
-                                }
-                                match ssh_tunnel::start_tunnel(&host) {
-                                    Ok(tunnel) => {
-                                        let base_url = format!("http://127.0.0.1:{}", tunnel.local_port);
-                                        let local_port = tunnel.local_port;
-                                        ssh_tunnel::set_active_tunnel(tunnel);
-
-                                        // Wait for health through tunnel.
-                                        let mut ok = false;
-                                        for _ in 0..40 {
-                                            if server::health_check(&base_url).await {
-                                                ok = true;
-                                                break;
-                                            }
-                                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                                        }
-                                        if ok {
-                                            if let Some(state) = app_handle.try_state::<std::sync::Mutex<ServerState>>() {
-                                                if let Ok(mut s) = state.lock() {
-                                                    s.tunnel_status = ssh_tunnel::TunnelStatus::Connected { local_port };
-                                                }
-                                            }
-                                            Ok(base_url)
-                                        } else {
-                                            Err("SSH tunnel established but daemon not reachable".into())
-                                        }
-                                    }
-                                    Err(e) => Err(format!("Failed to start SSH tunnel: {e}")),
-                                }
-                            }
-                            None => Err(format!("SSH host '{host_id}' not found")),
-                        }
-                    }
-                    connection_mode::ConnectionMode::Wsl => {
-                        log::info!("Connection mode: WSL");
-                        wsl::ensure_wsl_daemon(8372).await
-                    }
-                };
-
-                match startup_result {
-                    Ok(base_url) => {
-                        log::info!("Server ready at {base_url}");
-                        let (_, version) = server::health_check_with_version(&base_url).await;
-                        if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
-                            if let Ok(mut s) = state.lock() {
-                                s.mark_healthy(&base_url);
-                                s.server_version = version.clone();
-                                s.update_available = version
-                                    .as_ref()
-                                    .map(|v| server::version_lt(v, server::MIN_SERVER_VERSION))
-                                    .unwrap_or(false);
-                            }
-                        }
-
-                        server::start_health_monitor(&app_handle);
-
-                        // Start tunnel monitor when in SSH mode.
-                        if matches!(mode, connection_mode::ConnectionMode::Ssh { .. }) {
-                            server::start_tunnel_monitor(&app_handle);
-                        }
-
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.show();
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to connect to server: {e}");
-                        if let Ok(mut state) =
-                            app_handle.state::<Mutex<ServerState>>().lock()
-                        {
-                            state.mark_error(&e);
-                        }
-
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.show();
-                        }
-                    }
-                }
-            });
-
-            // Attempt silent authentication on startup.
-            let silent_auth_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                match token_refresh::attempt_silent_auth_on_startup().await {
-                    token_refresh::RefreshResult::Success(_state) => {
-                        log::info!("Silent authentication successful on startup");
-                        if let Err(e) =
-                            commands::populate_session_after_silent_refresh(&silent_auth_app)
-                                .await
-                        {
-                            log::error!("Failed to populate session after silent refresh: {e}");
-                            let _ = silent_auth_app.emit("auth:login-required", ());
-                        }
-                    }
-                    token_refresh::RefreshResult::NoToken => {
-                        log::info!("No refresh token available, user needs to login");
-                        let _ = silent_auth_app.emit("auth:login-required", ());
-                    }
-                    token_refresh::RefreshResult::Failed(reason) => {
-                        log::warn!("Silent authentication failed: {reason}");
-                        let _ = silent_auth_app.emit(
-                            "auth:silent-refresh-failed",
-                            serde_json::json!({ "reason": reason }),
-                        );
-                    }
-                }
-            });
+            // Show window immediately — the frontend drives server connection
+            // and onboarding flow.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+            }
 
             // On macOS, prevent window close — exit the whole app instead.
             #[cfg(target_os = "macos")]
@@ -213,6 +85,9 @@ pub fn run() {
             commands::get_tunnel_status,
             commands::deploy_server_to_host,
             commands::check_wsl_available,
+            commands::download_server_binary,
+            commands::has_saved_connection_mode,
+            commands::attempt_silent_auth,
         ])
         .build(tauri::generate_context!())
         .expect("error building tauri application")

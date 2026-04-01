@@ -33,6 +33,11 @@ describe("AuthGate", () => {
     resetStore();
     clearTauriListeners();
     mockInvoke.mockReset();
+    // Default mock for attempt_silent_auth — most tests don't care about it
+    mockInvoke.mockImplementation(async (cmd: string, ..._args: unknown[]) => {
+      if (cmd === "attempt_silent_auth") return false;
+      throw new Error(`Unexpected invoke: ${cmd}`);
+    });
   });
 
   describe("loading state", () => {
@@ -43,10 +48,10 @@ describe("AuthGate", () => {
       expect(screen.queryByTestId("protected")).not.toBeInTheDocument();
     });
 
-    it("does not call fetchState eagerly on mount", () => {
+    it("calls attempt_silent_auth on mount but not auth_get_state", () => {
       renderAuthGate();
 
-      // No invoke calls should happen on mount — state is event-driven
+      expect(mockInvoke).toHaveBeenCalledWith("attempt_silent_auth");
       expect(mockInvoke).not.toHaveBeenCalledWith("auth_get_state");
     });
 
@@ -67,12 +72,16 @@ describe("AuthGate", () => {
     });
 
     it("calls fetchState after 5s if still loading", async () => {
-      mockInvoke.mockResolvedValueOnce({ isAuthenticated: false, user: null });
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "attempt_silent_auth") return false;
+        if (cmd === "auth_get_state") return { isAuthenticated: false, user: null };
+        throw new Error(`Unexpected invoke: ${cmd}`);
+      });
 
       renderAuthGate();
 
-      // Before timer fires, no fetch
-      expect(mockInvoke).not.toHaveBeenCalled();
+      // Before timer fires, only attempt_silent_auth
+      expect(mockInvoke).not.toHaveBeenCalledWith("auth_get_state");
 
       // Advance past 5s fallback and flush all pending promises
       await act(async () => {
@@ -196,9 +205,13 @@ describe("AuthGate", () => {
     });
 
     it("starts device flow when sign-in button is clicked", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        userCode: "ABCD-1234",
-        verificationUri: "https://github.com/login/device",
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "attempt_silent_auth") return false;
+        if (cmd === "start_github_login") return {
+          userCode: "ABCD-1234",
+          verificationUri: "https://github.com/login/device",
+        };
+        throw new Error(`Unexpected invoke: ${cmd}`);
       });
 
       const user = userEvent.setup();
@@ -226,9 +239,13 @@ describe("AuthGate", () => {
 
   describe("device code flow", () => {
     it("shows device code after starting login and transitions on auth:state-changed", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        userCode: "WXYZ-5678",
-        verificationUri: "https://github.com/login/device",
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "attempt_silent_auth") return false;
+        if (cmd === "start_github_login") return {
+          userCode: "WXYZ-5678",
+          verificationUri: "https://github.com/login/device",
+        };
+        throw new Error(`Unexpected invoke: ${cmd}`);
       });
 
       const user = userEvent.setup();
@@ -262,9 +279,13 @@ describe("AuthGate", () => {
     });
 
     it("shows error on auth:login-failed", async () => {
-      mockInvoke.mockResolvedValueOnce({
-        userCode: "FAIL-0000",
-        verificationUri: "https://github.com/login/device",
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "attempt_silent_auth") return false;
+        if (cmd === "start_github_login") return {
+          userCode: "FAIL-0000",
+          verificationUri: "https://github.com/login/device",
+        };
+        throw new Error(`Unexpected invoke: ${cmd}`);
       });
 
       const user = userEvent.setup();
@@ -298,7 +319,11 @@ describe("AuthGate", () => {
 
   describe("silent refresh", () => {
     it("refetches state on auth:silent-refresh-success", async () => {
-      mockInvoke.mockResolvedValueOnce({ isAuthenticated: true, user: MOCK_USER });
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "attempt_silent_auth") return false;
+        if (cmd === "auth_get_state") return { isAuthenticated: true, user: MOCK_USER };
+        throw new Error(`Unexpected invoke: ${cmd}`);
+      });
 
       renderAuthGate();
 

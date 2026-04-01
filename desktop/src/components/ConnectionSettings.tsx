@@ -71,7 +71,7 @@ function TunnelStatusBadge({ status }: { status: TunnelStatus }) {
   }
 }
 
-interface HostEditorProps {
+export interface HostEditorProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   host: SshHost | null;
@@ -79,7 +79,7 @@ interface HostEditorProps {
   onTest: (id: string) => Promise<string>;
 }
 
-function HostEditor({ open, onOpenChange, host, onSave, onTest }: HostEditorProps) {
+export function HostEditor({ open, onOpenChange, host, onSave, onTest }: HostEditorProps) {
   const isEditing = host !== null;
   const [label, setLabel] = useState(host?.label ?? '');
   const [hostname, setHostname] = useState(host?.hostname ?? '');

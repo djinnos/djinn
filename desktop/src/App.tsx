@@ -1,6 +1,5 @@
 import { useServerHealth } from "@/hooks/useServerHealth";
 import { useEventSource } from "@/hooks/useEventSource";
-import { LoadingScreen } from "@/components/LoadingScreen";
 import { Sidebar } from "@/components/Sidebar";
 import { Titlebar } from "@/components/Titlebar";
 import { KanbanPage } from "@/pages/KanbanPage";
@@ -12,8 +11,9 @@ import { ChatPage } from "@/pages/ChatPage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { ServerUpdateBanner } from "@/components/ServerUpdateBanner";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useEffect } from "react";
+import { ServerOnboarding } from "@/components/ServerOnboarding";
+import { AuthGate } from "@/components/AuthGate";
+import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Navigate, Route, Routes } from "react-router-dom";
@@ -63,41 +63,27 @@ function MainLayout() {
   );
 }
 
-export default function App() {
+function AuthenticatedApp() {
   const { status } = useServerHealth();
   const selectedProjectId = useSelectedProjectId();
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
   const { hasModels, refresh: refreshModelGate } = useModelGateStore();
+  const hasConnectedOnce = useRef(false);
 
   useProjectsBootstrap(status);
   useEventSource(selectedProjectId);
 
   useEffect(() => {
     if (status === 'connected') {
+      hasConnectedOnce.current = true;
       void refreshGate();
       void refreshModelGate();
     }
   }, [status, refreshGate, refreshModelGate]);
 
-  useEffect(() => {
-    if (status === "connected" || status === "error") {
-      getCurrentWindow().show();
-    }
-  }, [status]);
-
-  if (status === "loading") {
-    return (
-      <LoadingScreen
-        status="loading"
-        message="Connecting to server..."
-      />
-    );
-  }
-
-  // When disconnected, still show the main layout so the user can access
-  // settings to configure the connection (e.g. deploy to a remote host).
-  // Only the initial loading state blocks the UI.
-  if (status === "error") {
+  // After initial onboarding, if server disconnects show MainLayout
+  // with ConnectionBanner so user can access Settings.
+  if (status !== 'connected' && hasConnectedOnce.current) {
     return <MainLayout />;
   }
 
@@ -110,4 +96,17 @@ export default function App() {
   }
 
   return <MainLayout />;
+}
+
+export default function App() {
+  // Gate 1: Server connection
+  return (
+    <ServerOnboarding>
+      {/* Gate 2: GitHub authentication (requires server) */}
+      <AuthGate>
+        {/* Gate 3 & 4: Provider + Model onboarding, then main app */}
+        <AuthenticatedApp />
+      </AuthGate>
+    </ServerOnboarding>
+  );
 }

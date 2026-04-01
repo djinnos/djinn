@@ -591,6 +591,48 @@ pub fn check_wsl_available() -> bool {
     crate::wsl::is_available()
 }
 
+/// Download the server binary from GitHub releases.
+/// Returns the path to the downloaded binary.
+#[tauri::command]
+pub async fn download_server_binary() -> Result<String, String> {
+    let path = crate::server::download_server_binary().await?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Check if a saved connection mode exists (first-launch detection).
+#[tauri::command]
+pub fn has_saved_connection_mode() -> bool {
+    let path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".djinn")
+        .join("connection_mode.json");
+    path.exists()
+}
+
+/// Attempt silent authentication using stored refresh tokens.
+/// Called by the frontend after the server is connected.
+#[tauri::command]
+pub async fn attempt_silent_auth(app: AppHandle) -> Result<bool, String> {
+    match crate::token_refresh::attempt_silent_auth_on_startup().await {
+        crate::token_refresh::RefreshResult::Success(_state) => {
+            log::info!("Silent authentication successful");
+            if let Err(e) = populate_session_after_silent_refresh(&app).await {
+                log::error!("Failed to populate session after silent refresh: {e}");
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        crate::token_refresh::RefreshResult::NoToken => {
+            log::info!("No refresh token available");
+            Ok(false)
+        }
+        crate::token_refresh::RefreshResult::Failed(reason) => {
+            log::warn!("Silent authentication failed: {reason}");
+            Ok(false)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Git commands
 // ---------------------------------------------------------------------------
