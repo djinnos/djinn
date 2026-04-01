@@ -71,8 +71,11 @@ pub async fn deploy_to_host(host: &SshHost) -> Result<DeployResult, String> {
             .join(", ");
         return Err(format!(
             "Missing shared libraries on remote: {libs_list}\n\n\
-             On Ubuntu/Debian, install them with:\n\
-             sudo apt-get install -y libgit2-dev libssl-dev libssh2-1-dev"
+             Either install them on the remote (Ubuntu/Debian):\n\
+             sudo apt-get install -y libgit2-dev libssl-dev libssh2-1-dev\n\n\
+             Or build a portable binary with vendored libs:\n\
+             cargo build -p djinn-server --release --features vendored\n\
+             Then set DJINN_SERVER_BIN to the release binary path and redeploy."
         ));
     }
 
