@@ -22,13 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
-        run: rustup toolchain install nightly --profile minimal
+        run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
           shared-key: release-server-${{ matrix.asset }}
       - name: Build
-        run: cargo +nightly build --release --features vendored
+        run: cargo +stable build --release --features vendored
       - name: Rename binary
         run: cp target/release/djinn-server ../${{ matrix.asset }}
       - uses: actions/upload-artifact@v4
