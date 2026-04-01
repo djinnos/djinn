@@ -35,6 +35,10 @@ pub mod verification;
 
 pub mod resource_monitor;
 
+// ─── Per-session cgroup memory limits ───────────────────────────────────────
+
+pub mod cgroup;
+
 // ─── Actors (was src/actors/) ────────────────────────────────────────────────
 
 pub mod actors;
