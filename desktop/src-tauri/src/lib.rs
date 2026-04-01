@@ -97,9 +97,15 @@ pub fn run() {
                 match startup_result {
                     Ok(base_url) => {
                         log::info!("Server ready at {base_url}");
+                        let (_, version) = server::health_check_with_version(&base_url).await;
                         if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
                             if let Ok(mut s) = state.lock() {
                                 s.mark_healthy(&base_url);
+                                s.server_version = version.clone();
+                                s.update_available = version
+                                    .as_ref()
+                                    .map(|v| server::version_lt(v, server::MIN_SERVER_VERSION))
+                                    .unwrap_or(false);
                             }
                         }
 

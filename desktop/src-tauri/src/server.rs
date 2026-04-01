@@ -16,6 +16,10 @@ pub struct ServerState {
     pub error_message: Option<String>,
     /// Current SSH tunnel status (only relevant in `Ssh` connection mode).
     pub tunnel_status: crate::ssh_tunnel::TunnelStatus,
+    /// Server version reported by the health endpoint.
+    pub server_version: Option<String>,
+    /// Whether the server version is older than the minimum required.
+    pub update_available: bool,
 }
 
 impl Default for ServerState {
@@ -34,6 +38,8 @@ impl ServerState {
             has_error: false,
             error_message: None,
             tunnel_status: crate::ssh_tunnel::TunnelStatus::Disconnected,
+            server_version: None,
+            update_available: false,
         }
     }
 
@@ -104,6 +110,48 @@ pub async fn health_check(base_url: &str) -> bool {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct HealthResponseBody {
+    #[allow(dead_code)]
+    status: String,
+    version: Option<String>,
+}
+
+/// HTTP GET `{base_url}/health` — returns (healthy, version).
+pub async fn health_check_with_version(base_url: &str) -> (bool, Option<String>) {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    match reqwest::get(&url).await {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<HealthResponseBody>().await {
+                Ok(body) => (true, body.version),
+                Err(_) => (true, None), // healthy but no version (old server)
+            }
+        }
+        _ => (false, None),
+    }
+}
+
+pub const MIN_SERVER_VERSION: &str = "0.1.0";
+
+fn parse_semver(v: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = v.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        parts[0].parse().ok()?,
+        parts[1].parse().ok()?,
+        parts[2].parse().ok()?,
+    ))
+}
+
+pub fn version_lt(current: &str, minimum: &str) -> bool {
+    match (parse_semver(current), parse_semver(minimum)) {
+        (Some(c), Some(m)) => c < m,
+        _ => false,
+    }
+}
+
 /// Retry connecting to the server according to the current connection mode.
 pub async fn retry_connection<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
     // Clear existing error state
@@ -160,9 +208,15 @@ pub async fn retry_connection<R: Runtime>(app: &AppHandle<R>) -> Result<String, 
         }
     };
 
+    let (_, version) = health_check_with_version(&base_url).await;
     if let Some(state) = app.try_state::<Mutex<ServerState>>() {
         if let Ok(mut s) = state.lock() {
             s.mark_healthy(&base_url);
+            s.server_version = version.clone();
+            s.update_available = version
+                .as_ref()
+                .map(|v| version_lt(v, MIN_SERVER_VERSION))
+                .unwrap_or(false);
         }
     }
 
@@ -195,12 +249,18 @@ pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
                 continue; // startup hasn't finished
             };
 
-            if health_check(&base_url).await {
+            let (healthy, version) = health_check_with_version(&base_url).await;
+            if healthy {
                 if !was_healthy {
                     log::info!("Health monitor: server recovered at {base_url}");
                     if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
                         if let Ok(mut s) = state.lock() {
                             s.mark_healthy(&base_url);
+                            s.server_version = version.clone();
+                            s.update_available = version
+                                .as_ref()
+                                .map(|v| version_lt(v, MIN_SERVER_VERSION))
+                                .unwrap_or(false);
                         }
                     }
                     let _ = app_handle.emit("server:reconnected", &base_url);

@@ -11,6 +11,7 @@ import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
+import { ServerUpdateBanner } from "@/components/ServerUpdateBanner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
@@ -29,6 +30,7 @@ function MainLayout() {
         <Titlebar />
         <div className="flex min-h-0 flex-1 flex-col">
           <ConnectionBanner />
+          <ServerUpdateBanner />
           <SyncHealthBanner />
           <Routes>
             {/* Global views (All Projects) */}

@@ -10,6 +10,8 @@ export interface ServerHealthState {
   error: string | null;
   retry: () => Promise<void>;
   isRetrying: boolean;
+  serverVersion: string | null;
+  updateAvailable: boolean;
 }
 
 const POLL_INTERVAL_MS = 2000;
@@ -19,6 +21,8 @@ export function useServerHealth(): ServerHealthState {
   const [port, setPort] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -28,6 +32,8 @@ export function useServerHealth(): ServerHealthState {
         setPort(serverStatus.port);
         setStatus("connected");
         setError(null);
+        setServerVersion(serverStatus.server_version);
+        setUpdateAvailable(serverStatus.update_available);
         return true;
       }
 
@@ -92,5 +98,5 @@ export function useServerHealth(): ServerHealthState {
     };
   }, [checkStatus, status]);
 
-  return { status, port, error, retry, isRetrying };
+  return { status, port, error, retry, isRetrying, serverVersion, updateAvailable };
 }
