@@ -19,15 +19,15 @@ import * as wsl from "./wsl.js";
 
 export type SendEvent = (event: string, payload?: unknown) => void;
 
-/** Runtime connection state (mirrors the Rust ServerState). */
+/** Runtime connection state — uses snake_case to match Tauri/Rust serialization. */
 export interface ServerStatus {
-  baseUrl: string | null;
+  base_url: string | null;
   port: number | null;
-  isHealthy: boolean;
-  hasError: boolean;
-  errorMessage: string | null;
-  serverVersion: string | null;
-  updateAvailable: boolean;
+  is_healthy: boolean;
+  has_error: boolean;
+  error_message: string | null;
+  server_version: string | null;
+  update_available: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,13 +64,13 @@ export class ServerState {
 
   toStatus(): ServerStatus {
     return {
-      baseUrl: this.baseUrl,
+      base_url: this.baseUrl,
       port: this.port,
-      isHealthy: this.isHealthy,
-      hasError: this.hasError,
-      errorMessage: this.errorMessage,
-      serverVersion: this.serverVersion,
-      updateAvailable: this.updateAvailable,
+      is_healthy: this.isHealthy,
+      has_error: this.hasError,
+      error_message: this.errorMessage,
+      server_version: this.serverVersion,
+      update_available: this.updateAvailable,
     };
   }
 }
