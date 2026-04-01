@@ -321,6 +321,13 @@ pub async fn create_branch(
     .await;
 
     if create.is_err() {
+        // Clean up any partial ref file left by the failed first attempt
+        // before retrying with the local target branch.  The branch_name
+        // contains a slash (task/xyz) so we need to join the components.
+        let ref_path = path.join(".git/refs/heads").join(&branch_name);
+        if ref_path.exists() {
+            let _ = std::fs::remove_file(&ref_path);
+        }
         run_git_command(
             path.clone(),
             vec!["branch".into(), branch_name.clone(), target_branch],
@@ -328,6 +335,35 @@ pub async fn create_branch(
         .await?;
     }
 
+    // Verify the branch ref actually points to a valid commit.
+    // A partial write (e.g. interrupted I/O, lock contention) can leave
+    // a 0-byte ref file that git treats as broken.
+    verify_branch_ref(&path, &branch_name).await?;
+
+    Ok(())
+}
+
+/// Verify that a branch ref resolves to a valid commit object.
+/// Returns an error if the ref is missing, empty, or corrupt.
+async fn verify_branch_ref(path: &Path, branch: &str) -> Result<(), GitError> {
+    let full_ref = format!("refs/heads/{branch}");
+    run_git_command(
+        path.to_path_buf(),
+        vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            full_ref,
+        ],
+    )
+    .await
+    .map_err(|e| {
+        // Clean up the broken ref so the next attempt starts fresh.
+        let ref_path = path.join(".git/refs/heads").join(branch);
+        if ref_path.exists() {
+            let _ = std::fs::remove_file(&ref_path);
+        }
+        e
+    })?;
     Ok(())
 }
 

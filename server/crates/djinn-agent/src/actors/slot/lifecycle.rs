@@ -463,6 +463,43 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         .await;
         return_free!();
     }
+    // Verify the worktree is a valid git working tree, not just an empty
+    // directory left behind by a partially failed `git worktree add`.
+    // Worktrees have a `.git` *file* (not directory) that points back to
+    // the main repository.  Also verify the branch ref is intact via
+    // `git rev-parse HEAD` inside the worktree.
+    let git_link = worktree_path.join(".git");
+    let git_link_valid = git_link.exists() && (git_link.is_file() || git_link.is_dir());
+    let rev_parse_ok = if git_link_valid {
+        tokio::process::Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(&worktree_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if !git_link_valid || !rev_parse_ok {
+        tracing::warn!(
+            task_id = %task_id,
+            worktree = %worktree_path.display(),
+            git_link_exists = git_link.exists(),
+            rev_parse_ok = rev_parse_ok,
+            "Lifecycle: worktree preflight failed — directory exists but git state is broken"
+        );
+        transition_interrupted(
+            &task_id,
+            runtime_role.config().release_action,
+            "worktree preflight failed: broken git state",
+            &app_state,
+        )
+        .await;
+        return_free!();
+    }
     emit_step(&task.id, "preflight_passed", serde_json::json!({}));
 
     // ── Resolve role-level MCP servers ────────────────────────────────────────
