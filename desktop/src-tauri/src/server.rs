@@ -44,6 +44,10 @@ impl ServerState {
         self.has_error = false;
         self.error_message = None;
         self.ready = true;
+
+        // Persist the active connection so token_sync and other out-of-band
+        // callers can resolve the server URL without access to Tauri state.
+        persist_active_connection(base_url);
     }
 
     pub fn mark_error(&mut self, message: &str) {
@@ -381,6 +385,32 @@ fn parse_port(url: &str) -> Option<u16> {
     let after_scheme = url.split("//").nth(1).unwrap_or(url);
     let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
     host_port.rsplit(':').next().and_then(|s| s.parse().ok())
+}
+
+/// Write `~/.djinn/active_connection.json` so that out-of-band callers
+/// (e.g. `token_sync`) can resolve the server URL without Tauri state.
+fn persist_active_connection(base_url: &str) {
+    let Some(home) = dirs::home_dir() else { return };
+    let path = home.join(".djinn").join("active_connection.json");
+    let payload = serde_json::json!({
+        "base_url": base_url,
+        "port": parse_port(base_url),
+    });
+    if let Ok(content) = serde_json::to_string_pretty(&payload) {
+        let _ = std::fs::write(&path, content);
+    }
+}
+
+/// Read the active server base URL from `~/.djinn/active_connection.json`.
+///
+/// Used by `token_sync` and any other code that needs the server URL
+/// outside of Tauri managed state.
+pub fn load_active_connection_url() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let path = home.join(".djinn").join("active_connection.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get("base_url")?.as_str().map(|s| s.to_string())
 }
 
 /// Spawn a background task that monitors the SSH tunnel health.

@@ -27,17 +27,25 @@ struct ServerGitHubAppTokens {
     user_login: Option<String>,
 }
 
-/// Resolve the server port from `~/.djinn/daemon.json`.
+/// Resolve the server base URL from `~/.djinn/active_connection.json`,
+/// falling back to `~/.djinn/daemon.json` for backward compatibility.
 ///
 /// This avoids coupling to Tauri managed state so the function can be called
 /// from any async context (including background tasks that don't hold an
 /// `AppHandle`).
-fn resolve_server_port() -> Option<u16> {
+fn resolve_server_base_url() -> Option<String> {
+    // Prefer active_connection.json — written for all connection modes.
+    if let Some(url) = crate::server::load_active_connection_url() {
+        return Some(url);
+    }
+
+    // Fallback: daemon.json (local daemon mode only, backward compat).
     let home = dirs::home_dir()?;
     let daemon_path = home.join(".djinn").join("daemon.json");
     let content = std::fs::read_to_string(daemon_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    json.get("port")?.as_u64().map(|p| p as u16)
+    let port = json.get("port")?.as_u64()?;
+    Some(format!("http://127.0.0.1:{}", port))
 }
 
 /// Push tokens to the server's credential vault via the MCP `credential_set` tool.
@@ -50,10 +58,10 @@ pub async fn sync_tokens_to_server(
     expires_at: u64,
     user_login: Option<&str>,
 ) {
-    let port = match resolve_server_port() {
-        Some(p) => p,
+    let base_url = match resolve_server_base_url() {
+        Some(u) => u,
         None => {
-            log::warn!("token_sync: server port not available, skipping credential sync");
+            log::warn!("token_sync: server URL not available, skipping credential sync");
             return;
         }
     };
@@ -73,8 +81,6 @@ pub async fn sync_tokens_to_server(
             return;
         }
     };
-
-    let base_url = format!("http://127.0.0.1:{}", port);
 
     if let Err(e) = do_sync(&base_url, &tokens_json).await {
         log::error!("token_sync: failed to sync tokens to server: {}", e);
