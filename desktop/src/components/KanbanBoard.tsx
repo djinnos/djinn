@@ -198,8 +198,6 @@ export function KanbanBoard({
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
-  const IN_FLIGHT = new Set(["in_progress", "verifying", "needs_task_review", "in_task_review", "needs_lead_intervention", "in_lead_intervention"]);
-
   const handleTaskClick = (task: Task) => {
     navigate(`/task/${task.id}`);
   };

@@ -18,18 +18,12 @@ import {
   UnavailableIcon,
   LinkSquare02Icon,
   GitMergeIcon,
-  PlayIcon,
-  StopIcon,
-  Cancel01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { RotateCcw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
-import { useTaskActions } from "@/hooks/useTaskActions";
-import { useExecutionControl } from "@/hooks/useExecutionControl";
-import { useSelectedProject, useIsAllProjects } from "@/stores/useProjectStore";
+import { useIsAllProjects } from "@/stores/useProjectStore";
 import { projectStore } from "@/stores/projectStore";
 import { verificationStore } from "@/stores/verificationStore";
 import { useStoreWithEqualityFn } from "zustand/traditional";
@@ -172,97 +166,6 @@ function acProgressIcon(met: number, total: number) {
   if (pct <= 0.25) return Progress02Icon;
   if (pct <= 0.5) return Progress03Icon;
   return Progress04Icon;
-}
-
-
-function ActionButton({
-  icon,
-  label,
-  disabled,
-  className,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  disabled?: boolean;
-  className?: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      className={cn(
-        "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-inherit transition-colors hover:bg-white/10 disabled:pointer-events-none disabled:opacity-30",
-        className,
-      )}
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-      aria-label={label}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-function TaskCardActions({ task, actionsBg }: { task: Task; actionsBg?: string }) {
-  const selectedProject = useSelectedProject();
-  const isAll = useIsAllProjects();
-  const { busy: transitioning, transition } = useTaskActions();
-  const { busy: killing, killTask } = useExecutionControl();
-  const busy = transitioning || killing;
-
-  const taskProjectId = task.project_id ?? undefined;
-  const project = isAll
-    ? projectStore.getState().projects.find((p) => p.id === taskProjectId)
-    : selectedProject;
-  if (!project?.path) return null;
-  const projectPath = project.path;
-
-  const isOpen = task.status === "open";
-  const isInProgress = task.status === "in_progress";
-  const isClosed = task.status === "closed";
-  const isBlocked = (task.unresolved_blocker_count ?? 0) > 0;
-
-  const actions: React.ReactNode[] = [];
-
-  if (isOpen && !isBlocked) {
-    actions.push(
-      <ActionButton key="start" icon={<HugeiconsIcon icon={PlayIcon} size={12} />} label="Start" disabled={busy} className="hover:text-emerald-400" onClick={() => transition(task.id, projectPath, "start")} />
-    );
-  }
-  if (isInProgress) {
-    actions.push(
-      <ActionButton key="stop" icon={<HugeiconsIcon icon={StopIcon} size={12} />} label="Stop" disabled={busy} className="hover:text-red-400" onClick={() => killTask(task.id)} />
-    );
-  }
-  if (isClosed) {
-    actions.push(
-      <ActionButton key="reopen" icon={<RotateCcw className="h-3 w-3" />} label="Reopen" disabled={busy} onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")} />
-    );
-  }
-  if (!isClosed && !isInProgress) {
-    actions.push(
-      <ActionButton key="close" icon={<HugeiconsIcon icon={Cancel01Icon} size={12} />} label="Close" disabled={busy} className="hover:text-red-400" onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")} />
-    );
-  }
-
-  if (actions.length === 0) return null;
-
-  return (
-    <div
-      className={cn(
-        "pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center gap-1 rounded-b-xl px-3 py-1.5 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/taskcard:opacity-100 [&>*]:pointer-events-auto",
-        actionsBg ?? "bg-zinc-800/70"
-      )}
-      onClick={(e) => e.stopPropagation()}
-    >
-      {actions}
-    </div>
-  );
 }
 
 function ProjectBadge({ projectId }: { projectId?: string }) {
