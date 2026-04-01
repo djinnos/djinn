@@ -612,7 +612,8 @@ pub(super) async fn run_reply_loop(
             // block arrives during streaming, rather than waiting for the full
             // response.  Results are collected in a Vec and merged with
             // post-stream dispatch results before assembling the final message.
-            let mut streaming_inflight: FuturesUnordered<std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ContentBlock)> + Send + '_>>> = FuturesUnordered::new();
+            type StreamingFut<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ContentBlock)> + Send + 'a>>;
+            let mut streaming_inflight: FuturesUnordered<StreamingFut<'_>> = FuturesUnordered::new();
             let mut streaming_results: Vec<(usize, ContentBlock)> = Vec::new();
             // Indices of tool calls that were dispatched during streaming.
             let mut streaming_dispatched: HashSet<usize> = HashSet::new();

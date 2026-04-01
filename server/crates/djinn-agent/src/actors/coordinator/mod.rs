@@ -542,13 +542,13 @@ impl CoordinatorActor {
 
                     // ADR-048 §3A: idle-time memory consolidation.
                     // Check if a previously spawned sweep has completed.
-                    if let Some(handle) = self.idle_consolidation_handle.as_ref() {
-                        if handle.is_finished() {
-                            self.idle_consolidation_handle = None;
-                            self.idle_consolidation_cancel = None;
-                            self.last_idle_consolidation = Some(StdInstant::now());
-                            tracing::info!("CoordinatorActor: idle consolidation sweep completed");
-                        }
+                    if let Some(handle) = self.idle_consolidation_handle.as_ref()
+                        && handle.is_finished()
+                    {
+                        self.idle_consolidation_handle = None;
+                        self.idle_consolidation_cancel = None;
+                        self.last_idle_consolidation = Some(StdInstant::now());
+                        tracing::info!("CoordinatorActor: idle consolidation sweep completed");
                     }
                     // Only attempt a new sweep when no sweep is already running.
                     if self.idle_consolidation_handle.is_none() {
@@ -1105,10 +1105,10 @@ impl CoordinatorActor {
     /// cancellable background consolidation sweep.
     async fn maybe_start_idle_consolidation(&mut self) {
         // Respect cooldown.
-        if let Some(last) = self.last_idle_consolidation {
-            if last.elapsed() < IDLE_CONSOLIDATION_COOLDOWN {
-                return;
-            }
+        if let Some(last) = self.last_idle_consolidation
+            && last.elapsed() < IDLE_CONSOLIDATION_COOLDOWN
+        {
+            return;
         }
 
         // Check pool: all slots must be idle (no active sessions).

@@ -377,7 +377,7 @@ pub(crate) async fn compact_conversation(
         let total_chars: usize = conversation
             .messages
             .iter()
-            .map(|m| estimate_message_chars(m))
+            .map(estimate_message_chars)
             .sum();
         let estimated_tokens = total_chars / CHARS_PER_TOKEN.max(1);
 
@@ -824,15 +824,15 @@ async fn partial_compact(
 
     // Re-append the last user message for mid-session so the agent knows
     // what it was working on (same logic as full compaction).
-    if matches!(ctx, CompactionContext::MidSession(_)) {
-        if let Some(last_user) = last_user_text {
-            let already_appended = new_messages
-                .last()
-                .map(|m| m.role == Role::User && m.text_content() == *last_user)
-                .unwrap_or(false);
-            if !already_appended {
-                new_messages.push(Message::user(last_user.clone()));
-            }
+    if matches!(ctx, CompactionContext::MidSession(_))
+        && let Some(last_user) = last_user_text
+    {
+        let already_appended = new_messages
+            .last()
+            .map(|m| m.role == Role::User && m.text_content() == *last_user)
+            .unwrap_or(false);
+        if !already_appended {
+            new_messages.push(Message::user(last_user.clone()));
         }
     }
 
@@ -1861,6 +1861,7 @@ mod tests {
     // ── Partial compaction constants ────────────────────────────────────────
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn partial_compaction_pivot_is_reasonable() {
         // Pivot should be between 0 and 1, and significantly past the midpoint
         // to preserve a large prefix.
@@ -1870,6 +1871,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn partial_compaction_min_reclaim_is_reasonable() {
         assert!(PARTIAL_COMPACTION_MIN_RECLAIM > 0.0);
         assert!(PARTIAL_COMPACTION_MIN_RECLAIM < 0.5);
@@ -1920,9 +1922,9 @@ mod tests {
     fn partial_compaction_skips_small_tail() {
         // When the tail would reclaim less than 20% of context window,
         // partial compaction should be skipped.
-        let messages = vec![
+        let messages = [
             // Large system prompt that dominates the token count.
-            Message::system(&"x".repeat(3000)),
+            Message::system("x".repeat(3000)),
             Message::user("tiny tail"),
             Message::assistant("tiny response"),
         ];
@@ -2100,6 +2102,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn overflow_constants_are_reasonable() {
         assert!(COMPACTION_OVERFLOW_MAX_RETRIES >= 1);
         assert!(COMPACTION_OVERFLOW_MAX_RETRIES <= 5);

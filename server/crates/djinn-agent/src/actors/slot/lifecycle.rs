@@ -36,8 +36,8 @@ fn sort_tool_schemas(tools: &mut [serde_json::Value], builtin_count: usize) {
             .to_string()
     };
     let split = builtin_count.min(tools.len());
-    tools[..split].sort_by(|a, b| key(a).cmp(&key(b)));
-    tools[split..].sort_by(|a, b| key(a).cmp(&key(b)));
+    tools[..split].sort_by_key(|a| key(a));
+    tools[split..].sort_by_key(|a| key(a));
 }
 
 /// Build a git commit message from an optional title and body.
