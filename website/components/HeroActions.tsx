@@ -86,16 +86,16 @@ export default function HeroActions() {
 
   const downloadLinks = {
     linux: "/api/download?platform=linux-appimage",
+    windows: "/api/download?platform=windows",
   };
 
   const MainButton = () => {
     if (os === "windows") {
       return (
-        <div className="px-8 py-4 bg-white/10 text-white/60 rounded-xl font-bold text-lg flex items-center gap-3 border border-border cursor-default">
+        <a href={downloadLinks.windows} className="px-8 py-4 bg-white text-bg-page rounded-xl font-bold text-lg flex items-center gap-3 hover:bg-gray-100 transition-all shadow-[0_0_20px_rgba(168,85,247,0.3)] hover:shadow-[0_0_30px_rgba(168,85,247,0.5)]">
           <Monitor className="w-5 h-5" />
-          Windows
-          <span className="text-sm font-medium bg-white/10 px-3 py-1 rounded-full">Coming Soon</span>
-        </div>
+          Download for Windows
+        </a>
       );
     }
 
@@ -125,11 +125,10 @@ export default function HeroActions() {
       <div className="text-sm text-text-secondary flex gap-6 justify-center relative">
         {os !== "mac" && <MacDropdown primary={false} />}
         {os !== "windows" && (
-          <span className="text-text-muted cursor-default flex items-center gap-1.5">
+          <a href={downloadLinks.windows} className="hover:text-white cursor-pointer transition-colors flex items-center gap-1.5">
             <Monitor className="w-3.5 h-3.5" />
-            Windows
-            <span className="text-[10px] bg-white/5 px-1.5 py-0.5 rounded-full">Coming Soon</span>
-          </span>
+            Download for Windows
+          </a>
         )}
         {os !== "linux" && (
           <a href={downloadLinks.linux} className="hover:text-white cursor-pointer transition-colors">

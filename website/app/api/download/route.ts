@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const REPO = "djinnos/djinn";
-const GITHUB_API = `https://api.github.com/repos/${REPO}/releases/latest`;
+const GITHUB_API = `https://api.github.com/repos/${REPO}/releases`;
 
 // Map platform params to asset filename patterns
 const PLATFORM_PATTERNS: Record<string, RegExp> = {
-  "mac-arm64": /Djinn.*arm64\.dmg$/,
-  "windows": /Djinn.*x64\.exe$/,
-  "linux-appimage": /Djinn.*\.AppImage$/,
-  "linux-deb": /Djinn.*\.deb$/,
+  "mac-arm64": /Djinn-.*arm64\.dmg$/,
+  "windows": /Djinn\.Setup\..*\.exe$/,
+  "linux-appimage": /Djinn-.*\.AppImage$/,
+  "linux-deb": /djinnos-desktop.*\.deb$/,
 };
 
 // Cache the latest release for 5 minutes to avoid hitting GitHub API rate limits
@@ -25,12 +25,12 @@ interface GitHubRelease {
   assets: GitHubAsset[];
 }
 
-async function getLatestRelease(): Promise<GitHubRelease> {
+async function getLatestDesktopRelease(): Promise<GitHubRelease> {
   if (cache && Date.now() - cache.timestamp < CACHE_TTL) {
     return cache.data;
   }
 
-  const res = await fetch(GITHUB_API, {
+  const res = await fetch(`${GITHUB_API}?per_page=20`, {
     headers: {
       Accept: "application/vnd.github.v3+json",
       "User-Agent": "djinn-website",
@@ -41,9 +41,17 @@ async function getLatestRelease(): Promise<GitHubRelease> {
     throw new Error(`GitHub API error: ${res.status}`);
   }
 
-  const data = await res.json();
-  cache = { data, timestamp: Date.now() };
-  return data;
+  const releases: GitHubRelease[] = await res.json();
+  const desktopRelease = releases.find((r) =>
+    r.tag_name.startsWith("desktop-v")
+  );
+
+  if (!desktopRelease) {
+    throw new Error("No desktop release found");
+  }
+
+  cache = { data: desktopRelease, timestamp: Date.now() };
+  return desktopRelease;
 }
 
 export async function GET(request: NextRequest) {
@@ -60,14 +68,14 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const release = await getLatestRelease();
+    const release = await getLatestDesktopRelease();
     const pattern = PLATFORM_PATTERNS[platform];
     const asset = release.assets.find((a) => pattern.test(a.name));
 
     if (!asset) {
       // Fallback to releases page if asset not found
       return NextResponse.redirect(
-        `https://github.com/${REPO}/releases/latest`
+        `https://github.com/${REPO}/releases`
       );
     }
 
@@ -75,7 +83,7 @@ export async function GET(request: NextRequest) {
   } catch {
     // On any error, redirect to releases page
     return NextResponse.redirect(
-      `https://github.com/${REPO}/releases/latest`
+      `https://github.com/${REPO}/releases`
     );
   }
 }
