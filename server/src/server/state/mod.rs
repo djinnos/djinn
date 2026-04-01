@@ -234,6 +234,7 @@ impl AppState {
                 self.health_tracker().clone(),
                 self.inner.role_registry.clone(),
                 self.inner.verifying_tasks.clone(),
+                self.inner.lsp.clone(),
             ));
 
         *self.inner.pool.lock().await = Some(pool.clone());

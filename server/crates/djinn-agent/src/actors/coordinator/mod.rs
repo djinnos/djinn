@@ -47,10 +47,12 @@ pub struct CoordinatorDeps {
     pub health: HealthTracker,
     pub role_registry: Arc<RoleRegistry>,
     pub verification_tracker: VerificationTracker,
+    pub lsp: crate::lsp::LspManager,
     consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
 }
 
 impl CoordinatorDeps {
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         events_tx: broadcast::Sender<DjinnEventEnvelope>,
@@ -61,6 +63,7 @@ impl CoordinatorDeps {
         health: HealthTracker,
         role_registry: Arc<RoleRegistry>,
         verification_tracker: VerificationTracker,
+        lsp: crate::lsp::LspManager,
     ) -> Self {
         Self {
             events_tx,
@@ -71,6 +74,7 @@ impl CoordinatorDeps {
             health,
             role_registry,
             verification_tracker,
+            lsp,
             consolidation_runner: None,
         }
     }
@@ -268,6 +272,7 @@ struct CoordinatorActor {
     catalog: CatalogService,
     health: HealthTracker,
     role_registry: Arc<RoleRegistry>,
+    lsp: crate::lsp::LspManager,
     // Sender clone for background tasks to send results back.
     self_sender: mpsc::Sender<CoordinatorMessage>,
     // Watch channel for lock-free status reads.
@@ -350,6 +355,7 @@ impl CoordinatorActor {
             health,
             role_registry,
             verification_tracker,
+            lsp,
             consolidation_runner,
         } = deps;
         let events = events_tx.subscribe();
@@ -366,6 +372,7 @@ impl CoordinatorActor {
             catalog,
             health,
             role_registry,
+            lsp,
             self_sender,
             status_tx,
             paused_projects: HashSet::new(),
@@ -494,7 +501,7 @@ impl CoordinatorActor {
                             role_registry: self.role_registry.clone(),
                             health_tracker: self.health.clone(),
                             file_time: Arc::new(crate::file_time::FileTime::new()),
-                            lsp: crate::lsp::LspManager::new(),
+                            lsp: self.lsp.clone(),
                             catalog: self.catalog.clone(),
                             coordinator: Arc::new(tokio::sync::Mutex::new(None)),
                             active_tasks: crate::context::ActivityTracker::default(),
@@ -1420,6 +1427,7 @@ mod tests {
             health,
             role_registry,
             verification_tracker,
+            crate::lsp::LspManager::new(),
         ))
     }
 
@@ -2208,6 +2216,7 @@ mod tests {
             health,
             Arc::new(RoleRegistry::new()),
             verification_tracker,
+            crate::lsp::LspManager::new(),
         ));
         (handle, tracker_clone)
     }
@@ -2439,6 +2448,7 @@ mod tests {
             health,
             role_registry,
             verification_tracker,
+            crate::lsp::LspManager::new(),
         ))
     }
 

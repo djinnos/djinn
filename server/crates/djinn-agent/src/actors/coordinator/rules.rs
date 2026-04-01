@@ -283,6 +283,7 @@ mod tests {
             HealthTracker::new(),
             Arc::new(RoleRegistry::new()),
             VerificationTracker::default(),
+            crate::lsp::LspManager::new(),
         ))
     }
 
@@ -589,6 +590,7 @@ mod tests {
                 HealthTracker::new(),
                 Arc::new(RoleRegistry::new()),
                 VerificationTracker::default(),
+                crate::lsp::LspManager::new(),
             ),
             receiver,
             sender,
@@ -652,6 +654,7 @@ mod tests {
                 HealthTracker::new(),
                 Arc::new(RoleRegistry::new()),
                 VerificationTracker::default(),
+                crate::lsp::LspManager::new(),
             ),
             receiver,
             sender,

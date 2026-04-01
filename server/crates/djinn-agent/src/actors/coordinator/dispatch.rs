@@ -1130,7 +1130,7 @@ impl CoordinatorActor {
             role_registry: self.role_registry.clone(),
             health_tracker: self.health.clone(),
             file_time: Arc::new(crate::file_time::FileTime::new()),
-            lsp: crate::lsp::LspManager::new(),
+            lsp: self.lsp.clone(),
             catalog: self.catalog.clone(),
             coordinator: Arc::new(tokio::sync::Mutex::new(None)),
             active_tasks: crate::context::ActivityTracker::default(),
