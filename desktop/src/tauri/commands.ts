@@ -77,7 +77,9 @@ export async function retryServerDiscovery(): Promise<number> {
 
 export type ConnectionMode =
   | { type: "daemon" }
-  | { type: "remote"; url: string };
+  | { type: "remote"; url: string }
+  | { type: "ssh"; host_id: string }
+  | { type: "wsl" };
 
 export async function getConnectionMode(): Promise<ConnectionMode> {
   return invoke("get_connection_mode");
@@ -154,4 +156,87 @@ export async function authLogin(): Promise<void> {
  */
 export async function authLogout(): Promise<void> {
   await invoke("auth_logout");
+}
+
+// --- Connection Settings Types ---
+
+export interface SshHost {
+  id: string;
+  label: string;
+  hostname: string;
+  user: string;
+  port: number;
+  key_path: string | null;
+  remote_daemon_port: number;
+  deployed: boolean;
+  server_version: string | null;
+}
+
+export type TunnelStatus =
+  | { status: "disconnected" }
+  | { status: "connecting" }
+  | { status: "connected"; local_port: number }
+  | { status: "reconnecting" }
+  | { status: "error"; message: string };
+
+// --- Connection Settings Commands ---
+
+/**
+ * Get saved SSH hosts from the backend.
+ */
+export async function getSshHosts(): Promise<SshHost[]> {
+  return invoke<SshHost[]>("get_ssh_hosts");
+}
+
+/**
+ * Save (create or update) an SSH host configuration.
+ */
+export async function saveSshHost(host: SshHost): Promise<void> {
+  return invoke<void>("save_ssh_host", { host });
+}
+
+/**
+ * Remove an SSH host configuration by ID.
+ */
+export async function removeSshHost(id: string): Promise<void> {
+  return invoke<void>("remove_ssh_host", { id });
+}
+
+/**
+ * Test SSH connectivity to a saved host.
+ * @returns A success message or throws on failure.
+ */
+export async function testSshConnection(hostId: string): Promise<string> {
+  return invoke<string>("test_ssh_connection", { hostId });
+}
+
+/**
+ * Get the current SSH tunnel status.
+ */
+export async function getTunnelStatus(): Promise<TunnelStatus> {
+  return invoke<TunnelStatus>("get_tunnel_status");
+}
+
+/**
+ * Deploy the djinn-server binary to a remote host via SSH.
+ * @returns A status message.
+ */
+export async function deployServerToHost(hostId: string): Promise<string> {
+  return invoke<string>("deploy_server_to_host", { hostId });
+}
+
+/**
+ * Check if WSL is available on this machine.
+ */
+export async function checkWslAvailable(): Promise<boolean> {
+  return invoke<boolean>("check_wsl_available");
+}
+
+/**
+ * Open a native file picker dialog.
+ * @param title Optional dialog title
+ * @returns The selected file path or null if cancelled
+ */
+export async function selectFile(title?: string): Promise<string | null> {
+  return invoke<string | null>("select_file", { title });
 }
