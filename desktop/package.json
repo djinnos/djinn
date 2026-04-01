@@ -15,7 +15,7 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "electron:compile": "tsc -p electron/tsconfig.json",
+    "electron:compile": "tsc -p electron/tsconfig.json && tsc -p electron/tsconfig.preload.json",
     "electron:dev": "pnpm electron:compile && VITE_DEV_SERVER_URL=http://localhost:1420 electron dist-electron/main.js --dev",
     "electron:start": "pnpm dev & sleep 2 && pnpm electron:dev",
     "electron:build": "pnpm build && pnpm electron:compile && electron-builder",
