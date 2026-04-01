@@ -18,6 +18,13 @@ use djinn_db::SessionMessageRepository;
 /// Fraction of the context window at which compaction is triggered.
 pub(crate) const COMPACTION_THRESHOLD: f64 = 0.8;
 
+/// Microcompaction: tool results older than this many turns are cleared.
+/// A "turn" is counted per assistant message, walking from the end.
+const MICROCOMPACT_AGE_THRESHOLD: usize = 6;
+
+/// Microcompaction: the most recent N turns are never cleared, regardless of age.
+const MICROCOMPACT_EXEMPT_RECENT: usize = 3;
+
 // ─── Compaction context ──────────────────────────────────────────────────────
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
@@ -168,6 +175,93 @@ pub(crate) fn needs_compaction(total_tokens_in: u32, context_window: i64) -> boo
     total_tokens_in as f64 / context_window as f64 >= COMPACTION_THRESHOLD
 }
 
+// ─── Microcompaction ─────────────────────────────────────────────────────────
+
+/// Zero-cost microcompaction pass: replace tool-result content in old turns with
+/// a short placeholder. This runs before LLM-based compaction and may reclaim
+/// enough tokens to skip the expensive summarisation entirely.
+///
+/// **Turn counting**: each `Assistant` message increments the turn counter,
+/// counted from the end of the conversation (most recent = turn 0).
+///
+/// Returns the estimated number of tokens reclaimed (chars / 4 heuristic).
+pub(crate) fn microcompact(conversation: &mut Conversation, current_turn: usize) -> usize {
+    use crate::message::ContentBlock;
+
+    let messages = &mut conversation.messages;
+
+    // 1. Assign a turn number to each message by walking backwards and
+    //    incrementing on each Assistant message.
+    let mut turn_map: Vec<usize> = vec![0; messages.len()];
+    let mut turn_counter: usize = 0;
+    for i in (0..messages.len()).rev() {
+        turn_map[i] = turn_counter;
+        if messages[i].role == Role::Assistant {
+            turn_counter += 1;
+        }
+    }
+
+    // Use the larger of the caller-provided current_turn or our counted turns
+    // to determine the age threshold. The age of a message = current_turn - its turn.
+    let effective_current = current_turn.max(turn_counter);
+
+    let mut chars_reclaimed: usize = 0;
+
+    // 2. Walk messages and clear old tool results.
+    for (i, msg) in messages.iter_mut().enumerate() {
+        if msg.role != Role::User {
+            continue;
+        }
+
+        let msg_turn = turn_map[i];
+
+        // Exempt recent turns.
+        if msg_turn < MICROCOMPACT_EXEMPT_RECENT {
+            continue;
+        }
+
+        // Only clear if the turn is old enough.
+        let age = effective_current.saturating_sub(msg_turn);
+        if age < MICROCOMPACT_AGE_THRESHOLD {
+            continue;
+        }
+
+        for block in &mut msg.content {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                // Idempotency: skip if already cleared (single text block with our marker).
+                let already_cleared = content.len() == 1
+                    && content[0]
+                        .as_text()
+                        .map(|t| t.starts_with("[Cleared"))
+                        .unwrap_or(false);
+                if already_cleared {
+                    continue;
+                }
+
+                // Measure the content we're about to replace.
+                let old_chars: usize = content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => text.len(),
+                        _ => 64, // conservative estimate for non-text blocks
+                    })
+                    .sum();
+
+                let placeholder = format!("[Cleared — tool result from turn {msg_turn}]");
+                let placeholder_chars = placeholder.len();
+
+                *content = vec![ContentBlock::text(placeholder)];
+
+                // Only count net savings.
+                chars_reclaimed += old_chars.saturating_sub(placeholder_chars);
+            }
+        }
+    }
+
+    // Convert chars to estimated tokens (chars / 4 heuristic).
+    chars_reclaimed / 4
+}
+
 // ─── Main compaction entry point ──────────────────────────────────────────────
 
 /// Compact `conversation` in-place using LLM summarisation, with a
@@ -203,6 +297,46 @@ pub(crate) async fn compact_conversation(
             error = %e,
             "compaction: failed to persist messages before compaction"
         );
+    }
+
+    // 1b. Microcompaction pre-pass: clear old tool results in-place.
+    //     Count assistant messages to determine the current turn number.
+    let current_turn = conversation
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .count();
+    let tokens_reclaimed = microcompact(conversation, current_turn);
+
+    if tokens_reclaimed > 0 {
+        // Re-estimate total conversation size after microcompaction.
+        let total_chars: usize = conversation
+            .messages
+            .iter()
+            .map(|m| estimate_message_chars(m))
+            .sum();
+        let estimated_tokens = total_chars / CHARS_PER_TOKEN.max(1);
+
+        tracing::info!(
+            task_id = %task_id,
+            session_id = %session_id,
+            tokens_reclaimed,
+            estimated_tokens_after = estimated_tokens,
+            context_window,
+            "compaction: microcompaction reclaimed tokens"
+        );
+
+        // If microcompaction brought us below threshold, skip full compaction.
+        if context_window > 0
+            && (estimated_tokens as f64 / context_window as f64) < COMPACTION_THRESHOLD
+        {
+            tracing::info!(
+                task_id = %task_id,
+                session_id = %session_id,
+                "compaction: microcompaction sufficient, skipping LLM compaction"
+            );
+            return true;
+        }
     }
 
     // 2. Extract system prompt and last plain-text user message before modifying.
@@ -1144,5 +1278,137 @@ mod tests {
             assert!(!prompt.is_empty());
             assert!(!system.is_empty());
         }
+    }
+
+    // ── Microcompaction tests ───────────────────────────────────────────────
+
+    /// Build a conversation with N assistant turns, each preceded by a tool
+    /// call/result pair.
+    fn build_tool_conversation(num_turns: usize) -> Conversation {
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a coding agent."));
+        conv.push(Message::user("Do the task."));
+
+        for i in 0..num_turns {
+            let call_id = format!("call_{i}");
+            conv.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: call_id.clone(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": format!("echo turn {i}")}),
+                }],
+                metadata: None,
+            });
+            conv.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: call_id,
+                    content: vec![ContentBlock::text(format!(
+                        "This is a verbose result from turn {i} with lots of content: {}",
+                        "x".repeat(200)
+                    ))],
+                    is_error: false,
+                }],
+                metadata: None,
+            });
+            conv.push(Message::assistant(format!("Processed turn {i}.")));
+        }
+
+        conv
+    }
+
+    #[test]
+    fn microcompact_clears_old_tool_results() {
+        let mut conv = build_tool_conversation(10);
+        let tokens = microcompact(&mut conv, 10);
+
+        // Should have reclaimed some tokens.
+        assert!(tokens > 0, "expected tokens reclaimed, got {tokens}");
+
+        // Recent turns (last MICROCOMPACT_EXEMPT_RECENT) should be untouched.
+        // Check that the last few tool results are NOT cleared.
+        let tool_results: Vec<(usize, &Message)> = conv
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            })
+            .collect();
+
+        // The last MICROCOMPACT_EXEMPT_RECENT tool results should not be cleared.
+        for (_, msg) in tool_results.iter().rev().take(MICROCOMPACT_EXEMPT_RECENT) {
+            for block in &msg.content {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    let text = content.iter().filter_map(|b| b.as_text()).collect::<String>();
+                    assert!(
+                        !text.starts_with("[Cleared"),
+                        "recent tool result should not be cleared: {text}"
+                    );
+                }
+            }
+        }
+
+        // Some old tool results should be cleared.
+        let cleared_count = tool_results
+            .iter()
+            .filter(|(_, msg)| {
+                msg.content.iter().any(|b| {
+                    if let ContentBlock::ToolResult { content, .. } = b {
+                        content
+                            .first()
+                            .and_then(|c| c.as_text())
+                            .map(|t| t.starts_with("[Cleared"))
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                })
+            })
+            .count();
+        assert!(
+            cleared_count > 0,
+            "expected some tool results to be cleared"
+        );
+    }
+
+    #[test]
+    fn microcompact_is_idempotent() {
+        let mut conv = build_tool_conversation(10);
+        let tokens_first = microcompact(&mut conv, 10);
+        assert!(tokens_first > 0);
+
+        // Second pass should reclaim nothing (already cleared).
+        let tokens_second = microcompact(&mut conv, 10);
+        assert_eq!(
+            tokens_second, 0,
+            "second microcompaction pass should reclaim 0 tokens"
+        );
+    }
+
+    #[test]
+    fn microcompact_no_op_for_short_conversations() {
+        let mut conv = build_tool_conversation(3);
+        let tokens = microcompact(&mut conv, 3);
+
+        // With only 3 turns and MICROCOMPACT_EXEMPT_RECENT=3, nothing should
+        // be cleared (all turns are exempt).
+        assert_eq!(tokens, 0, "short conversation should not be microcompacted");
+    }
+
+    #[test]
+    fn microcompact_preserves_conversation_integrity() {
+        let mut conv = build_tool_conversation(10);
+        microcompact(&mut conv, 10);
+
+        // Every ToolResult should still reference a valid ToolUse.
+        assert!(
+            find_orphaned_tool_result(&conv.messages).is_none(),
+            "microcompaction must not create orphaned tool results"
+        );
     }
 }
