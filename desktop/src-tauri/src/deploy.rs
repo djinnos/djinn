@@ -53,10 +53,33 @@ pub async fn deploy_to_host(host: &SshHost) -> Result<DeployResult, String> {
     ssh_exec(host, "chmod +x ~/.djinn/bin/djinn-server")
         .map_err(|e| format!("Failed to chmod: {e}"))?;
 
-    // 6. Verify.
-    log::info!("Deploy step 6/6: verifying installation");
+    // 6. Check for missing shared libraries.
+    log::info!("Deploy step 6/7: checking shared library dependencies");
+    let ldd_output = ssh_exec(host, "ldd ~/.djinn/bin/djinn-server 2>&1 || true")
+        .unwrap_or_default();
+    let missing_libs: Vec<&str> = ldd_output
+        .lines()
+        .filter(|l| l.contains("not found"))
+        .collect();
+
+    if !missing_libs.is_empty() {
+        let libs_list = missing_libs
+            .iter()
+            .filter_map(|l| l.split_whitespace().next())
+            .map(|s| s.trim_start_matches('\t'))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "Missing shared libraries on remote: {libs_list}\n\n\
+             On Ubuntu/Debian, install them with:\n\
+             sudo apt-get install -y libgit2-dev libssl-dev libssh2-1-dev"
+        ));
+    }
+
+    // 7. Verify.
+    log::info!("Deploy step 7/7: verifying installation");
     let version = ssh_exec(host, "~/.djinn/bin/djinn-server --version")
-        .map_err(|e| format!("Binary uploaded but failed to run on remote (wrong architecture?): {e}"))?;
+        .map_err(|e| format!("Binary uploaded but failed to run: {e}"))?;
     let version = version.trim().to_string();
     log::info!("Deployed djinn-server to {}: {}", host.label, version);
 
