@@ -410,6 +410,7 @@ export function ConnectionSettings() {
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingHost, setEditingHost] = useState<SshHost | null>(null);
+  const [showSshSection, setShowSshSection] = useState(mode.type === 'ssh');
 
   const handleModeSwitch = useCallback((newMode: ConnectionMode) => {
     void switchMode(newMode);
@@ -446,18 +447,25 @@ export function ConnectionSettings() {
       {/* Mode Selector */}
       <div className="flex items-center gap-2">
         <Button
-          variant={mode.type === 'daemon' ? 'secondary' : 'outline'}
+          variant={mode.type === 'daemon' && !showSshSection ? 'secondary' : 'outline'}
           size="sm"
-          onClick={() => handleModeSwitch({ type: 'daemon' })}
+          onClick={() => { setShowSshSection(false); handleModeSwitch({ type: 'daemon' }); }}
         >
           <HugeiconsIcon icon={ComputerIcon} size={14} />
           Local
         </Button>
         <Button
-          variant={mode.type === 'ssh' ? 'secondary' : 'outline'}
+          variant={mode.type === 'ssh' || showSshSection ? 'secondary' : 'outline'}
           size="sm"
-          onClick={() => handleModeSwitch({ type: 'ssh', host_id: hosts[0]?.id ?? '' })}
-          disabled={mode.type !== 'ssh' && hosts.length === 0}
+          onClick={() => {
+            if (mode.type === 'ssh') return; // already active
+            if (hosts.length > 0) {
+              void switchMode({ type: 'ssh', host_id: hosts[0].id });
+            } else {
+              // No hosts yet — just show the SSH section so user can add one
+              setShowSshSection(true);
+            }
+          }}
         >
           <HugeiconsIcon icon={Wifi01Icon} size={14} />
           Remote (SSH)
@@ -483,7 +491,7 @@ export function ConnectionSettings() {
       )}
 
       {/* SSH Hosts section */}
-      {(mode.type === 'ssh' || hosts.length > 0) && (
+      {(mode.type === 'ssh' || showSshSection || hosts.length > 0) && (
         <div className="flex flex-col gap-2 mt-1">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-medium text-muted-foreground">SSH Hosts</h3>
