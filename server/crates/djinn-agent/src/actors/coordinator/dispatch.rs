@@ -1,7 +1,7 @@
 use super::*;
 use crate::roles::DispatchContext;
 use crate::task_merge::{self, MergeActions};
-use djinn_core::models::task::PRIORITY_CRITICAL;
+use djinn_core::models::task::{IssueType, PRIORITY_CRITICAL};
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
@@ -1166,6 +1166,38 @@ impl CoordinatorActor {
 
         for task in tasks {
             if !self.is_project_dispatch_enabled(&task.project_id) {
+                continue;
+            }
+
+            // Simple-lifecycle tasks (planning, spike, research, review) don't
+            // produce code changes — close them directly instead of entering
+            // the PR/merge flow.
+            let simple = IssueType::parse(&task.issue_type)
+                .map(|it| it.uses_simple_lifecycle())
+                .unwrap_or(false);
+            if simple {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    issue_type = %task.issue_type,
+                    "CoordinatorActor: simple-lifecycle task approved — closing directly"
+                );
+                if let Err(e) = repo
+                    .transition(
+                        &task.id,
+                        TransitionAction::Close,
+                        "coordinator",
+                        "system",
+                        Some("simple-lifecycle task — no PR needed"),
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: failed to close simple-lifecycle approved task"
+                    );
+                }
                 continue;
             }
 
