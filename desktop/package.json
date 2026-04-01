@@ -13,7 +13,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "sidecar:sync": "bash scripts/sync-server-sidecar.sh",
-    "tauri:dev": "pnpm sidecar:sync && tauri dev",
+    "tauri:dev": "tauri dev",
     "tauri:build": "pnpm sidecar:sync && tauri build",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
