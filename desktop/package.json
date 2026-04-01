@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "DjinnOS Desktop Application",
-  "author": "DjinnOS Team",
+  "author": "DjinnOS Team <team@djinnos.com>",
   "repository": "github:djinnos/djinn",
   "main": "dist-electron/main.js",
   "type": "module",

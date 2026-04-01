@@ -31,5 +31,4 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-publish:
-  provider: github
+publish: null
