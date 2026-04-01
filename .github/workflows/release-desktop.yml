@@ -64,7 +64,8 @@ jobs:
 
       - name: Patch version into tauri.conf.json
         shell: bash
-        run: sed -i.bak 's/"version": ".*"/"version": "'"$VERSION"'"/' src-tauri/tauri.conf.json
+        run: |
+          sed -i.bak "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
 
       - name: Build Tauri app
         run: pnpm tauri build
