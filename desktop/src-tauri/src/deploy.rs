@@ -26,27 +26,37 @@ pub struct DeployResult {
 /// 5. Verify by running `--version`.
 pub async fn deploy_to_host(host: &SshHost) -> Result<DeployResult, String> {
     // 1. Detect remote architecture.
-    let arch = ssh_exec(host, "uname -m")?;
+    log::info!("Deploy step 1/6: detecting remote architecture for {}", host.label);
+    let arch = ssh_exec(host, "uname -m")
+        .map_err(|e| format!("Failed to detect remote architecture: {e}"))?;
     let arch = arch.trim().to_string();
     log::info!("Remote architecture for {}: {}", host.label, arch);
 
     // 2. Create remote directory.
-    ssh_exec(host, "mkdir -p ~/.djinn/bin")?;
+    log::info!("Deploy step 2/6: creating remote directory");
+    ssh_exec(host, "mkdir -p ~/.djinn/bin")
+        .map_err(|e| format!("Failed to create remote directory: {e}"))?;
 
     // 3. Determine which local binary to upload.
-    //    For now we look for a `djinn-server` binary next to the running exe
-    //    (same strategy as server.rs resolve_server_binary).
+    log::info!("Deploy step 3/6: locating local djinn-server binary");
     let local_binary = find_local_server_binary()?;
+    log::info!("Using local binary: {}", local_binary.display());
 
     // 4. Upload via scp.
+    log::info!("Deploy step 4/6: uploading binary via scp");
     let remote_path = "~/.djinn/bin/djinn-server";
-    scp_upload(host, &local_binary, remote_path)?;
+    scp_upload(host, &local_binary, remote_path)
+        .map_err(|e| format!("Failed to upload binary: {e}"))?;
 
     // 5. Make executable.
-    ssh_exec(host, "chmod +x ~/.djinn/bin/djinn-server")?;
+    log::info!("Deploy step 5/6: setting executable permission");
+    ssh_exec(host, "chmod +x ~/.djinn/bin/djinn-server")
+        .map_err(|e| format!("Failed to chmod: {e}"))?;
 
     // 6. Verify.
-    let version = ssh_exec(host, "~/.djinn/bin/djinn-server --version 2>/dev/null")?;
+    log::info!("Deploy step 6/6: verifying installation");
+    let version = ssh_exec(host, "~/.djinn/bin/djinn-server --version")
+        .map_err(|e| format!("Binary uploaded but failed to run on remote (wrong architecture?): {e}"))?;
     let version = version.trim().to_string();
     log::info!("Deployed djinn-server to {}: {}", host.label, version);
 

@@ -297,7 +297,7 @@ function HostRow({
   onConnect: () => void;
   onEdit: () => void;
   onTest: () => void;
-  onDeploy: () => void;
+  onDeploy: () => Promise<unknown>;
   onRemove: () => void;
 }) {
   const [testing, setTesting] = useState(false);
@@ -364,11 +364,13 @@ function HostRow({
           <HugeiconsIcon icon={Edit02Icon} size={14} />
         </Button>
         {!host.deployed && (
-          <Button variant="outline" size="sm" disabled={deploying} onClick={() => {
+          <Button variant="outline" size="sm" disabled={deploying} onClick={async () => {
             setDeploying(true);
-            void onDeploy();
-            // deploying state reset is handled by parent reload
-            setTimeout(() => setDeploying(false), 5000);
+            try {
+              await onDeploy();
+            } finally {
+              setDeploying(false);
+            }
           }}>
             {deploying ? (
               <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
@@ -518,7 +520,7 @@ export function ConnectionSettings() {
                   onConnect={() => void connectToHost(host.id)}
                   onEdit={() => handleOpenEditHost(host)}
                   onTest={() => void testHost(host.id)}
-                  onDeploy={() => void deployToHost(host.id)}
+                  onDeploy={() => deployToHost(host.id)}
                   onRemove={() => void deleteHost(host.id)}
                 />
               ))}
