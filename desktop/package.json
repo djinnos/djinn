@@ -2,6 +2,9 @@
   "name": "djinnos-desktop",
   "private": true,
   "version": "0.1.0",
+  "description": "DjinnOS Desktop Application",
+  "author": "DjinnOS Team",
+  "repository": "github:djinnos/djinn",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
