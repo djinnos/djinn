@@ -161,6 +161,12 @@ impl CoordinatorActor {
                 .then_with(|| a.created_at.cmp(&b.created_at))
         });
 
+        // ADR-048 §3A: cancel any in-flight idle consolidation sweep when
+        // tasks are ready for dispatch.
+        if !ready.is_empty() {
+            self.cancel_idle_consolidation();
+        }
+
         let mut exhausted_roles: HashSet<&'static str> = HashSet::new();
 
         // Expire stale cooldowns and old dispatch timestamps.

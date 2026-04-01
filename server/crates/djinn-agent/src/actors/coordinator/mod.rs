@@ -98,6 +98,10 @@ mod wave;
 /// Interval between stuck-detection passes (AGENT-08).
 const STUCK_INTERVAL: Duration = Duration::from_secs(30);
 const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Minimum cooldown between idle-time memory consolidation sweeps (ADR-048 §3A).
+const IDLE_CONSOLIDATION_COOLDOWN: Duration = Duration::from_secs(300);
+
 const TASK_OUTCOME_CONFIDENCE_ACTIVITY: &str = "task_outcome_confidence";
 const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
 const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
@@ -331,6 +335,13 @@ struct CoordinatorActor {
     /// the lifecycle finishes).  Entries are removed when the session
     /// disappears from `list_active()`.
     stall_killed: HashSet<String>,
+    /// Timestamp of the last completed idle-time consolidation sweep (ADR-048 §3A).
+    last_idle_consolidation: Option<StdInstant>,
+    /// Cancellation token for an in-flight idle consolidation sweep.
+    /// Cancelled when a new task becomes dispatch-ready.
+    idle_consolidation_cancel: Option<CancellationToken>,
+    /// Join handle for the spawned idle consolidation task.
+    idle_consolidation_handle: Option<tokio::task::JoinHandle<()>>,
     // Metrics
     dispatched: u64,
     recovered: u64,
@@ -395,6 +406,9 @@ impl CoordinatorActor {
             pr_draft_first_seen: HashMap::new(),
             merge_fail_count: HashMap::new(),
             stall_killed: HashSet::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
             dispatched: 0,
             recovered: 0,
         }
@@ -524,6 +538,21 @@ impl CoordinatorActor {
                     // elapsed since the last patrol completed (or actor start).
                     if self.last_patrol_completed.elapsed() >= self.next_patrol_interval {
                         self.maybe_dispatch_architect_patrol().await;
+                    }
+
+                    // ADR-048 §3A: idle-time memory consolidation.
+                    // Check if a previously spawned sweep has completed.
+                    if let Some(handle) = self.idle_consolidation_handle.as_ref() {
+                        if handle.is_finished() {
+                            self.idle_consolidation_handle = None;
+                            self.idle_consolidation_cancel = None;
+                            self.last_idle_consolidation = Some(StdInstant::now());
+                            tracing::info!("CoordinatorActor: idle consolidation sweep completed");
+                        }
+                    }
+                    // Only attempt a new sweep when no sweep is already running.
+                    if self.idle_consolidation_handle.is_none() {
+                        self.maybe_start_idle_consolidation().await;
                     }
                 }
             }
@@ -1068,6 +1097,76 @@ impl CoordinatorActor {
         );
         repo.get_path(project_id).await.ok().flatten()
     }
+
+    // ─── Idle-time memory consolidation (ADR-048 §3A) ───────────────────────
+
+    /// Check whether the system is idle (no active slots, no ready tasks) and
+    /// enough time has passed since the last consolidation.  If so, spawn a
+    /// cancellable background consolidation sweep.
+    async fn maybe_start_idle_consolidation(&mut self) {
+        // Respect cooldown.
+        if let Some(last) = self.last_idle_consolidation {
+            if last.elapsed() < IDLE_CONSOLIDATION_COOLDOWN {
+                return;
+            }
+        }
+
+        // Check pool: all slots must be idle (no active sessions).
+        let pool_status = match self.pool.get_status().await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if pool_status.active_slots > 0 {
+            return;
+        }
+
+        // Check board: no tasks waiting for dispatch.
+        let repo = self.task_repo();
+        let has_ready = match repo
+            .list_ready(ReadyQuery {
+                issue_type: None,
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(tasks) => !tasks.is_empty(),
+            Err(_) => return,
+        };
+        if has_ready {
+            return;
+        }
+
+        // All idle — spawn the sweep.
+        let token = CancellationToken::new();
+        let db = self.db.clone();
+        let runner = self.consolidation_runner.clone();
+        let child_token = token.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = child_token.cancelled() => {
+                    tracing::info!("CoordinatorActor: idle consolidation sweep cancelled");
+                }
+                _ = consolidation::run_note_consolidation(&db, &runner) => {}
+            }
+        });
+
+        tracing::info!("CoordinatorActor: starting idle-time consolidation sweep");
+        self.idle_consolidation_cancel = Some(token);
+        self.idle_consolidation_handle = Some(handle);
+    }
+
+    /// Cancel any in-flight idle consolidation sweep (e.g. when new work arrives).
+    fn cancel_idle_consolidation(&mut self) {
+        if let Some(token) = self.idle_consolidation_cancel.take() {
+            token.cancel();
+            tracing::debug!("CoordinatorActor: cancelled idle consolidation sweep (new work arrived)");
+        }
+        // Drop the handle — the spawned task will wind down on its own.
+        self.idle_consolidation_handle = None;
+    }
 }
 
 // ─── Handle ───────────────────────────────────────────────────────────────────
@@ -1567,6 +1666,7 @@ mod tests {
             catalog: CatalogService::new(),
             health: HealthTracker::new(),
             role_registry: Arc::new(RoleRegistry::new()),
+            lsp: crate::lsp::LspManager::new(),
             self_sender: tokio::sync::mpsc::channel(1).0,
             status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
                 paused_projects: HashSet::new(),
@@ -1597,6 +1697,9 @@ mod tests {
             pr_draft_first_seen: HashMap::new(),
             merge_fail_count: HashMap::new(),
             stall_killed: HashSet::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
             dispatched: 0,
             recovered: 0,
         };
