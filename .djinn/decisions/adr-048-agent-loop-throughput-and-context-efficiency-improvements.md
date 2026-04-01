@@ -96,11 +96,6 @@ If the compaction request itself hits a context-length error:
 2. Retry (up to 3 attempts).
 3. If all retries fail, fall back to aggressive microcompaction (clear ALL tool results older than 2 turns) and retry once more.
 
-#### 3C. Side queries for non-critical LLM work
-
-Introduce a `side_query()` helper that makes lightweight LLM calls outside the main conversation loop. Use cases: note summary generation, consolidation synthesis, verification explanations. Side queries share provider configuration but maintain their own minimal context, avoiding pollution of the agent's conversation history and enabling independent retry/backoff.
-
-
 ## Consequences
 
 ### Positive
@@ -130,4 +125,3 @@ Introduce a `side_query()` helper that makes lightweight LLM calls outside the m
 6. **2A** (partial compaction) — requires compaction refactor
 7. **3B** (compaction overflow) — safety net
 8. **3A** (idle consolidation) — coordinator enhancement
-9. **3C** (side queries) — infrastructure for future use
