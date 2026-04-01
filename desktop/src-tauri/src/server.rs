@@ -99,11 +99,6 @@ pub async fn ensure_daemon() -> Result<String, String> {
     ))
 }
 
-/// Verify a remote server URL is reachable.
-pub async fn check_remote(base_url: &str) -> bool {
-    health_check(base_url).await
-}
-
 /// HTTP GET `{base_url}/health` — returns true if the server responds 2xx.
 pub async fn health_check(base_url: &str) -> bool {
     let url = format!("{}/health", base_url.trim_end_matches('/'));
@@ -196,14 +191,22 @@ pub async fn retry_connection<R: Runtime>(app: &AppHandle<R>) -> Result<String, 
                     let local_port = tunnel.local_port;
                     crate::ssh_tunnel::set_active_tunnel(tunnel);
 
-                    // Update tunnel status in server state
+                    let (_, version) = health_check_with_version(&base_url).await;
                     if let Some(state) = app.try_state::<Mutex<ServerState>>() {
                         if let Ok(mut s) = state.lock() {
                             s.tunnel_status =
                                 crate::ssh_tunnel::TunnelStatus::Connected { local_port };
+                            s.mark_healthy(&base_url);
+                            s.server_version = version.clone();
+                            s.update_available = version
+                                .as_ref()
+                                .map(|v| version_lt(v, MIN_SERVER_VERSION))
+                                .unwrap_or(false);
                         }
                     }
 
+                    start_health_monitor(app);
+                    start_tunnel_monitor(app);
                     return Ok(base_url);
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -228,6 +231,8 @@ pub async fn retry_connection<R: Runtime>(app: &AppHandle<R>) -> Result<String, 
                 .unwrap_or(false);
         }
     }
+
+    start_health_monitor(app);
 
     Ok(base_url)
 }
