@@ -24,8 +24,8 @@ jobs:
             desktop:
               - 'desktop/**'
 
-  server:
-    name: Server
+  server-clippy:
+    name: Server Clippy
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
@@ -49,11 +49,39 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          shared-key: server
+          shared-key: server-clippy
           cache-on-failure: true
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+  server-test:
+    name: Server Test
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_BUILD_DIR: target
+      RUSTC_WRAPPER: ""
+      RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
 
       - name: Configure git identity for tests
         run: |
@@ -135,11 +163,11 @@ jobs:
     name: Quality Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [server, desktop-frontend, desktop-tauri]
+    needs: [server-clippy, server-test, desktop-frontend, desktop-tauri]
     steps:
       - name: Check results
         run: |
-          results=("${{ needs.server.result }}" "${{ needs.desktop-frontend.result }}" "${{ needs.desktop-tauri.result }}")
+          results=("${{ needs.server-clippy.result }}" "${{ needs.server-test.result }}" "${{ needs.desktop-frontend.result }}" "${{ needs.desktop-tauri.result }}")
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then
               echo "Quality gate failed: found result '$r'"
