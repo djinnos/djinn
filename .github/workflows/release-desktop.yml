@@ -42,6 +42,11 @@ jobs:
         run: rustup show
         working-directory: desktop/src-tauri
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          shared-key: release-desktop-${{ matrix.platform }}
+
       - name: Install system dependencies (Linux)
         if: matrix.platform == 'linux'
         uses: awalsh128/cache-apt-pkgs-action@latest
