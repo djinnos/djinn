@@ -15,7 +15,7 @@ type SettingsGetToolResponse = McpToolOutput<"settings_get">;
 
 interface ParsedSettingsGet {
   settings?: {
-    models?: string[] | null;
+    model_priority?: Record<string, string[]> | null;
     max_sessions?: Record<string, number> | null;
   };
   error?: string;
@@ -46,16 +46,18 @@ export async function fetchSettings(): Promise<SettingsResponse> {
     throw new Error(parsed.error);
   }
 
-  const savedModels = parsed.settings?.models ?? [];
+  const modelPriority = parsed.settings?.model_priority ?? {};
   const maxSessions = parsed.settings?.max_sessions ?? {};
 
-  // Use the flat models list; fall back to max_sessions keys if empty
+  // Collect unique model IDs from all roles; fall back to max_sessions keys
   const seen = new Set<string>();
   const modelIds: string[] = [];
-  for (const id of savedModels) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      modelIds.push(id);
+  for (const ids of Object.values(modelPriority ?? {})) {
+    for (const id of ids) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        modelIds.push(id);
+      }
     }
   }
 
@@ -88,7 +90,10 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
   }, {});
 
   const response = await callMcpTool("settings_set", {
-    models: modelIds,
+    model_priority_worker: modelIds,
+    model_priority_lead: modelIds,
+    model_priority_reviewer: modelIds,
+    model_priority_planner: modelIds,
     max_sessions: maxSessions,
   });
 
