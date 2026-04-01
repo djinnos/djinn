@@ -58,6 +58,8 @@ export async function getServerStatus(): Promise<{
   is_healthy: boolean;
   has_error: boolean;
   error_message: string | null;
+  server_version: string | null;
+  update_available: boolean;
 }> {
   return invoke("get_server_status");
 }

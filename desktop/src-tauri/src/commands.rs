@@ -218,6 +218,8 @@ pub struct ServerStatus {
     pub is_healthy: bool,
     pub has_error: bool,
     pub error_message: Option<String>,
+    pub server_version: Option<String>,
+    pub update_available: bool,
 }
 
 /// Get server status from app state
@@ -233,6 +235,8 @@ pub fn get_server_status(state: State<Mutex<ServerState>>) -> Result<ServerStatu
         is_healthy: state.is_healthy,
         has_error: state.has_error,
         error_message: state.error_message.clone(),
+        server_version: state.server_version.clone(),
+        update_available: state.update_available,
     })
 }
 
