@@ -10,6 +10,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
+import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
@@ -27,6 +28,7 @@ function MainLayout() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Titlebar />
         <div className="flex min-h-0 flex-1 flex-col">
+          <ConnectionBanner />
           <SyncHealthBanner />
           <Routes>
             {/* Global views (All Projects) */}
@@ -60,7 +62,7 @@ function MainLayout() {
 }
 
 export default function App() {
-  const { status, error, retry, isRetrying } = useServerHealth();
+  const { status } = useServerHealth();
   const selectedProjectId = useSelectedProjectId();
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
   const { hasModels, refresh: refreshModelGate } = useModelGateStore();
@@ -76,7 +78,7 @@ export default function App() {
   }, [status, refreshGate, refreshModelGate]);
 
   useEffect(() => {
-    if (status === "connected") {
+    if (status === "connected" || status === "error") {
       getCurrentWindow().show();
     }
   }, [status]);
@@ -90,15 +92,11 @@ export default function App() {
     );
   }
 
+  // When disconnected, still show the main layout so the user can access
+  // settings to configure the connection (e.g. deploy to a remote host).
+  // Only the initial loading state blocks the UI.
   if (status === "error") {
-    return (
-      <LoadingScreen
-        status="error"
-        message={error || "Failed to connect to server"}
-        onRetry={retry}
-        isRetrying={isRetrying}
-      />
-    );
+    return <MainLayout />;
   }
 
   if (hasProvider === false) {

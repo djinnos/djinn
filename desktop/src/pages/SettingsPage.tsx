@@ -10,6 +10,7 @@ import { ConnectionSettings } from '@/components/ConnectionSettings';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useServerHealth } from '@/hooks/useServerHealth';
 import { AddProviderModal } from '@/components/AddProviderModal';
 
 function ProvidersSettings() {
@@ -96,12 +97,23 @@ function ProvidersSettings() {
 }
 
 export function SettingsPage() {
+  const { status } = useServerHealth();
+  const isConnected = status === 'connected';
+
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
       <section className="min-h-0 min-w-0 flex-1 flex flex-col gap-6 overflow-x-hidden overflow-y-auto pb-6">
         <ConnectionSettings />
         <div className="border-t border-border" />
-        <ProvidersSettings />
+        {isConnected ? (
+          <ProvidersSettings />
+        ) : (
+          <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-6 text-center">
+            <p className="text-sm text-muted-foreground">
+              Connect to a server to manage providers and agents.
+            </p>
+          </div>
+        )}
       </section>
     </div>
   );
