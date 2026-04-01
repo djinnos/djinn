@@ -159,8 +159,8 @@ export function activeTunnelHostId(): string | null {
  * Finds a free local port, then spawns:
  * `ssh -N -L {localPort}:127.0.0.1:{remoteDaemonPort} -p {port} [-i key] user@host`
  */
-export function startTunnel(host: SshHost): SshTunnel {
-  const localPort = findFreePort();
+export async function startTunnel(host: SshHost): Promise<SshTunnel> {
+  const localPort = await findFreePort();
 
   const args: string[] = [
     "-N",
@@ -315,17 +315,21 @@ function sshExecWithTimeout(
 // ---------------------------------------------------------------------------
 
 /** Find a free TCP port on localhost by binding to port 0. */
-export function findFreePort(): number {
-  const server = net.createServer();
-  server.listen(0, "127.0.0.1");
-  const addr = server.address();
-  if (!addr || typeof addr === "string") {
-    server.close();
-    throw new Error("Failed to find free port: unexpected address type");
-  }
-  const port = addr.port;
-  server.close();
-  return port;
+export function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        server.close();
+        reject(new Error("Failed to find free port: unexpected address type"));
+        return;
+      }
+      const port = addr.port;
+      server.close(() => resolve(port));
+    });
+    server.on("error", (err) => reject(err));
+  });
 }
 
 /** Escape a string for safe use in a shell command. */

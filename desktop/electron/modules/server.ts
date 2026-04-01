@@ -305,7 +305,7 @@ export async function retryConnection(
 
       ssh.ensureRemoteDaemon(host);
 
-      const tunnel = ssh.startTunnel(host);
+      const tunnel = await ssh.startTunnel(host);
       baseUrl = `http://127.0.0.1:${tunnel.localPort}`;
 
       // Wait for health through tunnel.
@@ -466,7 +466,7 @@ export function startTunnelMonitor(
         }
 
         try {
-          const tunnel = ssh.startTunnel(host);
+          const tunnel = await ssh.startTunnel(host);
           const localPort = tunnel.localPort;
           const baseUrl = `http://127.0.0.1:${localPort}`;
           ssh.setActiveTunnel(tunnel);
