@@ -49,6 +49,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
+          shared-key: server
           cache-on-failure: true
 
       - name: Clippy
@@ -121,6 +122,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+          shared-key: desktop-tauri
           cache-on-failure: true
 
       - name: Clippy
