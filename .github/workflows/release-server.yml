@@ -13,10 +13,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, asset: djinn-server-linux-x64 }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, asset: djinn-server-linux-arm64 }
-          - { runner: macos-13, target: x86_64-apple-darwin, asset: djinn-server-macos-x64 }
-          - { runner: macos-15, target: aarch64-apple-darwin, asset: djinn-server-macos-arm64 }
+          - { runner: ubuntu-latest, asset: djinn-server-linux-x64 }
+          - { runner: macos-latest, asset: djinn-server-macos-arm64 }
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -24,17 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
-        run: rustup show  # reads rust-toolchain.toml
-      - name: Add target
-        run: rustup target add ${{ matrix.target }}
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          shared-key: release-server-${{ matrix.target }}
+          shared-key: release-server-${{ matrix.asset }}
       - name: Build
-        run: cargo build --release --features vendored --target ${{ matrix.target }}
+        run: cargo build --release --features vendored
       - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/djinn-server ../${{ matrix.asset }}
+        run: cp target/release/djinn-server ../${{ matrix.asset }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
