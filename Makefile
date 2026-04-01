@@ -24,4 +24,4 @@ dev: ## Build server, kill daemon, and start Electron desktop app
 	else \
 		echo "No daemon file found."; \
 	fi
-	cd $(DESKTOP_DIR) && DJINN_SERVER_BIN=$(SERVER_BIN) pnpm electron:dev
+	cd $(DESKTOP_DIR) && DJINN_SERVER_BIN=$(SERVER_BIN) pnpm electron:start

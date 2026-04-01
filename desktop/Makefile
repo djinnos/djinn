@@ -14,7 +14,7 @@ dev: ## Run frontend only (browser, no Tauri)
 	pnpm dev
 
 desktop: ## Run full Electron desktop app (dev mode)
-	pnpm electron:dev
+	pnpm electron:start
 
 server: ## Start the djinn server daemon
 	cd $(SERVER_DIR) && make restart
@@ -48,7 +48,7 @@ halt: stop server-stop ## Stop everything (desktop + server)
 run-all: ## Start desktop app (server auto-downloads if needed)
 	-@pkill -f "djinn-server" 2>/dev/null || true
 	@sleep 0.5
-	pnpm electron:dev
+	pnpm electron:start
 
 reset: ## Kill everything and restart fresh
 	@echo "Killing all djinn processes..."
