@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 
 use crate::extension;
 use crate::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
@@ -136,6 +138,238 @@ fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Option<S
         return None;
     }
     Some(out)
+}
+
+/// Maximum characters per tool result to prevent context overflow.
+/// ~30k chars = 7.5k tokens — enough for diagnosis, safe with multiple calls.
+const MAX_TOOL_RESULT_CHARS: usize = 30_000;
+
+/// Dispatch a single tool call and return `(original_index, ContentBlock::ToolResult)`.
+///
+/// Extracted as a standalone function so it can be called both during
+/// streaming (ADR-048 §1B) and in the post-stream batch dispatch.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_single_tool<'a>(
+    idx: usize,
+    id: String,
+    name: String,
+    _input_json: serde_json::Value,
+    args: Option<serde_json::Map<String, serde_json::Value>>,
+    tool_span: Option<crate::provider::telemetry::ToolSpan>,
+    stash: Arc<Mutex<OutputStash>>,
+    app_state: &'a crate::context::AgentContext,
+    task_id: &'a str,
+    worktree_path: &'a std::path::Path,
+    role_name: &'a str,
+    mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
+) -> (usize, ContentBlock) {
+    // ── Intercept stash-navigation tools (no extension dispatch needed) ──
+    if name == "output_view" || name == "output_grep" {
+        let result = {
+            let guard = stash.lock().unwrap();
+            let args_map = args.as_ref();
+            if name == "output_view" {
+                let tid = args_map
+                    .and_then(|m| m.get("tool_use_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let offset = args_map
+                    .and_then(|m| m.get("offset"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let limit = args_map
+                    .and_then(|m| m.get("limit"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(200) as usize;
+                guard.view(tid, offset, limit)
+            } else {
+                let tid = args_map
+                    .and_then(|m| m.get("tool_use_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let pattern = args_map
+                    .and_then(|m| m.get("pattern"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ctx_lines = args_map
+                    .and_then(|m| m.get("context_lines"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3) as usize;
+                guard.grep(tid, pattern, ctx_lines)
+            }
+        };
+        let (content, is_error) = match result {
+            Ok(text) => {
+                if let Some(ts) = &tool_span {
+                    ts.record_output(&text, false);
+                }
+                (vec![ContentBlock::Text { text }], false)
+            }
+            Err(err) => {
+                if let Some(ts) = &tool_span {
+                    ts.record_output(&err, true);
+                }
+                (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
+            }
+        };
+        if let Some(ts) = tool_span {
+            if is_error { ts.end_error("tool returned error"); } else { ts.end_ok(); }
+        }
+        return (idx, ContentBlock::ToolResult {
+            tool_use_id: id,
+            content,
+            is_error,
+        });
+    }
+
+    // ── MCP tool dispatch (takes priority for MCP-registered names) ──
+    if let Some(registry) = mcp_registry
+        && registry.has_tool(&name) {
+            tracing::debug!(
+                task_id = %task_id,
+                tool = %name,
+                "ReplyLoop: dispatching to MCP server"
+            );
+            let mcp_result = registry.call_tool(&name, args.clone()).await;
+            let (content, is_error) = match mcp_result {
+                Ok(value) => {
+                    let text = if value.is_string() {
+                        value.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string_pretty(&value)
+                            .unwrap_or_else(|_| value.to_string())
+                    };
+                    if let Some(ts) = &tool_span {
+                        ts.record_output(&text, false);
+                    }
+                    (vec![ContentBlock::Text { text }], false)
+                }
+                Err(err) => {
+                    if let Some(ts) = &tool_span {
+                        ts.record_output(&err, true);
+                    }
+                    (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
+                }
+            };
+            if let Some(ts) = tool_span {
+                if is_error { ts.end_error("MCP tool returned error"); } else { ts.end_ok(); }
+            }
+            return (idx, ContentBlock::ToolResult {
+                tool_use_id: id,
+                content,
+                is_error,
+            });
+        }
+
+    // ── Normal tool dispatch ────────────────────────────────────────
+    // Retry logic for SQLite BUSY errors.
+    let mut result =
+        extension::call_tool(
+            app_state,
+            &name,
+            args.clone(),
+            worktree_path,
+            Some(task_id),
+            Some(role_name),
+            mcp_registry,
+        )
+            .await;
+    {
+        let mut retries = 0u32;
+        while retries < 5 {
+            match &result {
+                Err(e) if e.contains("database is locked") => {
+                    retries += 1;
+                    let backoff = std::time::Duration::from_millis(
+                        100 * (1 << retries.min(4)),
+                    );
+                    tracing::warn!(
+                        task_id = %task_id,
+                        tool = %name,
+                        retry = retries,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "ReplyLoop: database locked, retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    result = extension::call_tool(
+                        app_state,
+                        &name,
+                        args.clone(),
+                        worktree_path,
+                        Some(task_id),
+                        Some(role_name),
+                        mcp_registry,
+                    )
+                    .await;
+                }
+                _ => break,
+            }
+        }
+    }
+    let (content, is_error) =
+        match result {
+            Ok(value) => {
+                let mut text = if value.is_string() {
+                    value.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string_pretty(&value)
+                        .unwrap_or_else(|_| value.to_string())
+                };
+                if text.len() > MAX_TOOL_RESULT_CHARS {
+                    let stash_text = extract_stash_content(&name, &value)
+                        .unwrap_or_else(|| text.clone());
+                    stash.lock().unwrap().insert(
+                        id.clone(),
+                        name.clone(),
+                        stash_text,
+                    );
+                    let full_bytes = text.len();
+                    text = crate::truncate::smart_truncate(
+                        &text,
+                        MAX_TOOL_RESULT_CHARS,
+                    );
+                    text.push_str(&format!(
+                        "\n\n[Full output stashed ({full_bytes} bytes). \
+                         Use output_view(tool_use_id=\"{id}\") to paginate \
+                         or output_grep(tool_use_id=\"{id}\", pattern=\"...\") to search.]"
+                    ));
+                }
+                if let Some(ts) = &tool_span {
+                    ts.record_output(&text, false);
+                }
+                (vec![ContentBlock::Text { text }], false)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    tool = %name,
+                    error = %err,
+                    "ReplyLoop: tool call returned error"
+                );
+                let err_text = format!("error: {err}");
+                if let Some(ts) = &tool_span {
+                    ts.record_output(&err_text, true);
+                }
+                (
+                    vec![ContentBlock::Text {
+                        text: err_text,
+                    }],
+                    true,
+                )
+            }
+        };
+    if let Some(ts) = tool_span {
+        if is_error {
+            ts.end_error("tool returned error");
+        } else {
+            ts.end_ok();
+        }
+    }
+    (idx, ContentBlock::ToolResult {
+        tool_use_id: id,
+        content,
+        is_error,
+    })
 }
 
 pub(crate) struct ReplyLoopContext<'a> {
@@ -373,8 +607,19 @@ pub(super) async fn run_reply_loop(
             let mut saw_round_event = false;
             let mut needs_reactive_compaction = false;
 
+            // ── ADR-048 §1B: Streaming tool dispatch ────────────────────────
+            // Concurrent-safe tools are dispatched as soon as their ToolUse
+            // block arrives during streaming, rather than waiting for the full
+            // response.  Results are collected in a Vec and merged with
+            // post-stream dispatch results before assembling the final message.
+            let mut streaming_inflight: FuturesUnordered<std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ContentBlock)> + Send + '_>>> = FuturesUnordered::new();
+            let mut streaming_results: Vec<(usize, ContentBlock)> = Vec::new();
+            // Indices of tool calls that were dispatched during streaming.
+            let mut streaming_dispatched: HashSet<usize> = HashSet::new();
+
             loop {
                 tokio::select! {
+                    biased;
                     _ = cancel.cancelled() => {
                         interrupted = Some("session cancelled");
                         break;
@@ -382,6 +627,10 @@ pub(super) async fn run_reply_loop(
                     _ = global_cancel.cancelled() => {
                         interrupted = Some("supervisor shutting down");
                         break;
+                    }
+                    // Drain completed streaming tool futures.
+                    Some(result) = streaming_inflight.next() => {
+                        streaming_results.push(result);
                     }
                     evt = stream.next() => {
                         let Some(evt) = evt else { break; };
@@ -429,7 +678,47 @@ pub(super) async fn run_reply_loop(
                                 turn_text.push_str(&text);
                             }
                             StreamEvent::Delta(tool_use @ ContentBlock::ToolUse { .. }) => {
+                                // ADR-048 §1B: if the tool is concurrent-safe,
+                                // dispatch immediately during streaming.
+                                let idx = turn_tool_calls.len();
+                                let should_dispatch_now = if let ContentBlock::ToolUse { name, .. } = &tool_use {
+                                    is_concurrent_safe(name)
+                                        && streaming_dispatched.len() < MAX_TOOL_CONCURRENCY
+                                } else {
+                                    false
+                                };
                                 turn_tool_calls.push(tool_use);
+                                if should_dispatch_now {
+                                    streaming_dispatched.insert(idx);
+                                    let tool_call = &turn_tool_calls[idx];
+                                    let ContentBlock::ToolUse { id, name, input } = tool_call else {
+                                        unreachable!();
+                                    };
+                                    tracing::debug!(
+                                        task_id = %task_id,
+                                        tool = %name,
+                                        tool_use_id = %id,
+                                        "ReplyLoop: streaming dispatch (ADR-048 §1B)"
+                                    );
+                                    let id = id.clone();
+                                    let name = name.clone();
+                                    let input_json = input.clone();
+                                    let args = match input {
+                                        serde_json::Value::Object(map) => Some(map.clone()),
+                                        _ => None,
+                                    };
+                                    let tool_span = otel_session.as_ref().map(|session| {
+                                        let ts = telemetry::ToolSpan::start(session.context(), &name, &id);
+                                        ts.record_input(&input_json.to_string());
+                                        ts
+                                    });
+                                    let stash = Arc::clone(&output_stash);
+                                    streaming_inflight.push(Box::pin(dispatch_single_tool(
+                                        idx, id, name, input_json, args, tool_span,
+                                        stash, app_state, task_id, worktree_path,
+                                        role_name, mcp_registry,
+                                    )));
+                                }
                             }
                             StreamEvent::Delta(ContentBlock::ToolResult { .. })
                             | StreamEvent::Delta(ContentBlock::Thinking { .. }) => {
@@ -479,6 +768,19 @@ pub(super) async fn run_reply_loop(
                         }
                     }
                 }
+            }
+
+            // Drain any remaining in-flight streaming tool futures.
+            while let Some(result) = streaming_inflight.next().await {
+                streaming_results.push(result);
+            }
+            if !streaming_dispatched.is_empty() {
+                tracing::debug!(
+                    task_id = %task_id,
+                    dispatched = streaming_dispatched.len(),
+                    completed = streaming_results.len(),
+                    "ReplyLoop: streaming dispatch complete (ADR-048 §1B)"
+                );
             }
 
             // ── End OTel generation span for this turn ───────────────────────
@@ -747,26 +1049,24 @@ pub(super) async fn run_reply_loop(
             // Non-finalize tool calls: reset nudge counter and dispatch normally.
             consecutive_nudge_count = 0;
 
-            // ── Dispatch tool calls ──────────────────────────────────────────
+            // ── Dispatch tool calls (ADR-048 §1A + §1B) ────────────────────
+            // §1B streaming dispatch: concurrent-safe tools already dispatched
+            // during streaming have results in `streaming_results`.  Remaining
+            // tools (non-safe, or safe tools that exceeded the streaming
+            // concurrency cap) are dispatched here using the §1A batch logic.
 
-            // Maximum characters per tool result to prevent context overflow.
-            // ~30k chars ≈ 7.5k tokens — enough for diagnosis, safe with multiple calls.
-            const MAX_TOOL_RESULT_CHARS: usize = 30_000;
-
-            // ── Partition tool calls into concurrent-safe / serial batches ──
-            // (ADR-048 §1A) Consecutive concurrent_safe tools form a parallel
-            // batch; any non-safe tool becomes a single-item serial batch.
-            // Batches are processed in order, parallel batches via join_all
-            // bounded by MAX_TOOL_CONCURRENCY, serial batches one-at-a-time.
-
-            // Prepare (original_index, tool_call) pairs, filtering non-ToolUse.
+            // Prepare (original_index, tool_call) pairs, filtering non-ToolUse
+            // and skipping indices that were already dispatched during streaming.
             let indexed_tool_calls: Vec<(usize, &ContentBlock)> = turn_tool_calls
                 .iter()
                 .enumerate()
-                .filter(|(_, b)| matches!(b, ContentBlock::ToolUse { .. }))
+                .filter(|(idx, b)| {
+                    matches!(b, ContentBlock::ToolUse { .. })
+                        && !streaming_dispatched.contains(idx)
+                })
                 .collect();
 
-            // Partition into batches: Parallel(Vec<indices>) or Serial(index).
+            // Partition remaining tools into batches: Parallel(Vec<indices>) or Serial(index).
             enum ToolBatch {
                 Parallel(Vec<usize>),
                 Serial(usize),
@@ -794,24 +1094,29 @@ pub(super) async fn run_reply_loop(
                 }
             }
 
-            if !batches.is_empty() {
-                let safe_count: usize = batches.iter().map(|b| match b {
-                    ToolBatch::Parallel(v) => v.len(),
-                    ToolBatch::Serial(_) => 0,
-                }).sum();
-                let serial_count = indexed_tool_calls.len() - safe_count;
-                tracing::debug!(
-                    task_id = %task_id,
-                    total = indexed_tool_calls.len(),
-                    concurrent_safe = safe_count,
-                    serial = serial_count,
-                    batch_count = batches.len(),
-                    "ReplyLoop: tool call batching (ADR-048)"
-                );
+            {
+                let total_tools = turn_tool_calls.iter()
+                    .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                    .count();
+                if total_tools > 0 {
+                    let safe_remaining: usize = batches.iter().map(|b| match b {
+                        ToolBatch::Parallel(v) => v.len(),
+                        ToolBatch::Serial(_) => 0,
+                    }).sum();
+                    let serial_remaining = indexed_tool_calls.len() - safe_remaining;
+                    tracing::debug!(
+                        task_id = %task_id,
+                        total = total_tools,
+                        streamed = streaming_dispatched.len(),
+                        remaining_safe = safe_remaining,
+                        remaining_serial = serial_remaining,
+                        batch_count = batches.len(),
+                        "ReplyLoop: tool call dispatch (ADR-048 §1A+§1B)"
+                    );
+                }
             }
 
-            // Closure that builds the dispatch future for a single tool call.
-            // Returns (original_index, ContentBlock::ToolResult).
+            // Helper to build a dispatch call for a single tool.
             let make_tool_future = |idx: usize, tool_call: &ContentBlock| {
                 let ContentBlock::ToolUse { id, name, input } = tool_call else {
                     unreachable!("filtered above");
@@ -829,229 +1134,25 @@ pub(super) async fn run_reply_loop(
                     serde_json::Value::Object(map) => Some(map.clone()),
                     _ => None,
                 };
-
-                // Start tool span before the async block so it parents correctly.
                 let tool_span = otel_session.as_ref().map(|session| {
                     let ts = telemetry::ToolSpan::start(session.context(), &name, &id);
                     ts.record_input(&input_json.to_string());
                     ts
                 });
-
                 let stash = Arc::clone(&output_stash);
-                async move {
-                    // ── Intercept stash-navigation tools (no extension dispatch needed) ──
-                    if name == "output_view" || name == "output_grep" {
-                        let result = {
-                            let guard = stash.lock().unwrap();
-                            let args_map = args.as_ref();
-                            if name == "output_view" {
-                                let tid = args_map
-                                    .and_then(|m| m.get("tool_use_id"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let offset = args_map
-                                    .and_then(|m| m.get("offset"))
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0) as usize;
-                                let limit = args_map
-                                    .and_then(|m| m.get("limit"))
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(200) as usize;
-                                guard.view(tid, offset, limit)
-                            } else {
-                                let tid = args_map
-                                    .and_then(|m| m.get("tool_use_id"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let pattern = args_map
-                                    .and_then(|m| m.get("pattern"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let ctx_lines = args_map
-                                    .and_then(|m| m.get("context_lines"))
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(3) as usize;
-                                guard.grep(tid, pattern, ctx_lines)
-                            }
-                        };
-                        let (content, is_error) = match result {
-                            Ok(text) => {
-                                if let Some(ts) = &tool_span {
-                                    ts.record_output(&text, false);
-                                }
-                                (vec![ContentBlock::Text { text }], false)
-                            }
-                            Err(err) => {
-                                if let Some(ts) = &tool_span {
-                                    ts.record_output(&err, true);
-                                }
-                                (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
-                            }
-                        };
-                        if let Some(ts) = tool_span {
-                            if is_error { ts.end_error("tool returned error"); } else { ts.end_ok(); }
-                        }
-                        return (idx, ContentBlock::ToolResult {
-                            tool_use_id: id,
-                            content,
-                            is_error,
-                        });
-                    }
-
-                    // ── MCP tool dispatch (takes priority for MCP-registered names) ──
-                    if let Some(registry) = mcp_registry
-                        && registry.has_tool(&name) {
-                            tracing::debug!(
-                                task_id = %task_id,
-                                tool = %name,
-                                "ReplyLoop: dispatching to MCP server"
-                            );
-                            let mcp_result = registry.call_tool(&name, args.clone()).await;
-                            let (content, is_error) = match mcp_result {
-                                Ok(value) => {
-                                    let text = if value.is_string() {
-                                        value.as_str().unwrap_or("").to_string()
-                                    } else {
-                                        serde_json::to_string_pretty(&value)
-                                            .unwrap_or_else(|_| value.to_string())
-                                    };
-                                    if let Some(ts) = &tool_span {
-                                        ts.record_output(&text, false);
-                                    }
-                                    (vec![ContentBlock::Text { text }], false)
-                                }
-                                Err(err) => {
-                                    if let Some(ts) = &tool_span {
-                                        ts.record_output(&err, true);
-                                    }
-                                    (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
-                                }
-                            };
-                            if let Some(ts) = tool_span {
-                                if is_error { ts.end_error("MCP tool returned error"); } else { ts.end_ok(); }
-                            }
-                            return (idx, ContentBlock::ToolResult {
-                                tool_use_id: id,
-                                content,
-                                is_error,
-                            });
-                        }
-
-                    // ── Normal tool dispatch ────────────────────────────────
-                    // Retry logic for SQLite BUSY errors.
-                    let mut result =
-                        extension::call_tool(
-                            app_state,
-                            &name,
-                            args.clone(),
-                            worktree_path,
-                            Some(task_id),
-                            Some(role_name),
-                            mcp_registry,
-                        )
-                            .await;
-                    {
-                        let mut retries = 0u32;
-                        while retries < 5 {
-                            match &result {
-                                Err(e) if e.contains("database is locked") => {
-                                    retries += 1;
-                                    let backoff = std::time::Duration::from_millis(
-                                        100 * (1 << retries.min(4)),
-                                    );
-                                    tracing::warn!(
-                                        task_id = %task_id,
-                                        tool = %name,
-                                        retry = retries,
-                                        backoff_ms = backoff.as_millis() as u64,
-                                        "ReplyLoop: database locked, retrying"
-                                    );
-                                    tokio::time::sleep(backoff).await;
-                                    result = extension::call_tool(
-                                        app_state,
-                                        &name,
-                                        args.clone(),
-                                        worktree_path,
-                                        Some(task_id),
-                                        Some(role_name),
-                                        mcp_registry,
-                                    )
-                                    .await;
-                                }
-                                _ => break,
-                            }
-                        }
-                    }
-                    let (content, is_error) =
-                        match result {
-                            Ok(value) => {
-                                let mut text = if value.is_string() {
-                                    value.as_str().unwrap_or("").to_string()
-                                } else {
-                                    serde_json::to_string_pretty(&value)
-                                        .unwrap_or_else(|_| value.to_string())
-                                };
-                                if text.len() > MAX_TOOL_RESULT_CHARS {
-                                    let stash_text = extract_stash_content(&name, &value)
-                                        .unwrap_or_else(|| text.clone());
-                                    stash.lock().unwrap().insert(
-                                        id.clone(),
-                                        name.clone(),
-                                        stash_text,
-                                    );
-                                    let full_bytes = text.len();
-                                    text = crate::truncate::smart_truncate(
-                                        &text,
-                                        MAX_TOOL_RESULT_CHARS,
-                                    );
-                                    text.push_str(&format!(
-                                        "\n\n[Full output stashed ({full_bytes} bytes). \
-                                         Use output_view(tool_use_id=\"{id}\") to paginate \
-                                         or output_grep(tool_use_id=\"{id}\", pattern=\"...\") to search.]"
-                                    ));
-                                }
-                                if let Some(ts) = &tool_span {
-                                    ts.record_output(&text, false);
-                                }
-                                (vec![ContentBlock::Text { text }], false)
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    tool = %name,
-                                    error = %err,
-                                    "ReplyLoop: tool call returned error"
-                                );
-                                let err_text = format!("error: {err}");
-                                if let Some(ts) = &tool_span {
-                                    ts.record_output(&err_text, true);
-                                }
-                                (
-                                    vec![ContentBlock::Text {
-                                        text: err_text,
-                                    }],
-                                    true,
-                                )
-                            }
-                        };
-                    if let Some(ts) = tool_span {
-                        if is_error {
-                            ts.end_error("tool returned error");
-                        } else {
-                            ts.end_ok();
-                        }
-                    }
-                    (idx, ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content,
-                        is_error,
-                    })
-                }
+                dispatch_single_tool(
+                    idx, id, name, input_json, args, tool_span,
+                    stash, app_state, task_id, worktree_path,
+                    role_name, mcp_registry,
+                )
             };
 
-            // ── Execute batches in order ────────────────────────────────────
+            // ── Execute remaining batches in order ──────────────────────────
             let mut indexed_results: Vec<(usize, ContentBlock)> =
-                Vec::with_capacity(indexed_tool_calls.len());
+                Vec::with_capacity(indexed_tool_calls.len() + streaming_results.len());
+
+            // Include results from streaming dispatch.
+            indexed_results.extend(streaming_results);
 
             for batch in &batches {
                 match batch {
