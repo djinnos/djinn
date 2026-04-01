@@ -7,13 +7,19 @@ let invokeHandler: InvokeHandler = () => undefined
 
 const listeners = new Map<string, Set<EventCallback>>()
 
+/**
+ * Mock for `window.electronAPI.invoke` — resolves via the registered handler.
+ */
 export const mockInvoke = vi.fn(
   (cmd: string, args?: Record<string, unknown>) => {
     return Promise.resolve(invokeHandler(cmd, args))
   },
 )
 
-export const mockListen = vi.fn(
+/**
+ * Mock for `window.electronAPI.on` — registers event listeners.
+ */
+export const mockOn = vi.fn(
   (event: string, handler: EventCallback) => {
     if (!listeners.has(event)) {
       listeners.set(event, new Set())
@@ -26,6 +32,9 @@ export const mockListen = vi.fn(
   },
 )
 
+/**
+ * Emit a mock event to all registered listeners for the given event name.
+ */
 export const mockEmit = vi.fn(
   (event: string, payload?: unknown) => {
     const handlers = listeners.get(event)
@@ -38,23 +47,40 @@ export const mockEmit = vi.fn(
   },
 )
 
+/**
+ * Set a custom handler for `invoke` calls.
+ */
 export function setInvokeHandler(handler: InvokeHandler) {
   invokeHandler = handler
 }
 
-export function resetTauriMocks() {
+/**
+ * Reset all electron mocks and listeners.
+ */
+export function resetElectronMocks() {
   mockInvoke.mockClear()
-  mockListen.mockClear()
+  mockOn.mockClear()
   mockEmit.mockClear()
   listeners.clear()
   invokeHandler = () => undefined
 }
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: mockInvoke,
-}))
-
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: mockListen,
-  emit: mockEmit,
-}))
+/**
+ * Install the mocks onto `window.electronAPI`.
+ * Call this in a `beforeEach` or at module scope to override the global setup.ts mock.
+ */
+export function installElectronMocks() {
+  Object.defineProperty(window, 'electronAPI', {
+    value: {
+      invoke: mockInvoke,
+      on: mockOn,
+      getWindow: vi.fn(() => ({
+        minimize: vi.fn(),
+        toggleMaximize: vi.fn(),
+        close: vi.fn(),
+        startDragging: vi.fn(),
+      })),
+    },
+    writable: true,
+  })
+}

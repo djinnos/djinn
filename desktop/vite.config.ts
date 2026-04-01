@@ -8,6 +8,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@tauri-apps/api/core": path.resolve(__dirname, "./src/electron/shims/tauri-core.ts"),
+      "@tauri-apps/api/event": path.resolve(__dirname, "./src/electron/shims/tauri-event.ts"),
+      "@tauri-apps/api/window": path.resolve(__dirname, "./src/electron/shims/tauri-window.ts"),
+      "@tauri-apps/plugin-opener": path.resolve(__dirname, "./src/electron/shims/tauri-opener.ts"),
     },
   },
   // Vite options tailored for Tauri development
@@ -20,8 +24,9 @@ export default defineConfig({
       ignored: ["**/.djinn/**"],
     },
   },
+  base: './',
   build: {
-    target: "safari13",
+    target: "chrome130",
     minify: true,
     sourcemap: false,
   },

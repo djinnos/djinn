@@ -18,79 +18,40 @@ if (!Element.prototype.scrollIntoView) {
   })
 }
 
-// Mock Tauri internals — prevents "window.__TAURI_INTERNALS__ is not defined" errors
-Object.defineProperty(window, "__TAURI_INTERNALS__", {
+// Mock Electron API — the shim layer (`@tauri-apps/api/core` etc.) delegates to
+// `window.electronAPI.*` at runtime, so mocking at this boundary is sufficient.
+const mockListeners = new Map<string, Set<Function>>();
+
+Object.defineProperty(window, 'electronAPI', {
   value: {
-    invoke: () => Promise.resolve(),
-    transformCallback: () => 0,
-    metadata: { currentWebview: { label: "main" }, currentWindow: { label: "main" } },
+    invoke: vi.fn().mockRejectedValue(new Error('invoke not mocked for this command')),
+    on: vi.fn((event: string, callback: Function) => {
+      if (!mockListeners.has(event)) mockListeners.set(event, new Set());
+      mockListeners.get(event)!.add(callback);
+      return Promise.resolve(() => { mockListeners.get(event)?.delete(callback); });
+    }),
+    getWindow: vi.fn(() => ({
+      minimize: vi.fn(),
+      toggleMaximize: vi.fn(),
+      close: vi.fn(),
+      startDragging: vi.fn(),
+    })),
   },
   writable: true,
-})
+});
 
-// Mock Tauri core invoke — default no-op, tests override per-command
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn().mockRejectedValue(new Error("invoke not mocked for this command")),
-}));
-
-// Mock @tauri-apps/api
-vi.mock("@tauri-apps/api", () => ({
-  invoke: vi.fn(() => Promise.resolve()),
-  transformCallback: vi.fn(() => 0),
-}))
-
-// Mock Tauri event system
-const _listeners = new Map<string, Set<(event: unknown) => void>>();
-
-export function emitTauriEvent(event: string, payload: unknown) {
-  const handlers = _listeners.get(event);
-  if (handlers) {
-    handlers.forEach((fn) => fn({ payload }));
-  }
+// Test utility: emit events to registered listeners
+export function emitMockEvent(event: string, payload: unknown) {
+  mockListeners.get(event)?.forEach(cb => cb(payload));
 }
 
-export function clearTauriListeners() {
-  _listeners.clear();
+export function clearMockListeners() {
+  mockListeners.clear();
 }
 
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn((event: string, handler: (event: unknown) => void) => {
-    if (!_listeners.has(event)) _listeners.set(event, new Set());
-    _listeners.get(event)!.add(handler);
-    const unlisten = () => {
-      _listeners.get(event)?.delete(handler);
-    };
-    return Promise.resolve(unlisten);
-  }),
-}));
-
-// Mock Tauri window API
-vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: vi.fn(() => ({
-    show: vi.fn(),
-    hide: vi.fn(),
-    close: vi.fn(),
-    setFocus: vi.fn(),
-  })),
-}));
-
-// Mock @tauri-apps/plugin-opener
-vi.mock("@tauri-apps/plugin-opener", () => ({
-  open: vi.fn(() => Promise.resolve()),
-}))
-
-// Mock @tauri-apps/plugin-shell
-vi.mock("@tauri-apps/plugin-shell", () => ({
-  Command: class {
-    static create() {
-      return new this()
-    }
-    execute() {
-      return Promise.resolve({ code: 0, stdout: "", stderr: "" })
-    }
-  },
-  open: vi.fn(() => Promise.resolve()),
-}))
+// Backward-compatible aliases — existing tests import these names
+export const emitTauriEvent = emitMockEvent;
+export const clearTauriListeners = clearMockListeners;
 
 // Mock SVG imports
 vi.mock("@/assets/logo.svg", () => ({ default: "logo.svg" }));

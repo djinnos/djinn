@@ -1,12 +1,11 @@
 import { screen, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { invoke } from "@tauri-apps/api/core";
 import { AuthGate } from "./AuthGate";
 import { useAuthStore } from "@/stores/authStore";
 import { renderWithProviders } from "@/test/helpers";
 import { emitTauriEvent, clearTauriListeners } from "@/test/setup";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
 
 const MOCK_USER = {
   sub: "user_123",

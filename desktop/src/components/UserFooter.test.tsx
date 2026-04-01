@@ -6,12 +6,11 @@
  */
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "@/stores/authStore";
 import { renderWithProviders } from "@/test/helpers";
 import { Sidebar } from "./Sidebar";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
 
 // Mock heavy Sidebar dependencies that are unrelated to auth
 vi.mock("@/hooks/useExecutionStatus", () => ({

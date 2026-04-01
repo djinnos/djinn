@@ -1,8 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "./authStore";
 import type { AuthState } from "@/tauri/commands";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
 
 const MOCK_USER = {
   sub: "user_123",

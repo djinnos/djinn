@@ -13,8 +13,8 @@ install: ## Install all dependencies (JS + server build)
 dev: ## Run frontend only (browser, no Tauri)
 	pnpm dev
 
-desktop: ## Run full Tauri desktop app
-	pnpm tauri:dev
+desktop: ## Run full Electron desktop app (dev mode)
+	pnpm electron:dev
 
 server: ## Start the djinn server daemon
 	cd $(SERVER_DIR) && make restart
@@ -34,10 +34,10 @@ server-stop: ## Stop the djinn server daemon
 		echo "No daemon file found."; \
 	fi
 
-stop: ## Stop the desktop app (Tauri + Vite)
+stop: ## Stop the desktop app (Electron + Vite)
 	@echo "Stopping desktop..."
 	-@pkill -f "djinnos-desktop" 2>/dev/null || true
-	-@pkill -f "tauri dev" 2>/dev/null || true
+	-@pkill -f "electron.*main" 2>/dev/null || true
 	-@pkill -f "vite.*desktop" 2>/dev/null || true
 	@echo "Desktop stopped."
 
@@ -48,12 +48,12 @@ halt: stop server-stop ## Stop everything (desktop + server)
 run-all: ## Start desktop app (server auto-downloads if needed)
 	-@pkill -f "djinn-server" 2>/dev/null || true
 	@sleep 0.5
-	pnpm tauri:dev
+	pnpm electron:dev
 
 reset: ## Kill everything and restart fresh
 	@echo "Killing all djinn processes..."
 	-@pkill -f "djinn-server" 2>/dev/null || true
-	-@pkill -f "tauri dev" 2>/dev/null || true
+	-@pkill -f "electron.*main" 2>/dev/null || true
 	-@pkill -f "djinnos-desktop" 2>/dev/null || true
 	-@pkill -f "vite.*desktop" 2>/dev/null || true
 	@sleep 1
@@ -63,8 +63,8 @@ reset: ## Kill everything and restart fresh
 storybook: ## Run Storybook
 	pnpm storybook
 
-build: ## Build production Tauri app
-	pnpm tauri:build
+build: ## Build production Electron app
+	pnpm electron:build
 
 clean: ## Remove build artifacts
-	rm -rf .cache/server-src/target
+	rm -rf dist dist-electron release

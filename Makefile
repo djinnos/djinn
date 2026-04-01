@@ -9,7 +9,7 @@ help: ## Show this help
 
 SERVER_BIN := $(SERVER_DIR)/target/debug/djinn-server
 
-dev: ## Build server, kill daemon, and start Tauri desktop app
+dev: ## Build server, kill daemon, and start Electron desktop app
 	cd $(SERVER_DIR) && cargo build --bin djinn-server
 	@if [ -f "$(DAEMON_FILE)" ]; then \
 		PID=$$(jq -r '.pid' "$(DAEMON_FILE)" 2>/dev/null); \
@@ -24,4 +24,4 @@ dev: ## Build server, kill daemon, and start Tauri desktop app
 	else \
 		echo "No daemon file found."; \
 	fi
-	cd $(DESKTOP_DIR) && DJINN_SERVER_BIN=$(SERVER_BIN) pnpm tauri:dev
+	cd $(DESKTOP_DIR) && DJINN_SERVER_BIN=$(SERVER_BIN) pnpm electron:dev

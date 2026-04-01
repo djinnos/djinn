@@ -2,6 +2,7 @@
   "name": "djinnos-desktop",
   "private": true,
   "version": "0.1.0",
+  "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +15,10 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "electron:compile": "tsc -p electron/tsconfig.json",
+    "electron:dev": "pnpm electron:compile && VITE_DEV_SERVER_URL=http://localhost:1420 electron dist-electron/main.js --dev",
+    "electron:start": "pnpm dev & sleep 2 && pnpm electron:dev",
+    "electron:build": "pnpm build && pnpm electron:compile && electron-builder",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "test": "vitest run --pool=vmThreads",
@@ -95,6 +100,8 @@
     "tsx": "^4.21.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
+    "electron": "^35.1.2",
+    "electron-builder": "^26.0.12",
     "vite": "^7.2.4",
     "vitest": "^4.1.0"
   }

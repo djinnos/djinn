@@ -36,3 +36,4 @@ storybook-static
 
 # Claude Code
 .claude/
+dist-electron/

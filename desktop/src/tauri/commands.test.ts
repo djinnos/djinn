@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import {
   getServerPort,
   getServerStatus,
@@ -12,7 +11,7 @@ import {
   startGithubLogin,
 } from "./commands";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
 
 describe("tauri/commands", () => {
   beforeEach(() => {
