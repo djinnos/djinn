@@ -526,6 +526,71 @@ pub async fn sync_github_tokens() -> Result<bool, String> {
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// SSH host management commands
+// ---------------------------------------------------------------------------
+
+/// Get all saved SSH hosts.
+#[tauri::command]
+pub fn get_ssh_hosts() -> Vec<crate::ssh_hosts::SshHost> {
+    crate::ssh_hosts::load_hosts()
+}
+
+/// Save (add or update) an SSH host.
+#[tauri::command]
+pub fn save_ssh_host(host: crate::ssh_hosts::SshHost) -> Result<(), String> {
+    crate::ssh_hosts::add_host(host)
+}
+
+/// Remove an SSH host by ID.
+#[tauri::command]
+pub fn remove_ssh_host(id: String) -> Result<(), String> {
+    crate::ssh_hosts::remove_host(&id)
+}
+
+/// Test SSH connectivity to a saved host. Returns the output of `uname -a` on success.
+#[tauri::command]
+pub async fn test_ssh_connection(host_id: String) -> Result<String, String> {
+    let host = crate::ssh_hosts::find_host(&host_id)
+        .ok_or_else(|| format!("SSH host '{host_id}' not found"))?;
+    crate::ssh_tunnel::test_connection(&host)
+}
+
+/// Get the current SSH tunnel status.
+#[tauri::command]
+pub fn get_tunnel_status(state: State<Mutex<ServerState>>) -> crate::ssh_tunnel::TunnelStatus {
+    state
+        .lock()
+        .map(|s| s.tunnel_status.clone())
+        .unwrap_or(crate::ssh_tunnel::TunnelStatus::Disconnected)
+}
+
+/// Deploy djinn-server to a remote SSH host.
+#[tauri::command]
+pub async fn deploy_server_to_host(host_id: String) -> Result<String, String> {
+    let host = crate::ssh_hosts::find_host(&host_id)
+        .ok_or_else(|| format!("SSH host '{host_id}' not found"))?;
+    let result = crate::deploy::deploy_to_host(&host).await?;
+
+    // Update the host record with deployment info.
+    let mut updated = host;
+    updated.deployed = true;
+    updated.server_version = Some(result.version.clone());
+    crate::ssh_hosts::update_host(updated)?;
+
+    Ok(result.version)
+}
+
+/// Check if WSL is available on this machine.
+#[tauri::command]
+pub fn check_wsl_available() -> bool {
+    crate::wsl::is_available()
+}
+
+// ---------------------------------------------------------------------------
+// Git commands
+// ---------------------------------------------------------------------------
+
 /// Check if a git repository has an 'origin' remote configured
 #[tauri::command]
 pub fn check_git_remote(project_path: String) -> Result<Option<String>, String> {

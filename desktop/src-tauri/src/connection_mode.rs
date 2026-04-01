@@ -13,6 +13,10 @@ pub enum ConnectionMode {
     Daemon,
     /// Connect to an externally-managed server (VPS, WSL, etc.).
     Remote { url: String },
+    /// Connect to a remote server via SSH tunnel.
+    Ssh { host_id: String },
+    /// Connect to a djinn-server running inside WSL.
+    Wsl,
 }
 
 /// Load the persisted connection mode, falling back to `Daemon` on any error.

@@ -4,9 +4,13 @@ use tauri::{Emitter, Manager};
 mod auth;
 mod commands;
 mod connection_mode;
+mod deploy;
 mod server;
+mod ssh_hosts;
+mod ssh_tunnel;
 mod token_refresh;
 mod token_sync;
+mod wsl;
 
 pub use server::ServerState;
 
@@ -31,7 +35,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let mode = connection_mode::load();
 
-                let startup_result = match mode {
+                let startup_result = match mode.clone() {
                     connection_mode::ConnectionMode::Daemon => {
                         log::info!("Connection mode: daemon — ensuring server is running");
                         server::ensure_daemon().await
@@ -43,6 +47,50 @@ pub fn run() {
                         } else {
                             Err(format!("Remote server at {url} is not reachable"))
                         }
+                    }
+                    connection_mode::ConnectionMode::Ssh { ref host_id } => {
+                        log::info!("Connection mode: ssh — tunnelling via host {host_id}");
+                        let host = ssh_hosts::find_host(host_id);
+                        match host {
+                            Some(host) => {
+                                if let Err(e) = ssh_tunnel::ensure_remote_daemon(&host).await {
+                                    log::warn!("Could not ensure remote daemon: {e}");
+                                }
+                                match ssh_tunnel::start_tunnel(&host) {
+                                    Ok(tunnel) => {
+                                        let base_url = format!("http://127.0.0.1:{}", tunnel.local_port);
+                                        let local_port = tunnel.local_port;
+                                        ssh_tunnel::set_active_tunnel(tunnel);
+
+                                        // Wait for health through tunnel.
+                                        let mut ok = false;
+                                        for _ in 0..40 {
+                                            if server::health_check(&base_url).await {
+                                                ok = true;
+                                                break;
+                                            }
+                                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                        }
+                                        if ok {
+                                            if let Some(state) = app_handle.try_state::<std::sync::Mutex<ServerState>>() {
+                                                if let Ok(mut s) = state.lock() {
+                                                    s.tunnel_status = ssh_tunnel::TunnelStatus::Connected { local_port };
+                                                }
+                                            }
+                                            Ok(base_url)
+                                        } else {
+                                            Err("SSH tunnel established but daemon not reachable".into())
+                                        }
+                                    }
+                                    Err(e) => Err(format!("Failed to start SSH tunnel: {e}")),
+                                }
+                            }
+                            None => Err(format!("SSH host '{host_id}' not found")),
+                        }
+                    }
+                    connection_mode::ConnectionMode::Wsl => {
+                        log::info!("Connection mode: WSL");
+                        wsl::ensure_wsl_daemon(8372).await
                     }
                 };
 
@@ -56,6 +104,11 @@ pub fn run() {
                         }
 
                         server::start_health_monitor(&app_handle);
+
+                        // Start tunnel monitor when in SSH mode.
+                        if matches!(mode, connection_mode::ConnectionMode::Ssh { .. }) {
+                            server::start_tunnel_monitor(&app_handle);
+                        }
 
                         if let Some(window) = app_handle.get_webview_window("main") {
                             let _ = window.show();
@@ -146,7 +199,19 @@ pub fn run() {
             commands::list_git_branches,
             commands::setup_git_remote,
             commands::sync_github_tokens,
+            commands::get_ssh_hosts,
+            commands::save_ssh_host,
+            commands::remove_ssh_host,
+            commands::test_ssh_connection,
+            commands::get_tunnel_status,
+            commands::deploy_server_to_host,
+            commands::check_wsl_available,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                ssh_tunnel::stop_active_tunnel();
+            }
+        });
 }

@@ -14,6 +14,8 @@ pub struct ServerState {
     pub is_healthy: bool,
     pub has_error: bool,
     pub error_message: Option<String>,
+    /// Current SSH tunnel status (only relevant in `Ssh` connection mode).
+    pub tunnel_status: crate::ssh_tunnel::TunnelStatus,
 }
 
 impl Default for ServerState {
@@ -31,6 +33,7 @@ impl ServerState {
             is_healthy: false,
             has_error: false,
             error_message: None,
+            tunnel_status: crate::ssh_tunnel::TunnelStatus::Disconnected,
         }
     }
 
@@ -116,6 +119,40 @@ pub async fn retry_connection<R: Runtime>(app: &AppHandle<R>) -> Result<String, 
             } else {
                 return Err(format!("Remote server at {url} is not reachable"));
             }
+        }
+        crate::connection_mode::ConnectionMode::Ssh { host_id } => {
+            let host = crate::ssh_hosts::find_host(&host_id)
+                .ok_or_else(|| format!("SSH host '{host_id}' not found"))?;
+
+            crate::ssh_tunnel::ensure_remote_daemon(&host).await?;
+
+            let tunnel = crate::ssh_tunnel::start_tunnel(&host)?;
+            let base_url = format!("http://127.0.0.1:{}", tunnel.local_port);
+
+            // Wait for health through tunnel
+            for _ in 0..40 {
+                if health_check(&base_url).await {
+                    let local_port = tunnel.local_port;
+                    crate::ssh_tunnel::set_active_tunnel(tunnel);
+
+                    // Update tunnel status in server state
+                    if let Some(state) = app.try_state::<Mutex<ServerState>>() {
+                        if let Ok(mut s) = state.lock() {
+                            s.tunnel_status =
+                                crate::ssh_tunnel::TunnelStatus::Connected { local_port };
+                        }
+                    }
+
+                    return Ok(base_url);
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            return Err(
+                "SSH tunnel established but daemon not reachable through it".into(),
+            );
+        }
+        crate::connection_mode::ConnectionMode::Wsl => {
+            crate::wsl::ensure_wsl_daemon(DEFAULT_PORT).await?
         }
     };
 
@@ -344,4 +381,104 @@ fn parse_port(url: &str) -> Option<u16> {
     let after_scheme = url.split("//").nth(1).unwrap_or(url);
     let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
     host_port.rsplit(':').next().and_then(|s| s.parse().ok())
+}
+
+/// Spawn a background task that monitors the SSH tunnel health.
+///
+/// Every 5 seconds it checks whether the SSH child process is still alive.
+/// If the tunnel dies, it emits `tunnel:disconnected` and attempts to
+/// reconnect. On successful reconnection it emits `tunnel:reconnected`.
+pub fn start_tunnel_monitor<R: Runtime>(app: &AppHandle<R>) {
+    let app_handle = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        // Let the initial connection settle.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            if !crate::ssh_tunnel::is_active_tunnel_alive() {
+                log::warn!("Tunnel monitor: SSH tunnel process has exited");
+
+                if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
+                    if let Ok(mut s) = state.lock() {
+                        s.tunnel_status = crate::ssh_tunnel::TunnelStatus::Reconnecting;
+                    }
+                }
+                let _ = app_handle.emit("tunnel:disconnected", ());
+
+                // Attempt reconnection.
+                let host_id = crate::ssh_tunnel::active_tunnel_host_id();
+                if let Some(host_id) = host_id {
+                    if let Some(host) = crate::ssh_hosts::find_host(&host_id) {
+                        match crate::ssh_tunnel::start_tunnel(&host) {
+                            Ok(tunnel) => {
+                                let local_port = tunnel.local_port;
+                                let base_url = format!("http://127.0.0.1:{}", local_port);
+                                crate::ssh_tunnel::set_active_tunnel(tunnel);
+
+                                // Wait briefly for health.
+                                let mut reconnected = false;
+                                for _ in 0..20 {
+                                    if health_check(&base_url).await {
+                                        reconnected = true;
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(250)).await;
+                                }
+
+                                if reconnected {
+                                    log::info!(
+                                        "Tunnel monitor: reconnected on local port {}",
+                                        local_port
+                                    );
+                                    if let Some(state) =
+                                        app_handle.try_state::<Mutex<ServerState>>()
+                                    {
+                                        if let Ok(mut s) = state.lock() {
+                                            s.tunnel_status =
+                                                crate::ssh_tunnel::TunnelStatus::Connected {
+                                                    local_port,
+                                                };
+                                            s.mark_healthy(&base_url);
+                                        }
+                                    }
+                                    let _ = app_handle.emit("tunnel:reconnected", &base_url);
+                                } else {
+                                    log::error!("Tunnel monitor: reconnected tunnel but daemon not reachable");
+                                    if let Some(state) =
+                                        app_handle.try_state::<Mutex<ServerState>>()
+                                    {
+                                        if let Ok(mut s) = state.lock() {
+                                            s.tunnel_status = crate::ssh_tunnel::TunnelStatus::Error {
+                                                message: "Tunnel reconnected but daemon not reachable".into(),
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Tunnel monitor: failed to reconnect: {}", e);
+                                if let Some(state) =
+                                    app_handle.try_state::<Mutex<ServerState>>()
+                                {
+                                    if let Ok(mut s) = state.lock() {
+                                        s.tunnel_status =
+                                            crate::ssh_tunnel::TunnelStatus::Error {
+                                                message: e,
+                                            };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // No host_id — tunnel was cleared, stop monitoring.
+                    log::info!("Tunnel monitor: no active tunnel, stopping monitor");
+                    break;
+                }
+            }
+        }
+    });
 }

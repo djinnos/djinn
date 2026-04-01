@@ -27,6 +27,7 @@ dirs = "5"
 log = "0.4"
 once_cell = { version = "1", default-features = false }
 djinn-daemon = { path = "../../server/crates/djinn-daemon" }
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
