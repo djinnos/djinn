@@ -72,7 +72,8 @@ impl LspManager {
 
     /// Kill all LSP clients whose project root is under `worktree`.
     /// Must be called before removing a worktree directory.
-    pub async fn shutdown_for_worktree(&self, worktree: &Path) {
+    /// Returns the number of clients killed.
+    pub async fn shutdown_for_worktree(&self, worktree: &Path) -> usize {
         let worktree_str = worktree.to_string_lossy();
         let mut inner = self.inner.lock().await;
         let keys: Vec<String> = inner
@@ -85,12 +86,15 @@ impl LspManager {
             })
             .cloned()
             .collect();
+        let mut killed = 0;
         for key in keys {
             if let Some(client) = inner.clients.remove(&key) {
                 tracing::info!(key = %key, pid = client.pid, "lsp: killing client for worktree teardown");
                 kill_client(client);
+                killed += 1;
             }
         }
+        killed
     }
 
     pub async fn touch_file(&self, worktree: &Path, path: &Path, wait_for_diagnostics: bool) {

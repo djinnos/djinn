@@ -1233,6 +1233,20 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     // Always commit whatever the agent wrote before verification or cleanup.
     commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
 
+    // ── Shut down LSP clients for this worktree ──────────────────────────────
+    // Centralized cleanup: every session-end path flows through here, so LSP
+    // processes are always reclaimed regardless of how the session finished
+    // (normal completion, error, timeout, pause, cancellation).
+    let lsp_killed = app_state.lsp.shutdown_for_worktree(&worktree_path).await;
+    if lsp_killed > 0 {
+        tracing::info!(
+            task_id = %task_id,
+            worktree = %worktree_path.display(),
+            clients_killed = lsp_killed,
+            "Lifecycle: shut down LSP clients on session end"
+        );
+    }
+
     // ── Handle pause/kill cancellation ────────────────────────────────────────
     if pause.is_cancelled() {
         tracing::info!(task_id = %task_id, "Lifecycle: paused; preserving worktree");
@@ -1243,9 +1257,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
-        // Worktree is preserved for resume, but LSP clients are demand-spawned
-        // so they'll be re-created when the session resumes and touches files.
-        app_state.lsp.shutdown_for_worktree(&worktree_path).await;
+        // LSP clients already shut down above (centralized cleanup).
         return_free!();
     }
     if cancel.is_cancelled() {
@@ -1343,9 +1355,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         )
         .await;
         // Don't clean up worktree — will be reused on resume.
-        // LSP clients are demand-spawned; shut them down now to free resources.
-        // They'll be re-created when the session resumes and touches files.
-        app_state.lsp.shutdown_for_worktree(&worktree_path).await;
+        // LSP clients already shut down above (centralized cleanup).
 
         // Spawn extraction for completed worker sessions too — reflection must
         // happen regardless of whether the session is preserved for resume.

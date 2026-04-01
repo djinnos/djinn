@@ -150,7 +150,13 @@ describe("UserFooter (via Sidebar)", () => {
     });
 
     it("calls logout when sign-out button is clicked", async () => {
-      mockInvoke.mockResolvedValueOnce(undefined); // auth_logout
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === "auth_logout") return Promise.resolve(undefined);
+        // ConnectionStatusBadge fires these on mount
+        if (cmd === "get_connection_mode") return Promise.resolve({ type: "daemon" });
+        if (cmd === "get_server_status") return Promise.resolve({ is_healthy: true });
+        return Promise.resolve(undefined);
+      });
       const user = userEvent.setup();
 
       renderWithProviders(<Sidebar />);

@@ -13,7 +13,7 @@ export function ConnectionStatusBadge() {
   const [hostLabel, setHostLabel] = useState<string | null>(null);
 
   useEffect(() => {
-    void getConnectionMode().then(setMode).catch(() => {});
+    void getConnectionMode().then((m) => { if (m) setMode(m); }).catch(() => {});
   }, []);
 
   useEffect(() => {

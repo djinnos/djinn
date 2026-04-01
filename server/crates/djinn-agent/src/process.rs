@@ -20,6 +20,11 @@ use tokio::time::Duration;
 #[cfg(unix)]
 use wait_timeout::ChildExt;
 
+/// OOM score adjustment for agent child processes.  Higher values make the
+/// kernel OOM-killer prefer these processes over the rest of the system.
+#[cfg(target_os = "linux")]
+const CHILD_OOM_SCORE_ADJ: &str = "800\n";
+
 #[cfg(unix)]
 pub fn isolate_process_group(cmd: &mut Command) {
     // SAFETY: pre_exec runs in the child process right before exec.
@@ -46,6 +51,10 @@ pub fn isolate_process_group(cmd: &mut Command) {
                 // Encoding: (class << 13) | level
                 let ioprio_val = (IOPRIO_CLASS_BE << 13) | 7;
                 let _ = libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, ioprio_val);
+
+                // Raise OOM score so the kernel prefers killing agent children
+                // over the user's desktop processes.
+                let _ = std::fs::write("/proc/self/oom_score_adj", CHILD_OOM_SCORE_ADJ);
             }
 
             Ok(())

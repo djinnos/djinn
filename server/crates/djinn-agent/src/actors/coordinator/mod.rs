@@ -396,6 +396,17 @@ impl CoordinatorActor {
     async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
 
+        // Log detected system memory at startup.
+        if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
+            tracing::info!(
+                total_gb = mem.total_bytes / (1024 * 1024 * 1024),
+                available_gb = mem.available_bytes / (1024 * 1024 * 1024),
+                effective_limit_gb = mem.effective_limit_bytes / (1024 * 1024 * 1024),
+                suggested_max_sessions = mem.suggested_max_sessions(),
+                "CoordinatorActor: system memory detected"
+            );
+        }
+
         // Always start with execution paused for all projects.
         #[cfg(not(test))]
         {
@@ -445,7 +456,33 @@ impl CoordinatorActor {
                 _ = self.tick.tick() => {
                     self.enforce_session_stall_timeout().await;
                     self.detect_and_recover_stuck_filtered(None).await;
-                    self.dispatch_ready_tasks(None).await;
+
+                    // Check memory pressure before dispatching.
+                    let memory_throttled = if let Some(mem) = crate::resource_monitor::MemoryStatus::read() {
+                        if mem.is_critical() {
+                            tracing::error!(
+                                psi_full_avg10 = mem.psi_full_avg10,
+                                available_mb = mem.available_bytes / (1024 * 1024),
+                                "memory pressure CRITICAL — all tasks stalled; skipping dispatch"
+                            );
+                            true
+                        } else if mem.should_throttle() {
+                            tracing::warn!(
+                                psi_some_avg10 = mem.psi_some_avg10,
+                                available_mb = mem.available_bytes / (1024 * 1024),
+                                "memory pressure elevated — throttling dispatch"
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !memory_throttled {
+                        self.dispatch_ready_tasks(None).await;
+                    }
                     self.process_approved_tasks().await;
                     self.poll_pr_statuses().await;
                     if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {

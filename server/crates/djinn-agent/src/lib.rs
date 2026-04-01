@@ -31,6 +31,10 @@ pub(crate) mod truncate;
 
 pub mod verification;
 
+// ─── Resource monitoring ─────────────────────────────────────────────────────
+
+pub mod resource_monitor;
+
 // ─── Actors (was src/actors/) ────────────────────────────────────────────────
 
 pub mod actors;
