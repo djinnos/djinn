@@ -75,6 +75,8 @@ Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadm
 
 **If the epic is complete:** Call `epic_close(id)` immediately, then `submit_grooming(summary="Epic complete — closed.")`. Do NOT create new tasks for a completed epic. Failing to close a completed epic causes an infinite planning loop — you will be dispatched repeatedly for an epic that has no remaining work.
 
+**If a few tasks remain open but their acceptance criteria appear already met by the codebase:** Verify this yourself using `shell` and `read` (you have read-only codebase access). If confirmed, close them with `task_transition(id, "close")`, then close the epic. **NEVER create a worker task to verify or close other tasks or the epic — that is YOUR job.** Workers write code; you manage task and epic lifecycle.
+
 ### Step 3: Decide — Spike or Tasks?
 
 **Choose spike-first when:**
