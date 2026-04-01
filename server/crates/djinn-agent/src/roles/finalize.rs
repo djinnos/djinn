@@ -26,6 +26,8 @@ pub struct TaskGroomingEntry {
 #[derive(Debug, Deserialize)]
 pub struct SubmitWork {
     pub task_id: String,
+    /// Short imperative-mood commit subject line (max 72 chars).
+    pub commit_title: String,
     pub summary: String,
     #[serde(default)]
     pub files_changed: Vec<String>,
@@ -77,10 +79,11 @@ pub fn tool_submit_work() -> RmcpTool {
         "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.".to_string(),
         object!({
             "type": "object",
-            "required": ["task_id", "summary"],
+            "required": ["task_id", "commit_title", "summary"],
             "properties": {
                 "task_id": {"type": "string", "description": "Task UUID or short_id"},
-                "summary": {"type": "string", "description": "Brief summary of the work completed"},
+                "commit_title": {"type": "string", "description": "Short imperative-mood git commit subject line, max 72 characters. Example: 'add rate limiting to auth middleware'", "maxLength": 72},
+                "summary": {"type": "string", "description": "Longer description of the work completed, used as the commit body"},
                 "files_changed": {
                     "type": "array",
                     "items": {"type": "string"},

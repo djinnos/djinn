@@ -50,6 +50,7 @@ async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_stat
     };
 
     let activity_payload = serde_json::json!({
+        "commit_title": work.commit_title,
         "summary": work.summary,
         "files_changed": work.files_changed,
         "remaining_concerns": work.remaining_concerns,

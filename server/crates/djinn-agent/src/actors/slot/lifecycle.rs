@@ -24,6 +24,29 @@ use super::*;
 use crate::AgentType;
 use crate::task_merge::interrupt_paused_worker_session;
 
+/// Build a git commit message from an optional title and body.
+/// Truncates the title to 72 characters. Returns `None` if both are empty.
+fn format_commit_message(title: Option<&str>, body: Option<&str>) -> Option<String> {
+    let title = title.map(|t| {
+        let t = t.trim();
+        if t.len() > 72 {
+            format!("{}...", &t[..69])
+        } else {
+            t.to_string()
+        }
+    });
+    let body = body.and_then(|b| {
+        let b = b.trim();
+        if b.is_empty() { None } else { Some(b) }
+    });
+    match (title.as_deref(), body) {
+        (Some(t), Some(b)) if !t.is_empty() => Some(format!("{t}\n\n{b}")),
+        (Some(t), None) if !t.is_empty() => Some(t.to_string()),
+        (_, Some(b)) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// Standalone async function that runs the full per-task lifecycle:
 /// load -> worktree -> session -> reply loop -> post-session work -> cleanup.
 /// Verification runs as a separate background task after the slot is freed.
@@ -1240,12 +1263,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             .as_deref()
             .is_some_and(|n| n == "submit_work")
         {
-            final_output
-                .finalize_payload
-                .as_ref()
+            let payload = final_output.finalize_payload.as_ref();
+            let title = payload
+                .and_then(|p| p.get("commit_title"))
+                .and_then(|s| s.as_str());
+            let body = payload
                 .and_then(|p| p.get("summary"))
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string())
+                .and_then(|s| s.as_str());
+            format_commit_message(title, body)
         } else {
             None
         };
@@ -1359,12 +1384,16 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         // Commit any file changes before tearing down the worktree so the
         // branch preserves them for the PR pipeline.
         if final_result.is_ok() {
-            let commit_msg = final_output
-                .finalize_payload
-                .as_ref()
-                .and_then(|p| p.get("summary"))
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string());
+            let commit_msg = {
+                let payload = final_output.finalize_payload.as_ref();
+                let title = payload
+                    .and_then(|p| p.get("commit_title"))
+                    .and_then(|s| s.as_str());
+                let body = payload
+                    .and_then(|p| p.get("summary"))
+                    .and_then(|s| s.as_str());
+                format_commit_message(title, body)
+            };
             if let Err(e) = commit_final_work_if_needed(
                 &task_id,
                 &worktree_path,
