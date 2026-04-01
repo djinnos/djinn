@@ -26,7 +26,7 @@ reqwest = { version = "0.12", features = ["json"] }
 dirs = "5"
 log = "0.4"
 once_cell = { version = "1", default-features = false }
-djinn-server = { path = "../../server" }
+djinn-daemon = { path = "../../server/crates/djinn-daemon" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

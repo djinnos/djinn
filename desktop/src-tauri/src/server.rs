@@ -65,7 +65,7 @@ const DEFAULT_PORT: u16 = 8372;
 pub async fn ensure_daemon() -> Result<String, String> {
     let server_bin = resolve_server_binary()?;
     let info =
-        djinn_server::daemon::ensure_running(DEFAULT_PORT, None, &server_bin).await?;
+        djinn_daemon::ensure_running(DEFAULT_PORT, None, &server_bin).await?;
     let base_url = format!("http://127.0.0.1:{}", info.port);
 
     // Wait for the HTTP health endpoint to be ready (the daemon may still be
