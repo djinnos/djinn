@@ -29,10 +29,14 @@ pub fn router(state: AppState) -> Router {
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
+    version: &'static str,
 }
 
 async fn health() -> axum::Json<HealthResponse> {
-    axum::Json(HealthResponse { status: "ok" })
+    axum::Json(HealthResponse {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 /// Run the server, blocking until shutdown signal.

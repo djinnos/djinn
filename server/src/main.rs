@@ -31,7 +31,7 @@ use djinn_server::server::{self, AppState};
 const DEFAULT_UPSTREAM_URL: &str = "http://127.0.0.1:8372/mcp";
 
 #[derive(Parser)]
-#[command(name = "djinn-server", about = "Djinn MCP server")]
+#[command(name = "djinn-server", about = "Djinn MCP server", version)]
 struct Cli {
     /// Run as stdio bridge to daemon HTTP MCP endpoint.
     #[arg(long, default_value_t = false)]
