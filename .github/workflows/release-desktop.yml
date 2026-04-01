@@ -98,10 +98,14 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Flatten artifacts
+        run: |
+          mkdir -p flat
+          find artifacts -type f -exec mv {} flat/ \;
       - name: Create checksums
-        working-directory: artifacts
-        run: sha256sum * > checksums-desktop.txt 2>/dev/null || true
+        working-directory: flat
+        run: sha256sum * > checksums-desktop.txt
       - name: Publish release
-        run: gh release create "${{ github.ref_name }}" artifacts/* --generate-notes --title "Desktop ${{ github.ref_name }}"
+        run: gh release create "${{ github.ref_name }}" flat/* --generate-notes --title "Desktop ${{ github.ref_name }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
