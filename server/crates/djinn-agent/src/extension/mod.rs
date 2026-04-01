@@ -1725,6 +1725,14 @@ async fn call_write(
             state.lsp.touch_file(worktree_path, &path, true).await;
             let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
 
+            // Signal repo-map watcher to refresh this worktree's SCIP index.
+            state.event_bus.send(
+                djinn_core::events::DjinnEventEnvelope::repo_map_refresh_requested(
+                    &worktree_path.display().to_string(),
+                    Some(&worktree_path.display().to_string()),
+                ),
+            );
+
             Ok(serde_json::json!({
                 "ok": true,
                 "path": path.display().to_string(),
@@ -2124,6 +2132,14 @@ async fn call_edit(
             state.lsp.touch_file(worktree_path, &path, true).await;
             let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
 
+            // Signal repo-map watcher to refresh this worktree's SCIP index.
+            state.event_bus.send(
+                djinn_core::events::DjinnEventEnvelope::repo_map_refresh_requested(
+                    &worktree_path.display().to_string(),
+                    Some(&worktree_path.display().to_string()),
+                ),
+            );
+
             let mut result = serde_json::json!({
                 "ok": true,
                 "path": path.display().to_string(),
@@ -2204,6 +2220,16 @@ async fn call_apply_patch(
     }
 
     let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
+
+    // Signal repo-map watcher to refresh this worktree's SCIP index.
+    if !affected.is_empty() {
+        state.event_bus.send(
+            djinn_core::events::DjinnEventEnvelope::repo_map_refresh_requested(
+                &worktree_path.display().to_string(),
+                Some(&worktree_path.display().to_string()),
+            ),
+        );
+    }
 
     Ok(serde_json::json!({
         "ok": true,

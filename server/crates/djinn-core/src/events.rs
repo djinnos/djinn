@@ -375,6 +375,24 @@ impl DjinnEventEnvelope {
         Self { entity_type: "activity", action: "logged", payload: serde_json::to_value(serde_json::json!({"task_id": task_id, "action": action, "actor": actor, "actor_role": actor_role, "payload": payload})).unwrap(), id: None, project_id: None, from_sync: false }
     }
 
+    /// Emitted by agent Write/Edit/ApplyPatch tools after a successful file
+    /// mutation so that the repo-map watcher can trigger a targeted SCIP refresh
+    /// for just the affected worktree instead of relying on the filesystem watcher.
+    pub fn repo_map_refresh_requested(project_path: &str, worktree_path: Option<&str>) -> Self {
+        Self {
+            entity_type: "repo_map",
+            action: "refresh_requested",
+            payload: serde_json::to_value(serde_json::json!({
+                "project_path": project_path,
+                "worktree_path": worktree_path,
+            }))
+            .unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+
     pub fn entity_type(&self) -> &'static str {
         self.entity_type
     }

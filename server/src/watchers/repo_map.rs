@@ -27,7 +27,10 @@ use djinn_db::{
     RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository,
 };
 
-const DEBOUNCE: Duration = Duration::from_secs(2);
+/// Filesystem watcher debounce interval. Increased from 2s to 60s because
+/// tool-call-driven refresh (ADR-043 Phase 5) now handles the hot path; the
+/// watcher serves only as a fallback for external edits.
+const DEBOUNCE: Duration = Duration::from_secs(60);
 const DEFAULT_REPO_MAP_TOKEN_BUDGET: usize = 1200;
 const WORKTREE_REUSE_DIFF_FILE_THRESHOLD: usize = 20;
 /// Minimum interval between SCIP indexing completions for the same project.
@@ -207,6 +210,39 @@ pub fn spawn_repo_map_refresh_watchers(
                                 Err(_) => continue,
                             };
                             guard.watchers.retain(|path, _| current_projects.contains(path));
+                        } else if envelope.entity_type == "repo_map" && envelope.action == "refresh_requested" {
+                            // ADR-043 Phase 5: tool-call-driven SCIP refresh.
+                            // Agent Write/Edit/ApplyPatch tools emit this event
+                            // so we refresh only the affected worktree.
+                            let worktree_path = envelope.payload
+                                .get("worktree_path")
+                                .and_then(|v| v.as_str())
+                                .map(PathBuf::from);
+
+                            let guard = state_clone.lock().await;
+                            let app_state = guard.app_state.clone();
+                            let events_bus = crate::events::event_bus_for(&guard.events_tx);
+                            let in_flight = guard.in_flight.clone();
+                            let last_completion = guard.last_completion.clone();
+                            drop(guard);
+
+                            tokio::spawn(async move {
+                                if let Err(error) = refresh_worktree_if_needed(
+                                    &app_state,
+                                    &events_bus,
+                                    in_flight,
+                                    last_completion,
+                                    worktree_path.as_deref(),
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        worktree = ?worktree_path,
+                                        error = %error,
+                                        "repo-map tool-driven refresh failed"
+                                    );
+                                }
+                            });
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -370,6 +406,60 @@ fn add_watch(state: &mut RepoMapWatcherState, project_id: &str, project_path: &P
         }
         Err(e) => tracing::warn!(error = %e, "failed to create repo-map watcher"),
     }
+}
+
+/// ADR-043 Phase 5: targeted SCIP refresh triggered by agent tool calls.
+///
+/// Resolves the project that owns the given worktree path, then refreshes
+/// only that single worktree (or the project root when `worktree_path` is
+/// `None`).  Respects the existing per-project cooldown and cache-hit logic
+/// so duplicate work is avoided.
+async fn refresh_worktree_if_needed(
+    app_state: &AppState,
+    events: &crate::events::EventBus,
+    in_flight: Arc<Mutex<HashSet<RefreshTarget>>>,
+    last_completion: Arc<Mutex<HashMap<String, Instant>>>,
+    worktree_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let Some(worktree) = worktree_path else {
+        return Ok(());
+    };
+
+    // Resolve which project this worktree belongs to.
+    let project_repo = ProjectRepository::new(app_state.db().clone(), events.clone());
+    let worktree_str = worktree.to_string_lossy();
+    let project_id = project_repo
+        .resolve(&worktree_str)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no project found for worktree {worktree_str}"))?;
+    let project = project_repo
+        .get(&project_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
+
+    let project_path = PathBuf::from(&project.path);
+
+    // Determine whether this is the canonical project path or a worktree.
+    let wt = if worktree == project_path {
+        None
+    } else {
+        Some(worktree.to_path_buf())
+    };
+
+    if let Some(identity) =
+        repo_identity(app_state, &project.id, &project_path, wt).await
+    {
+        maybe_refresh_identity(
+            app_state.db(),
+            events,
+            in_flight,
+            last_completion,
+            identity,
+        )
+        .await;
+    }
+
+    Ok(())
 }
 
 async fn refresh_project_and_worktrees(
