@@ -27,6 +27,7 @@ pub fn run() {
                 .set_focus();
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Mutex::new(server::init_server_state()))
         .setup(move |app| {
             let app_handle = app.handle().clone();
