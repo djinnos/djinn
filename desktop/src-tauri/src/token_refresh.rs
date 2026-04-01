@@ -304,6 +304,10 @@ pub async fn logout() -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// All tests share the global `CURRENT_TOKEN_STATE` mutex, so we serialise
+    /// them with a second lock to prevent races.
+    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
     fn create_token_state(expires_in_seconds: u64) -> TokenState {
         TokenState {
             access_token: "test_access_token".to_string(),
@@ -315,6 +319,7 @@ mod tests {
 
     #[test]
     fn test_is_token_expired_or_stale_returns_true_when_no_token() {
+        let _lock = TEST_LOCK.lock().unwrap();
         // Clear any existing token state
         clear_token_state();
 
@@ -326,6 +331,7 @@ mod tests {
 
     #[test]
     fn test_is_token_expired_or_stale_returns_false_for_future_token() {
+        let _lock = TEST_LOCK.lock().unwrap();
         // Token expires in 1 hour (well beyond the 30-second buffer)
         let state = create_token_state(3600);
         set_token_state(state);
@@ -338,6 +344,7 @@ mod tests {
 
     #[test]
     fn test_is_token_expired_or_stale_returns_true_for_past_token() {
+        let _lock = TEST_LOCK.lock().unwrap();
         // Token expired 1 hour ago
         let state = TokenState {
             access_token: "test_access_token".to_string(),
@@ -355,6 +362,7 @@ mod tests {
 
     #[test]
     fn test_is_token_expired_or_stale_returns_true_at_buffer_edge() {
+        let _lock = TEST_LOCK.lock().unwrap();
         // Token expires in exactly EXPIRY_BUFFER_SECONDS - 1 seconds
         // This should trigger staleness because we add buffer to current time
         let state = create_token_state(EXPIRY_BUFFER_SECONDS - 1);
@@ -368,6 +376,7 @@ mod tests {
 
     #[test]
     fn test_is_token_expired_or_stale_returns_false_just_outside_buffer() {
+        let _lock = TEST_LOCK.lock().unwrap();
         // Token expires in EXPIRY_BUFFER_SECONDS + 5 seconds
         // This should be fresh
         let state = create_token_state(EXPIRY_BUFFER_SECONDS + 5);
@@ -381,6 +390,7 @@ mod tests {
 
     #[test]
     fn test_set_and_get_token_state() {
+        let _lock = TEST_LOCK.lock().unwrap();
         clear_token_state();
 
         let state = create_token_state(3600);
@@ -398,6 +408,7 @@ mod tests {
 
     #[test]
     fn test_get_token_state_returns_none_when_empty() {
+        let _lock = TEST_LOCK.lock().unwrap();
         clear_token_state();
 
         let retrieved = get_token_state();
@@ -409,6 +420,7 @@ mod tests {
 
     #[test]
     fn test_clear_token_state() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let state = create_token_state(3600);
         set_token_state(state);
 
@@ -421,6 +433,7 @@ mod tests {
 
     #[test]
     fn test_get_valid_access_token_returns_token_when_valid() {
+        let _lock = TEST_LOCK.lock().unwrap();
         // Token expires in 1 hour
         let state = create_token_state(3600);
         set_token_state(state.clone());
@@ -432,6 +445,7 @@ mod tests {
 
     #[test]
     fn test_get_valid_access_token_returns_none_when_expired() {
+        let _lock = TEST_LOCK.lock().unwrap();
         // Token expired 1 hour ago
         let state = TokenState {
             access_token: "test_access_token".to_string(),
@@ -447,6 +461,7 @@ mod tests {
 
     #[test]
     fn test_get_valid_access_token_returns_none_within_buffer() {
+        let _lock = TEST_LOCK.lock().unwrap();
         // Token expires in 15 seconds (within 30-second buffer)
         let state = create_token_state(15);
         set_token_state(state);
@@ -460,6 +475,7 @@ mod tests {
 
     #[test]
     fn test_token_state_overwrite() {
+        let _lock = TEST_LOCK.lock().unwrap();
         clear_token_state();
 
         let state1 = create_token_state(3600);
