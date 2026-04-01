@@ -356,13 +356,12 @@ async fn verify_branch_ref(path: &Path, branch: &str) -> Result<(), GitError> {
         ],
     )
     .await
-    .map_err(|e| {
+    .inspect_err(|_| {
         // Clean up the broken ref so the next attempt starts fresh.
         let ref_path = path.join(".git/refs/heads").join(branch);
         if ref_path.exists() {
             let _ = std::fs::remove_file(&ref_path);
         }
-        e
     })?;
     Ok(())
 }
