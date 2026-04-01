@@ -208,8 +208,29 @@ fn ssh_exec_with_timeout(host: &SshHost, command: &str, timeout: u32) -> Result<
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(format!("SSH command failed: {}", stderr.trim()))
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".into());
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit code {code} (no output)")
+        };
+        log::error!(
+            "ssh_exec command={:?} host={} exit={} stderr={:?} stdout={:?}",
+            command,
+            host.hostname,
+            code,
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout),
+        );
+        Err(format!("SSH command failed (exit {}): {}", code, detail))
     }
 }
 
