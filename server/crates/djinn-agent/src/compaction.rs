@@ -25,6 +25,16 @@ const MICROCOMPACT_AGE_THRESHOLD: usize = 6;
 /// Microcompaction: the most recent N turns are never cleared, regardless of age.
 const MICROCOMPACT_EXEMPT_RECENT: usize = 3;
 
+/// Partial compaction: the pivot point expressed as a fraction of total estimated
+/// tokens. Messages up to this point form the stable prefix that is preserved
+/// verbatim (for prompt-cache hits); only the tail is summarised.
+const PARTIAL_COMPACTION_PIVOT: f64 = 0.6;
+
+/// Partial compaction is skipped (falling through to full compaction) when the
+/// tail after the pivot is estimated to reclaim less than this fraction of the
+/// context window.
+const PARTIAL_COMPACTION_MIN_RECLAIM: f64 = 0.2;
+
 // ─── Compaction context ──────────────────────────────────────────────────────
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
@@ -157,6 +167,32 @@ Wrap reasoning in `<analysis>` tags:
 9. **Next Step** – *Include only if* directly continues user instruction
 
 > No new ideas unless user confirmed"#;
+
+const PARTIAL_COMPACTION_PROMPT: &str = r#"## Partial Compaction Context
+The latter portion of a conversation is being summarised while the beginning is kept intact.
+The earlier messages (system prompt and initial context) are preserved verbatim and do NOT
+appear below — only the tail of the conversation that needs compacting is shown.
+
+Your summary will be inserted immediately after the preserved prefix, so it must connect
+naturally to the earlier context that the reader already has.
+
+**Tail Messages to Summarise:**
+{messages}
+
+Wrap reasoning in `<analysis>` tags.
+
+### Include These Sections:
+1. **Progress Since Start** – What was accomplished in this portion of the conversation
+2. **Files Changed** – Every file path read, created, or edited, with description of changes
+3. **Code Decisions** – Key architectural decisions and reasoning
+4. **Errors + Fixes** – Bugs encountered and resolutions (or outstanding)
+5. **Current Work** – What was actively being worked on at the end of this segment
+6. **Next Steps** – Concrete remaining work items
+
+> Preserve exact file paths, function names, type names, and error messages
+> Do NOT repeat information that would already be in the preserved earlier context"#;
+
+const PARTIAL_COMPACTION_SUMMARISER_SYSTEM: &str = "You are summarising the tail portion of a conversation. The beginning of the conversation is preserved separately and the reader will have it. Produce a dense, faithful summary of only the provided messages, connecting naturally to the earlier context the reader already has. Do not repeat early context.";
 
 pub(crate) const SUMMARISER_SYSTEM_WORKER_PRE_RESUME: &str = "You are summarising a coding agent's work session that is about to receive reviewer feedback. Produce a dense, faithful summary focused on what was implemented, what files were changed, and what the current state of the code is. Do NOT include any statements about work being complete or done — the reviewer has determined it is not.";
 pub(crate) const SUMMARISER_SYSTEM_WORKER_MID_SESSION: &str = "You are summarising a coding agent's in-progress work session. Produce a dense, faithful summary that preserves all implementation context so the agent can continue working without re-reading files.";
@@ -339,6 +375,45 @@ pub(crate) async fn compact_conversation(
         }
     }
 
+    // 1c. Extract last user text early (needed by both partial and full compaction).
+    let last_user_text: Option<String> = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User && m.content.iter().any(|b| b.as_text().is_some()))
+        .and_then(|m| {
+            let t = m.text_content();
+            if t.is_empty() { None } else { Some(t) }
+        });
+
+    // 1d. Partial compaction: summarise only the tail, preserving the prefix
+    //     for prompt-cache hits.
+    match partial_compact(provider, conversation, &ctx, context_window, &last_user_text).await {
+        Ok(true) => {
+            tracing::info!(
+                task_id = %task_id,
+                session_id = %session_id,
+                "compaction: partial compaction succeeded"
+            );
+            return true;
+        }
+        Ok(false) => {
+            tracing::debug!(
+                task_id = %task_id,
+                session_id = %session_id,
+                "compaction: partial compaction skipped (tail too small), proceeding to full"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                session_id = %session_id,
+                error = %e,
+                "compaction: partial compaction failed, falling back to full compaction"
+            );
+        }
+    }
+
     // 2. Extract system prompt and last plain-text user message before modifying.
     let system_msg: Option<Message> = conversation
         .messages
@@ -346,6 +421,8 @@ pub(crate) async fn compact_conversation(
         .find(|m| m.role == Role::System)
         .cloned();
 
+    // Re-extract last_user_text in case partial_compact mutated the conversation
+    // (it shouldn't have on failure, but be defensive).
     let last_user_text: Option<String> = conversation
         .messages
         .iter()
@@ -439,6 +516,203 @@ pub(crate) async fn compact_conversation(
             false
         }
     }
+}
+
+// ─── Partial compaction ─────────────────────────────────────────────────────
+
+/// Attempt partial compaction: summarise only the tail of the conversation
+/// (messages after a pivot point at ~60% of total tokens) while preserving the
+/// prefix verbatim.  This preserves the system prompt and early context for
+/// prompt-cache hits.
+///
+/// Returns `Ok(true)` if partial compaction was performed, `Ok(false)` if the
+/// tail is too small to be worth compacting (caller should fall through to full
+/// compaction), or `Err` on LLM failure.
+async fn partial_compact(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    ctx: &CompactionContext,
+    context_window: i64,
+    last_user_text: &Option<String>,
+) -> Result<bool, anyhow::Error> {
+    let messages = &conversation.messages;
+    if messages.len() < 4 {
+        // Too few messages to meaningfully split.
+        return Ok(false);
+    }
+
+    // 1. Estimate per-message token counts and find the pivot.
+    let msg_tokens: Vec<usize> = messages
+        .iter()
+        .map(|m| estimate_message_chars(m) / CHARS_PER_TOKEN.max(1))
+        .collect();
+    let total_tokens: usize = msg_tokens.iter().sum();
+
+    if total_tokens == 0 {
+        return Ok(false);
+    }
+
+    let pivot_token_target = (total_tokens as f64 * PARTIAL_COMPACTION_PIVOT) as usize;
+
+    // Walk from the start accumulating tokens to find the pivot index.
+    // The pivot is the first message whose cumulative total reaches the target.
+    // We never split inside the system message (index 0).
+    let mut cumulative: usize = 0;
+    let mut pivot_idx: usize = 1; // default: right after system prompt
+    for (i, &tok) in msg_tokens.iter().enumerate() {
+        cumulative += tok;
+        if cumulative >= pivot_token_target {
+            pivot_idx = i;
+            break;
+        }
+    }
+
+    // Ensure pivot is at least 1 (never include system msg in the tail).
+    pivot_idx = pivot_idx.max(1);
+
+    // Ensure the tail has at least 2 messages to summarise.
+    if pivot_idx + 2 > messages.len() {
+        return Ok(false);
+    }
+
+    // 2. Estimate reclaimable tokens (the tail).
+    let tail_tokens: usize = msg_tokens[pivot_idx..].iter().sum();
+
+    // Check if tail is large enough to be worth compacting.
+    if context_window > 0
+        && (tail_tokens as f64 / context_window as f64) < PARTIAL_COMPACTION_MIN_RECLAIM
+    {
+        tracing::debug!(
+            tail_tokens,
+            context_window,
+            min_reclaim = PARTIAL_COMPACTION_MIN_RECLAIM,
+            "partial_compact: tail too small, skipping"
+        );
+        return Ok(false);
+    }
+
+    // 3. Ensure we don't split a tool-use / tool-result pair.  If the message
+    //    at pivot_idx is a user message containing ToolResult blocks, move the
+    //    pivot back one so the preceding ToolUse assistant message is also in
+    //    the tail (keeping the pair together).
+    {
+        use crate::message::ContentBlock;
+        let pivot_msg = &messages[pivot_idx];
+        if pivot_msg.role == Role::User
+            && pivot_msg
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            && pivot_idx > 1
+        {
+            // Include the preceding assistant ToolUse message in the tail.
+            pivot_idx -= 1;
+        }
+    }
+
+    let prefix = &messages[..pivot_idx];
+    let tail = &messages[pivot_idx..];
+
+    tracing::info!(
+        pivot_idx,
+        prefix_messages = prefix.len(),
+        tail_messages = tail.len(),
+        tail_tokens,
+        total_tokens,
+        "partial_compact: attempting partial compaction"
+    );
+
+    // 4. Summarise the tail using progressive tool-response removal (same
+    //    strategy as full compaction).
+    let summary = do_partial_compact(provider, tail).await?;
+
+    // 5. Rebuild the conversation: prefix + summary + continuation.
+    let mut new_messages: Vec<Message> = prefix.to_vec();
+
+    new_messages.push(Message::user(format!(
+        "[Partial compaction: the following is a summary of {} messages that were \
+         compacted to free context space. Earlier messages are preserved above.]\n\n{}",
+        tail.len(),
+        summary,
+    )));
+
+    let continuation_msg = match ctx {
+        CompactionContext::PreResume(_) => {
+            "Part of your context was compacted. The messages above the summary are \
+             preserved verbatim; the summary covers your more recent work. You will \
+             receive feedback in the next message."
+        }
+        _ => {
+            "Part of your context was compacted. The messages above the summary are \
+             preserved verbatim; the summary covers your more recent work. Continue \
+             calling tools as necessary to complete the task."
+        }
+    };
+    new_messages.push(Message::assistant(continuation_msg));
+
+    // Re-append the last user message for mid-session so the agent knows
+    // what it was working on (same logic as full compaction).
+    if matches!(ctx, CompactionContext::MidSession(_)) {
+        if let Some(last_user) = last_user_text {
+            let already_appended = new_messages
+                .last()
+                .map(|m| m.role == Role::User && m.text_content() == *last_user)
+                .unwrap_or(false);
+            if !already_appended {
+                new_messages.push(Message::user(last_user.clone()));
+            }
+        }
+    }
+
+    conversation.messages = new_messages;
+    Ok(true)
+}
+
+/// Summarise a slice of tail messages for partial compaction, using the same
+/// progressive tool-response removal strategy as full compaction.
+async fn do_partial_compact(
+    provider: &dyn LlmProvider,
+    tail_messages: &[Message],
+) -> anyhow::Result<String> {
+    const REMOVAL_PERCENTAGES: &[u32] = &[0, 10, 20, 50, 100];
+
+    for &pct in REMOVAL_PERCENTAGES {
+        let filtered = filter_tool_responses_middle_out(tail_messages, pct);
+        let formatted = format_messages_as_text(&filtered);
+        let prompt_text = PARTIAL_COMPACTION_PROMPT.replace("{messages}", &formatted);
+
+        let mut compact_conv = Conversation::new();
+        compact_conv.push(Message::system(PARTIAL_COMPACTION_SUMMARISER_SYSTEM));
+        compact_conv.push(Message::user(prompt_text));
+
+        match call_llm_for_summary(provider, &compact_conv).await {
+            Ok(summary) if !summary.is_empty() => return Ok(summary),
+            Ok(_) => {
+                tracing::debug!(pct, "partial_compact: empty summary at removal pct, retrying");
+            }
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                let is_ctx_error = msg.contains("context_length")
+                    || msg.contains("too many tokens")
+                    || msg.contains("maximum context")
+                    || msg.contains("context window")
+                    || msg.contains("prompt is too long");
+                if is_ctx_error {
+                    tracing::debug!(
+                        pct,
+                        error = %e,
+                        "partial_compact: context length error, retrying with more removal"
+                    );
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "partial_compact: failed to summarise tail even with 100% tool-response removal"
+    ))
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -1410,5 +1684,110 @@ mod tests {
             find_orphaned_tool_result(&conv.messages).is_none(),
             "microcompaction must not create orphaned tool results"
         );
+    }
+
+    // ── Partial compaction constants ────────────────────────────────────────
+
+    #[test]
+    fn partial_compaction_pivot_is_reasonable() {
+        // Pivot should be between 0 and 1, and significantly past the midpoint
+        // to preserve a large prefix.
+        assert!(PARTIAL_COMPACTION_PIVOT > 0.0);
+        assert!(PARTIAL_COMPACTION_PIVOT < 1.0);
+        assert!(PARTIAL_COMPACTION_PIVOT >= 0.5, "pivot should preserve at least half");
+    }
+
+    #[test]
+    fn partial_compaction_min_reclaim_is_reasonable() {
+        assert!(PARTIAL_COMPACTION_MIN_RECLAIM > 0.0);
+        assert!(PARTIAL_COMPACTION_MIN_RECLAIM < 0.5);
+    }
+
+    #[test]
+    fn partial_compaction_pivot_finding() {
+        // Simulate the pivot-finding logic from partial_compact.
+        let messages = vec![
+            Message::system("System prompt with moderate length content."),
+            Message::user("First user message"),
+            Message::assistant("First assistant response with some content"),
+            Message::user("Second user message"),
+            Message::assistant("Second assistant response"),
+            Message::user("Third user message - this is longer to shift the pivot"),
+            Message::assistant("Third assistant response"),
+            Message::user("Fourth user message"),
+            Message::assistant("Fourth assistant response"),
+        ];
+
+        let msg_tokens: Vec<usize> = messages
+            .iter()
+            .map(|m| estimate_message_chars(m) / CHARS_PER_TOKEN.max(1))
+            .collect();
+        let total_tokens: usize = msg_tokens.iter().sum();
+        let pivot_target = (total_tokens as f64 * PARTIAL_COMPACTION_PIVOT) as usize;
+
+        let mut cumulative: usize = 0;
+        let mut pivot_idx: usize = 1;
+        for (i, &tok) in msg_tokens.iter().enumerate() {
+            cumulative += tok;
+            if cumulative >= pivot_target {
+                pivot_idx = i;
+                break;
+            }
+        }
+        pivot_idx = pivot_idx.max(1);
+
+        // Pivot should be somewhere in the middle, not at the very start or end.
+        assert!(pivot_idx >= 1, "pivot must be after system message");
+        assert!(
+            pivot_idx + 2 <= messages.len(),
+            "pivot must leave at least 2 messages in the tail"
+        );
+    }
+
+    #[test]
+    fn partial_compaction_skips_small_tail() {
+        // When the tail would reclaim less than 20% of context window,
+        // partial compaction should be skipped.
+        let messages = vec![
+            // Large system prompt that dominates the token count.
+            Message::system(&"x".repeat(3000)),
+            Message::user("tiny tail"),
+            Message::assistant("tiny response"),
+        ];
+
+        let msg_tokens: Vec<usize> = messages
+            .iter()
+            .map(|m| estimate_message_chars(m) / CHARS_PER_TOKEN.max(1))
+            .collect();
+        let total_tokens: usize = msg_tokens.iter().sum();
+        let pivot_target = (total_tokens as f64 * PARTIAL_COMPACTION_PIVOT) as usize;
+
+        let mut cumulative: usize = 0;
+        let mut pivot_idx: usize = 1;
+        for (i, &tok) in msg_tokens.iter().enumerate() {
+            cumulative += tok;
+            if cumulative >= pivot_target {
+                pivot_idx = i;
+                break;
+            }
+        }
+        pivot_idx = pivot_idx.max(1);
+
+        let tail_tokens: usize = msg_tokens[pivot_idx..].iter().sum();
+        let context_window: i64 = 10_000;
+
+        // The tail is small relative to the context window, so partial compaction
+        // should be skipped.
+        let would_skip =
+            (tail_tokens as f64 / context_window as f64) < PARTIAL_COMPACTION_MIN_RECLAIM;
+        assert!(
+            would_skip,
+            "expected tail ({tail_tokens} tokens) to be too small for context window ({context_window})"
+        );
+    }
+
+    #[test]
+    fn partial_compaction_prompt_has_messages_placeholder() {
+        assert!(PARTIAL_COMPACTION_PROMPT.contains("{messages}"));
     }
 }
