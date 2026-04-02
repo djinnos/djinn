@@ -9,8 +9,7 @@ import { useExecutionControl } from "@/hooks/useExecutionControl";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { verificationStore } from "@/stores/verificationStore";
 import { Button } from "@/components/ui/button";
-import { RotateCcw } from "lucide-react";
-import { ArrowDown01Icon, ArrowRight01Icon, Cancel01Icon, PlayIcon, StopIcon } from "@hugeicons/core-free-icons";
+import { ArrowDown01Icon, ArrowRight01Icon, Cancel01Icon, PlayIcon, Refresh01Icon, StopIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   areSetupVerificationViewsEqual,
@@ -127,7 +126,7 @@ function TaskActions({ task }: { task: Task }) {
           onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")}
           className="gap-1.5"
         >
-          <RotateCcw className="h-3.5 w-3.5" />
+          <HugeiconsIcon icon={Refresh01Icon} size={14} />
           Reopen
         </Button>
       )}

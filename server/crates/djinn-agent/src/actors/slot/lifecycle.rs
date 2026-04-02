@@ -1252,8 +1252,14 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         }
     }
 
-    // Always commit whatever the agent wrote before verification or cleanup.
-    commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
+    // Commit a WIP snapshot for interrupted / non-worker sessions.
+    // Skip this for successful worker sessions — they get a proper commit
+    // with the message from submit_work in commit_final_work_if_needed below.
+    let worker_completed_ok =
+        reply_result.is_ok() && runtime_role.config().preserves_session;
+    if !worker_completed_ok {
+        commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
+    }
 
     // ── Shut down LSP clients for this worktree ──────────────────────────────
     // Centralized cleanup: every session-end path flows through here, so LSP

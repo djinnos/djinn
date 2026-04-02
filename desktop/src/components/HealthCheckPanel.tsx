@@ -1,7 +1,8 @@
 import { Button } from '@/components/ui/button';
 import { StepLog } from '@/components/StepLog';
 import type { VerificationRun } from '@/stores/verificationStore';
-import { RotateCcw } from 'lucide-react';
+import { Refresh01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 interface HealthCheckPanelProps {
   projectName: string;
@@ -45,7 +46,7 @@ export function HealthCheckPanel({ projectName, run, open, onClose }: HealthChec
         <div className="mt-6 flex items-center justify-between border-t pt-4 text-sm text-muted-foreground">
           <span>Last run: {formatTimestamp(run?.startedAt)}</span>
           <Button type="button" variant="outline" size="sm" className="gap-1.5" disabled>
-            <RotateCcw className="h-3.5 w-3.5" />
+            <HugeiconsIcon icon={Refresh01Icon} size={14} />
             Re-run
           </Button>
         </div>

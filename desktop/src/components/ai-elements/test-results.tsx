@@ -8,12 +8,13 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import {
-  CheckCircle2Icon,
-  ChevronRightIcon,
-  CircleDotIcon,
+  ArrowRight01Icon,
+  CancelCircleIcon,
+  CheckmarkCircle04Icon,
   CircleIcon,
-  XCircleIcon,
-} from "lucide-react";
+  Progress02Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import type { ComponentProps, HTMLAttributes } from "react";
 import { createContext, useContext, useMemo } from "react";
 
@@ -99,7 +100,7 @@ export const TestResultsSummary = ({
             className="gap-1 bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
             variant="secondary"
           >
-            <CheckCircle2Icon className="size-3" />
+            <HugeiconsIcon icon={CheckmarkCircle04Icon} size={12} />
             {summary.passed} passed
           </Badge>
           {summary.failed > 0 && (
@@ -107,7 +108,7 @@ export const TestResultsSummary = ({
               className="gap-1 bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
               variant="secondary"
             >
-              <XCircleIcon className="size-3" />
+              <HugeiconsIcon icon={CancelCircleIcon} size={12} />
               {summary.failed} failed
             </Badge>
           )}
@@ -116,7 +117,7 @@ export const TestResultsSummary = ({
               className="gap-1 bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
               variant="secondary"
             >
-              <CircleIcon className="size-3" />
+              <HugeiconsIcon icon={CircleIcon} size={12} />
               {summary.skipped} skipped
             </Badge>
           )}
@@ -228,10 +229,10 @@ const statusStyles: Record<TestStatus, string> = {
 };
 
 const statusIcons: Record<TestStatus, React.ReactNode> = {
-  failed: <XCircleIcon className="size-4" />,
-  passed: <CheckCircle2Icon className="size-4" />,
-  running: <CircleDotIcon className="size-4 animate-pulse" />,
-  skipped: <CircleIcon className="size-4" />,
+  failed: <HugeiconsIcon icon={CancelCircleIcon} size={16} />,
+  passed: <HugeiconsIcon icon={CheckmarkCircle04Icon} size={16} />,
+  running: <HugeiconsIcon icon={Progress02Icon} size={16} className="animate-pulse" />,
+  skipped: <HugeiconsIcon icon={CircleIcon} size={16} />,
 };
 
 const TestStatusIcon = ({ status }: { status: TestStatus }) => (
@@ -280,7 +281,7 @@ export const TestSuiteName = ({
       )}
       {...props}
     >
-      <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+      <HugeiconsIcon icon={ArrowRight01Icon} size={16} className="shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
       <TestStatusIcon status={status} />
       <span className="font-medium text-sm">{children ?? name}</span>
     </CollapsibleTrigger>
