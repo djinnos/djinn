@@ -63,12 +63,19 @@ pub fn init(config: &LangfuseConfig) -> anyhow::Result<bool> {
     let mut headers = std::collections::HashMap::new();
     headers.insert("Authorization".to_string(), config.auth_header());
 
+    // Langfuse OTLP ingestion lives at /api/public/otel/v1/traces.
+    // If the user supplied just the base URL (e.g. http://localhost:3000),
+    // normalise it so the exporter hits the correct path.
+    let base = config.endpoint.trim_end_matches('/');
+    let otlp_base = if base.ends_with("/api/public/otel") {
+        base.to_string()
+    } else {
+        format!("{base}/api/public/otel")
+    };
+
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(format!(
-            "{}/v1/traces",
-            config.endpoint.trim_end_matches('/')
-        ))
+        .with_endpoint(format!("{otlp_base}/v1/traces"))
         .with_headers(headers)
         .build()?;
 
