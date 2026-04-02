@@ -432,11 +432,12 @@ async fn lifecycle_provider_failure_session_reaches_failed_and_slot_freed() {
     );
 }
 
-/// Worktree cleanup: after a provider failure the lifecycle calls
-/// `teardown_worktree`, which removes the worktree directory.  Verify the
-/// directory is gone after the lifecycle completes.
+/// Worktree preservation: after a provider failure the lifecycle preserves the
+/// worktree so the next retry session can reuse the target/ build cache.
+/// Real teardown happens on task close/merge (task_merge.rs) or via
+/// purge_all_worktrees on execution restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lifecycle_provider_failure_cleans_up_worktree() {
+async fn lifecycle_provider_failure_preserves_worktree_for_retry() {
     let repo = create_git_repo().await;
     let db = create_test_db();
     let cancel = CancellationToken::new();
@@ -480,11 +481,11 @@ async fn lifecycle_provider_failure_cleans_up_worktree() {
     // Drain the slot event (ensures lifecycle is fully done)
     recv_slot_event(&mut event_rx).await;
 
-    // ── Assert: worktree directory removed after failure ───────────────────
-    // give the async teardown a brief moment to complete (it's in-line for
-    // the worker failure path)
+    // ── Assert: worktree directory preserved for retry ─────────────────────
+    // Failed sessions now preserve the worktree so the next session can
+    // reuse the target/ build cache instead of rebuilding from scratch.
     assert!(
-        !worktree_path.exists(),
-        "worktree directory should be removed after provider failure, still exists at {worktree_path:?}"
+        worktree_path.exists(),
+        "worktree directory should be preserved after provider failure for retry, but was removed at {worktree_path:?}"
     );
 }

@@ -1283,7 +1283,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         return_free!();
     }
     if cancel.is_cancelled() {
-        tracing::info!(task_id = %task_id, "Lifecycle: cancelled; cleaning up");
+        tracing::info!(task_id = %task_id, "Lifecycle: cancelled; preserving worktree for retry");
         update_session_record(
             current_record_id.as_deref(),
             SessionStatus::Interrupted,
@@ -1292,14 +1292,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             &app_state,
         )
         .await;
-        teardown_worktree(
-            &task.short_id,
-            &worktree_path,
-            &project_dir,
-            &app_state,
-            false,
-        )
-        .await;
+        // Preserve the worktree — the task will be released back to open and
+        // re-dispatched, so the next session can reuse the build cache.
+        cleanup_worktree(&task_id, &worktree_path, &app_state).await;
         transition_interrupted(
             &task_id,
             runtime_role.config().release_action,
@@ -1479,14 +1474,12 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             }
         }
 
-        teardown_worktree(
-            &task.short_id,
-            &worktree_path,
-            &project_dir,
-            &app_state,
-            false,
-        )
-        .await;
+        // Preserve the worktree for potential re-dispatch.  Non-worker roles
+        // (lead, reviewer, architect) may release the task back to open, in
+        // which case the next worker session benefits from the existing
+        // target/ build cache.  Real teardown happens on task close/merge
+        // (task_merge.rs) or via purge_all_worktrees on execution restart.
+        cleanup_worktree(&task_id, &worktree_path, &app_state).await;
 
         // For non-worker roles, free the slot immediately and run
         // post-session work (finalize payload, on_complete, transition) in a
@@ -1782,10 +1775,15 @@ async fn apply_transition_and_dispatch(
                     )
                     .await
                 {
-                    tracing::error!(
+                    // Release is only valid from in_progress.  If the task is
+                    // already in open/todo/closed (e.g. a concurrent session or
+                    // background handler transitioned it), that's fine — the
+                    // task isn't stuck.  Log at warn instead of error to avoid
+                    // noisy false alarms.
+                    tracing::warn!(
                         task_id = %task_id,
                         error = %e2,
-                        "Lifecycle: fallback Release also failed; task may be stuck"
+                        "Lifecycle: fallback Release failed (task likely already transitioned)"
                     );
                 }
             }

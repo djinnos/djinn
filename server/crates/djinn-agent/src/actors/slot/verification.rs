@@ -179,7 +179,21 @@ async fn run_verification_pipeline(
     let project_dir = PathBuf::from(project_path);
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
-    // Create a fresh worktree from the task branch.
+    // Create a fresh worktree from the task branch.  If the worktree path
+    // exists but is broken (missing .git), clean it up first so
+    // prepare_worktree can recreate it instead of crashing with ENOENT.
+    let stale_wt = project_dir
+        .join(".djinn")
+        .join("worktrees")
+        .join(&task.short_id);
+    if stale_wt.exists() && !stale_wt.join(".git").exists() {
+        tracing::warn!(
+            task_id = %task_id,
+            worktree = %stale_wt.display(),
+            "Verification: removing broken worktree remnant before prepare"
+        );
+        let _ = tokio::fs::remove_dir_all(&stale_wt).await;
+    }
     let (worktree_path, _) = prepare_worktree(&project_dir, &task, app_state).await?;
     let commit_sha = resolve_head_commit(&worktree_path)?;
 
