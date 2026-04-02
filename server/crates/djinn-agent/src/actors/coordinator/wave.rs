@@ -16,17 +16,6 @@
 
 use super::*;
 use djinn_core::models::task::PRIORITY_CRITICAL;
-use djinn_db::EpicRepository;
-
-/// Worker issue_types that count toward batch-completion.  Any `issue_type`
-/// not in this list is treated as a planner/meta task and excluded.
-const WORKER_ISSUE_TYPES: &[&str] = &["task", "research", "feature"];
-
-/// Returns `true` if the given issue_type is a worker type that counts
-/// toward batch-completion (and should trigger next-wave planning on close).
-pub fn is_worker_issue_type(issue_type: &str) -> bool {
-    WORKER_ISSUE_TYPES.contains(&issue_type)
-}
 
 impl CoordinatorActor {
     /// Called when an epic is created.  Creates the first planning task
@@ -65,89 +54,6 @@ impl CoordinatorActor {
         }
 
         self.create_planning_task(epic).await;
-    }
-
-    /// Called when a task is closed.  Checks whether all worker tasks under
-    /// the epic are now closed (batch complete) and if so creates a new
-    /// planning task for the next wave.
-    pub(super) async fn maybe_create_next_wave_planning(
-        &mut self,
-        epic_id: &str,
-        project_id: &str,
-    ) {
-        let epic_repo = EpicRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
-
-        // Fetch epic — bail if not found or already closed.
-        let epic = match epic_repo.get(epic_id).await {
-            Ok(Some(e)) => e,
-            Ok(None) => return,
-            Err(e) => {
-                tracing::warn!(
-                    epic_id,
-                    error = %e,
-                    "CoordinatorActor: failed to fetch epic for batch-completion check"
-                );
-                return;
-            }
-        };
-
-        if epic.status != "open" {
-            return;
-        }
-
-        let task_repo = self.task_repo();
-        let all_tasks = match task_repo.list_by_epic(epic_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(
-                    epic_id,
-                    error = %e,
-                    "CoordinatorActor: failed to list tasks for batch-completion check"
-                );
-                return;
-            }
-        };
-
-        // Check for an existing open/in-progress planning task — if one
-        // exists we don't create another.
-        let has_open_planning = all_tasks.iter().any(|t| {
-            matches!(t.issue_type.as_str(), "planning" | "decomposition")
-                && matches!(t.status.as_str(), "open" | "in_progress")
-        });
-        if has_open_planning {
-            return;
-        }
-
-        // Worker tasks: include only WORKER_ISSUE_TYPES.  A batch is complete
-        // when every worker task is closed.
-        let worker_tasks: Vec<_> = all_tasks
-            .iter()
-            .filter(|t| WORKER_ISSUE_TYPES.contains(&t.issue_type.as_str()))
-            .collect();
-
-        // No worker tasks yet — the first decomposition wave hasn't created
-        // anything to close.  Skip.
-        if worker_tasks.is_empty() {
-            return;
-        }
-
-        let all_closed = worker_tasks.iter().all(|t| t.status == "closed");
-
-        if !all_closed {
-            return;
-        }
-
-        tracing::info!(
-            epic_id,
-            project_id,
-            worker_count = worker_tasks.len(),
-            "CoordinatorActor: batch complete — creating next-wave planning task"
-        );
-
-        self.create_planning_task(&epic).await;
     }
 
     /// Internal: create a planning task for an epic and trigger dispatch.

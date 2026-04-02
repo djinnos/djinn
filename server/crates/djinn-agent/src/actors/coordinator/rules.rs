@@ -61,10 +61,24 @@ impl CoordinatorActor {
         let task_repo = self.task_repo();
 
         // Rule 1: Spike or Research closure.
+        // Only fire when all other worker tasks are also closed (epic is drained),
+        // so the planner doesn't create new waves while work is still in progress.
         let is_spike_or_research = matches!(task.issue_type.as_str(), "spike" | "research");
 
         if is_spike_or_research {
-            if !self.open_planning_task_exists(&task_repo, epic_id).await {
+            let all_tasks = match task_repo.list_by_epic(epic_id).await {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            let has_open_work = all_tasks.iter().any(|t| {
+                t.id != task.id
+                    && !matches!(
+                        t.issue_type.as_str(),
+                        "planning" | "decomposition" | "review"
+                    )
+                    && t.status != "closed"
+            });
+            if !has_open_work && !self.open_planning_task_exists(&task_repo, epic_id).await {
                 self.create_planning_task_by_ids(
                     &task_repo,
                     epic_id,

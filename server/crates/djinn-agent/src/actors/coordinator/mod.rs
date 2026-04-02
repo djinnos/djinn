@@ -822,19 +822,6 @@ impl CoordinatorActor {
                     );
                     self.dispatch_ready_tasks(Some(&task.project_id)).await;
                 }
-                // Batch-completion check: when a *worker* task closes, check
-                // if all non-planning worker tasks under the epic are closed
-                // (AC5/AC6 — wave-based planning).
-                // Planning/decomposition/review/spike task closures must NOT
-                // trigger this — otherwise a planner task closing re-triggers
-                // wave creation even when the epic should be done.
-                if task.status == "closed"
-                    && wave::is_worker_issue_type(&task.issue_type)
-                    && let Some(ref epic_id) = task.epic_id
-                {
-                    self.maybe_create_next_wave_planning(epic_id, &task.project_id)
-                        .await;
-                }
             }
             _ => {}
         }
