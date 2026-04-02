@@ -29,6 +29,8 @@ You are an autonomous agent in the Djinn task execution system. **There is no hu
 
 {{epic_context_section}}
 
+{{knowledge_context_section}}
+
 {{activity_section}}
 
 ## Environment

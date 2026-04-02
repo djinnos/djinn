@@ -848,3 +848,98 @@ pub(crate) fn build_telemetry_meta(
         session_id: Some(task_id.to_owned()),
     }
 }
+
+// ─── Knowledge context helpers ──────────────────────────────────────────────
+
+/// Extract crate/module path prefixes from a task's description, design, and epic context.
+pub(crate) fn derive_task_scope_paths(
+    task: &djinn_core::models::Task,
+    epic_context: Option<&str>,
+) -> Vec<String> {
+    use regex::Regex;
+    // Match paths like: crates/foo, src/bar/baz, server/crates/djinn-db
+    // Looking for patterns with at least 2 slash-separated segments
+    let re = Regex::new(
+        r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#,
+    )
+    .unwrap_or_else(|_| Regex::new(r"[a-z]+/[a-z]+").unwrap());
+
+    let mut paths = std::collections::HashSet::new();
+
+    for text in [&task.description, &task.design] {
+        for cap in re.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                let path = m.as_str();
+                // Filter to paths that look like code paths (not URLs, not short fragments)
+                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
+                    // Derive scope: split on /src/ or take up to 3 components
+                    if let Some(idx) = path.find("/src/") {
+                        paths.insert(path[..idx].to_string());
+                    } else {
+                        paths.insert(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(epic) = epic_context {
+        for cap in re.captures_iter(epic) {
+            if let Some(m) = cap.get(1) {
+                let path = m.as_str();
+                if path.contains('/') && !path.starts_with("http") && !path.starts_with("//") {
+                    if let Some(idx) = path.find("/src/") {
+                        paths.insert(path[..idx].to_string());
+                    } else {
+                        paths.insert(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    paths.into_iter().collect()
+}
+
+/// Format knowledge notes for injection into the system prompt.
+/// Uses L0 (abstract) for most notes, L1 (overview) for high-confidence ones.
+/// Budget-capped at `budget_chars`, dropping lowest-confidence notes first.
+pub(crate) fn format_knowledge_notes(
+    notes: &[djinn_core::models::Note],
+    budget_chars: usize,
+) -> String {
+    let mut lines = Vec::new();
+    let mut used = 0;
+
+    for note in notes {
+        let label = match note.note_type.as_str() {
+            "pitfall" => "Pitfall",
+            "pattern" => "Pattern",
+            "case" => "Case",
+            _ => "Note",
+        };
+
+        let summary = if note.confidence > 0.8 {
+            // High confidence: use overview (L1) if available
+            note.overview
+                .as_deref()
+                .or(note.abstract_.as_deref())
+                .unwrap_or_else(|| &note.content[..note.content.len().min(200)])
+        } else {
+            // Lower confidence: use abstract (L0) if available
+            note.abstract_
+                .as_deref()
+                .unwrap_or_else(|| &note.content[..note.content.len().min(100)])
+        };
+
+        let line = format!("- **[{}] {}**: {}", label, note.title, summary);
+
+        if used + line.len() > budget_chars {
+            break;
+        }
+        used += line.len() + 1; // +1 for newline
+        lines.push(line);
+    }
+
+    lines.join("\n")
+}

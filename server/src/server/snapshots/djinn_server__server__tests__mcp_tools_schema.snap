@@ -1,6 +1,5 @@
 ---
 source: src/server/mod.rs
-assertion_line: 482
 expression: signatures
 ---
 [
@@ -3622,6 +3621,14 @@ expression: signatures
         "project": {
           "description": "Absolute path to the project directory.",
           "type": "string"
+        },
+        "scope_paths": {
+          "description": "Crate/module path prefixes this note applies to. Empty array means global.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
         },
         "tags": {
           "items": {

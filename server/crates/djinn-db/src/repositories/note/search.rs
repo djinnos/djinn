@@ -376,6 +376,77 @@ impl NoteRepository {
         Ok(query.fetch_all(self.db.pool()).await?)
     }
 
+    /// Query notes whose `scope_paths` overlap with the given task paths.
+    ///
+    /// A note matches if it is either global (`scope_paths` is empty JSON array)
+    /// or any of its scope path entries is a prefix of any provided task path.
+    /// When `task_paths` is empty, only global notes are returned.
+    pub async fn query_by_scope_overlap(
+        &self,
+        project_id: &str,
+        task_paths: &[String],
+        note_types: &[&str],
+        min_confidence: f64,
+        limit: usize,
+    ) -> Result<Vec<Note>> {
+        self.db.ensure_initialized().await?;
+
+        // Build the note_type IN clause — these are controlled strings, safe to interpolate.
+        let types_in = note_types
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut bind_values: Vec<String> = Vec::new();
+
+        // ?1 = project_id
+        bind_values.push(project_id.to_string());
+        // ?2 = min_confidence
+        // (handled separately as f64)
+
+        let scope_clause = if task_paths.is_empty() {
+            // Only global notes
+            "json_array_length(n.scope_paths) = 0".to_string()
+        } else {
+            // Global notes OR any scope_path is a prefix of any task_path
+            let mut exists_parts = Vec::new();
+            for task_path in task_paths {
+                let idx = bind_values.len() + 2; // +2 because ?2 is min_confidence
+                bind_values.push(task_path.clone());
+                exists_parts.push(format!(
+                    "EXISTS (SELECT 1 FROM json_each(n.scope_paths) AS sp WHERE ?{idx} LIKE sp.value || '%')"
+                ));
+            }
+            let exists_or = exists_parts.join(" OR ");
+            format!("(json_array_length(n.scope_paths) = 0 OR {exists_or})")
+        };
+
+        let sql = format!(
+            "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
+                    n.storage, n.note_type, n.folder, n.tags, n.content,
+                    n.created_at, n.updated_at, n.last_accessed,
+                    n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
+                    n.scope_paths
+             FROM notes n
+             WHERE n.project_id = ?1
+               AND n.note_type IN ({types_in})
+               AND n.confidence >= ?2
+               AND {scope_clause}
+             ORDER BY n.confidence DESC, n.updated_at DESC
+             LIMIT {limit}"
+        );
+
+        let mut query = sqlx::query_as::<_, Note>(&sql);
+        query = query.bind(&bind_values[0]); // project_id
+        query = query.bind(min_confidence);   // ?2
+        for val in &bind_values[1..] {
+            query = query.bind(val);
+        }
+
+        Ok(query.fetch_all(self.db.pool()).await?)
+    }
+
     /// Find tasks whose `memory_refs` JSON array contains `permalink`.
     ///
     /// Returns minimal task info: `(id, short_id, title, status)`.

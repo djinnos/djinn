@@ -27,12 +27,20 @@ pub struct Note {
     pub confidence: f64,
     pub abstract_: Option<String>,
     pub overview: Option<String>,
+    /// JSON array of relative path prefixes where this note applies.
+    /// Empty `[]` = global note (applies everywhere).
+    pub scope_paths: String,
 }
 
 impl Note {
     /// Parse the JSON tags string into a `Vec<String>`.
     pub fn parsed_tags(&self) -> Vec<String> {
         serde_json::from_str(&self.tags).unwrap_or_default()
+    }
+
+    /// Parse the JSON scope_paths string into a `Vec<String>`.
+    pub fn parsed_scope_paths(&self) -> Vec<String> {
+        serde_json::from_str(&self.scope_paths).unwrap_or_default()
     }
 
     /// Convert to a `serde_json::Value` with parsed tags.
@@ -55,6 +63,7 @@ impl Note {
             "confidence": self.confidence,
             "abstract": self.abstract_,
             "overview": self.overview,
+            "scope_paths": self.parsed_scope_paths(),
         })
     }
 }

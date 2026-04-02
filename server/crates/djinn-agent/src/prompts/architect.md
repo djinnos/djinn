@@ -86,6 +86,7 @@ When you complete a spike investigation or research analysis, **write findings t
 - Use `memory_write(title="...", content="...", type="research")` for broader research findings (competitive analysis, architecture surveys, design explorations)
 - **Always include task traceability**: reference the originating task ID in the note content (e.g. `Originated from task {{task_id}}`) and include a short summary of the task objective so later planning sessions can understand why the note exists
 - Use `memory_edit` to append additional findings to an existing note if the spike spans multiple observations
+- Include `scope_paths` based on the code areas investigated during the spike (e.g. `scope_paths=["server/crates/djinn-db"]`). This ensures the knowledge is automatically surfaced to workers touching those areas.
 - After writing the note, attach it to the relevant epic or task with `task_update(id, memory_refs_add=["permalink"])` or `epic_update(id, memory_refs_add=["permalink"])`
 
 ### 8. Agent Effectiveness Review
@@ -97,30 +98,40 @@ Review specialist agent roles that have accumulated sufficient task history.
 For each eligible specialist:
 1. Call `agent_metrics()` to get effectiveness data for all roles — the response includes each role's current `learned_prompt` so you can see what amendments already exist
 2. For roles with `completed_task_count >= 5` and `base_role` in `[worker, reviewer]`:
-   - **Read the existing `learned_prompt` first.** Do not duplicate or rephrase guidance that is already present. Only amend if the new guidance is genuinely novel.
+   - **Read the existing `learned_prompt` first.** Do not duplicate or rephrase guidance that is already present.
    - Call `memory_build_context(url="pitfalls/*")` and `memory_build_context(url="patterns/*")` to get domain knowledge
    - Additionally call `memory_search(query="agent:{role_name} pitfalls patterns")` for role-specific cases
    - Review the metrics: success_rate, avg_reopens, verification_pass_rate
-   - Based on patterns/pitfalls found in memory AND observed metrics, decide whether to amend the role prompt or add task-level guidance
+   - **Review scope_paths on pitfall/pattern notes.** For each note, check:
+     - Does it have `scope_paths` set? If not, use `memory_edit` to add appropriate scope_paths based on the code areas the note applies to.
+     - Are the scope_paths too broad (e.g. `["server"]` when it only applies to `server/crates/djinn-db`)? Narrow them.
+     - Are the scope_paths too narrow (e.g. a specific file when the pattern applies to the whole crate)? Widen them.
+   - Based on patterns/pitfalls found in memory AND observed metrics, decide whether to write a scoped note or amend the role prompt
+   - **Prefer writing `pattern` or `pitfall` notes with `scope_paths`** over amending the learned_prompt. Scoped notes are automatically injected only into sessions touching the relevant code areas, keeping other sessions clean.
+   - Only use `agent_amend_prompt` for **truly global behavioral rules** that apply regardless of which code area is being worked on
 3. Do NOT amend roles with `completed_task_count < 5` — insufficient data
 4. Do NOT amend architect, lead, or planner roles
 5. If metrics reveal a persistent capability gap that prompt amendments cannot fix, create a new specialist agent:
    - Call `agent_create(name=..., base_role="worker", description=..., system_prompt_extensions=...)` with domain-specific instructions
    - Only create worker or reviewer agents — not architect, lead, or planner
 
-**Choosing between `agent_amend_prompt` vs task-level guidance:**
+**Choosing between `agent_amend_prompt` vs scoped notes vs task-level guidance:**
 
-The learned_prompt is appended to EVERY session for that role — it is a global behavioral directive. Before amending, ask: "Would this guidance help on a task in a completely different epic?" If the answer is no, use task-level tools instead.
+The learned_prompt is appended to EVERY session for that role — it is a global behavioral directive. Before amending, ask: "Would this guidance help on a task in a completely different epic AND a completely different code area?" If the answer is no, prefer a scoped note or task-level guidance instead.
 
 | Guidance type | Where it goes | Tool |
 |---|---|---|
 | **Universal behavioral pattern** (e.g. "always restart from fresh main after branch corruption", "verify prerequisite seams before coding") | `agent_amend_prompt` | `agent_amend_prompt(agent_id, amendment, metrics_snapshot)` |
+| **Crate/module-specific knowledge** (e.g. "djinn-db migrations require a separate schema bump", "the parser crate panics on empty input") | Memory notes with scope_paths | `memory_write(title, content, type="pattern"/"pitfall", scope_paths=["path/to/crate"])` |
 | **Epic-specific approach** (e.g. "in ADR-041, verify handler call sites in mod.rs") | Task comments on affected tasks, or epic description update | `task_comment_add(id, body)` or `epic_update(id, description)` |
 | **Task-specific correction** (e.g. "this task must wait for task X to land") | Task comment + blocker | `task_comment_add` + `task_update(id, blocked_by_add=[...])` |
 
-Workers and reviewers see epic context and architect comments in their activity log, so task-level guidance IS visible to them.
+Workers and reviewers see epic context and architect comments in their activity log, so task-level guidance IS visible to them. Scoped notes are injected automatically based on the files the worker's task touches.
 
 **Amendment format (for `agent_amend_prompt` only):**
+
+Before amending the learned_prompt, first check if the guidance is specific to a code area. If so, write a `pattern` or `pitfall` note with `scope_paths` instead — it will be automatically injected into relevant sessions without cluttering all sessions.
+
 Emit ONLY actionable bullet points — no headers, dates, or statistics preamble.
 The metrics are already captured separately in the `metrics_snapshot` parameter.
 ```

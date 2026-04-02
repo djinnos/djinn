@@ -61,7 +61,8 @@ impl NoteRepository {
             "SELECT id, project_id, permalink, title, file_path,
                         storage, note_type, folder, tags, content,
                         created_at, updated_at, last_accessed,
-                        access_count, confidence, abstract as abstract_, overview
+                        access_count, confidence, abstract as abstract_, overview,
+                        scope_paths
              FROM notes n
              WHERE n.project_id = ?1
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')

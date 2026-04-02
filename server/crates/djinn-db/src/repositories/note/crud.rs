@@ -9,6 +9,7 @@ struct CreateNoteParams<'a> {
     note_type: &'a str,
     tags: &'a str,
     storage: &'a str,
+    scope_paths: &'a str,
 }
 
 impl<'a> CreateNoteParams<'a> {
@@ -28,6 +29,7 @@ impl<'a> CreateNoteParams<'a> {
             note_type,
             tags,
             storage: "file",
+            scope_paths: "[]",
         }
     }
 
@@ -46,6 +48,27 @@ impl<'a> CreateNoteParams<'a> {
             note_type,
             tags,
             storage: "db",
+            scope_paths: "[]",
+        }
+    }
+
+    fn db_with_scope(
+        project_id: &'a str,
+        title: &'a str,
+        content: &'a str,
+        note_type: &'a str,
+        tags: &'a str,
+        scope_paths: &'a str,
+    ) -> Self {
+        Self {
+            project_id,
+            project_path: None,
+            title,
+            content,
+            note_type,
+            tags,
+            storage: "db",
+            scope_paths,
         }
     }
 }
@@ -82,6 +105,47 @@ impl NoteRepository {
         .await
     }
 
+    pub async fn create_db_note_with_scope(
+        &self,
+        project_id: &str,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        scope_paths: &str,
+    ) -> Result<Note> {
+        self.create_internal(CreateNoteParams::db_with_scope(
+            project_id, title, content, note_type, tags, scope_paths,
+        ))
+        .await
+    }
+
+    pub async fn update_scope_paths(&self, id: &str, scope_paths: &str) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
+        let id = id.to_owned();
+        let scope_paths = scope_paths.to_owned();
+
+        sqlx::query(
+            "UPDATE notes SET
+                scope_paths = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(&id)
+        .bind(&scope_paths)
+        .execute(self.db.pool())
+        .await?;
+
+        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        self.events.send(DjinnEventEnvelope::note_updated(&note));
+        Ok(note)
+    }
+
     pub async fn create_db_note_with_permalink(
         &self,
         project_id: &str,
@@ -109,8 +173,8 @@ impl NoteRepository {
         sqlx::query(
             "INSERT INTO notes
                 (id, project_id, permalink, title, file_path,
-                 storage, note_type, folder, tags, content, content_hash)
-             VALUES (?1, ?2, ?3, ?4, '', 'db', ?5, ?6, ?7, ?8, ?9)",
+                 storage, note_type, folder, tags, content, content_hash, scope_paths)
+             VALUES (?1, ?2, ?3, ?4, '', 'db', ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(&id)
         .bind(&project_id)
@@ -121,6 +185,7 @@ impl NoteRepository {
         .bind(&tags)
         .bind(&content)
         .bind(&content_hash)
+        .bind("[]")
         .execute(&mut *tx)
         .await?;
 
@@ -191,6 +256,7 @@ impl NoteRepository {
             note_type,
             tags,
             storage,
+            scope_paths,
         } = params;
 
         let id = uuid::Uuid::now_v7().to_string();
@@ -212,6 +278,7 @@ impl NoteRepository {
         let folder = folder_for_type(&note_type).to_owned();
         let tags = tags.to_owned();
         let storage = storage.to_owned();
+        let scope_paths = scope_paths.to_owned();
 
         if storage == "file" {
             let file_path = file_path.as_ref().ok_or_else(|| {
@@ -228,8 +295,8 @@ impl NoteRepository {
             sqlx::query(
                 "INSERT INTO notes
                     (id, project_id, permalink, title, file_path,
-                     storage, note_type, folder, tags, content, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     storage, note_type, folder, tags, content, content_hash, scope_paths)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )
             .bind(&id)
             .bind(&project_id)
@@ -242,6 +309,7 @@ impl NoteRepository {
             .bind(&tags)
             .bind(&content)
             .bind(&content_hash)
+            .bind(&scope_paths)
             .execute(&mut *tx)
             .await?;
 
@@ -286,7 +354,8 @@ impl NoteRepository {
             "SELECT id, project_id, permalink, title, file_path,
                         storage, note_type, folder, tags, content,
                         created_at, updated_at, last_accessed,
-                        access_count, confidence, abstract as abstract_, overview
+                        access_count, confidence, abstract as abstract_, overview,
+                        scope_paths
                  FROM notes WHERE project_id = ?1 AND permalink = ?2",
         )
         .bind(project_id)
@@ -305,7 +374,8 @@ impl NoteRepository {
             "SELECT id, project_id, permalink, title, file_path,
                         storage, note_type, folder, tags, content,
                         created_at, updated_at, last_accessed,
-                        access_count, confidence, abstract as abstract_, overview
+                        access_count, confidence, abstract as abstract_, overview,
+                        scope_paths
                  FROM notes
                  WHERE project_id = ?1 AND content_hash = ?2
                  ORDER BY created_at ASC
@@ -350,7 +420,8 @@ impl NoteRepository {
                 "SELECT id, project_id, permalink, title, file_path,
                             storage, note_type, folder, tags, content,
                             created_at, updated_at, last_accessed,
-                            access_count, confidence, abstract as abstract_, overview
+                            access_count, confidence, abstract as abstract_, overview,
+                            scope_paths
                      FROM notes WHERE project_id = ?1 AND folder = ?2
                      ORDER BY folder, title",
             )
@@ -363,7 +434,8 @@ impl NoteRepository {
                 "SELECT id, project_id, permalink, title, file_path,
                             storage, note_type, folder, tags, content,
                             created_at, updated_at, last_accessed,
-                            access_count, confidence, abstract as abstract_, overview
+                            access_count, confidence, abstract as abstract_, overview,
+                            scope_paths
                      FROM notes WHERE project_id = ?1
                      ORDER BY folder, title",
             )

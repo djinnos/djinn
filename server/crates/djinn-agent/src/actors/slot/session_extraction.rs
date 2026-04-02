@@ -37,6 +37,9 @@ pub struct SessionTaxonomy {
     pub notes_written: u32,
     /// Number of task state transitions triggered via task_transition
     pub tasks_transitioned: u32,
+    /// Deduplicated list of file paths changed during the session.
+    #[serde(default)]
+    pub changed_file_paths: Vec<String>,
     /// Extraction-quality counters persisted for this session.
     #[serde(default)]
     pub extraction_quality: ExtractionQuality,
@@ -240,7 +243,9 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
         }
     }
 
-    taxonomy.files_changed = files_changed_set.len() as u32;
+    taxonomy.changed_file_paths = files_changed_set.into_iter().collect();
+    taxonomy.changed_file_paths.sort();
+    taxonomy.files_changed = taxonomy.changed_file_paths.len() as u32;
     taxonomy.tools_used = unique_tools.len() as u32;
 
     // Staleness analysis: notes read but never mentioned in a subsequent tool call
@@ -589,6 +594,47 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
     }
 }
 
+// ── Scope path derivation ────────────────────────────────────────────────────
+
+/// Derive crate/module-level scope paths from a list of changed file paths.
+///
+/// For each file path, strips the project root prefix and finds the crate
+/// boundary by splitting on `/src/`. Falls back to taking up to the 3rd
+/// directory component.
+///
+/// Example: `server/crates/djinn-db/src/repositories/agent.rs` → `server/crates/djinn-db`
+pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<String> {
+    let mut scopes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let root_prefix = project_root.trim_end_matches('/');
+
+    for path in file_paths {
+        // Strip project root prefix if present
+        let relative = path
+            .strip_prefix(root_prefix)
+            .unwrap_or(path)
+            .trim_start_matches('/');
+
+        // Strategy 1: Split on /src/ and take the prefix (crate root)
+        if let Some(idx) = relative.find("/src/") {
+            scopes.insert(relative[..idx].to_string());
+            continue;
+        }
+
+        // Strategy 2: Take up to the 3rd directory component
+        let parts: Vec<&str> = relative.split('/').collect();
+        if parts.len() > 3 {
+            scopes.insert(parts[..3].join("/"));
+        } else if parts.len() > 1 {
+            // At least 2 components: use all but the filename
+            scopes.insert(parts[..parts.len() - 1].join("/"));
+        }
+    }
+
+    let mut result: Vec<String> = scopes.into_iter().collect();
+    result.sort();
+    result
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -803,6 +849,7 @@ mod tests {
             notes_read: 4,
             notes_written: 1,
             tasks_transitioned: 1,
+            changed_file_paths: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
             extraction_quality: ExtractionQuality {
                 extracted: 2,
                 dedup_skipped: 1,

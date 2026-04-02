@@ -81,6 +81,10 @@ pub struct TaskContext {
     // ── Epic context ─────────────────────────────────────────────────────
     /// Epic context section for lead agents (title, description, memory_refs, sibling tasks).
     pub epic_context: Option<String>,
+
+    // ── Knowledge context ────────────────────────────────────────────────
+    /// Path-scoped knowledge notes relevant to this task's code areas.
+    pub knowledge_context: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -168,6 +172,16 @@ pub(crate) fn render_prompt_for_role(
         _ => String::new(),
     };
     out = out.replace("{{epic_context_section}}", &epic_context_section);
+
+    let knowledge_context_section = match &ctx.knowledge_context {
+        Some(text) if !text.trim().is_empty() => format!(
+            "## Relevant Knowledge\n\n\
+             The following patterns, pitfalls, and cases were learned from previous work \
+             in the code areas this task touches.\n\n{text}\n"
+        ),
+        _ => String::new(),
+    };
+    out = out.replace("{{knowledge_context_section}}", &knowledge_context_section);
 
     let activity_section = match &ctx.activity {
         Some(log) if !log.trim().is_empty() => format!(
@@ -378,6 +392,7 @@ mod tests {
             worker_concerns: None,
             verification_failure: None,
             epic_context: None,
+            knowledge_context: None,
         }
     }
 

@@ -875,6 +875,37 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         None
     };
 
+    // ── Build knowledge context from scope-matched notes ─────────────
+    let knowledge_context = {
+        let note_repo = djinn_db::NoteRepository::new(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
+        );
+
+        let task_paths = derive_task_scope_paths(&task, epic_context.as_deref());
+
+        match note_repo.query_by_scope_overlap(
+            &task.project_id,
+            &task_paths,
+            &["pattern", "pitfall", "case"],
+            0.3,
+            10,
+        ).await {
+            Ok(notes) if !notes.is_empty() => {
+                Some(format_knowledge_notes(&notes, 2000))
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "Lifecycle: failed to query knowledge context"
+                );
+                None
+            }
+        }
+    };
+
     let base_system_prompt = runtime_role.render_prompt(
         &task,
         &TaskContext {
@@ -896,6 +927,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             worker_concerns,
             verification_failure,
             epic_context,
+            knowledge_context,
         },
     );
     // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).

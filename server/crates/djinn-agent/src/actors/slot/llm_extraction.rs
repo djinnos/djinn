@@ -46,6 +46,8 @@ const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extrac
 struct ExtractedNote {
     title: String,
     content: String,
+    #[serde(default)]
+    scope_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -80,6 +82,7 @@ struct ExtractionContext<'a> {
     project_id: &'a str,
     session_id: &'a str,
     provenance: &'a str,
+    session_scope_paths: &'a [String],
     #[cfg(test)]
     candidate_lookup: CandidateLookup,
 }
@@ -301,15 +304,24 @@ async fn run_llm_extraction_inner(
 
     // ── Build prompt ───────────────────────────────────────────────────────
     let taxonomy_json = serde_json::to_string(&taxonomy).unwrap_or_else(|_| "{}".to_string());
+    let project_path = &project.path;
+    let session_scope_paths = crate::actors::slot::session_extraction::derive_scope_paths(
+        &taxonomy.changed_file_paths,
+        project_path,
+    );
+    let scope_json =
+        serde_json::to_string(&session_scope_paths).unwrap_or_else(|_| "[]".to_string());
     let prompt = format!(
         "Task: {title}\n\
          Description: {description}\n\n\
          Session event counts: {taxonomy_json}\n\n\
+         Files touched were in these areas: {scope_json}\n\
+         Include a \"scope_paths\" array per note with relevant path prefixes from the list above.\n\n\
          Extract knowledge from this session. Return JSON:\n\
          {{\n\
-           \"cases\": [{{\"title\": \"...\", \"content\": \"Brief problem and solution description\"}}],\n\
-           \"patterns\": [{{\"title\": \"...\", \"content\": \"Reusable process or method discovered\"}}],\n\
-           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Error encountered and how it was resolved\"}}]\n\
+           \"cases\": [{{\"title\": \"...\", \"content\": \"Brief problem and solution description\", \"scope_paths\": [\"...\"]}}],\n\
+           \"patterns\": [{{\"title\": \"...\", \"content\": \"Reusable process or method discovered\", \"scope_paths\": [\"...\"]}}],\n\
+           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Error encountered and how it was resolved\", \"scope_paths\": [\"...\"]}}]\n\
          }}\n\
          Return empty arrays if nothing significant was learned. \
          Maximum 3 cases, 3 patterns, 2 pitfalls.\n\
@@ -318,6 +330,7 @@ async fn run_llm_extraction_inner(
         title = task.title,
         description = task.description,
         taxonomy_json = taxonomy_json,
+        scope_json = scope_json,
     );
 
     // ── Call LLM ───────────────────────────────────────────────────────────
@@ -394,6 +407,7 @@ async fn run_llm_extraction_inner(
         project_id: &project.id,
         session_id: &session_id,
         provenance: &provenance,
+        session_scope_paths: &session_scope_paths,
         #[cfg(test)]
         candidate_lookup: candidate_lookup_override
             .map(|lookup| CandidateLookup::with_override(lookup))
@@ -490,14 +504,22 @@ async fn process_extracted_note(
     }
 
     let content_with_provenance = format!("{}{}", note.content, extraction_context.provenance);
+    let scope_paths = if note.scope_paths.is_empty() {
+        extraction_context.session_scope_paths.to_vec()
+    } else {
+        note.scope_paths.clone()
+    };
+    let scope_paths_json =
+        serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
     match extraction_context
         .note_repo
-        .create_db_note(
+        .create_db_note_with_scope(
             extraction_context.project_id,
             &note.title,
             &content_with_provenance,
             note_type,
             "[]",
+            &scope_paths_json,
         )
         .await
     {
@@ -847,6 +869,7 @@ mod tests {
             notes_read: 1,
             notes_written: 2,
             tasks_transitioned: 1,
+            changed_file_paths: vec![],
             extraction_quality: ExtractionQuality::default(),
         };
 

@@ -17,6 +17,8 @@ pub struct WriteParams {
     #[schemars(rename = "type")]
     pub note_type: String,
     pub tags: Option<Vec<String>>,
+    /// Crate/module path prefixes this note applies to. Empty array means global.
+    pub scope_paths: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

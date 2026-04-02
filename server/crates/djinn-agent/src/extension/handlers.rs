@@ -845,6 +845,7 @@ pub(super) async fn call_memory_write(
                 content: p.content,
                 note_type: p.note_type,
                 tags: p.tags,
+                scope_paths: p.scope_paths,
             }),
             worktree_root,
         )

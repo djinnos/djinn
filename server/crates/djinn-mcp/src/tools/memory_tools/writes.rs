@@ -421,8 +421,24 @@ impl DjinnMcpServer {
             return Json(response);
         }
 
-        match repo
-            .create(
+        let scope_paths_json = p
+            .scope_paths
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
+            .unwrap_or_else(|| "[]".to_string());
+
+        let create_result = if p.scope_paths.is_some() {
+            repo.create_db_note_with_scope(
+                &project_id,
+                &p.title,
+                &p.content,
+                &p.note_type,
+                &tags_json,
+                &scope_paths_json,
+            )
+            .await
+        } else {
+            repo.create(
                 &project_id,
                 Path::new(&p.project),
                 &p.title,
@@ -431,7 +447,9 @@ impl DjinnMcpServer {
                 &tags_json,
             )
             .await
-        {
+        };
+
+        match create_result {
             Ok(note) => {
                 self.schedule_summary_regeneration(&note.id);
                 self.detect_emit_and_schedule_contradictions(&repo, &note)

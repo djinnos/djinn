@@ -149,6 +149,7 @@ pub(super) struct MemoryWriteParams {
     #[serde(rename = "type")]
     pub note_type: String,
     pub tags: Option<Vec<String>>,
+    pub scope_paths: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
