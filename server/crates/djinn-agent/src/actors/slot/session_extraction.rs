@@ -596,13 +596,15 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
 
 // ── Scope path derivation ────────────────────────────────────────────────────
 
-/// Derive crate/module-level scope paths from a list of changed file paths.
+/// Derive scope paths from a list of changed file paths.
 ///
-/// For each file path, strips the project root prefix and finds the crate
-/// boundary by splitting on `/src/`. Falls back to taking up to the 3rd
-/// directory component.
+/// For each file path, strips the project root prefix and takes the parent
+/// directory. This is language-agnostic: works for Rust, Go, Python, JS, etc.
 ///
-/// Example: `server/crates/djinn-db/src/repositories/agent.rs` → `server/crates/djinn-db`
+/// Examples:
+/// - `server/crates/djinn-db/src/repositories/agent.rs` → `server/crates/djinn-db/src/repositories`
+/// - `internal/auth/login/handler.go` → `internal/auth/login`
+/// - `packages/ui/src/Button.tsx` → `packages/ui/src`
 pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<String> {
     let mut scopes: std::collections::HashSet<String> = std::collections::HashSet::new();
     let root_prefix = project_root.trim_end_matches('/');
@@ -614,19 +616,12 @@ pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<Stri
             .unwrap_or(path)
             .trim_start_matches('/');
 
-        // Strategy 1: Split on /src/ and take the prefix (crate root)
-        if let Some(idx) = relative.find("/src/") {
-            scopes.insert(relative[..idx].to_string());
-            continue;
-        }
-
-        // Strategy 2: Take up to the 3rd directory component
-        let parts: Vec<&str> = relative.split('/').collect();
-        if parts.len() > 3 {
-            scopes.insert(parts[..3].join("/"));
-        } else if parts.len() > 1 {
-            // At least 2 components: use all but the filename
-            scopes.insert(parts[..parts.len() - 1].join("/"));
+        // Take the parent directory (strip the filename)
+        if let Some(idx) = relative.rfind('/') {
+            let dir = &relative[..idx];
+            if !dir.is_empty() {
+                scopes.insert(dir.to_string());
+            }
         }
     }
 

@@ -409,13 +409,18 @@ impl NoteRepository {
             // Only global notes
             "json_array_length(n.scope_paths) = 0".to_string()
         } else {
-            // Global notes OR any scope_path is a prefix of any task_path
+            // Global notes OR bidirectional scope overlap:
+            // - task path is under note scope (note is more general — parent match)
+            // - note scope is under task path (note is more specific — child match)
             let mut exists_parts = Vec::new();
             for task_path in task_paths {
                 let idx = bind_values.len() + 2; // +2 because ?2 is min_confidence
                 bind_values.push(task_path.clone());
                 exists_parts.push(format!(
-                    "EXISTS (SELECT 1 FROM json_each(n.scope_paths) AS sp WHERE ?{idx} LIKE sp.value || '%')"
+                    "EXISTS (SELECT 1 FROM json_each(n.scope_paths) AS sp \
+                     WHERE ?{idx} LIKE sp.value || '/%' \
+                        OR sp.value LIKE ?{idx} || '/%' \
+                        OR sp.value = ?{idx})"
                 ));
             }
             let exists_or = exists_parts.join(" OR ");
