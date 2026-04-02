@@ -346,8 +346,15 @@ pub(super) async fn sweep_stale_resources(
                 };
                 let wt_exists = worktrees_dir.join(short_id).exists();
                 let should_delete = match task_repo.get_by_short_id(short_id).await {
-                    Ok(Some(task)) => task.status == "closed" && !wt_exists,
-                    Ok(None) => true,
+                    // Only delete branches for closed tasks that Djinn created a PR for.
+                    // Branches for tasks without a pr_url were not managed by Djinn
+                    // and must not be touched.
+                    Ok(Some(task)) => {
+                        task.status == "closed" && !wt_exists && task.pr_url.is_some()
+                    }
+                    // Unknown task — do NOT delete; the branch may belong to
+                    // another project or have been created outside Djinn.
+                    Ok(None) => false,
                     Err(_) => false,
                 };
                 if should_delete {
