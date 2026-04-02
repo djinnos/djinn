@@ -7,13 +7,15 @@ import { EmptyState } from '@/components/EmptyState';
 import { AgentConfig } from '@/components/AgentConfig';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { ConnectionSettings } from '@/components/ConnectionSettings';
+import { LangfuseConfig } from '@/components/LangfuseConfig';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useServerHealth } from '@/hooks/useServerHealth';
 import { AddProviderModal } from '@/components/AddProviderModal';
 
-function ProvidersSettings() {
+function ModelsTab() {
   const {
     providers,
     configuredProviders,
@@ -96,25 +98,46 @@ function ProvidersSettings() {
   );
 }
 
+function GeneralTab() {
+  return (
+    <div className="flex flex-col gap-6 flex-1 min-h-0">
+      <ConnectionSettings />
+
+      <div className="border-t border-border" />
+
+      <LangfuseConfig />
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { status } = useServerHealth();
   const isConnected = status === 'connected';
 
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
-      <section className="min-h-0 min-w-0 flex-1 flex flex-col gap-6 overflow-x-hidden overflow-y-auto pb-6">
-        <ConnectionSettings />
-        <div className="border-t border-border" />
-        {isConnected ? (
-          <ProvidersSettings />
-        ) : (
-          <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-6 text-center">
-            <p className="text-sm text-muted-foreground">
-              Connect to a server to manage providers and agents.
-            </p>
-          </div>
-        )}
-      </section>
+      <Tabs defaultValue="models" className="flex-1 min-h-0 flex flex-col">
+        <TabsList variant="line" className="shrink-0 w-full justify-start mb-4">
+          <TabsTrigger value="models">Models</TabsTrigger>
+          <TabsTrigger value="general">General</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="models" className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6">
+          {isConnected ? (
+            <ModelsTab />
+          ) : (
+            <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-6 text-center">
+              <p className="text-sm text-muted-foreground">
+                Connect to a server to manage providers and agents.
+              </p>
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="general" className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6">
+          <GeneralTab />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

@@ -481,6 +481,7 @@ export function Sidebar() {
             Djinn
           </span>
         </div>
+        <ConnectionStatusBadge />
       </div>
 
       {/* Navigation */}
@@ -563,7 +564,6 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="border-t p-3 space-y-2">
-        <ConnectionStatusBadge />
         <NavItem
           icon={<HugeiconsIcon icon={Settings01Icon} size={16} />}
           label="Settings"

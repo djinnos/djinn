@@ -2,8 +2,10 @@ import { create } from 'zustand';
 import {
   fetchSettings,
   saveSettings,
+  saveLangfuseSettings,
   fetchProviderModels,
   ModelEntry,
+  LangfuseSettings,
   ProviderModel
 } from '@/api/settings';
 
@@ -12,8 +14,10 @@ export type { ModelEntry };
 export interface SettingsState {
   models: ModelEntry[];
   availableModels: ProviderModel[];
+  langfuse: LangfuseSettings;
   isLoading: boolean;
   isSaving: boolean;
+  isSavingLangfuse: boolean;
   error: string | null;
   hasUnsavedChanges: boolean;
 }
@@ -28,14 +32,18 @@ export interface SettingsActions {
   toggleRoleForModel: (indexOrModelId: number | string, role: string) => void;
   removeModelsByProvider: (provider: string) => void;
   saveSettings: () => Promise<boolean>;
+  updateLangfuse: (langfuse: LangfuseSettings) => void;
+  saveLangfuse: () => Promise<boolean>;
   resetError: () => void;
 }
 
 const initialState: SettingsState = {
   models: [],
   availableModels: [],
+  langfuse: { publicKey: "", secretKey: "", endpoint: "" },
   isLoading: false,
   isSaving: false,
+  isSavingLangfuse: false,
   error: null,
   hasUnsavedChanges: false,
 };
@@ -47,7 +55,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
     set({ isLoading: true, error: null });
     try {
       const settings = await fetchSettings();
-      set({ models: settings.models, isLoading: false, hasUnsavedChanges: false });
+      set({ models: settings.models, langfuse: settings.langfuse, isLoading: false, hasUnsavedChanges: false });
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : 'Failed to load settings',
@@ -128,11 +136,11 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
   },
 
   saveSettings: async () => {
-    const { models } = get();
+    const { models, langfuse } = get();
 
     set({ isSaving: true, error: null });
     try {
-      await saveSettings({ models });
+      await saveSettings({ models, langfuse });
       set({ isSaving: false, hasUnsavedChanges: false });
       return true;
     } catch (error) {
@@ -142,6 +150,24 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
         error: message,
         isSaving: false
       });
+      return false;
+    }
+  },
+
+  updateLangfuse: (langfuse: LangfuseSettings) => {
+    set({ langfuse });
+  },
+
+  saveLangfuse: async () => {
+    const { langfuse } = get();
+    set({ isSavingLangfuse: true, error: null });
+    try {
+      await saveLangfuseSettings(langfuse);
+      set({ isSavingLangfuse: false });
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save Langfuse settings';
+      set({ error: message, isSavingLangfuse: false });
       return false;
     }
   },

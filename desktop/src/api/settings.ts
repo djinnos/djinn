@@ -7,8 +7,15 @@ export interface ModelEntry {
   max_concurrent: number;
 }
 
+export interface LangfuseSettings {
+  publicKey: string;
+  secretKey: string;
+  endpoint: string;
+}
+
 export interface SettingsResponse {
   models: ModelEntry[];
+  langfuse: LangfuseSettings;
 }
 
 type SettingsGetToolResponse = McpToolOutput<"settings_get">;
@@ -79,7 +86,14 @@ export async function fetchSettings(): Promise<SettingsResponse> {
     };
   });
 
-  return { models };
+  const settings = parsed.settings ?? {};
+  const langfuse: LangfuseSettings = {
+    publicKey: (settings as Record<string, unknown>).langfuse_public_key as string ?? "",
+    secretKey: (settings as Record<string, unknown>).langfuse_secret_key as string ?? "",
+    endpoint: (settings as Record<string, unknown>).langfuse_endpoint as string ?? "",
+  };
+
+  return { models, langfuse };
 }
 
 export async function saveSettings(settings: SettingsResponse): Promise<void> {
@@ -95,10 +109,25 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
     model_priority_reviewer: modelIds,
     model_priority_planner: modelIds,
     max_sessions: maxSessions,
+    langfuse_public_key: settings.langfuse.publicKey,
+    langfuse_secret_key: settings.langfuse.secretKey,
+    langfuse_endpoint: settings.langfuse.endpoint,
   });
 
   if (!response.ok) {
     throw new Error(response.error ?? "Failed to save settings");
+  }
+}
+
+export async function saveLangfuseSettings(langfuse: LangfuseSettings): Promise<void> {
+  const response = await callMcpTool("settings_set", {
+    langfuse_public_key: langfuse.publicKey,
+    langfuse_secret_key: langfuse.secretKey,
+    langfuse_endpoint: langfuse.endpoint,
+  });
+
+  if (!response.ok) {
+    throw new Error(response.error ?? "Failed to save Langfuse settings");
   }
 }
 
