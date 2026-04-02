@@ -679,9 +679,30 @@ pub fn format_family_for_provider(
         FormatFamily::Google
     } else if lower.contains("codex") || model_id.contains("codex") {
         FormatFamily::OpenAIResponses
+    } else if is_openai_responses_model(model_id) && is_native_openai_provider(&lower) {
+        FormatFamily::OpenAIResponses
     } else {
         FormatFamily::OpenAI
     }
+}
+
+/// Returns true for OpenAI models that support the Responses API (GPT-5.x,
+/// o-series reasoning models).  These get better quality and reasoning
+/// summaries when routed through `/responses` instead of `/chat/completions`.
+fn is_openai_responses_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    lower.starts_with("gpt-5")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+}
+
+/// Returns true for provider IDs that point to OpenAI's own API (not
+/// third-party OpenAI-compatible endpoints like Fireworks, Together, etc.).
+fn is_native_openai_provider(provider_id_lower: &str) -> bool {
+    provider_id_lower == "openai"
+        || provider_id_lower.starts_with("openai")
+        || provider_id_lower.contains("chatgpt")
 }
 
 pub fn capabilities_for_provider(provider_id: &str) -> crate::provider::ProviderCapabilities {

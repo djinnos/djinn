@@ -43,6 +43,16 @@ impl OpenAIResponsesProvider {
             body["stream"] = json!(true);
         }
 
+        // Enable reasoning with summaries for models that support it.
+        // GPT-5.x defaults to effort=none; we raise it and request summaries
+        // so the thinking content is captured and persisted.
+        if is_reasoning_capable_model(&self.config.model_id) {
+            body["reasoning"] = json!({
+                "effort": "medium",
+                "summary": "detailed"
+            });
+        }
+
         if !tools.is_empty() {
             let tools_spec: Vec<Value> = tools
                 .iter()
@@ -107,6 +117,17 @@ fn is_fireworks_base_url(base_url: &str) -> bool {
     base_url.contains("fireworks.ai")
 }
 
+/// Returns true for OpenAI models that support the Responses API `reasoning`
+/// parameter (effort + summary).  This covers the GPT-5 family and o-series
+/// reasoning models.
+fn is_reasoning_capable_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    lower.starts_with("gpt-5")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+}
+
 // ─── SSE parsing ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -161,6 +182,15 @@ enum ResponsesStreamEvent {
     ContentPartAdded {},
     #[serde(rename = "response.content_part.done")]
     ContentPartDone {},
+    /// Reasoning summary text delta (streamed when `reasoning.summary` is set).
+    #[serde(rename = "response.reasoning_summary_text.delta")]
+    ReasoningSummaryTextDelta { delta: String },
+    #[serde(rename = "response.reasoning_summary_text.done")]
+    ReasoningSummaryTextDone {},
+    #[serde(rename = "response.reasoning_summary_part.added")]
+    ReasoningSummaryPartAdded {},
+    #[serde(rename = "response.reasoning_summary_part.done")]
+    ReasoningSummaryPartDone {},
     #[serde(rename = "error")]
     Error { error: Value },
     #[serde(rename = "keepalive")]
@@ -180,6 +210,10 @@ const KNOWN_EVENT_TYPES: &[&str] = &[
     "response.failed",
     "response.function_call_arguments.delta",
     "response.function_call_arguments.done",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_part.done",
     "error",
     "keepalive",
 ];
@@ -246,6 +280,13 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
                 ParsedLine::Events(vec![])
             } else {
                 ParsedLine::Events(vec![StreamEvent::Delta(ContentBlock::Text { text: delta })])
+            }
+        }
+        ResponsesStreamEvent::ReasoningSummaryTextDelta { delta } => {
+            if delta.is_empty() {
+                ParsedLine::Events(vec![])
+            } else {
+                ParsedLine::Events(vec![StreamEvent::Thinking(delta)])
             }
         }
         ResponsesStreamEvent::OutputItemDone { item } => {
@@ -840,5 +881,149 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("insufficient_quota"));
         assert!(msg.contains("quota exceeded"));
+    }
+
+    #[test]
+    fn test_parse_reasoning_summary_delta() {
+        let mut acc = Vec::new();
+        let line = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"The user wants to","sequence_number":4}"#;
+        match parse_responses_line(line, &mut acc) {
+            ParsedLine::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(
+                    matches!(&events[0], StreamEvent::Thinking(t) if t == "The user wants to")
+                );
+            }
+            ParsedLine::ProviderError(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_reasoning_summary_empty_delta_skipped() {
+        let mut acc = Vec::new();
+        let line = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"","sequence_number":4}"#;
+        match parse_responses_line(line, &mut acc) {
+            ParsedLine::Events(events) => assert!(events.is_empty()),
+            ParsedLine::ProviderError(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_reasoning_summary_lifecycle_events_ignored() {
+        let mut acc = Vec::new();
+        // These lifecycle events should be silently consumed without error
+        for line in [
+            r#"{"type":"response.reasoning_summary_part.added","item_id":"rs_abc","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""},"sequence_number":3}"#,
+            r#"{"type":"response.reasoning_summary_text.done","item_id":"rs_abc","output_index":0,"summary_index":0,"text":"Full summary.","sequence_number":10}"#,
+            r#"{"type":"response.reasoning_summary_part.done","item_id":"rs_abc","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"Full summary."},"sequence_number":11}"#,
+        ] {
+            match parse_responses_line(line, &mut acc) {
+                ParsedLine::Events(events) => assert!(events.is_empty(), "expected no events for lifecycle event"),
+                ParsedLine::ProviderError(e) => panic!("unexpected error: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_request_includes_reasoning_for_gpt5() {
+        let mut config = test_provider().config.clone();
+        config.model_id = "gpt-5.4".to_string();
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(req["reasoning"]["effort"], "medium");
+        assert_eq!(req["reasoning"]["summary"], "detailed");
+    }
+
+    #[test]
+    fn test_build_request_no_reasoning_for_codex() {
+        let provider = test_provider(); // model_id = gpt-5.1-codex
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        // codex models don't match is_reasoning_capable_model (they contain "codex")
+        // but gpt-5.1-codex starts with "gpt-5" so it should get reasoning
+        assert_eq!(req["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn test_build_request_includes_reasoning_for_o_series() {
+        let mut config = test_provider().config.clone();
+        config.model_id = "o3".to_string();
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(req["reasoning"]["effort"], "medium");
+        assert_eq!(req["reasoning"]["summary"], "detailed");
+    }
+
+    #[test]
+    fn test_build_request_no_reasoning_for_non_reasoning_model() {
+        let mut config = test_provider().config.clone();
+        config.model_id = "some-custom-model".to_string();
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert!(req.get("reasoning").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stream_reasoning_summary_with_text() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        let body = "\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n\
+data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_1\"}}\n\n\
+data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"status\":\"in_progress\"}}\n\n\
+data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n\
+data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"Thinking about \"}\n\n\
+data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"the problem.\"}\n\n\
+data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"text\":\"Thinking about the problem.\"}\n\n\
+data: {\"type\":\"response.reasoning_summary_part.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"Thinking about the problem.\"}}\n\n\
+data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Thinking about the problem.\"}],\"status\":\"completed\"}}\n\n\
+data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\n\
+data: {\"type\":\"response.content_part.added\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n\
+data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"delta\":\"The answer is 42.\"}\n\n\
+data: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"text\":\"The answer is 42.\"}\n\n\
+data: {\"type\":\"response.content_part.done\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"The answer is 42.\"}}\n\n\
+data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"The answer is 42.\"}],\"status\":\"completed\"}}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"reasoning\"},{\"type\":\"message\"}],\"usage\":{\"input_tokens\":50,\"output_tokens\":30}}}\n\n";
+
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(200, body, seen_auth);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
+        let events: Vec<StreamEvent> = stream.try_collect().await.expect("stream events");
+
+        // Should have: Thinking("Thinking about "), Thinking("the problem."),
+        //              Delta(Text("The answer is 42.")), Usage, Done
+        let thinking_events: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Thinking(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking_events, vec!["Thinking about ", "the problem."]);
+
+        let text_events: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Delta(ContentBlock::Text { text }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_events, vec!["The answer is 42."]);
+
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Usage(_))));
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Done)));
     }
 }

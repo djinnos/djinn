@@ -47,6 +47,24 @@ fn provider_helpers_cover_branches() {
         format_family_for_provider("openai", "gpt-4o"),
         FormatFamily::OpenAI
     );
+    // GPT-5.x and o-series on native OpenAI → Responses API
+    assert_eq!(
+        format_family_for_provider("openai", "gpt-5.4"),
+        FormatFamily::OpenAIResponses
+    );
+    assert_eq!(
+        format_family_for_provider("openai", "o3"),
+        FormatFamily::OpenAIResponses
+    );
+    assert_eq!(
+        format_family_for_provider("openai", "o4-mini"),
+        FormatFamily::OpenAIResponses
+    );
+    // Third-party OpenAI-compatible providers stay on Chat Completions
+    assert_eq!(
+        format_family_for_provider("fireworks", "gpt-5.4"),
+        FormatFamily::OpenAI
+    );
 
     let anthropic = capabilities_for_provider("anthropic");
     assert!(anthropic.streaming);

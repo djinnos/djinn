@@ -369,7 +369,7 @@ async fn api_key_provider_config(
     Ok(ProviderConfig {
         base_url: provider_base_url(provider_id),
         auth: provider_auth(provider_id, api_key),
-        format_family: provider_format_family(provider_id),
+        format_family: provider_format_family(provider_id, &model.id),
         model_id: model.id.clone(),
         context_window: model.context_window.max(0) as u32,
         telemetry: None,
@@ -402,13 +402,23 @@ fn provider_auth(provider_id: &str, api_key: String) -> AuthMethod {
     }
 }
 
-fn provider_format_family(provider_id: &str) -> FormatFamily {
+fn provider_format_family(provider_id: &str, model_id: &str) -> FormatFamily {
     match provider_id {
         "anthropic" => FormatFamily::Anthropic,
         "google" => FormatFamily::Google,
         "chatgpt_codex" => FormatFamily::OpenAIResponses,
+        "openai" if is_openai_responses_model(model_id) => FormatFamily::OpenAIResponses,
         _ => FormatFamily::OpenAI,
     }
+}
+
+/// Returns true for OpenAI models that support the Responses API.
+fn is_openai_responses_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    lower.starts_with("gpt-5")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
 }
 
 fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
