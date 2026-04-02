@@ -388,7 +388,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           <img
             src={agentAvatar(task.active_session.agent_type)}
             alt={task.active_session.agent_type ?? "agent"}
-            className="pointer-events-none absolute bottom-0 right-1 h-12 w-12 transition-opacity duration-150 group-hover/taskcard:opacity-0"
+            className="pointer-events-none absolute bottom-0 right-1 h-12 w-12"
           />
         )}
 
