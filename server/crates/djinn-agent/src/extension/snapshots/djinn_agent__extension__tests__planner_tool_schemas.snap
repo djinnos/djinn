@@ -320,6 +320,34 @@ expression: tool_schemas_planner()
     "name": "ci_job_log"
   },
   {
+    "description": "Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.",
+    "inputSchema": {
+      "properties": {
+        "language": {
+          "description": "Programming language filter (e.g. \"Rust\", \"Python\", \"TypeScript\")",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path filter to search within specific directories (e.g. \"src/\")",
+          "type": "string"
+        },
+        "query": {
+          "description": "Search query. Supports regex patterns.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "Repository filter in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "github_search"
+  },
+  {
     "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
     "inputSchema": {
       "properties": {

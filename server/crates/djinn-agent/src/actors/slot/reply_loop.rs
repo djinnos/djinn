@@ -66,6 +66,7 @@ fn is_concurrent_safe(name: &str) -> bool {
             | "output_grep"
             | "lsp"
             | "read"
+            | "github_search"
     )
 }
 

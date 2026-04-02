@@ -1,3 +1,4 @@
+mod github_search;
 mod shared_schemas;
 
 use rmcp::model::Tool as RmcpTool;
@@ -210,6 +211,7 @@ where
         "apply_patch" => call_apply_patch(state, &call.arguments, worktree_path).await,
         "lsp" => call_lsp(state, &call.arguments, worktree_path).await,
         "code_graph" => call_code_graph(state, &call.arguments, &worktree_project_path).await,
+        "github_search" => call_github_search(state, &call.arguments).await,
         other => {
             if let Some(registry) = mcp_registry
                 && registry.has_tool(other)
@@ -3092,6 +3094,9 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
     tool_values.push(serde_json::to_value(tool_code_graph()).expect("serialize tool_code_graph"));
     tool_values.push(serde_json::to_value(tool_ci_job_log()).expect("serialize tool_ci_job_log"));
+    tool_values.push(
+        serde_json::to_value(tool_github_search()).expect("serialize tool_github_search"),
+    );
     tool_values.push(serde_json::to_value(tool_output_view()).expect("serialize tool_output_view"));
     tool_values.push(serde_json::to_value(tool_output_grep()).expect("serialize tool_output_grep"));
     tool_values
@@ -3480,6 +3485,74 @@ async fn call_code_graph(
         }
     };
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// github_search — search GitHub code via grep.app
+// ---------------------------------------------------------------------------
+
+fn tool_github_search() -> RmcpTool {
+    RmcpTool::new(
+        "github_search".to_string(),
+        "Search GitHub code across millions of public repositories via grep.app. \
+         Returns matching code snippets with file paths, line numbers, and repository info. \
+         Useful for finding real-world usage examples, implementation patterns, and API usage."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query. Supports regex patterns."
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Programming language filter (e.g. \"Rust\", \"Python\", \"TypeScript\")"
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "Repository filter in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Path filter to search within specific directories (e.g. \"src/\")"
+                }
+            }
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+struct GithubSearchParams {
+    query: String,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+async fn call_github_search(
+    _state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .user_agent("djinn-agent/0.1")
+            .build()
+            .expect("http client")
+    });
+    let params: GithubSearchParams = parse_args(arguments)?;
+    github_search::search(
+        &HTTP,
+        &params.query,
+        params.language.as_deref(),
+        params.repo.as_deref(),
+        params.path.as_deref(),
+    )
+    .await
 }
 
 #[cfg(test)]
