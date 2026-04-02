@@ -37,7 +37,7 @@ fn anthropic_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
         provider_headers: Default::default(),
         capabilities: ProviderCapabilities {
             streaming: true,
-            max_tokens_default: Some(8192),
+            max_tokens_default: Some(64_000),
         },
     }
 }

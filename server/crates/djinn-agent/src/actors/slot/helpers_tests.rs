@@ -50,7 +50,7 @@ fn provider_helpers_cover_branches() {
 
     let anthropic = capabilities_for_provider("anthropic");
     assert!(anthropic.streaming);
-    assert_eq!(anthropic.max_tokens_default, Some(8192));
+    assert_eq!(anthropic.max_tokens_default, Some(64_000));
 
     let synthetic = capabilities_for_provider("synthetic-provider");
     assert!(!synthetic.streaming);

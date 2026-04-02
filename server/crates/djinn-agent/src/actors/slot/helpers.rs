@@ -695,7 +695,7 @@ pub fn capabilities_for_provider(provider_id: &str) -> crate::provider::Provider
     } else if lower.contains("anthropic") {
         ProviderCapabilities {
             streaming: true,
-            max_tokens_default: Some(8192),
+            max_tokens_default: Some(64_000),
         }
     } else {
         ProviderCapabilities::default()

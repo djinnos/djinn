@@ -165,16 +165,52 @@ impl AnthropicProvider {
         ))
     }
 
+    /// Whether prompt caching is active for this conversation (i.e. at least one
+    /// system message carries the `anthropic_cache_breakpoint` metadata).
+    fn has_cache_metadata(conversation: &Conversation) -> bool {
+        conversation
+            .messages
+            .iter()
+            .any(|m| m.role == djinn_core::message::Role::System && Self::maybe_cache_control(m).is_some())
+    }
+
+    /// Inject a `cache_control: {"type": "ephemeral"}` marker on the last
+    /// content block of the last message in the serialized messages array.
+    ///
+    /// This creates a message-level cache breakpoint so that the entire
+    /// conversation prefix (system + tools + all messages up to the latest turn)
+    /// becomes cacheable across consecutive requests within the same session.
+    fn add_message_cache_breakpoint(messages: &mut [Value]) {
+        if let Some(last_msg) = messages.last_mut() {
+            if let Some(content) = last_msg.get_mut("content").and_then(Value::as_array_mut) {
+                if let Some(last_block) = content.last_mut() {
+                    if let Some(obj) = last_block.as_object_mut() {
+                        obj.insert(
+                            "cache_control".to_string(),
+                            json!({"type": "ephemeral"}),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn build_request(
         &self,
         conversation: &Conversation,
         tools: &[Value],
         tool_choice: Option<ToolChoice>,
     ) -> Value {
-        let (_system, messages) = conversation.to_anthropic_messages();
+        let (_system, mut messages) = conversation.to_anthropic_messages();
         let system_blocks = Self::system_blocks(conversation);
 
-        let max_tokens = self.config.capabilities.max_tokens_default.unwrap_or(8192);
+        // Message-level cache breakpoint: mark the last message so the full
+        // conversation prefix is cacheable across consecutive turns.
+        if Self::has_cache_metadata(conversation) {
+            Self::add_message_cache_breakpoint(&mut messages);
+        }
+
+        let max_tokens = self.config.capabilities.max_tokens_default.unwrap_or(64_000);
 
         let mut body = json!({
             "model": self.config.model_id,
@@ -480,7 +516,7 @@ mod tests {
             provider_headers: std::collections::HashMap::new(),
             capabilities: ProviderCapabilities {
                 streaming: true,
-                max_tokens_default: Some(8192),
+                max_tokens_default: Some(64_000),
             },
         }
     }

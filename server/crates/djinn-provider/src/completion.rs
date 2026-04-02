@@ -415,7 +415,7 @@ fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
     match provider_id {
         "anthropic" => ProviderCapabilities {
             streaming: true,
-            max_tokens_default: Some(8192),
+            max_tokens_default: Some(64_000),
         },
         _ => ProviderCapabilities::default(),
     }
