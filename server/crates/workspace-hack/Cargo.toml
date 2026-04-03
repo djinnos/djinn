@@ -25,9 +25,11 @@ form_urlencoded = { version = "1.2.2" }
 futures-channel = { version = "0.3.32", features = ["sink"] }
 futures-sink = { version = "0.3.32" }
 futures-util = { version = "0.3.32", features = ["channel", "io", "sink"] }
-hyper = { version = "1.8.1", features = ["full"] }
+git2 = { version = "0.20.4", features = ["vendored-libgit2", "vendored-openssl"] }
+hyper = { version = "1.9.0", features = ["full"] }
 hyper-util = { version = "0.1.20", features = ["http1", "http2", "server", "service", "tokio"] }
-insta = { version = "1.46.3", features = ["json", "redactions"] }
+insta = { version = "1.47.2", features = ["json", "redactions"] }
+libgit2-sys = { version = "0.18.3", default-features = false, features = ["https", "ssh", "vendored", "vendored-openssl"] }
 libsqlite3-sys = { version = "0.30.1", features = ["bundled", "unlock_notify"] }
 log = { version = "0.4.29", default-features = false, features = ["std"] }
 memchr = { version = "2.8.0" }
@@ -52,12 +54,12 @@ tokio-stream = { version = "0.1.18", features = ["fs", "sync"] }
 tokio-util = { version = "0.7.18", features = ["codec", "io"] }
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-core = { version = "0.1.36" }
-uuid = { version = "1.22.0", features = ["v4", "v7"] }
+uuid = { version = "1.23.0", features = ["v4", "v7"] }
 
 [build-dependencies]
 aho-corasick = { version = "1.1.4" }
 base64 = { version = "0.22.1" }
-cc = { version = "1.2.57", default-features = false, features = ["parallel"] }
+cc = { version = "1.2.58", default-features = false, features = ["parallel"] }
 crypto-common = { version = "0.1.7", default-features = false, features = ["std"] }
 deranged = { version = "0.5.8", features = ["powerfmt", "serde"] }
 digest = { version = "0.10.7", features = ["std"] }
@@ -94,35 +96,39 @@ bitflags = { version = "2.11.0", default-features = false, features = ["std"] }
 getrandom = { version = "0.4.2", default-features = false, features = ["std", "sys_rng"] }
 hyper-rustls = { version = "0.27.7", default-features = false, features = ["aws-lc-rs", "http1", "native-tokio", "ring", "tls12"] }
 hyper-util = { version = "0.1.20", default-features = false, features = ["client-legacy", "client-proxy"] }
-mio = { version = "1.1.1", features = ["net", "os-ext"] }
+mio = { version = "1.2.0", features = ["net", "os-ext"] }
+openssl-sys = { version = "0.9.112", default-features = false, features = ["vendored"] }
 rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "aws_lc_rs", "ring", "std", "tls12"] }
-rustls-webpki = { version = "0.103.9", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+rustls-webpki = { version = "0.103.10", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
 tower = { version = "0.5.3", default-features = false, features = ["log", "make", "retry", "timeout"] }
 tower-http = { version = "0.6.8", features = ["cors", "follow-redirect"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 bitflags = { version = "2.11.0", default-features = false, features = ["std"] }
-mio = { version = "1.1.1", features = ["net", "os-ext"] }
+mio = { version = "1.2.0", features = ["net", "os-ext"] }
 rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "aws_lc_rs", "ring", "std", "tls12"] }
-rustls-webpki = { version = "0.103.9", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+rustls-webpki = { version = "0.103.10", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 
 [target.aarch64-apple-darwin.dependencies]
 bitflags = { version = "2.11.0", default-features = false, features = ["std"] }
+errno = { version = "0.3.14" }
 getrandom = { version = "0.4.2", default-features = false, features = ["std", "sys_rng"] }
 hyper-rustls = { version = "0.27.7", default-features = false, features = ["aws-lc-rs", "http1", "native-tokio", "ring", "tls12"] }
 hyper-util = { version = "0.1.20", default-features = false, features = ["client-legacy", "client-proxy"] }
-mio = { version = "1.1.1", features = ["net", "os-ext"] }
+mio = { version = "1.2.0", features = ["net", "os-ext"] }
+openssl-sys = { version = "0.9.112", default-features = false, features = ["vendored"] }
 rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "aws_lc_rs", "ring", "std", "tls12"] }
-rustls-webpki = { version = "0.103.9", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+rustls-webpki = { version = "0.103.10", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
 tower = { version = "0.5.3", default-features = false, features = ["log", "make", "retry", "timeout"] }
 tower-http = { version = "0.6.8", features = ["cors", "follow-redirect"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 bitflags = { version = "2.11.0", default-features = false, features = ["std"] }
-mio = { version = "1.1.1", features = ["net", "os-ext"] }
+errno = { version = "0.3.14" }
+mio = { version = "1.2.0", features = ["net", "os-ext"] }
 rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "aws_lc_rs", "ring", "std", "tls12"] }
-rustls-webpki = { version = "0.103.9", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+rustls-webpki = { version = "0.103.10", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 
 ### END HAKARI SECTION
