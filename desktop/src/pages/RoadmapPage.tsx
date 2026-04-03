@@ -62,7 +62,7 @@ export function RoadmapPage() {
   );
 
   // Fetch blockers for all tasks — cached and refreshed with tasks
-  const { data: blockersByTask } = useQuery({
+  const { data: blockersByTask, isLoading: blockersLoading } = useQuery({
     queryKey: ["roadmap-blockers", projectPath, taskIds.join(",")],
     queryFn: () => fetchAllBlockers(taskIds, projectPath!),
     enabled: !!projectPath && taskIds.length > 0,
@@ -76,6 +76,16 @@ export function RoadmapPage() {
   );
 
   const hasData = graphData.some((g) => g.tasks.length > 0);
+
+  if (blockersLoading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <p className="text-sm text-muted-foreground">Loading roadmap…</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!hasData) {
     return (
