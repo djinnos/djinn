@@ -22,6 +22,8 @@ type SettingsGetToolResponse = McpToolOutput<"settings_get">;
 
 interface ParsedSettingsGet {
   settings?: {
+    models?: string[] | null;
+    // Legacy: per-role map from older server versions.
     model_priority?: Record<string, string[]> | null;
     max_sessions?: Record<string, number> | null;
   };
@@ -53,17 +55,30 @@ export async function fetchSettings(): Promise<SettingsResponse> {
     throw new Error(parsed.error);
   }
 
-  const modelPriority = parsed.settings?.model_priority ?? {};
   const maxSessions = parsed.settings?.max_sessions ?? {};
 
-  // Collect unique model IDs from all roles; fall back to max_sessions keys
+  // Prefer the flat `models` list (current schema). Fall back to the legacy
+  // per-role `model_priority` map, then to `max_sessions` keys.
   const seen = new Set<string>();
   const modelIds: string[] = [];
-  for (const ids of Object.values(modelPriority ?? {})) {
-    for (const id of ids) {
+
+  const flatModels = parsed.settings?.models;
+  if (flatModels && flatModels.length > 0) {
+    for (const id of flatModels) {
       if (!seen.has(id)) {
         seen.add(id);
         modelIds.push(id);
+      }
+    }
+  } else {
+    // Legacy: per-role model_priority map from older servers.
+    const modelPriority = parsed.settings?.model_priority ?? {};
+    for (const ids of Object.values(modelPriority ?? {})) {
+      for (const id of ids) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          modelIds.push(id);
+        }
       }
     }
   }
@@ -104,10 +119,7 @@ export async function saveSettings(settings: SettingsResponse): Promise<void> {
   }, {});
 
   const response = await callMcpTool("settings_set", {
-    model_priority_worker: modelIds,
-    model_priority_lead: modelIds,
-    model_priority_reviewer: modelIds,
-    model_priority_planner: modelIds,
+    models: modelIds,
     max_sessions: maxSessions,
     langfuse_public_key: settings.langfuse.publicKey,
     langfuse_secret_key: settings.langfuse.secretKey,
