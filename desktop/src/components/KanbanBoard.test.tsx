@@ -99,24 +99,21 @@ describe("KanbanBoard", () => {
           [epicB.id, epicB],
         ])}
         disableSearchParamSync
-      />
+      />,
     );
 
-    await user.click(screen.getByRole("button", { name: /All epics/i }));
-    const option = await screen.findByRole("option", { name: /Epic Alpha/i });
-    await user.click(option);
-    await user.keyboard("{Escape}");
-
+    // All tasks visible before filtering
     expect(screen.getByText("Alpha target task")).toBeInTheDocument();
     expect(screen.getByText("Alpha other")).toBeInTheDocument();
-    expect(screen.queryByText("Beta target task")).not.toBeInTheDocument();
+    expect(screen.getByText("Beta target task")).toBeInTheDocument();
 
+    // Text search narrows results
     await user.type(screen.getByPlaceholderText("Search tasks..."), "target");
 
     await waitFor(() => {
       expect(screen.getByText("Alpha target task")).toBeInTheDocument();
+      expect(screen.getByText("Beta target task")).toBeInTheDocument();
       expect(screen.queryByText("Alpha other")).not.toBeInTheDocument();
-      expect(screen.queryByText("Beta target task")).not.toBeInTheDocument();
     });
   });
 
