@@ -96,10 +96,10 @@ where
         "task_kill_session" => call_task_kill_session(state, &call.arguments).await,
         "task_blocked_list" => call_task_blocked_list(state, &call.arguments).await,
         "task_activity_list" => call_task_activity_list(state, &call.arguments).await,
-        "epic_show" => call_epic_show(state, &call.arguments).await,
-        "epic_update" => call_epic_update(state, &call.arguments).await,
-        "epic_tasks" => call_epic_tasks(state, &call.arguments).await,
-        "epic_close" => call_epic_close(state, &call.arguments).await,
+        "epic_show" => call_epic_show(state, &call.arguments, project_id.as_deref()).await,
+        "epic_update" => call_epic_update(state, &call.arguments, project_id.as_deref()).await,
+        "epic_tasks" => call_epic_tasks(state, &call.arguments, project_id.as_deref()).await,
+        "epic_close" => call_epic_close(state, &call.arguments, project_id.as_deref()).await,
         "memory_read" => call_memory_read(state, &call.arguments, &worktree_project_path).await,
         "memory_search" => {
             call_memory_search(
@@ -321,9 +321,13 @@ pub(super) async fn call_task_activity_list(
 pub(super) async fn call_epic_show(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    resolved_project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicShowParams = parse_args(arguments)?;
-    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
+    let project_id = match resolved_project_id {
+        Some(id) => id.to_string(),
+        None => resolve_project_id_for_agent_tools(state, arguments).await?,
+    };
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
     let response = djinn_mcp::tools::epic_ops::epic_show(
         &repo,
@@ -340,9 +344,13 @@ pub(super) async fn call_epic_show(
 pub(super) async fn call_epic_update(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    resolved_project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicUpdateParams = parse_args(arguments)?;
-    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
+    let project_id = match resolved_project_id {
+        Some(id) => id.to_string(),
+        None => resolve_project_id_for_agent_tools(state, arguments).await?,
+    };
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
     let response = djinn_mcp::tools::epic_ops::epic_update_with_delta(
         &repo,
@@ -367,9 +375,13 @@ pub(super) async fn call_epic_update(
 pub(super) async fn call_epic_tasks(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    resolved_project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicTasksParams = parse_args(arguments)?;
-    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
+    let project_id = match resolved_project_id {
+        Some(id) => id.to_string(),
+        None => resolve_project_id_for_agent_tools(state, arguments).await?,
+    };
     let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
     let task_repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
     let response = djinn_mcp::tools::epic_ops::epic_tasks(
@@ -399,9 +411,13 @@ pub(super) async fn call_epic_tasks(
 pub(super) async fn call_epic_close(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    resolved_project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: EpicShowParams = parse_args(arguments)?;
-    let project_id = resolve_project_id_for_agent_tools(state, arguments).await?;
+    let project_id = match resolved_project_id {
+        Some(id) => id.to_string(),
+        None => resolve_project_id_for_agent_tools(state, arguments).await?,
+    };
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
     let epic = repo
         .resolve_in_project(&project_id, &p.id)

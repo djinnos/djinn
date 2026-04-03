@@ -2138,7 +2138,7 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
         .expect("show args object")
         .clone(),
     );
-    let show_value = call_epic_show(&state, &show_args)
+    let show_value = call_epic_show(&state, &show_args, None)
         .await
         .expect("epic_show succeeds");
     assert_eq!(show_value["id"], epic.id);
@@ -2158,7 +2158,7 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
         .expect("update args object")
         .clone(),
     );
-    let update_value = call_epic_update(&state, &update_args)
+    let update_value = call_epic_update(&state, &update_args, None)
         .await
         .expect("epic_update succeeds");
     let epic_model: djinn_mcp::tools::epic_ops::EpicSingleResponse =
@@ -2180,7 +2180,7 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
         .expect("tasks args object")
         .clone(),
     );
-    let tasks_value = call_epic_tasks(&state, &tasks_args)
+    let tasks_value = call_epic_tasks(&state, &tasks_args, None)
         .await
         .expect("epic_tasks succeeds");
     assert_eq!(tasks_value["total"], serde_json::json!(1));

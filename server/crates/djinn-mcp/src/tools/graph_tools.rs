@@ -3,8 +3,8 @@
 //! All graph queries are dispatched through the [`RepoGraphOps`] bridge trait,
 //! keeping the MCP layer free of petgraph/SCIP dependencies.
 
-use rmcp::Json;
-use rmcp::handler::server::wrapper::Parameters;
+use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{GraphNeighbor, ImpactEntry, RankedNode};
@@ -13,7 +13,7 @@ use crate::tools::task_tools::{ErrorOr, ErrorResponse};
 
 // ── Request types ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct CodeGraphParams {
     /// The operation to perform: `neighbors`, `ranked`, `impact`, or `implementations`.
     pub operation: String,
@@ -36,30 +36,30 @@ pub struct CodeGraphParams {
 
 // ── Response types ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct NeighborsResponse {
     pub key: String,
     pub neighbors: Vec<GraphNeighbor>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RankedResponse {
     pub nodes: Vec<RankedNode>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImplementationsResponse {
     pub symbol: String,
     pub implementations: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactResponse {
     pub key: String,
     pub impact: Vec<ImpactEntry>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
     Neighbors(NeighborsResponse),
@@ -106,12 +106,16 @@ fn require_key(params: &CodeGraphParams) -> Result<&str, String> {
 
 // ── Handler ─────────────────────────────────────────────────────────────────────
 
+#[tool_router(router = graph_tool_router, vis = "pub")]
 impl DjinnMcpServer {
+    /// Query the repository dependency graph built from SCIP indexer output.
+    #[tool(
+        description = "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol)."
+    )]
     pub async fn code_graph(
         &self,
-        params: Parameters<CodeGraphParams>,
+        Parameters(params): Parameters<CodeGraphParams>,
     ) -> Json<ErrorOr<CodeGraphResponse>> {
-        let params = params.0;
         let result = match params.operation.as_str() {
             "neighbors" => self.code_graph_neighbors(&params).await,
             "ranked" => self.code_graph_ranked(&params).await,
@@ -128,7 +132,9 @@ impl DjinnMcpServer {
             Err(error) => ErrorOr::Error(ErrorResponse { error }),
         })
     }
+}
 
+impl DjinnMcpServer {
     async fn code_graph_neighbors(
         &self,
         params: &CodeGraphParams,

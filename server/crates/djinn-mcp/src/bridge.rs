@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::Serialize;
 
 // ── Data types ─────────────────────────────────────────────────────────────────
@@ -153,7 +154,7 @@ pub trait GitOps: Send + Sync {
 // on petgraph or SCIP protobuf types directly.
 
 /// A neighbor of a node in the repository dependency graph.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GraphNeighbor {
     pub key: String,
     pub kind: String,
@@ -164,7 +165,7 @@ pub struct GraphNeighbor {
 }
 
 /// A ranked node from PageRank + structural weight scoring.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RankedNode {
     pub key: String,
     pub kind: String,
@@ -175,7 +176,7 @@ pub struct RankedNode {
 }
 
 /// An impact-set entry: a node transitively dependent on the queried node.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactEntry {
     pub key: String,
     pub depth: usize,
