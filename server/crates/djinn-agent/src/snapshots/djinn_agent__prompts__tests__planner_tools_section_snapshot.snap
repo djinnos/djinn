@@ -1,0 +1,32 @@
+---
+source: crates/djinn-agent/src/prompts.rs
+assertion_line: 776
+expression: section
+---
+- `task_show(id)` — Show details of a work item including recent activity and blockers.
+- `task_list(issue_type?, label?, limit?, offset?, parent?, priority?, sort?, status?, text?)` — List tasks with optional filters and pagination.
+- `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.
+- `memory_read(identifier)` — Read a note by permalink or title.
+- `memory_search(query, folder?, limit?, task_id?, type?)` — Search notes in project memory.
+- `memory_list(depth?, folder?, type?)` — List notes in project memory. Returns compact summaries without full content.
+- `shell(command, timeout_ms?)` — Execute shell commands in the task worktree. Commands always run from the worktree root.
+- `read(file_path, limit?, offset?)` — Read a file with line numbers and pagination. Rejects binary files.
+- `lsp(file_path, operation, character?, depth?, kind?, line?, name_filter?, symbol?)` — Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.
+- `code_graph(operation, project_path, direction?, key?, kind_filter?, limit?)` — Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol).
+- `ci_job_log(job_id, step?)` — Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.
+- `github_search(query, language?, path?, repo?)` — Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.
+- `output_view(tool_use_id, limit?, offset?)` — Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.
+- `output_grep(pattern, tool_use_id, context_lines?)` — Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.
+- `task_create(acceptance_criteria, epic_id, title, blocked_by?, description?, design?, issue_type?, labels?, owner?, parent_id?, priority?, status?)` — Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.
+- `task_update(id, acceptance_criteria?, blocked_by_add?, blocked_by_remove?, description?, design?, epic_id?, memory_refs_add?, memory_refs_remove?, owner?, priority?, status?, title?)` — Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.
+- `task_blocked_list(id)` — List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.
+- `epic_show(id)` — Show details for an epic by UUID or short ID.
+- `epic_update(id, description?, memory_refs_add?, memory_refs_remove?, status?, title?)` — Update epic fields (title/description) and accept memory ref delta args for planner workflows.
+- `epic_tasks(id, limit?, offset?)` — List tasks for an epic with pagination.
+- `epic_close(id)` — Close an epic. Use when all work is complete and no further waves are needed.
+- `task_transition(action, id, reason?, replacement_task_ids?)` — Transition a task using a named workflow action.
+- `task_delete_branch(id)` — Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.
+- `task_archive_activity(id)` — Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.
+- `task_reset_counters(id)` — Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.
+- `task_kill_session(id)` — Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.
+- `submit_grooming(summary?, tasks_reviewed?)` — Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.

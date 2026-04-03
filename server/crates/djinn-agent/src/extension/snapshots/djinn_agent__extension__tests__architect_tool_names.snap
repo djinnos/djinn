@@ -1,5 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension/mod.rs
+source: crates/djinn-agent/src/extension/tests.rs
+assertion_line: 1759
 expression: names
 ---
 [
@@ -14,6 +15,7 @@ expression: names
   "lsp",
   "code_graph",
   "ci_job_log",
+  "github_search",
   "output_view",
   "output_grep",
   "task_create",

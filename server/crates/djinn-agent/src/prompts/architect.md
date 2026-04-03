@@ -139,39 +139,6 @@ The metrics are already captured separately in the `metrics_snapshot` parameter.
 - [Additional guidance if applicable]
 ```
 
-## Tools
-
-- `task_list(status?, issue_type?, limit?)` — list tasks with optional filters
-- `task_show(id)` — show full task details including AC, blockers, reopen_count, total_reopen_count, intervention_count
-- `task_activity_list(id, actor_role?, limit?)` — see what lead/reviewers/workers have done
-- `task_blocked_list(id)` — list tasks blocked by this one
-- `task_update(id, ...)` — update task fields; use `blocked_by_add`/`blocked_by_remove` to enforce task sequencing
-- `task_comment_add(id, comment)` — add a strategic observation or directive
-- `task_transition(id, action)` — `force_close`, `release`, etc. for corrective action
-- `task_create(epic_id, title, issue_type?, description?, design?, acceptance_criteria?)` — create a spike, research, planning, or review task. **Use `issue_type="planning"` for tasks requiring epic metadata operations** (epic_update, epic_close, memory_refs management, roadmap/AC changes, or other metadata-only maintenance). Workers cannot perform epic management.
-- `task_kill_session(id)` — kill a stuck session so the next dispatch starts fresh
-- `task_delete_branch(id)` — delete worktree and branch for a task; use when a task started work it shouldn't have
-- `task_archive_activity(id)` — archive old activity entries to reduce noise
-- `task_reset_counters(id)` — reset working counters (`reopen_count`, `continuation_count`) after corrective actions; lifetime totals (`total_reopen_count`, `total_verification_failure_count`) are preserved
-- `epic_show(id)` — show epic details
-- `epic_tasks(epic_id)` — list all tasks under an epic
-- `epic_update(id, ...)` — update epic description or memory_refs
-- `memory_read(path)` — read a specific note
-- `memory_search(q)` — search memory for relevant context
-- `memory_build_context(url)` — build tiered context from a memory note or folder; use `url="folder/*"` for all notes in a folder
-- `memory_write(title, content, type, tags?)` — create or update a note (use for spike findings, research results, ADRs)
-- `memory_edit(identifier, operation, content, find_text?, section?, type?)` — edit an existing note (append, prepend, find_replace, replace_section)
-- `memory_health()` — aggregate health report: total notes, broken link count, orphan count, stale notes by folder
-- `memory_broken_links(folder?)` — list all broken wikilinks with source context
-- `memory_orphans(folder?)` — list notes with zero inbound links (excludes catalogs and singletons)
-- `agent_metrics(agent_id?, window_days?)` — get effectiveness metrics per agent role
-- `agent_amend_prompt(agent_id, amendment, metrics_snapshot?)` — append amendment to a specialist role's learned_prompt and log to history
-- `agent_create(name, base_role, description?, system_prompt_extensions?, model_preference?)` — create a new specialist agent when existing agents lack required capabilities
-- `shell(command)` — read-only shell: `git log`, `git diff`, `grep`, `cat`, `ls`. Do not write files.
-- `read(path)` — read a source file
-- `lsp(operation, ...)` — code navigation
-- `submit_work(task_id, summary, next_patrol_minutes?)` — **end your session.** Call this when the patrol is complete. Include `next_patrol_minutes` to schedule the next patrol (see below).
-
 ## Corrective Actions
 
 **When you find a stuck task** (total_reopen_count ≥ 3, session_count ≥ 6, or intervention_count ≥ 2):

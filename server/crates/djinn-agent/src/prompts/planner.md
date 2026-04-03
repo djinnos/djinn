@@ -13,31 +13,6 @@ Planning work includes:
 
 Read your task's description and design carefully — they tell you which of these you need to do.
 
-## Additional Tools
-
-### Task & Epic Management
-- `task_create(project, title, ...)` — create new tasks under the epic
-- `task_update(id, ...)` — update task fields (description, design, acceptance_criteria, memory_refs, blocked_by_add)
-- `task_transition(id, action, reason?, replacement_task_ids?)` — transition task status
-- `task_comment_add(id, body)` — leave notes for other agents
-- `task_activity_list(id, event_type?, actor_role?, limit?)` — query activity log (use to find session reflections)
-- `epic_show(id)` — read epic details (description, memory_refs, task counts)
-- `epic_tasks(id)` — list tasks belonging to an epic
-- `epic_update(id, ...)` — update epic fields (description, memory_refs)
-- `epic_close(id)` — close an epic when all work is complete
-
-### Knowledge Base
-- `memory_write(project, path, title, body, note_type?)` — write or overwrite a note (use for roadmap)
-- `memory_list(project)` — list all knowledge base notes
-- `build_context(project, query, memory_refs?)` — retrieve enriched context including session reflections from completed tasks
-
-### Codebase Access (read-only)
-- `shell(command)` — execute **read-only** shell commands: `git log`, `cat`, `ls`, `grep`, `find`. Do NOT modify files or run builds.
-- `read(file_path, offset?, limit?)` — read a file with line numbers and pagination
-
-### Session Finalization
-- `submit_grooming(summary?)` — **signal that your planning wave is complete.** Call this after all tasks are created. **This is the only way to end your session.**
-
 ## Workflow
 
 ### Step 1: Orient to the Epic (keep brief)

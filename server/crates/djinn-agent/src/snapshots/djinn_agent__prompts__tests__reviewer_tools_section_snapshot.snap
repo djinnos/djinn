@@ -1,0 +1,20 @@
+---
+source: crates/djinn-agent/src/prompts.rs
+assertion_line: 762
+expression: section
+---
+- `task_show(id)` — Show details of a work item including recent activity and blockers.
+- `task_list(issue_type?, label?, limit?, offset?, parent?, priority?, sort?, status?, text?)` — List tasks with optional filters and pagination.
+- `task_activity_list(id, actor_role?, event_type?, limit?)` — Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.
+- `memory_read(identifier)` — Read a note by permalink or title.
+- `memory_search(query, folder?, limit?, task_id?, type?)` — Search notes in project memory.
+- `memory_list(depth?, folder?, type?)` — List notes in project memory. Returns compact summaries without full content.
+- `shell(command, timeout_ms?)` — Execute shell commands in the task worktree. Commands always run from the worktree root.
+- `read(file_path, limit?, offset?)` — Read a file with line numbers and pagination. Rejects binary files.
+- `lsp(file_path, operation, character?, depth?, kind?, line?, name_filter?, symbol?)` — Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.
+- `code_graph(operation, project_path, direction?, key?, kind_filter?, limit?)` — Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol).
+- `ci_job_log(job_id, step?)` — Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.
+- `github_search(query, language?, path?, repo?)` — Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.
+- `output_view(tool_use_id, limit?, offset?)` — Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.
+- `output_grep(pattern, tool_use_id, context_lines?)` — Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.
+- `submit_review(task_id, verdict, acceptance_criteria?, feedback?)` — Submit the task review outcome with per-criterion AC verdicts. This atomically sets acceptance criteria met/unmet state on the task. Your session ends after this call.

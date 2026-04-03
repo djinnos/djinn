@@ -113,6 +113,10 @@ pub(crate) fn render_prompt_for_role(
     let mut out = format!("{BASE_TEMPLATE}\n{role_template}");
     out = out.replace("{{role_name}}", role_name);
 
+    // Dynamic tools section from role schemas
+    let tools_md = format_tools_section(&(config.tool_schemas)());
+    out = out.replace("{{tools_section}}", &tools_md);
+
     // Task fields
     out = out.replace("{{task_id}}", &task.id);
     out = out.replace("{{task_title}}", &task.title);
@@ -293,6 +297,52 @@ pub(crate) fn apply_skills(prompt: &str, skills: &[crate::skills::ResolvedSkill]
     out.push_str("\n\n");
     out.push_str(&section);
     out
+}
+
+// ─── Tool section generator ───────────────────────────────────────────────
+
+/// Generate a markdown tools reference from serialized tool schemas.
+///
+/// Each schema is expected to have `name`, `description`, and `inputSchema`
+/// (with `properties` and optionally `required`). Output is a bullet list:
+///
+/// ```text
+/// - `tool_name(required_param, optional_param?)` — Description text.
+/// ```
+fn format_tools_section(schemas: &[serde_json::Value]) -> String {
+    let mut lines = Vec::with_capacity(schemas.len());
+    for schema in schemas {
+        let name = schema["name"].as_str().unwrap_or("unknown");
+        let desc = schema["description"].as_str().unwrap_or("");
+        let input = &schema["inputSchema"];
+        let required: Vec<&str> = input["required"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        // Collect parameter names in a stable order: required first, then optional.
+        let mut req_params = Vec::new();
+        let mut opt_params = Vec::new();
+        if let Some(props) = input["properties"].as_object() {
+            // Sort keys for deterministic output.
+            let mut keys: Vec<&String> = props.keys().collect();
+            keys.sort();
+            for key in keys {
+                if required.contains(&key.as_str()) {
+                    req_params.push(key.as_str());
+                } else {
+                    opt_params.push(format!("{key}?"));
+                }
+            }
+        }
+
+        let mut params: Vec<String> = req_params.iter().map(|s| s.to_string()).collect();
+        params.extend(opt_params);
+        let sig = params.join(", ");
+
+        lines.push(format!("- `{name}({sig})` — {desc}"));
+    }
+    lines.join("\n")
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -693,6 +743,120 @@ mod tests {
         assert!(
             prompt.contains("task objective"),
             "architect prompt should ask for enough context to explain why a memory note exists"
+        );
+    }
+
+    // ── Tools section snapshot tests ─────────────────────────────────────────
+
+    #[test]
+    fn worker_tools_section_snapshot() {
+        let schemas = (AgentType::Worker.role_config().tool_schemas)();
+        let section = format_tools_section(&schemas);
+        insta::assert_snapshot!(section);
+    }
+
+    #[test]
+    fn reviewer_tools_section_snapshot() {
+        let schemas = (AgentType::Reviewer.role_config().tool_schemas)();
+        let section = format_tools_section(&schemas);
+        insta::assert_snapshot!(section);
+    }
+
+    #[test]
+    fn lead_tools_section_snapshot() {
+        let schemas = (AgentType::Lead.role_config().tool_schemas)();
+        let section = format_tools_section(&schemas);
+        insta::assert_snapshot!(section);
+    }
+
+    #[test]
+    fn planner_tools_section_snapshot() {
+        let schemas = (AgentType::Planner.role_config().tool_schemas)();
+        let section = format_tools_section(&schemas);
+        insta::assert_snapshot!(section);
+    }
+
+    #[test]
+    fn architect_tools_section_snapshot() {
+        let schemas = (AgentType::Architect.role_config().tool_schemas)();
+        let section = format_tools_section(&schemas);
+        insta::assert_snapshot!(section);
+    }
+
+    #[test]
+    fn tools_section_injected_into_rendered_prompt() {
+        let task = make_task();
+        let ctx = make_ctx();
+
+        // Verify each role's prompt contains its tools and NOT other roles' tools.
+        let worker_prompt = render_prompt(AgentType::Worker, &task, &ctx);
+        assert!(
+            worker_prompt.contains("`submit_work("),
+            "worker prompt should contain submit_work"
+        );
+        assert!(
+            worker_prompt.contains("`github_search("),
+            "worker prompt should contain github_search"
+        );
+        assert!(
+            !worker_prompt.contains("`submit_review("),
+            "worker prompt should NOT contain submit_review"
+        );
+        assert!(
+            !worker_prompt.contains("{{tools_section}}"),
+            "tools_section placeholder should be replaced"
+        );
+
+        let reviewer_prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+        assert!(
+            reviewer_prompt.contains("`submit_review("),
+            "reviewer prompt should contain submit_review"
+        );
+        assert!(
+            reviewer_prompt.contains("`github_search("),
+            "reviewer prompt should contain github_search"
+        );
+        assert!(
+            !reviewer_prompt.contains("`submit_work("),
+            "reviewer prompt should NOT contain submit_work"
+        );
+
+        let lead_prompt = render_prompt(AgentType::Lead, &task, &ctx);
+        assert!(
+            lead_prompt.contains("`submit_decision("),
+            "lead prompt should contain submit_decision"
+        );
+        assert!(
+            lead_prompt.contains("`task_create("),
+            "lead prompt should contain task_create"
+        );
+        assert!(
+            !lead_prompt.contains("`submit_work("),
+            "lead prompt should NOT contain submit_work"
+        );
+
+        let planner_prompt = render_prompt(AgentType::Planner, &task, &ctx);
+        assert!(
+            planner_prompt.contains("`submit_grooming("),
+            "planner prompt should contain submit_grooming"
+        );
+        assert!(
+            planner_prompt.contains("`epic_tasks("),
+            "planner prompt should contain epic_tasks"
+        );
+
+        let architect_prompt = render_prompt(AgentType::Architect, &task, &ctx);
+        assert!(
+            architect_prompt.contains("`submit_work("),
+            "architect prompt should contain submit_work"
+        );
+        assert!(
+            architect_prompt.contains("`memory_health("),
+            "architect prompt should contain memory_health"
+        );
+        assert!(
+            architect_prompt.contains("`agent_amend_prompt("),
+            "architect prompt should contain agent_amend_prompt"
         );
     }
 }

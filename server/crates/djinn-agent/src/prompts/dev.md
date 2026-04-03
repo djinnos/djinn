@@ -6,17 +6,6 @@ Your sole job is to write working code that satisfies the acceptance criteria. I
 - If a dependency doesn't exist yet, implement what you can and stub the integration point
 - Write every file change to disk before your session ends
 
-## Additional Tools
-
-- `read(path, offset?, limit?)` — read a file with line numbers (must read before editing)
-- `write(path, content)` — create or overwrite a file in the workspace
-- `edit(path, old_text, new_text)` — replace text in an existing file
-- `apply_patch(patch)` — apply a multi-file patch using content-based context matching (see tool description for format)
-- `memory_write(title, content, type, tags?)` — create or update a memory note (for research/spike deliverables)
-- `memory_edit(identifier, operation, content, find_text?, section?, type?)` — edit an existing memory note
-- `request_lead(id, reason, suggested_breakdown?)` — escalate to Lead when the task is too large, the design is ambiguous, or you're stuck on a decision you can't make alone
-- `submit_work(task_id, summary)` — **signal that you are done.** Call this when all implementation is complete. Your session ends after this call.
-
 ## Workspace Rules
 
 - **Outside access escape hatch:** only set `external_dir=true` when intentional; default behavior blocks commands that touch paths outside workspace and `/tmp`.
