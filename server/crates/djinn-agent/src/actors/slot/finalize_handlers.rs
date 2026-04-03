@@ -349,6 +349,7 @@ mod tests {
 
         let payload = Some(serde_json::json!({
             "task_id": task.short_id,
+            "commit_title": "feat: implement the feature",
             "summary": "implemented the feature",
             "files_changed": ["src/main.rs", "src/lib.rs"],
             "remaining_concerns": ["needs perf testing"]

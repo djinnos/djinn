@@ -31,7 +31,7 @@ pub struct CodeGraphParams {
     pub kind_filter: Option<String>,
     /// Maximum results for `ranked` (default 20) or max traversal depth for `impact` (default 3).
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: Option<i64>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ impl DjinnMcpServer {
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         validate_kind_filter(params.kind_filter.as_deref())?;
-        let limit = params.limit.unwrap_or(20);
+        let limit = params.limit.unwrap_or(20) as usize;
         let nodes = self
             .state
             .repo_graph()
@@ -189,7 +189,7 @@ impl DjinnMcpServer {
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let key = require_key(params)?;
-        let depth = params.limit.unwrap_or(3);
+        let depth = params.limit.unwrap_or(3) as usize;
         let impact = self
             .state
             .repo_graph()

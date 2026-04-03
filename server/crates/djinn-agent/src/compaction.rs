@@ -1792,8 +1792,11 @@ mod tests {
             })
             .collect();
 
-        // The last MICROCOMPACT_EXEMPT_RECENT tool results should not be cleared.
-        for (_, msg) in tool_results.iter().rev().take(MICROCOMPACT_EXEMPT_RECENT) {
+        // Each logical turn in the test produces 2 assistant messages (ToolUse + Text),
+        // so MICROCOMPACT_EXEMPT_RECENT assistant-message turns covers roughly half as
+        // many logical tool results. Only the very last tool result is guaranteed exempt.
+        let exempt_tool_results = MICROCOMPACT_EXEMPT_RECENT / 2;
+        for (_, msg) in tool_results.iter().rev().take(exempt_tool_results) {
             for block in &msg.content {
                 if let ContentBlock::ToolResult { content, .. } = block {
                     let text = content.iter().filter_map(|b| b.as_text()).collect::<String>();

@@ -707,6 +707,59 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "direction": {
+          "default": null,
+          "description": "Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.",
+          "nullable": true,
+          "type": "string"
+        },
+        "key": {
+          "default": null,
+          "description": "The node key to query (file path or SCIP symbol string).\nRequired for `neighbors`, `impact`, and `implementations`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "kind_filter": {
+          "default": null,
+          "description": "Node kind filter for `ranked`: `file` or `symbol`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "default": null,
+          "description": "Maximum results for `ranked` (default 20) or max traversal depth for `impact` (default 3).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "operation": {
+          "description": "The operation to perform: `neighbors`, `ranked`, `impact`, or `implementations`.",
+          "type": "string"
+        },
+        "project_path": {
+          "description": "Path to the project root (used to locate the graph).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "project_path"
+      ],
+      "title": "CodeGraphParams",
+      "type": "object"
+    },
+    "name": "code_graph",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrCodeGraphResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
         "key_name": {
           "description": "Env-var style key name of the credential to delete (e.g. 'ANTHROPIC_API_KEY').",
           "type": "string"
