@@ -694,7 +694,29 @@ pub(super) async fn completions_handler(
     }
 
     let mcp = DjinnMcpServer::new(state.mcp_state());
-    let tool_schemas = mcp.all_tool_schemas();
+    let mut tool_schemas = mcp.all_tool_schemas();
+
+    // Resolve project path for chat extension tools (shell, read, lsp, github_search).
+    let project_path = if let Some(project_ref) = req.project.as_deref() {
+        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+        match project_repo.resolve(project_ref).await {
+            Ok(Some(id)) => match project_repo.get(&id).await {
+                Ok(Some(project)) => Some(std::path::PathBuf::from(&project.path)),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // When we have a project, add codebase tools from the agent extension layer.
+    let agent_ctx = if project_path.is_some() {
+        tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
+        Some(state.agent_context())
+    } else {
+        None
+    };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     tokio::spawn(async move {
@@ -811,7 +833,19 @@ pub(super) async fn completions_handler(
                 let args =
                     serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
                 let started_at = Instant::now();
-                match mcp.dispatch_tool(&name, args).await {
+
+                // Try chat extension tools first (shell, read, lsp, github_search),
+                // then fall back to MCP tools.
+                let dispatch_result = if djinn_agent::chat_tools::is_chat_extension_tool(&name) {
+                    if let (Some(ctx), Some(root)) = (&agent_ctx, &project_path) {
+                        djinn_agent::chat_tools::dispatch_chat_tool(ctx, &name, args, root).await
+                    } else {
+                        Err(format!("tool '{name}' requires a project context"))
+                    }
+                } else {
+                    mcp.dispatch_tool(&name, args).await
+                };
+                match dispatch_result {
                     Ok(value) => {
                         let output = value.to_string();
                         let elapsed_ms = started_at.elapsed().as_millis() as u64;

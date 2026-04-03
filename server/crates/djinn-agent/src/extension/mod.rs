@@ -1,9 +1,9 @@
 mod fuzzy;
-mod github_search;
-mod handlers;
+pub(crate) mod github_search;
+pub(crate) mod handlers;
 mod helpers;
 mod shared_schemas;
-mod tool_defs;
+pub(crate) mod tool_defs;
 mod types;
 
 use std::path::Path;

@@ -53,7 +53,7 @@ pub(super) fn tool_role_amend_prompt() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_shell() -> RmcpTool {
+pub(crate) fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
         "Execute shell commands in the task worktree. Commands always run from the worktree root."
@@ -69,7 +69,7 @@ pub(super) fn tool_shell() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_read() -> RmcpTool {
+pub(crate) fn tool_read() -> RmcpTool {
     RmcpTool::new(
         "read".to_string(),
         "Read a file with line numbers and pagination. Rejects binary files.".to_string(),
@@ -261,7 +261,7 @@ pub(super) fn tool_apply_patch() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_lsp() -> RmcpTool {
+pub(crate) fn tool_lsp() -> RmcpTool {
     RmcpTool::new(
         "lsp".to_string(),
         "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.".to_string(),
@@ -351,7 +351,7 @@ pub(super) fn tool_code_graph() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_github_search() -> RmcpTool {
+pub(crate) fn tool_github_search() -> RmcpTool {
     RmcpTool::new(
         "github_search".to_string(),
         "Search GitHub code across millions of public repositories via grep.app. \
