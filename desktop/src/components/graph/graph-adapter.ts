@@ -62,9 +62,8 @@ export function toGraphData(
 
   // Add epic groups
   for (const [epicId, epic] of epics) {
-    if (epic.status === "closed") continue;
     const epicTasks = tasksByEpic.get(epicId) || [];
-    // Skip closed epics with no tasks
+    // Skip epics with no tasks unless they are open or drafting
     if (epicTasks.length === 0 && epic.status !== "open" && epic.status !== "drafting") continue;
 
     result.push({
@@ -72,6 +71,7 @@ export function toGraphData(
       name: epic.title,
       color: epic.color || DEFAULT_EPIC_COLOR,
       emoji: epic.emoji || DEFAULT_EPIC_EMOJI,
+      status: epic.status,
       tasks: epicTasks.map((t) => toTaskData(t, blockersByTask)),
     });
   }

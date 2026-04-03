@@ -25,5 +25,7 @@ export interface EpicData {
   color: string;
   /** Unicode emoji from the epic (e.g., "🔐") */
   emoji: string;
+  /** Epic status — used to visually distinguish closed epics */
+  status?: string;
   tasks: TaskData[];
 }

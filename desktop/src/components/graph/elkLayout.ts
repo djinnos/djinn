@@ -47,7 +47,7 @@ export function buildGraphElements(groups: EpicData[]): {
       id: group.id,
       type: "epicGroup",
       position: { x: 0, y: 0 },
-      data: { label: group.name, epicColor: group.color, emoji: group.emoji },
+      data: { label: group.name, epicColor: group.color, emoji: group.emoji, status: group.status },
       style: { width: 400, height: 300 },
     });
 
