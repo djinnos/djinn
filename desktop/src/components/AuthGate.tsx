@@ -1,6 +1,6 @@
 import { useAuthStore } from "@/stores/authStore";
-import { startGithubLogin, attemptSilentAuth, type AuthUser } from "@/tauri/commands";
-import { listen } from "@tauri-apps/api/event";
+import { startGithubLogin, attemptSilentAuth, type AuthUser } from "@/electron/commands";
+import { listen } from "@/electron/shims/event";
 import { type ReactNode, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { GithubIcon, Copy01Icon, Tick01Icon } from "@hugeicons/core-free-icons";

@@ -2,7 +2,7 @@
  * Sync GitHub OAuth tokens from the desktop token file to the server's
  * credential vault via the MCP JSON-RPC protocol.
  *
- * Ported from src-tauri/src/token_sync.rs
+ * Token synchronization between local storage and server credential vault
  */
 
 import * as fs from "node:fs";

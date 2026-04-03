@@ -232,7 +232,7 @@ let currentStreamingText = new Map<string, string>();
 
 // ── vi.mock calls ────────────────────────────────────────────────────────────
 
-vi.mock("@tauri-apps/api/window", () => ({
+vi.mock("@/electron/shims/window", () => ({
   getCurrentWindow: () => ({ startDragging: async () => {} }),
 }));
 

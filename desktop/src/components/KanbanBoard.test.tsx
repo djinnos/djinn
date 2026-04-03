@@ -1,7 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { KanbanBoard } from "@/components/KanbanBoard";
 import type { Epic, Task } from "@/api/types";
+
+vi.mock("@/electron/commands", () => ({
+  checkGitRemote: vi.fn(),
+  setupGitRemote: vi.fn(),
+}));
+
+vi.mock("@/api/mcpClient", () => ({
+  callMcpTool: vi.fn(),
+}));
 
 const epicA: Epic = {
   id: "epic-a",
@@ -93,8 +102,9 @@ describe("KanbanBoard", () => {
       />
     );
 
-    await user.click(screen.getByPlaceholderText("All epics"));
-    await user.click(screen.getByRole("option", { name: /Epic Alpha/i }));
+    await user.click(screen.getByRole("button", { name: /All epics/i }));
+    const option = await screen.findByRole("option", { name: /Epic Alpha/i });
+    await user.click(option);
     await user.keyboard("{Escape}");
 
     expect(screen.getByText("Alpha target task")).toBeInTheDocument();

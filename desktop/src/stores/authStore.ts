@@ -5,7 +5,7 @@ import {
   authLogout,
   type AuthState,
   type AuthUser,
-} from "@/tauri/commands";
+} from "@/electron/commands";
 
 interface AuthStore {
   isAuthenticated: boolean;
@@ -15,7 +15,7 @@ interface AuthStore {
 
   /** Fetch auth state from the Rust backend. */
   fetchState: () => Promise<void>;
-  /** Update auth state from a Tauri event payload. */
+  /** Update auth state from an IPC event payload. */
   setState: (state: AuthState) => void;
   /** Initiate OAuth login flow. */
   login: () => Promise<void>;

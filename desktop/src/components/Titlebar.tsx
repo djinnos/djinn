@@ -1,4 +1,4 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@/electron/shims/window";
 import {
   Cancel01Icon,
   MinusSignIcon,
@@ -14,7 +14,7 @@ import { useProjectRoute } from "@/hooks/useProjectRoute";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useExecutionStatus } from "@/hooks/useExecutionStatus";
 import { updateProject, fetchProjects } from "@/api/server";
-import { listGitBranches } from "@/tauri/commands";
+import { listGitBranches } from "@/electron/commands";
 import {
   Combobox,
   ComboboxContent,
@@ -257,7 +257,7 @@ function ExecutionIndicator() {
 export function Titlebar() {
   return (
     <div
-      data-tauri-drag-region
+      data-drag-region
       className="flex h-9 select-none items-center border-b border-border/50 bg-background"
     >
       {/* Left: Breadcrumb + Branch */}
@@ -267,7 +267,7 @@ export function Titlebar() {
       </div>
 
       {/* Center: Session indicator */}
-      <div data-tauri-drag-region className="flex flex-1 items-center justify-center">
+      <div data-drag-region className="flex flex-1 items-center justify-center">
         <ExecutionIndicator />
       </div>
 

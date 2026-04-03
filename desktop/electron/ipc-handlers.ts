@@ -2,7 +2,7 @@
  * Central IPC handler registration.
  *
  * Maps every frontend `invoke(command, args)` call to the corresponding
- * Node.js module function. This replaces Tauri's `generate_handler!` macro.
+ * Node.js module function that registers all IPC handlers.
  */
 
 import { ipcMain, dialog, shell, BrowserWindow } from "electron";
@@ -24,7 +24,7 @@ import * as wsl from "./modules/wsl.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Shortcut to send events to the renderer (mirrors Tauri's app.emit()). */
+/** Shortcut to send events to the renderer. */
 function makeSendEvent(win: BrowserWindow): server.SendEvent {
   return (event: string, payload?: unknown) => {
     if (!win.isDestroyed()) {

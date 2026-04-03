@@ -80,7 +80,7 @@ const sampleSessions = [
   { id: 'sess-3', title: 'Review authentication epic', updatedAt: hoursAgo(5) },
   { id: 'sess-4', title: 'Refactor Zustand stores', updatedAt: hoursAgo(26) },
   { id: 'sess-5', title: 'Create onboarding flow tasks', updatedAt: hoursAgo(28) },
-  { id: 'sess-6', title: 'Debug Tauri sidecar startup', updatedAt: hoursAgo(50) },
+  { id: 'sess-6', title: 'Debug server sidecar startup', updatedAt: hoursAgo(50) },
   { id: 'sess-7', title: 'Design settings page layout', updatedAt: hoursAgo(72) },
 ];
 

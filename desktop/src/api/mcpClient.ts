@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { McpToolInput, McpToolName, McpToolOutput } from "@/api/generated/mcp-tools.gen";
-import { getServerPort } from "@/tauri/commands";
+import { getServerPort } from "@/electron/commands";
 
 type ToolCallResult = {
   content?: Array<{ type?: string; text?: string }>;

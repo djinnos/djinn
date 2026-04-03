@@ -1,4 +1,4 @@
-Tauri v2 desktop app — React 19 + TypeScript + Vite frontend, Rust backend.
+Electron desktop app — React 19 + TypeScript + Vite frontend, Electron backend.
 
 ## Dependency Management (pnpm)
 
@@ -15,7 +15,7 @@ pnpm test                 # vitest (jsdom, vmThreads pool)
 pnpm tsc --noEmit         # type-check without emitting
 pnpm lint                 # eslint
 pnpm build                # tsc + vite build
-pnpm tauri:dev            # full Tauri dev (syncs sidecar first)
+pnpm electron:start       # full Electron dev mode
 ```
 
 ## Project Structure
@@ -23,16 +23,17 @@ pnpm tauri:dev            # full Tauri dev (syncs sidecar first)
 - `@/` path alias → `src/`
 - `src/api/` — MCP client, generated types, query hooks
 - `src/components/` — UI components (shadcn/ui + custom)
+- `src/electron/` — Electron IPC commands and shims
 - `src/pages/` — route pages
 - `src/stores/` — Zustand stores
 - `src/hooks/` — React hooks
 - `src/test/` — test setup and mocks
-- `src-tauri/` — Rust backend (Tauri)
+- `electron/` — Electron main process
 
 ## Tech Stack
 
 - **Frontend**: React 19, TypeScript 5.9, Vite 7, Tailwind CSS 4
-- **Desktop**: Tauri v2 (Rust backend)
+- **Desktop**: Electron (Node.js backend)
 - **State**: Zustand, TanStack Query
 - **UI**: shadcn/ui (Radix + CVA), Lucide icons
 - **Testing**: Vitest 4, Testing Library, jsdom
@@ -40,5 +41,5 @@ pnpm tauri:dev            # full Tauri dev (syncs sidecar first)
 
 ## Testing
 
-- Tests use jsdom with Tauri API mocks (`src/test/setup.ts`)
+- Tests use jsdom with Electron API mocks (`src/test/setup.ts`)
 - Run `pnpm test` to execute; `pnpm test:watch` for watch mode

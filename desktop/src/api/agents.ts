@@ -1,4 +1,4 @@
-import { getServerPort } from "@/tauri/commands";
+import { getServerPort } from "@/electron/commands";
 
 async function getBaseUrl(): Promise<string> {
   const port = await getServerPort();

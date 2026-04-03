@@ -30,7 +30,7 @@ import { useProjectRoute } from '@/hooks/useProjectRoute';
 import { useStore } from 'zustand';
 import { verificationStore, type VerificationRun } from '@/stores/verificationStore';
 import { addProject, fetchProjects } from '@/api/server';
-import { selectDirectory } from '@/tauri/commands';
+import { selectDirectory } from '@/electron/commands';
 import { showToast } from '@/lib/toast';
 import { HealthCheckPanel } from '@/components/HealthCheckPanel';
 import { ConnectionStatusBadge } from '@/components/ConnectionStatusBadge';
@@ -479,7 +479,7 @@ export function Sidebar() {
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r bg-sidebar">
       {/* Header */}
-      <div data-tauri-drag-region className="flex h-12 items-center border-b px-5">
+      <div data-drag-region className="flex h-12 items-center border-b px-5">
         <div className="flex flex-1 items-center gap-3">
           <span className="flex h-4 w-4 items-center justify-center shrink-0 overflow-visible">
             <img src={logoSvg} alt="Djinn" className="h-6 w-6" />

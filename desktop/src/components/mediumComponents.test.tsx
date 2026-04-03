@@ -6,7 +6,7 @@ import { GitRemoteSetupBanner } from './GitRemoteSetupBanner';
 import { SyncHealthBanner } from './SyncHealthBanner';
 import { sseStore } from '@/stores/sseStore';
 
-vi.mock('@/tauri/commands', () => ({
+vi.mock('@/electron/commands', () => ({
   checkGitRemote: vi.fn(),
   setupGitRemote: vi.fn(),
 }));
@@ -54,8 +54,7 @@ describe('AgentConfig', () => {
     const root = container.firstElementChild as HTMLElement;
     expect(within(root).getByRole('heading', { name: 'Models' })).toBeInTheDocument();
 
-    const searchInput = within(root).getByPlaceholderText('Search or add models...');
-    expect(searchInput).toBeInTheDocument();
+    expect(within(root).getByRole('button', { name: /Add Model/i })).toBeInTheDocument();
 
     expect(within(root).getByText('gpt-4o')).toBeInTheDocument();
     expect(within(root).getByText('OpenAI')).toBeInTheDocument();
@@ -82,7 +81,7 @@ describe('AgentConfig', () => {
     );
 
     const root = container.firstElementChild as HTMLElement;
-    expect(within(root).getByText('No models configured. Search above to add models.')).toBeInTheDocument();
+    expect(within(root).getByText('No models configured. Use the Add model button to get started.')).toBeInTheDocument();
   });
 
   it('disables save while saving', () => {

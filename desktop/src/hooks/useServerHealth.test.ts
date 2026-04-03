@@ -1,20 +1,20 @@
 import { renderHook, waitFor, act, cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const tauriCommandMocks = vi.hoisted(() => ({
+const commandMocks = vi.hoisted(() => ({
   getServerStatus: vi.fn(),
   retryServerDiscovery: vi.fn(),
 }));
 
-const tauriEventMocks = vi.hoisted(() => ({
+const eventMocks = vi.hoisted(() => ({
   listen: vi.fn(),
 }));
 
-vi.mock('@/tauri/commands', () => ({
-  getServerStatus: tauriCommandMocks.getServerStatus,
-  retryServerDiscovery: tauriCommandMocks.retryServerDiscovery,
+vi.mock('@/electron/commands', () => ({
+  getServerStatus: commandMocks.getServerStatus,
+  retryServerDiscovery: commandMocks.retryServerDiscovery,
 }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: tauriEventMocks.listen }));
+vi.mock('@/electron/shims/event', () => ({ listen: eventMocks.listen }));
 
 import { useServerHealth } from './useServerHealth';
 
@@ -22,7 +22,7 @@ describe('useServerHealth', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
-    tauriEventMocks.listen.mockResolvedValue(vi.fn());
+    eventMocks.listen.mockResolvedValue(vi.fn());
   });
 
   afterEach(() => {
@@ -32,7 +32,7 @@ describe('useServerHealth', () => {
   });
 
   it('sets connected state when server is healthy', async () => {
-    tauriCommandMocks.getServerStatus.mockResolvedValue({ is_healthy: true, port: 7777, has_error: false });
+    commandMocks.getServerStatus.mockResolvedValue({ is_healthy: true, port: 7777, has_error: false });
     const { result, unmount } = renderHook(() => useServerHealth());
 
     await waitFor(() => expect(result.current.status).toBe('connected'));
@@ -42,7 +42,7 @@ describe('useServerHealth', () => {
   });
 
   it('sets disconnected/error state when server reports error', async () => {
-    tauriCommandMocks.getServerStatus.mockResolvedValue({ is_healthy: false, port: null, has_error: true, error_message: 'down' });
+    commandMocks.getServerStatus.mockResolvedValue({ is_healthy: false, port: null, has_error: true, error_message: 'down' });
     const { result, unmount } = renderHook(() => useServerHealth());
 
     await waitFor(() => expect(result.current.status).toBe('error'));
@@ -52,7 +52,7 @@ describe('useServerHealth', () => {
 
   it('polls until connected', async () => {
     vi.useFakeTimers();
-    tauriCommandMocks.getServerStatus
+    commandMocks.getServerStatus
       .mockResolvedValueOnce({ is_healthy: false, port: null, has_error: false })
       .mockResolvedValue({ is_healthy: true, port: 9999, has_error: false });
 

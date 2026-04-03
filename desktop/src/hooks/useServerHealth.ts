@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { getServerStatus, retryServerConnection } from "@/tauri/commands";
-import { listen } from "@tauri-apps/api/event";
+import { getServerStatus, retryServerConnection } from "@/electron/commands";
+import { listen } from "@/electron/shims/event";
 
 export type ConnectionStatus = "loading" | "connected" | "error";
 

@@ -12,8 +12,7 @@
 
 import { useEffect, useRef } from "react";
 import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
-import { getServerPort } from "../tauri";
-import { retryServerConnection } from "../tauri/commands";
+import { getServerPort, retryServerConnection } from "@/electron/commands";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
 import { useSelectedProject } from "@/stores/useProjectStore";
@@ -21,7 +20,7 @@ import { projectStore, ALL_PROJECTS } from "@/stores/projectStore";
 import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "@/electron/shims/event";
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;

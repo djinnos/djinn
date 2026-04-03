@@ -27,8 +27,8 @@ import {
 } from '@/components/ui/alert-dialog';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { useConnectionSettings } from '@/hooks/useConnectionSettings';
-import { selectFile } from '@/tauri/commands';
-import type { ConnectionMode, SshHost, TunnelStatus } from '@/tauri/commands';
+import { selectFile } from '@/electron/commands';
+import type { ConnectionMode, SshHost, TunnelStatus } from '@/electron/commands';
 import { cn } from '@/lib/utils';
 
 function TunnelStatusBadge({ status }: { status: TunnelStatus }) {

@@ -159,7 +159,18 @@ body {
     @apply bg-background text-foreground;
   }
 
-  /* Webkit (Tauri/WebView) scrollbar styling */
+  /* Electron window drag regions */
+  [data-drag-region] {
+    -webkit-app-region: drag;
+  }
+  [data-drag-region] button,
+  [data-drag-region] a,
+  [data-drag-region] input,
+  [data-drag-region] [role="button"] {
+    -webkit-app-region: no-drag;
+  }
+
+  /* Webkit (Electron/WebView) scrollbar styling */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;

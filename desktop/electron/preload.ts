@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   on: (event: string, callback: (payload: unknown) => void): Promise<() => void> => {
     const handler = (_event: IpcRendererEvent, payload: unknown) => callback(payload);
     ipcRenderer.on(event, handler);
-    // Return a promise that resolves to an unlisten function (matching Tauri's listen() API)
+    // Return a promise that resolves to an unlisten function
     return Promise.resolve(() => {
       ipcRenderer.removeListener(event, handler);
     });

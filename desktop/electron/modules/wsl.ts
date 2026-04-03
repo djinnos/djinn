@@ -1,7 +1,7 @@
 /**
  * WSL (Windows Subsystem for Linux) support.
  *
- * Ported from src-tauri/src/wsl.rs
+ * WSL detection and management
  *
  * On Windows, the desktop app can launch and connect to a djinn-server running
  * inside the default WSL distribution. WSL2 shares localhost networking so the

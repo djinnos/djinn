@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { addProject, fetchProjects, removeProject, type Project } from '@/api/server';
 import { showToast } from '@/lib/toast';
-import { selectDirectory, syncGithubTokens } from '@/tauri/commands';
+import { selectDirectory, syncGithubTokens } from '@/electron/commands';
 
 export function useProjects() {
   const [projects, setProjects] = useState<Project[]>([]);

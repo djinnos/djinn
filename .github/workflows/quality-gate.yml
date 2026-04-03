@@ -244,41 +244,6 @@ jobs:
       - name: Tests
         run: pnpm test
 
-  desktop-tauri:
-    name: Desktop Tauri
-    needs: changes
-    if: needs.changes.outputs.desktop == 'true'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: desktop/src-tauri
-    env:
-      RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
-    steps:
-      - uses: actions/checkout@v4
-
-      - run: rustup toolchain install
-        working-directory: desktop/src-tauri
-
-      - uses: rui314/setup-mold@v1
-
-      - uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: libwebkit2gtk-4.1-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev libayatana-appindicator3-dev
-          version: 1.0
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: desktop/src-tauri
-          shared-key: desktop-tauri
-          cache-on-failure: true
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Tests
-        run: cargo test --all-targets
-
   # ── Quality gate ────────────────────────────────────────────────────
   quality-gate:
     name: Quality Gate
@@ -290,7 +255,6 @@ jobs:
       - server-clippy
       - server-test
       - desktop-frontend
-      - desktop-tauri
     steps:
       - name: Check results
         run: |
@@ -300,7 +264,6 @@ jobs:
             "${{ needs.server-clippy.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.desktop-frontend.result }}"
-            "${{ needs.desktop-tauri.result }}"
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then

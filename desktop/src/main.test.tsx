@@ -6,7 +6,7 @@ import { screen, waitFor, act } from "@testing-library/react";
 import { renderWithProviders } from "@/test/helpers";
 import { AuthGate } from "@/components/AuthGate";
 import { useAuthStore } from "@/stores/authStore";
-import { emitTauriEvent, clearTauriListeners } from "@/test/setup";
+import { emitMockEvent, clearMockListeners } from "@/test/setup";
 
 const mockInvoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
 
@@ -27,7 +27,7 @@ function resetStore() {
 describe("main entry point (AuthGate + App integration)", () => {
   beforeEach(() => {
     resetStore();
-    clearTauriListeners();
+    clearMockListeners();
     mockInvoke.mockReset();
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "attempt_silent_auth") return false;
@@ -46,7 +46,7 @@ describe("main entry point (AuthGate + App integration)", () => {
 
     // Backend signals login required
     act(() => {
-      emitTauriEvent("auth:login-required", {});
+      emitMockEvent("auth:login-required", {});
     });
 
     await waitFor(() => {
@@ -66,7 +66,7 @@ describe("main entry point (AuthGate + App integration)", () => {
 
     // Backend signals authenticated state
     act(() => {
-      emitTauriEvent("auth:state-changed", {
+      emitMockEvent("auth:state-changed", {
         isAuthenticated: true,
         user: { sub: "user_1", name: "Test", email: "t@t.com" },
       });

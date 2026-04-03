@@ -1,5 +1,5 @@
 import { useAuthStore } from "./authStore";
-import type { AuthState } from "@/tauri/commands";
+import type { AuthState } from "@/electron/commands";
 
 const mockInvoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
 

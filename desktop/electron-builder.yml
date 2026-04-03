@@ -2,7 +2,7 @@ appId: com.djinnos.desktop
 productName: Djinn
 directories:
   output: release
-  buildResources: src-tauri/icons
+  buildResources: build
 files:
   - dist/**/*
   - dist-electron/**/*
@@ -13,21 +13,16 @@ linux:
     - AppImage
     - deb
   category: Development
-  icon: src-tauri/icons/icon.png
 mac:
   target:
     - dmg
-  icon: src-tauri/icons/icon.icns
   category: public.app-category.developer-tools
-  entitlements: src-tauri/Entitlements.plist
-  entitlementsInherit: src-tauri/Entitlements.plist
   hardenedRuntime: true
   gatekeeperAssess: false
 win:
   target:
     - nsis
     - msi
-  icon: src-tauri/icons/icon.ico
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

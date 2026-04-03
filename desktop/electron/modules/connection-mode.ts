@@ -1,7 +1,7 @@
 /**
  * Connection mode persistence.
  *
- * Ported from src-tauri/src/connection_mode.rs
+ * Connection mode persistence and management
  */
 
 import * as fs from "node:fs";

@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useServerHealth } from '@/hooks/useServerHealth';
-import { getConnectionMode, getTunnelStatus, getSshHosts, type ConnectionMode, type TunnelStatus, type SshHost } from '@/tauri/commands';
-import { listen } from '@tauri-apps/api/event';
+import { getConnectionMode, getTunnelStatus, getSshHosts, type ConnectionMode, type TunnelStatus, type SshHost } from '@/electron/commands';
+import { listen } from '@/electron/shims/event';
 import { cn } from '@/lib/utils';
 
 export function ConnectionStatusBadge() {

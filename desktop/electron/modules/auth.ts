@@ -1,7 +1,7 @@
 /**
  * GitHub OAuth device code flow, token storage, and user profile fetching.
  *
- * Ported from src-tauri/src/auth.rs
+ * GitHub OAuth authentication flow
  */
 
 import * as fs from "node:fs";

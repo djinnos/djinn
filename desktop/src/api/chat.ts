@@ -1,4 +1,4 @@
-import { getServerPort } from "@/tauri/commands";
+import { getServerPort } from "@/electron/commands";
 import type { ChatMessage } from "@/stores/chatStore";
 
 async function getBaseUrl(): Promise<string> {

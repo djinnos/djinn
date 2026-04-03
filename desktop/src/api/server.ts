@@ -1,6 +1,6 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput, ProjectListOutputSchema } from "@/api/generated/mcp-tools.gen";
-import { getServerPort } from "@/tauri/commands";
+import { getServerPort } from "@/electron/commands";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
 

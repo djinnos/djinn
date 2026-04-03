@@ -18,7 +18,7 @@ if (!Element.prototype.scrollIntoView) {
   })
 }
 
-// Mock Electron API — the shim layer (`@tauri-apps/api/core` etc.) delegates to
+// Mock Electron API — the shim layer (`@/electron/shims/*`) delegates to
 // `window.electronAPI.*` at runtime, so mocking at this boundary is sufficient.
 const mockListeners = new Map<string, Set<Function>>();
 
@@ -49,9 +49,6 @@ export function clearMockListeners() {
   mockListeners.clear();
 }
 
-// Backward-compatible aliases — existing tests import these names
-export const emitTauriEvent = emitMockEvent;
-export const clearTauriListeners = clearMockListeners;
 
 // Mock SVG imports
 vi.mock("@/assets/logo.svg", () => ({ default: "logo.svg" }));

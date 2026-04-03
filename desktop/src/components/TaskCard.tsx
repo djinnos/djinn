@@ -20,7 +20,7 @@ import {
   GitMergeIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@/electron/shims/opener";
 import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
 import { useIsAllProjects } from "@/stores/useProjectStore";

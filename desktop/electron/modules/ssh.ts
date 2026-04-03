@@ -1,7 +1,7 @@
 /**
  * SSH host persistence and tunnel management.
  *
- * Ported from src-tauri/src/ssh_hosts.rs and src-tauri/src/ssh_tunnel.rs
+ * SSH host management and tunnel handling
  */
 
 import * as fs from "node:fs";

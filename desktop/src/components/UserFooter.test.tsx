@@ -48,8 +48,8 @@ vi.mock("@/api/server", () => ({
   addProject: vi.fn(),
   fetchProjects: vi.fn().mockResolvedValue([]),
 }));
-vi.mock("@/tauri/commands", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/tauri/commands")>();
+vi.mock("@/electron/commands", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/electron/commands")>();
   return {
     ...actual,
     selectDirectory: vi.fn(),

@@ -10,7 +10,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Loading02Icon } from "@hugeicons/core-free-icons";
-import { checkGitRemote, setupGitRemote } from "@/tauri/commands";
+import { checkGitRemote, setupGitRemote } from "@/electron/commands";
 import { showToast } from "@/lib/toast";
 
 type BannerState = "info" | "running" | "success" | "error";

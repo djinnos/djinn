@@ -1,7 +1,7 @@
 /**
  * Daemon management, health monitoring, binary download.
  *
- * Ported from src-tauri/src/server.rs and server/crates/djinn-daemon/src/lib.rs
+ * Server lifecycle management (discovery, health checks, embedded launch)
  */
 
 import * as fs from "node:fs";
@@ -19,7 +19,7 @@ import * as wsl from "./wsl.js";
 
 export type SendEvent = (event: string, payload?: unknown) => void;
 
-/** Runtime connection state — uses snake_case to match Tauri/Rust serialization. */
+/** Runtime connection state — uses snake_case to match Rust serialization. */
 export interface ServerStatus {
   base_url: string | null;
   port: number | null;

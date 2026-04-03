@@ -64,7 +64,7 @@ function createWindow(): void {
   });
 }
 
-// macOS: prevent default close behavior, quit instead (matching Tauri)
+// macOS: prevent default close behavior, quit instead
 app.on('window-all-closed', () => {
   app.quit();
 });

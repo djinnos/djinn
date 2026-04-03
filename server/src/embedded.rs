@@ -1,7 +1,7 @@
 /// Embedded server startup — runs the djinn server in-process as a background
 /// tokio task instead of a separate sidecar binary.
 ///
-/// Designed to be called from the Tauri desktop app. The caller supplies a
+/// Designed to be called from the desktop app. The caller supplies a
 /// `CancellationToken`; cancelling it triggers the server's graceful shutdown
 /// (up to 5 seconds of connection draining).
 use std::path::PathBuf;

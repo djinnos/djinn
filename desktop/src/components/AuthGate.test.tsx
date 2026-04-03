@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { AuthGate } from "./AuthGate";
 import { useAuthStore } from "@/stores/authStore";
 import { renderWithProviders } from "@/test/helpers";
-import { emitTauriEvent, clearTauriListeners } from "@/test/setup";
+import { emitMockEvent, clearMockListeners } from "@/test/setup";
 
 const mockInvoke = window.electronAPI.invoke as ReturnType<typeof vi.fn>;
 
@@ -30,7 +30,7 @@ function renderAuthGate(children = <div data-testid="protected">Protected conten
 describe("AuthGate", () => {
   beforeEach(() => {
     resetStore();
-    clearTauriListeners();
+    clearMockListeners();
     mockInvoke.mockReset();
     // Default mock for attempt_silent_auth — most tests don't care about it
     mockInvoke.mockImplementation(async (cmd: string, ..._args: unknown[]) => {
@@ -95,7 +95,7 @@ describe("AuthGate", () => {
 
       // Backend event arrives before timeout — sync state update
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       // Verify store updated (isLoading = false)
@@ -115,7 +115,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -127,7 +127,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:silent-refresh-failed", { reason: "token_expired" });
+        emitMockEvent("auth:silent-refresh-failed", { reason: "token_expired" });
       });
 
       await waitFor(() => {
@@ -139,7 +139,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:state-changed", {
+        emitMockEvent("auth:state-changed", {
           isAuthenticated: true,
           user: MOCK_USER,
         });
@@ -154,7 +154,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -168,7 +168,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -180,7 +180,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -195,7 +195,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -217,7 +217,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -251,7 +251,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -266,7 +266,7 @@ describe("AuthGate", () => {
 
       // Backend completes polling and emits auth:state-changed
       act(() => {
-        emitTauriEvent("auth:state-changed", {
+        emitMockEvent("auth:state-changed", {
           isAuthenticated: true,
           user: MOCK_USER,
         });
@@ -291,7 +291,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -305,7 +305,7 @@ describe("AuthGate", () => {
       });
 
       act(() => {
-        emitTauriEvent("auth:login-failed", { reason: "Device code expired" });
+        emitMockEvent("auth:login-failed", { reason: "Device code expired" });
       });
 
       await waitFor(() => {
@@ -328,7 +328,7 @@ describe("AuthGate", () => {
 
       // First transition to unauthenticated via event
       act(() => {
-        emitTauriEvent("auth:login-required", {});
+        emitMockEvent("auth:login-required", {});
       });
 
       await waitFor(() => {
@@ -337,7 +337,7 @@ describe("AuthGate", () => {
 
       // Silent refresh succeeds — triggers fetchState
       act(() => {
-        emitTauriEvent("auth:silent-refresh-success", {});
+        emitMockEvent("auth:silent-refresh-success", {});
       });
 
       await waitFor(() => {
@@ -351,7 +351,7 @@ describe("AuthGate", () => {
       renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:state-changed", {
+        emitMockEvent("auth:state-changed", {
           isAuthenticated: true,
           user: MOCK_USER,
         });
@@ -362,7 +362,7 @@ describe("AuthGate", () => {
       });
 
       act(() => {
-        emitTauriEvent("auth:state-changed", {
+        emitMockEvent("auth:state-changed", {
           isAuthenticated: false,
           user: null,
         });
@@ -379,7 +379,7 @@ describe("AuthGate", () => {
       const { unmount } = renderAuthGate();
 
       act(() => {
-        emitTauriEvent("auth:state-changed", {
+        emitMockEvent("auth:state-changed", {
           isAuthenticated: true,
           user: MOCK_USER,
         });
@@ -393,7 +393,7 @@ describe("AuthGate", () => {
 
       // Emitting after unmount should not cause errors
       act(() => {
-        emitTauriEvent("auth:state-changed", {
+        emitMockEvent("auth:state-changed", {
           isAuthenticated: false,
           user: null,
         });
@@ -416,7 +416,7 @@ describe("AuthGate", () => {
       );
 
       act(() => {
-        emitTauriEvent("auth:state-changed", {
+        emitMockEvent("auth:state-changed", {
           isAuthenticated: true,
           user: MOCK_USER,
         });
@@ -438,7 +438,7 @@ describe("AuthGate", () => {
       );
 
       act(() => {
-        emitTauriEvent("auth:state-changed", {
+        emitMockEvent("auth:state-changed", {
           isAuthenticated: true,
           user: MOCK_USER,
         });

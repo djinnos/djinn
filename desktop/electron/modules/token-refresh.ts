@@ -7,7 +7,7 @@
  * - Token rotation handling (GitHub returns new refresh token)
  * - Automatic cleanup on refresh failure
  *
- * Ported from src-tauri/src/token_refresh.rs
+ * Automatic OAuth token refresh
  */
 
 import {

@@ -86,15 +86,15 @@ stop: ## Stop the server daemon
 halt: stop ## Stop everything (server + desktop)
 	-@pkill -f "djinn-server" 2>/dev/null || true
 	-@pkill -f "djinnos-desktop" 2>/dev/null || true
-	-@pkill -f "tauri dev" 2>/dev/null || true
+	-@pkill -f "electron.*main" 2>/dev/null || true
 	-@pkill -f "vite.*desktop" 2>/dev/null || true
 	@echo "All processes halted."
 
 reset: ## Kill everything and restart fresh
 	@echo "Killing all djinn processes..."
 	-@pkill -f "djinn-server" 2>/dev/null || true
-	-@pkill -f "tauri dev" 2>/dev/null || true
 	-@pkill -f "djinnos-desktop" 2>/dev/null || true
+	-@pkill -f "electron.*main" 2>/dev/null || true
 	-@pkill -f "vite.*desktop" 2>/dev/null || true
 	@sleep 1
 	@echo "Restarting..."

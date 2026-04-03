@@ -118,7 +118,7 @@ function ExecutionIndicatorMock({
 }
 
 /* ---------------------------------------------------------------------------
- * TitlebarMock — reproduces the full Titlebar layout without Tauri/store hooks
+ * TitlebarMock — reproduces the full Titlebar layout without Electron/store hooks
  * --------------------------------------------------------------------------- */
 
 interface TitlebarMockProps {
@@ -140,7 +140,7 @@ function TitlebarMock({
 }: TitlebarMockProps) {
   return (
     <div
-      data-tauri-drag-region
+      data-drag-region
       className="flex h-9 select-none items-center border-b border-border/50 bg-background"
     >
       {/* Left: Breadcrumb */}
@@ -161,7 +161,7 @@ function TitlebarMock({
 
       {/* Center: Session indicator */}
       <div
-        data-tauri-drag-region
+        data-drag-region
         className="flex flex-1 items-center justify-center"
       >
         <ExecutionIndicatorMock

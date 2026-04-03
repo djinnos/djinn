@@ -1,7 +1,7 @@
 /**
  * Remote deployment of djinn-server to SSH hosts.
  *
- * Ported from src-tauri/src/deploy.rs
+ * Remote server deployment via SSH
  *
  * Uploads the server binary via `scp` and makes it executable.
  */

@@ -1,11 +1,11 @@
 /**
- * Tauri command wrappers
+ * Electron IPC command wrappers
  *
  * All invoke() calls go through this module. Never call invoke() directly
  * in components - always use these wrapper functions.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./shims/invoke";
 
 export interface AuthUser {
   sub: string;
@@ -34,7 +34,7 @@ export async function startGithubLogin(): Promise<DeviceCodeInfo> {
 }
 
 /**
- * Get the server port from the Tauri backend.
+ * Get the server port from the Electron backend.
  * @returns The port number the backend server is running on
  */
 export async function getServerPort(): Promise<number> {
@@ -42,14 +42,14 @@ export async function getServerPort(): Promise<number> {
 }
 
 /**
- * Get the full server base URL from the Tauri backend.
+ * Get the full server base URL from the Electron backend.
  */
 export async function getServerUrl(): Promise<string> {
   return invoke("get_server_url");
 }
 
 /**
- * Get the server status from the Tauri backend.
+ * Get the server status from the Electron backend.
  * @returns The current server status including health and error state
  */
 export async function getServerStatus(): Promise<{

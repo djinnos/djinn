@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "@/electron/shims/event";
 import {
   getConnectionMode,
   setConnectionMode,
@@ -14,7 +14,7 @@ import {
   type ConnectionMode,
   type SshHost,
   type TunnelStatus,
-} from "@/tauri/commands";
+} from "@/electron/commands";
 import { showToast } from "@/lib/toast";
 
 export function useConnectionSettings() {
@@ -68,7 +68,7 @@ export function useConnectionSettings() {
     void loadInitialData();
   }, [loadInitialData]);
 
-  // Listen for tunnel status events from Tauri backend
+  // Listen for tunnel status events from Electron backend
   useEffect(() => {
     const unlisten = listen<TunnelStatus>("tunnel:status-changed", (event) => {
       setTunnelStatus(event.payload);

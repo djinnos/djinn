@@ -17,7 +17,7 @@ import {
   saveSshHost,
   testSshConnection,
   type SshHost,
-} from '@/tauri/commands';
+} from '@/electron/commands';
 import { HostEditor } from '@/components/ConnectionSettings';
 
 type Phase =

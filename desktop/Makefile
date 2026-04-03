@@ -10,7 +10,7 @@ install: ## Install all dependencies (JS + server build)
 	pnpm install
 	cd $(SERVER_DIR) && cargo build
 
-dev: ## Run frontend only (browser, no Tauri)
+dev: ## Run frontend only (browser, no Electron)
 	pnpm dev
 
 desktop: ## Run full Electron desktop app (dev mode)
