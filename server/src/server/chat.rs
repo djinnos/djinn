@@ -19,7 +19,7 @@ use djinn_agent::actors::slot::{
 use djinn_agent::message::{
     CacheBreakpoint, ContentBlock, Conversation, Message, MessageMeta, Role,
 };
-use djinn_agent::provider::{StreamEvent, create_provider};
+use djinn_agent::provider::{StreamEvent, TelemetryMeta, create_provider};
 use djinn_db::{
     EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, RepoMapCacheKey,
     RepoMapCacheRepository, TaskRepository,
@@ -593,11 +593,17 @@ pub(super) async fn completions_handler(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
+    let telemetry_meta = TelemetryMeta {
+        task_id: None,
+        agent_type: Some("chat".to_owned()),
+        session_id: Some(session_id.clone()),
+    };
+
     let provider_config = match provider_credential {
         ProviderCredential::OAuthConfig(mut cfg) => {
             cfg.model_id = resolved_model.clone();
             cfg.context_window = context_window.max(0) as u32;
-            cfg.telemetry = None;
+            cfg.telemetry = Some(telemetry_meta);
             cfg.session_affinity_key = Some(session_id.clone());
             *cfg
         }
@@ -616,7 +622,7 @@ pub(super) async fn completions_handler(
                 format_family: format_family_for_provider(&provider_id, &resolved_model),
                 model_id: resolved_model,
                 context_window: context_window.max(0) as u32,
-                telemetry: None,
+                telemetry: Some(telemetry_meta),
                 session_affinity_key: Some(session_id.clone()),
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
