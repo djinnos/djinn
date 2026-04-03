@@ -2,7 +2,7 @@ import type { Epic, Task } from "@/api/types";
 import type { EpicData, TaskData } from "./types";
 
 /** Default color when epic has no color set */
-const DEFAULT_EPIC_COLOR = "#6b7280"; // neutral grey
+const DEFAULT_EPIC_COLOR = "#8b5cf6"; // purple
 
 /** Default emoji when epic has no emoji set */
 const DEFAULT_EPIC_EMOJI = "📦";

@@ -20,29 +20,28 @@ const hexToRgba = (hex: string, opacity: number): string => {
 const EpicGroupNode = memo(({ data }: NodeProps) => {
   const d = data as EpicGroupData;
   const isClosed = d.status === "closed";
-  const opacity = isClosed ? 0.4 : 1;
+  const color = isClosed ? "#6b7280" : d.epicColor;
 
   return (
     <div
       className="rounded-lg border-2"
       style={{
-        borderColor: hexToRgba(d.epicColor, isClosed ? 0.15 : 0.3),
-        backgroundColor: hexToRgba(d.epicColor, isClosed ? 0.03 : 0.08),
+        borderColor: hexToRgba(color, 0.3),
+        backgroundColor: hexToRgba(color, 0.08),
         width: "100%",
         height: "100%",
-        opacity,
       }}
     >
       <div
         className="flex items-center gap-2 rounded-t-md px-4 py-2"
         style={{
-          backgroundColor: hexToRgba(d.epicColor, isClosed ? 0.08 : 0.15),
+          backgroundColor: hexToRgba(color, 0.15),
         }}
       >
         <span className="text-base">{d.emoji}</span>
         <span
           className="text-xs font-bold uppercase tracking-widest"
-          style={{ color: d.epicColor }}
+          style={{ color }}
         >
           {d.label}
           {isClosed && " (closed)"}

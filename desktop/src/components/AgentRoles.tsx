@@ -65,74 +65,84 @@ function AgentForm({ initial, fixedBaseRole, submitLabel, isBusy, onSubmit, onCa
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      {!fixedBaseRole && (
-        <div className="space-y-1.5">
-          <Label>Base role</Label>
-          <div className="flex flex-wrap gap-2">
-            {BASE_ROLES.map((role) => (
-              <button
-                key={role}
-                type="button"
-                onClick={() => setBaseRole(role)}
-                className={cn(
-                  "rounded-md border px-3 py-1.5 text-sm transition-colors",
-                  baseRole === role
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border bg-card text-muted-foreground hover:bg-muted",
-                )}
-              >
-                {BASE_ROLE_LABELS[role]}
-              </button>
-            ))}
+    <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+      {/* Header bar */}
+      <div className="shrink-0 border-b border-border px-6 py-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-foreground">
+            {initial?.name ? `Edit "${initial.name}"` : "New specialist"}
+          </h3>
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={onCancel} disabled={isBusy}>
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" disabled={isBusy || !name.trim()}>
+              {isBusy ? "Saving..." : submitLabel}
+            </Button>
           </div>
         </div>
-      )}
 
-      <div className="space-y-1.5">
-        <Label htmlFor="role-name">Name</Label>
-        <Input
-          id="role-name"
-          autoFocus
-          placeholder="e.g. Senior Backend Worker"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          required
-        />
+        {/* Compact metadata row */}
+        <div className="flex flex-wrap items-end gap-4">
+          {!fixedBaseRole && (
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Base role</Label>
+              <div className="flex gap-1.5">
+                {BASE_ROLES.map((role) => (
+                  <button
+                    key={role}
+                    type="button"
+                    onClick={() => setBaseRole(role)}
+                    className={cn(
+                      "rounded-md border px-2.5 py-1 text-xs transition-colors",
+                      baseRole === role
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-card text-muted-foreground hover:bg-muted",
+                    )}
+                  >
+                    {BASE_ROLE_LABELS[role]}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-1.5 flex-1 min-w-48">
+            <Label htmlFor="role-name" className="text-xs text-muted-foreground">Name</Label>
+            <Input
+              id="role-name"
+              autoFocus
+              placeholder="e.g. Senior Backend Worker"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
+          </div>
+
+          <div className="space-y-1.5 flex-1 min-w-48">
+            <Label htmlFor="role-description" className="text-xs text-muted-foreground">Description</Label>
+            <Input
+              id="role-description"
+              placeholder="Short description of what this specialist does"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
+        </div>
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="role-description">Description</Label>
-        <Input
-          id="role-description"
-          placeholder="Short description of what this specialist does"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-        />
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="role-extensions">
-          Prompt extensions{" "}
-          <span className="text-muted-foreground font-normal">(one per line)</span>
+      {/* Large prompt editor */}
+      <div className="flex-1 min-h-0 flex flex-col p-6 pb-8">
+        <Label htmlFor="role-extensions" className="text-xs text-muted-foreground mb-2 block shrink-0">
+          System prompt extensions
         </Label>
         <Textarea
           id="role-extensions"
-          placeholder={"You specialise in Rust systems programming.\nAlways write safe, idiomatic code."}
+          placeholder={"You specialise in Rust systems programming.\nAlways write safe, idiomatic code.\n\nWhen reviewing code, focus on:\n- Memory safety\n- Error handling patterns\n- Idiomatic use of traits and generics"}
           value={extensions}
           onChange={(e) => setExtensions(e.target.value)}
-          rows={4}
-          className="font-mono text-sm resize-y"
+          className="font-mono text-sm flex-1 min-h-[200px] resize-none"
         />
-      </div>
-
-      <div className="flex gap-2 justify-end pt-1">
-        <Button type="button" variant="outline" onClick={onCancel} disabled={isBusy}>
-          Cancel
-        </Button>
-        <Button type="submit" disabled={isBusy || !name.trim()}>
-          {isBusy ? "Saving..." : submitLabel}
-        </Button>
       </div>
     </form>
   );
@@ -506,6 +516,42 @@ export function AgentRoles() {
     roles: roles.filter((r) => r.base_role === baseRole),
   })).filter((g) => g.roles.length > 0);
 
+  // Full-page form takeover for create/edit
+  const editingRole = editingId ? roles.find((r) => r.id === editingId) : null;
+
+  if (isCreating) {
+    return (
+      <div className="flex h-full flex-col rounded-lg border border-border bg-card overflow-hidden">
+        <AgentForm
+          submitLabel="Create"
+          isBusy={createBusy}
+          onSubmit={(data) => void handleCreate(data)}
+          onCancel={() => setIsCreating(false)}
+        />
+      </div>
+    );
+  }
+
+  if (editingRole) {
+    return (
+      <div className="flex h-full flex-col rounded-lg border border-border bg-card overflow-hidden">
+        <AgentForm
+          initial={{
+            base_role: editingRole.base_role,
+            name: editingRole.name,
+            description: editingRole.description,
+            system_prompt_extensions: editingRole.system_prompt_extensions,
+          }}
+          fixedBaseRole={editingRole.base_role}
+          submitLabel="Save"
+          isBusy={editBusy}
+          onSubmit={(data) => void handleUpdate(editingRole.id, data)}
+          onCancel={() => setEditingId(null)}
+        />
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
@@ -523,24 +569,10 @@ export function AgentRoles() {
             Manage specialist roles that extend base agent behaviour.
           </p>
         </div>
-        {!isCreating && (
-          <Button onClick={() => setIsCreating(true)}>New Specialist</Button>
-        )}
+        <Button onClick={() => setIsCreating(true)}>New Specialist</Button>
       </div>
 
       {error && <InlineError message={error} onRetry={() => void loadRoles()} />}
-
-      {isCreating && (
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="font-medium mb-4">New specialist</h3>
-          <AgentForm
-            submitLabel="Create"
-            isBusy={createBusy}
-            onSubmit={(data) => void handleCreate(data)}
-            onCancel={() => setIsCreating(false)}
-          />
-        </div>
-      )}
 
       {roles.length === 0 && !isCreating ? (
         <div className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
@@ -554,35 +586,16 @@ export function AgentRoles() {
                 {label}
               </h3>
               <div className="space-y-2">
-                {groupRoles.map((role) =>
-                  editingId === role.id ? (
-                    <div key={role.id} className="rounded-lg border border-border bg-card p-4">
-                      <h4 className="font-medium mb-4">Edit "{role.name}"</h4>
-                      <AgentForm
-                        initial={{
-                          base_role: role.base_role,
-                          name: role.name,
-                          description: role.description,
-                          system_prompt_extensions: role.system_prompt_extensions,
-                        }}
-                        fixedBaseRole={role.base_role}
-                        submitLabel="Save"
-                        isBusy={editBusy}
-                        onSubmit={(data) => void handleUpdate(role.id, data)}
-                        onCancel={() => setEditingId(null)}
-                      />
-                    </div>
-                  ) : (
-                    <AgentCard
-                      key={role.id}
-                      role={role}
-                      onEdit={() => setEditingId(role.id)}
-                      onDelete={() => void handleDelete(role.id)}
-                      onRoleCleared={() => void loadRoles()}
-                      isDeleting={deletingId === role.id}
-                    />
-                  ),
-                )}
+                {groupRoles.map((role) => (
+                  <AgentCard
+                    key={role.id}
+                    role={role}
+                    onEdit={() => setEditingId(role.id)}
+                    onDelete={() => void handleDelete(role.id)}
+                    onRoleCleared={() => void loadRoles()}
+                    isDeleting={deletingId === role.id}
+                  />
+                ))}
               </div>
             </div>
           ))}
