@@ -6,7 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+# Shared environment for all jobs.
+# RUSTC_WRAPPER is cleared to disable local sccache in CI; the
+# Swatinem/rust-cache action handles caching instead.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_BUILD_DIR: target
+  RUSTC_WRAPPER: ""
+
 jobs:
+  # ── Change detection ────────────────────────────────────────────────
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -20,9 +30,112 @@ jobs:
         with:
           filters: |
             server:
-              - 'server/**'
+              - 'server/Cargo.toml'
+              - 'server/Cargo.lock'
+              - 'server/rust-toolchain.toml'
+              - 'server/.cargo/**'
+              - 'server/.config/**'
+              - 'server/crates/**/Cargo.toml'
+              - 'server/crates/**/*.rs'
+              - 'server/src/**/*.rs'
+              - '.github/workflows/quality-gate.yml'
             desktop:
               - 'desktop/**'
+
+  # ╔══════════════════════════════════════════════════════════════════╗
+  # ║  Cache Warming (main push only)                                 ║
+  # ║                                                                  ║
+  # ║  These jobs build the workspace to pre-populate GitHub Actions   ║
+  # ║  cache after every merge to main.  PR jobs set save-if: false    ║
+  # ║  so they never write cache — guaranteeing consistent warm hits   ║
+  # ║  from the last main commit.                                      ║
+  # ╚══════════════════════════════════════════════════════════════════╝
+
+  warm-cache-quality:
+    name: Warm Cache (Quality)
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-quality
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - name: Build workspace (populate cache)
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Prune old caches
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --repo ${{ github.repository }} --key server-quality- \
+            --sort created_at --order asc --json id | \
+            jq -r '.[:-1].[].id' | \
+            xargs -r -I{} gh cache delete {} --repo ${{ github.repository }} 2>/dev/null || true
+
+  warm-cache-test:
+    name: Warm Cache (Test)
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Build test binaries (populate cache)
+        run: cargo nextest run --workspace --all-targets --all-features --no-run
+
+      - name: Prune old caches
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --repo ${{ github.repository }} --key server-test- \
+            --sort created_at --order asc --json id | \
+            jq -r '.[:-1].[].id' | \
+            xargs -r -I{} gh cache delete {} --repo ${{ github.repository }} 2>/dev/null || true
+
+  # ╔══════════════════════════════════════════════════════════════════╗
+  # ║  Server Quality & Tests                                          ║
+  # ║                                                                  ║
+  # ║  These jobs read warm cache (save-if: false) and run the actual  ║
+  # ║  quality gates.  On main pushes the warm-cache jobs above write  ║
+  # ║  the cache; on PRs these jobs consume it.                        ║
+  # ╚══════════════════════════════════════════════════════════════════╝
 
   server-clippy:
     name: Server Clippy
@@ -33,10 +146,6 @@ jobs:
       run:
         working-directory: server
     env:
-      CARGO_TERM_COLOR: always
-      CARGO_INCREMENTAL: 0
-      CARGO_BUILD_BUILD_DIR: target
-      RUSTC_WRAPPER: ""
       RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
@@ -49,8 +158,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          shared-key: server-clippy
+          shared-key: server-quality
           cache-on-failure: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Verify workspace-hack (hakari)
+        run: |
+          cargo install cargo-hakari --locked 2>/dev/null || true
+          cargo hakari verify || {
+            echo "::error::workspace-hack is out of date. Run 'cargo hakari generate && cargo hakari manage-deps' locally."
+            exit 1
+          }
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -64,10 +183,6 @@ jobs:
       run:
         working-directory: server
     env:
-      CARGO_TERM_COLOR: always
-      CARGO_INCREMENTAL: 0
-      CARGO_BUILD_BUILD_DIR: target
-      RUSTC_WRAPPER: ""
       RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
@@ -82,6 +197,10 @@ jobs:
           workspaces: server
           shared-key: server-test
           cache-on-failure: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: taiki-e/install-action@nextest
 
       - name: Configure git identity for tests
         run: |
@@ -89,7 +208,11 @@ jobs:
           git config --global user.name "CI Test"
 
       - name: Tests
-        run: cargo test --all-targets --all-features
+        run: cargo nextest run --workspace --all-targets --all-features --profile ci
+
+  # ╔══════════════════════════════════════════════════════════════════╗
+  # ║  Desktop                                                         ║
+  # ╚══════════════════════════════════════════════════════════════════╝
 
   desktop-frontend:
     name: Desktop Frontend
@@ -130,9 +253,6 @@ jobs:
       run:
         working-directory: desktop/src-tauri
     env:
-      CARGO_TERM_COLOR: always
-      CARGO_INCREMENTAL: 0
-      RUSTC_WRAPPER: ""
       RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
@@ -159,15 +279,29 @@ jobs:
       - name: Tests
         run: cargo test --all-targets
 
+  # ── Quality gate ────────────────────────────────────────────────────
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [server-clippy, server-test, desktop-frontend, desktop-tauri]
+    needs:
+      - warm-cache-quality
+      - warm-cache-test
+      - server-clippy
+      - server-test
+      - desktop-frontend
+      - desktop-tauri
     steps:
       - name: Check results
         run: |
-          results=("${{ needs.server-clippy.result }}" "${{ needs.server-test.result }}" "${{ needs.desktop-frontend.result }}" "${{ needs.desktop-tauri.result }}")
+          results=(
+            "${{ needs.warm-cache-quality.result }}"
+            "${{ needs.warm-cache-test.result }}"
+            "${{ needs.server-clippy.result }}"
+            "${{ needs.server-test.result }}"
+            "${{ needs.desktop-frontend.result }}"
+            "${{ needs.desktop-tauri.result }}"
+          )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then
               echo "Quality gate failed: found result '$r'"

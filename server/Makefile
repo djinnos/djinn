@@ -6,7 +6,7 @@ INSTALL_PATH := $(INSTALL_DIR)/$(BINARY)
 DESKTOP_DIR := $(CURDIR)/../desktop
 DAEMON_FILE := $(HOME)/.djinn/daemon.json
 
-.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt langfuse-up langfuse-down help
+.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt langfuse-up langfuse-down verify help
 
 build: ## Build debug binary
 	cargo build
@@ -99,6 +99,9 @@ reset: ## Kill everything and restart fresh
 	@sleep 1
 	@echo "Restarting..."
 	$(MAKE) run-all
+
+verify: ## Run CI-equivalent checks locally (fmt, check, clippy, hakari, test)
+	./scripts/verify
 
 langfuse-up: ## Start Langfuse stack (dashboard at http://localhost:3000)
 	docker compose -f docker/docker-compose.langfuse.yml up -d

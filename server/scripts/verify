@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Local verification script that mirrors CI stages.
+# Usage: ./scripts/verify [stage]
+#
+# Stages:
+#   fmt             Check formatting
+#   check           Cargo check workspace
+#   clippy          Run clippy with -D warnings
+#   quality         fmt + check + clippy  (fast gate)
+#   test            Run unit tests with nextest
+#   hakari          Verify workspace-hack is up to date
+#   ci              quality + hakari + test  (default)
+#
+# Examples:
+#   ./scripts/verify            # Run full CI equivalent
+#   ./scripts/verify quality    # Fast quality checks only
+#   ./scripts/verify test       # Tests only
+
+set -euo pipefail
+
+# Resolve to the server directory regardless of where the script is called from.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$SERVER_DIR"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+run() {
+    local label="$1"
+    shift
+    echo -e "${CYAN}▸ ${label}${NC}"
+    if "$@"; then
+        echo -e "${GREEN}✓ ${label}${NC}\n"
+    else
+        echo -e "${RED}✗ ${label}${NC}\n"
+        exit 1
+    fi
+}
+
+stage_fmt() {
+    run "cargo fmt --check" cargo fmt --all --check
+}
+
+stage_check() {
+    run "cargo check --workspace" cargo check --workspace --all-targets --all-features
+}
+
+stage_clippy() {
+    run "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
+}
+
+stage_quality() {
+    stage_fmt
+    stage_check
+    stage_clippy
+}
+
+stage_test() {
+    if command -v cargo-nextest &>/dev/null; then
+        run "cargo nextest run" cargo nextest run --workspace --all-targets --all-features
+    else
+        echo -e "${CYAN}(nextest not found, falling back to cargo test)${NC}"
+        run "cargo test" cargo test --workspace --all-targets --all-features
+    fi
+}
+
+stage_hakari() {
+    if command -v cargo-hakari &>/dev/null; then
+        run "cargo hakari verify" cargo hakari verify
+    else
+        echo -e "${CYAN}(cargo-hakari not installed, skipping)${NC}"
+    fi
+}
+
+stage_ci() {
+    stage_quality
+    stage_hakari
+    stage_test
+}
+
+stage="${1:-ci}"
+
+case "$stage" in
+    fmt)        stage_fmt ;;
+    check)      stage_check ;;
+    clippy)     stage_clippy ;;
+    quality)    stage_quality ;;
+    test)       stage_test ;;
+    hakari)     stage_hakari ;;
+    ci)         stage_ci ;;
+    *)
+        echo "Unknown stage: $stage"
+        echo "Usage: $0 [fmt|check|clippy|quality|test|hakari|ci]"
+        exit 1
+        ;;
+esac
+
+echo -e "${GREEN}All stages passed.${NC}"

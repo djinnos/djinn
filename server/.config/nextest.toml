@@ -1,0 +1,17 @@
+# nextest configuration — https://nexte.st/docs/configuration/
+# Run locally with: cargo nextest run
+# CI uses:          cargo nextest run --profile ci
+
+[profile.default]
+# Local development: fast feedback, no retries.
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 3 }
+fail-fast = true
+final-status-level = "fail"
+
+[profile.ci]
+# CI: retry flaky tests, detect slow tests, report flakes.
+retries = { backoff = "exponential", count = 2, delay = "1s", jitter = true }
+slow-timeout = { period = "30s", terminate-after = 3 }
+fail-fast = false
+final-status-level = "flaky"
