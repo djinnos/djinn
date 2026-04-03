@@ -7,7 +7,6 @@ import { cn } from '@/lib/utils';
 import {
   KanbanIcon,
   Robot01Icon,
-  ChartHistogramIcon,
   ChatIcon,
   Folder02Icon,
   PlusSignIcon,
@@ -17,6 +16,7 @@ import {
   Loading02Icon,
   Settings01Icon,
   WorkflowSquare06Icon,
+  Brain01Icon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
@@ -398,10 +398,10 @@ export function Sidebar() {
       setActiveSection('chat');
     } else if (location.pathname.includes('/roadmap')) {
       setActiveSection('roadmap');
-    } else if (location.pathname.includes('/agents')) {
+    } else if (location.pathname.includes('/agents') || location.pathname.includes('/metrics')) {
       setActiveSection('agents');
-    } else if (location.pathname.includes('/metrics')) {
-      setActiveSection('metrics');
+    } else if (location.pathname.includes('/memory')) {
+      setActiveSection('memory');
     } else if (location.pathname.startsWith('/settings')) {
       setActiveSection('settings');
     } else {
@@ -445,7 +445,7 @@ export function Sidebar() {
         break;
       case 'm':
         e.preventDefault();
-        navigateToView('metrics');
+        navigateToView('memory');
         break;
       case 's':
         e.preventDefault();
@@ -522,12 +522,13 @@ export function Sidebar() {
           onClick={() => navigateToView('agents')}
         />
         <NavItem
-          icon={<HugeiconsIcon icon={ChartHistogramIcon} className="h-4 w-4" />}
-          label="Metrics"
+          icon={<HugeiconsIcon icon={Brain01Icon} className="h-4 w-4" />}
+          label="Memory"
           hotkey="M"
-          isActive={activeSection === 'metrics'}
-          onClick={() => navigateToView('metrics')}
+          isActive={activeSection === 'memory'}
+          onClick={() => navigateToView('memory')}
         />
+
 
         {/* Projects Section */}
         <div className="pt-2 space-y-0.5">

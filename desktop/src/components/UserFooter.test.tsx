@@ -76,6 +76,7 @@ vi.mock("@hugeicons/core-free-icons", () => ({
   Loading02Icon: "Loading02Icon",
   Settings01Icon: "Settings01Icon",
   WorkflowSquare06Icon: "WorkflowSquare06Icon",
+  Brain01Icon: "Brain01Icon",
 }));
 vi.mock("@hugeicons/react", () => ({
   HugeiconsIcon: ({ children }: { children?: React.ReactNode }) => <span>{children}</span>,

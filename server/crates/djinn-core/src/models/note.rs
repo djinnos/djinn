@@ -126,6 +126,7 @@ pub struct NoteCompact {
     pub note_type: String,
     pub folder: String,
     pub updated_at: String,
+    pub scope_paths: String,
 }
 
 /// L1 note overview payload used in tiered context responses.

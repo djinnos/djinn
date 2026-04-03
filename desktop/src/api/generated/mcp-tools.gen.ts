@@ -1065,6 +1065,7 @@ export namespace MemoryListOutputSchema {
   id: string
   note_type: string
   permalink: string
+  scope_paths: string
   title: string
   updated_at: string
   [k: string]: any
@@ -1197,6 +1198,7 @@ export namespace MemoryRecentOutputSchema {
   id: string
   note_type: string
   permalink: string
+  scope_paths: string
   title: string
   updated_at: string
   [k: string]: any

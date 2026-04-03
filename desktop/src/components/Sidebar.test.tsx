@@ -94,7 +94,7 @@ describe('Sidebar component', () => {
     expect(screen.getByRole('button', { name: /Chat/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Kanban/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Agents/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Metrics/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Memory/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Settings/ })).toBeInTheDocument();
   });
 

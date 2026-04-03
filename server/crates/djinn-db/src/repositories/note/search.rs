@@ -310,14 +310,14 @@ impl NoteRepository {
 
         let sql = if hours > 0 {
             format!(
-                "SELECT id, permalink, title, note_type, folder, updated_at
+                "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
                  FROM notes
                  WHERE project_id = ?1
                    AND updated_at >= datetime('now', '-{hours} hours')
                  ORDER BY updated_at DESC LIMIT ?2"
             )
         } else {
-            "SELECT id, permalink, title, note_type, folder, updated_at
+            "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
              FROM notes WHERE project_id = ?1
              ORDER BY updated_at DESC LIMIT ?2"
                 .to_owned()
@@ -342,7 +342,7 @@ impl NoteRepository {
     ) -> Result<Vec<NoteCompact>> {
         self.db.ensure_initialized().await?;
 
-        let mut sql = "SELECT id, permalink, title, note_type, folder, updated_at
+        let mut sql = "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
              FROM notes WHERE project_id = ?1"
             .to_owned();
 

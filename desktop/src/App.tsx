@@ -5,10 +5,10 @@ import { Titlebar } from "@/components/Titlebar";
 import { KanbanPage } from "@/pages/KanbanPage";
 import { RoadmapPage } from "@/pages/RoadmapPage";
 import { AgentsPage } from "@/pages/AgentsPage";
-import { MetricsPage } from "@/pages/MetricsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
+import { MemoryPage } from "@/pages/MemoryPage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { ServerUpdateBanner } from "@/components/ServerUpdateBanner";
@@ -40,7 +40,8 @@ function MainLayout() {
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/chat/:sessionId" element={<ChatPage />} />
             <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/metrics" element={<MetricsPage />} />
+            <Route path="/memory" element={<MemoryPage />} />
+            <Route path="/metrics" element={<Navigate to="/agents" replace />} />
 
             {/* Project-scoped views */}
             <Route path="/projects/:projectId/kanban" element={<KanbanPage />} />
@@ -48,7 +49,8 @@ function MainLayout() {
             <Route path="/projects/:projectId/chat" element={<ChatPage />} />
             <Route path="/projects/:projectId/chat/:sessionId" element={<ChatPage />} />
             <Route path="/projects/:projectId/agents" element={<AgentsPage />} />
-            <Route path="/projects/:projectId/metrics" element={<MetricsPage />} />
+            <Route path="/projects/:projectId/memory" element={<MemoryPage />} />
+            <Route path="/projects/:projectId/metrics" element={<Navigate to="../agents" replace />} />
 
             {/* Task session (global) */}
             <Route path="/task/:taskId" element={<TaskSessionPage />} />
