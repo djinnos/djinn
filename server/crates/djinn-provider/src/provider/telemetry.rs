@@ -316,6 +316,14 @@ impl LlmSpan {
         ));
     }
 
+    /// Record the model's thinking/reasoning content on the observation metadata.
+    pub fn record_thinking(&self, thinking: &str) {
+        self.cx.span().set_attribute(KeyValue::new(
+            "langfuse.observation.metadata",
+            format!(r#"{{"thinking":{}}}"#, serde_json::json!(truncate(thinking, 50_000))),
+        ));
+    }
+
     /// Record tool calls made in this generation turn.
     pub fn record_tool_calls(&self, tool_names: &[String]) {
         if !tool_names.is_empty() {

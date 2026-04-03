@@ -798,6 +798,10 @@ pub(super) async fn run_reply_loop(
                     if !turn_text.is_empty() {
                         llm.record_output(&turn_text);
                     }
+                    // Record thinking/reasoning content on the generation metadata.
+                    if !turn_thinking.is_empty() {
+                        llm.record_thinking(&turn_thinking);
+                    }
                     // Record tool call names on the generation span.
                     let tool_names: Vec<String> = turn_tool_calls
                         .iter()
