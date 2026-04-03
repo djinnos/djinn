@@ -677,9 +677,10 @@ pub fn format_family_for_provider(
         FormatFamily::Anthropic
     } else if lower.contains("google") || lower.contains("gemini") || lower.contains("vertex") {
         FormatFamily::Google
-    } else if lower.contains("codex") || model_id.contains("codex") {
-        FormatFamily::OpenAIResponses
-    } else if is_openai_responses_model(model_id) && is_native_openai_provider(&lower) {
+    } else if lower.contains("codex")
+        || model_id.contains("codex")
+        || (is_openai_responses_model(model_id) && is_native_openai_provider(&lower))
+    {
         FormatFamily::OpenAIResponses
     } else {
         FormatFamily::OpenAI

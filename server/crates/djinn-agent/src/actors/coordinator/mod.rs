@@ -52,9 +52,9 @@ pub use handle::CoordinatorHandle;
 pub use types::{CoordinatorDeps, CoordinatorError, CoordinatorStatus, VerificationTracker};
 
 // Re-export internal types for sibling submodules that use `use super::*;`.
-pub(self) use actor::CoordinatorActor;
-pub(self) use messages::CoordinatorMessage;
-pub(self) use types::*;
+use actor::CoordinatorActor;
+use messages::CoordinatorMessage;
+use types::*;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

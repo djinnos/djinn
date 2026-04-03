@@ -139,7 +139,7 @@ pub(super) struct MemoryBuildContextParams {
     pub max_related: Option<i64>,
     pub budget: Option<i64>,
     pub task_id: Option<String>,
-    pub query: Option<String>,
+    pub _query: Option<String>,
     pub limit: Option<i64>,
     pub min_confidence: Option<f64>,
 }

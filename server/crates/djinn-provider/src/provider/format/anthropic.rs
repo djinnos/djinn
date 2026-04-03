@@ -181,17 +181,15 @@ impl AnthropicProvider {
     /// conversation prefix (system + tools + all messages up to the latest turn)
     /// becomes cacheable across consecutive requests within the same session.
     fn add_message_cache_breakpoint(messages: &mut [Value]) {
-        if let Some(last_msg) = messages.last_mut() {
-            if let Some(content) = last_msg.get_mut("content").and_then(Value::as_array_mut) {
-                if let Some(last_block) = content.last_mut() {
-                    if let Some(obj) = last_block.as_object_mut() {
-                        obj.insert(
-                            "cache_control".to_string(),
-                            json!({"type": "ephemeral"}),
-                        );
-                    }
-                }
-            }
+        if let Some(last_msg) = messages.last_mut()
+            && let Some(content) = last_msg.get_mut("content").and_then(Value::as_array_mut)
+            && let Some(last_block) = content.last_mut()
+            && let Some(obj) = last_block.as_object_mut()
+        {
+            obj.insert(
+                "cache_control".to_string(),
+                json!({"type": "ephemeral"}),
+            );
         }
     }
 
