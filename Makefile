@@ -9,19 +9,21 @@ help: ## Show this help
 
 SERVER_BIN := $(SERVER_DIR)/target/debug/djinn-server
 
-dev: ## Build server, kill daemon, and start Electron desktop app
+dev: ## Build server and start Electron desktop app (RESTART_SERVER=1 to kill daemon first)
 	cd $(SERVER_DIR) && cargo build --bin djinn-server
-	@if [ -f "$(DAEMON_FILE)" ]; then \
-		PID=$$(jq -r '.pid' "$(DAEMON_FILE)" 2>/dev/null); \
-		if [ -n "$$PID" ] && [ "$$PID" != "null" ] && kill -0 "$$PID" 2>/dev/null; then \
-			echo "Stopping djinn-server (pid=$$PID)..."; \
-			kill "$$PID"; \
-			while kill -0 "$$PID" 2>/dev/null; do sleep 0.1; done; \
-			echo "Stopped."; \
+	@if [ "$(RESTART_SERVER)" = "1" ]; then \
+		if [ -f "$(DAEMON_FILE)" ]; then \
+			PID=$$(jq -r '.pid' "$(DAEMON_FILE)" 2>/dev/null); \
+			if [ -n "$$PID" ] && [ "$$PID" != "null" ] && kill -0 "$$PID" 2>/dev/null; then \
+				echo "Stopping djinn-server (pid=$$PID)..."; \
+				kill "$$PID"; \
+				while kill -0 "$$PID" 2>/dev/null; do sleep 0.1; done; \
+				echo "Stopped."; \
+			else \
+				echo "Server not running."; \
+			fi \
 		else \
-			echo "Server not running."; \
+			echo "No daemon file found."; \
 		fi \
-	else \
-		echo "No daemon file found."; \
 	fi
 	cd $(DESKTOP_DIR) && DJINN_SERVER_BIN=$(SERVER_BIN) pnpm electron:start

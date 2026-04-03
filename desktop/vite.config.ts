@@ -12,6 +12,8 @@ export default defineConfig({
       "@tauri-apps/api/event": path.resolve(__dirname, "./src/electron/shims/tauri-event.ts"),
       "@tauri-apps/api/window": path.resolve(__dirname, "./src/electron/shims/tauri-window.ts"),
       "@tauri-apps/plugin-opener": path.resolve(__dirname, "./src/electron/shims/tauri-opener.ts"),
+      // elkjs main entry requires('web-worker') for Node — use browser bundle
+      "elkjs": path.resolve(__dirname, "./node_modules/elkjs/lib/elk.bundled.js"),
     },
   },
   // Vite options tailored for Tauri development

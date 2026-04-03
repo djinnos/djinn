@@ -16,6 +16,7 @@ import {
   PauseIcon,
   Loading02Icon,
   Settings01Icon,
+  WorkflowSquare06Icon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
@@ -395,6 +396,8 @@ export function Sidebar() {
   useEffect(() => {
     if (location.pathname.includes('/chat')) {
       setActiveSection('chat');
+    } else if (location.pathname.includes('/roadmap')) {
+      setActiveSection('roadmap');
     } else if (location.pathname.includes('/agents')) {
       setActiveSection('agents');
     } else if (location.pathname.includes('/metrics')) {
@@ -431,6 +434,10 @@ export function Sidebar() {
       case 'k':
         e.preventDefault();
         navigateToView('kanban');
+        break;
+      case 'r':
+        e.preventDefault();
+        navigateToView('roadmap');
         break;
       case 'a':
         e.preventDefault();
@@ -499,6 +506,13 @@ export function Sidebar() {
           hotkey="K"
           isActive={activeSection === 'kanban'}
           onClick={() => navigateToView('kanban')}
+        />
+        <NavItem
+          icon={<HugeiconsIcon icon={WorkflowSquare06Icon} className="h-4 w-4" />}
+          label="Roadmap"
+          hotkey="R"
+          isActive={activeSection === 'roadmap'}
+          onClick={() => navigateToView('roadmap')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={Robot01Icon} className="h-4 w-4" />}

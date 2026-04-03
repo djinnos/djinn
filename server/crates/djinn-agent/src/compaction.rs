@@ -1038,6 +1038,10 @@ fn format_messages_as_text(messages: &[Message]) -> String {
                         .join("");
                     format!("[{role}]: tool_response: {result}")
                 }
+                ContentBlock::Image { .. } => format!("[{role}]: [image]"),
+                ContentBlock::Document { filename, .. } => {
+                    format!("[{role}]: [document: {}]", filename.as_deref().unwrap_or("file"))
+                }
                 // Thinking blocks are not relevant for compaction summaries.
                 ContentBlock::Thinking { .. } => continue,
             };
@@ -1074,6 +1078,8 @@ fn estimate_message_chars(msg: &Message) -> usize {
                     _ => 64,
                 })
                 .sum(),
+            ContentBlock::Image { data, .. } => data.len(),
+            ContentBlock::Document { data, .. } => data.len(),
             ContentBlock::Thinking { thinking } => thinking.len(),
         })
         .sum()

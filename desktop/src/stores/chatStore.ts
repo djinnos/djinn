@@ -13,10 +13,21 @@ export interface ChatSession {
   updatedAt: number;
 }
 
+export interface ChatAttachment {
+  id: string;
+  filename: string;
+  mediaType: string;
+  /** base64-encoded file data */
+  data: string;
+  /** data: URL for preview (images) */
+  url?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  attachments?: ChatAttachment[];
   toolCalls?: { name: string; success?: boolean }[];
   createdAt: number;
 }
@@ -260,6 +271,10 @@ export const useChatStore = create<ChatState>()(
           thinkingStartTimeBySession: {
             ...state.thinkingStartTimeBySession,
             [sessionId]: startTime,
+          },
+          loadingBySession: {
+            ...state.loadingBySession,
+            [sessionId]: startTime !== null ? true : state.loadingBySession[sessionId] ?? false,
           },
         }));
       },

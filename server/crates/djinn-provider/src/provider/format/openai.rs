@@ -51,6 +51,23 @@ impl OpenAIProvider {
                     ContentBlock::Text { text } => {
                         text_blocks.push(json!({"type": "text", "text": text}));
                     }
+                    ContentBlock::Image { media_type, data } => {
+                        text_blocks.push(json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{media_type};base64,{data}")
+                            }
+                        }));
+                    }
+                    ContentBlock::Document { media_type, data, filename } => {
+                        text_blocks.push(json!({
+                            "type": "file",
+                            "file": {
+                                "filename": filename.as_deref().unwrap_or("document"),
+                                "file_data": format!("data:{media_type};base64,{data}")
+                            }
+                        }));
+                    }
                     ContentBlock::ToolUse { id, name, input } => {
                         tool_calls.push(json!({
                             "id": id,

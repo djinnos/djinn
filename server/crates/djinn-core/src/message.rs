@@ -44,6 +44,24 @@ pub enum ContentBlock {
         is_error: bool,
     },
 
+    /// Base64-encoded image content.
+    Image {
+        /// MIME type, e.g. `"image/png"`, `"image/jpeg"`.
+        media_type: String,
+        /// Raw base64-encoded image data (no `data:` prefix).
+        data: String,
+    },
+
+    /// Base64-encoded document (e.g. PDF).
+    Document {
+        /// MIME type, e.g. `"application/pdf"`.
+        media_type: String,
+        /// Raw base64-encoded document data.
+        data: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
+
     /// Model reasoning/thinking content (extended thinking, chain-of-thought).
     ///
     /// Stored for display but stripped when serializing back to provider APIs
@@ -214,6 +232,8 @@ impl Conversation {
                     .filter_map(|c| c.as_text())
                     .map(|t| t.len())
                     .sum(),
+                ContentBlock::Image { data, .. } => data.len(),
+                ContentBlock::Document { data, .. } => data.len(),
                 ContentBlock::Thinking { thinking } => thinking.len(),
             })
             .sum();
@@ -445,6 +465,12 @@ impl Conversation {
                             ContentBlock::ToolUse { name, input, .. } => {
                                 vec![json!({"functionCall": {"name": name, "args": input}})]
                             }
+                            ContentBlock::Image { media_type, data } => {
+                                vec![json!({"inlineData": {"mimeType": media_type, "data": data}})]
+                            }
+                            ContentBlock::Document { media_type, data, .. } => {
+                                vec![json!({"inlineData": {"mimeType": media_type, "data": data}})]
+                            }
                             ContentBlock::Thinking { .. } => {
                                 // Thinking blocks are display-only; skip for Google.
                                 vec![]
@@ -505,6 +531,20 @@ impl Conversation {
                         match block {
                             ContentBlock::Text { text } if !text.is_empty() => {
                                 text_items.push(json!({"type": "input_text", "text": text}));
+                            }
+                            ContentBlock::Image { media_type, data } => {
+                                text_items.push(json!({
+                                    "type": "input_image",
+                                    "image_url": format!("data:{media_type};base64,{data}")
+                                }));
+                            }
+                            ContentBlock::Document { data, media_type, filename } => {
+                                // OpenAI Responses API supports file content via input_file
+                                text_items.push(json!({
+                                    "type": "input_file",
+                                    "filename": filename.as_deref().unwrap_or("document"),
+                                    "file_data": format!("data:{media_type};base64,{data}")
+                                }));
                             }
                             ContentBlock::ToolResult {
                                 tool_use_id,
@@ -616,6 +656,28 @@ fn content_block_to_anthropic(block: &ContentBlock) -> serde_json::Value {
                 "content": inner,
                 "is_error": is_error,
             })
+        }
+        ContentBlock::Image { media_type, data } => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            }
+        }),
+        ContentBlock::Document { media_type, data, filename } => {
+            let mut block = json!({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                }
+            });
+            if let Some(name) = filename {
+                block["title"] = json!(name);
+            }
+            block
         }
         // Thinking blocks are display-only; skip when serializing for the API.
         ContentBlock::Thinking { .. } => json!({"type": "text", "text": ""}),

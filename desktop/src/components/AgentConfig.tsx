@@ -34,17 +34,18 @@ function formatProvider(id: string): string {
   return known[id.toLowerCase()] ?? id.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 import {
-  Combobox,
-  ComboboxCollection,
-  ComboboxContent,
-  ComboboxEmpty,
-  ComboboxGroup,
-  ComboboxInput,
-  ComboboxItem,
-  ComboboxLabel,
-  ComboboxList,
-  ComboboxSeparator,
-} from "@/components/ui/combobox";
+  ModelSelector,
+  ModelSelectorContent,
+  ModelSelectorEmpty,
+  ModelSelectorGroup,
+  ModelSelectorInput,
+  ModelSelectorItem,
+  ModelSelectorList,
+  ModelSelectorLogo,
+  ModelSelectorName,
+  ModelSelectorSeparator,
+  ModelSelectorTrigger,
+} from "@/components/ai-elements/model-selector";
 
 export interface AgentModelEntry {
   model: string;
@@ -59,7 +60,7 @@ function ModelPicker({
   availableModels: ProviderModel[];
   onSelect: (model: ProviderModel) => void;
 }) {
-  const [value, setValue] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
 
   const groups = useMemo(() => {
     const map = new Map<string, ProviderModel[]>();
@@ -76,43 +77,39 @@ function ModelPicker({
       }));
   }, [availableModels]);
 
-  const handleValueChange = (val: string | null) => {
-    if (!val) return;
-    const model = availableModels.find((m) => {
-      const provId = m.provider_id ?? m.provider ?? "unknown";
-      return `${provId}/${m.id}` === val;
-    });
-    if (model) {
-      onSelect(model);
-      setTimeout(() => setValue(null), 0);
-    }
-  };
-
   return (
-    <Combobox items={groups} value={value} onValueChange={handleValueChange}>
-      <ComboboxInput placeholder="Search or add models..." showClear={false} className="w-full" />
-      <ComboboxContent>
-        <ComboboxEmpty>No models found.</ComboboxEmpty>
-        <ComboboxList>
-          {(group, index) => (
-            <ComboboxGroup key={group.provider} items={group.items}>
-              <ComboboxLabel>{formatProvider(group.provider)}</ComboboxLabel>
-              <ComboboxCollection>
-                {(item) => {
-                  const provId = item.provider_id ?? item.provider ?? "unknown";
-                  return (
-                    <ComboboxItem key={`${provId}/${item.id}`} value={`${provId}/${item.id}`}>
-                      {item.name}
-                    </ComboboxItem>
-                  );
-                }}
-              </ComboboxCollection>
-              {index < groups.length - 1 && <ComboboxSeparator />}
-            </ComboboxGroup>
-          )}
-        </ComboboxList>
-      </ComboboxContent>
-    </Combobox>
+    <ModelSelector open={open} onOpenChange={setOpen}>
+      <ModelSelectorTrigger
+        render={<Button />}
+      >
+        Add Model
+      </ModelSelectorTrigger>
+
+      <ModelSelectorContent title="Add a model">
+        <ModelSelectorInput placeholder="Search models…" />
+        <ModelSelectorList>
+          <ModelSelectorEmpty>No models found.</ModelSelectorEmpty>
+          {groups.map((group, index) => (
+            <ModelSelectorGroup key={group.provider} heading={formatProvider(group.provider)}>
+              {group.items.map((model) => (
+                <ModelSelectorItem
+                  key={`${group.provider}/${model.id}`}
+                  searchValue={model.name}
+                  onSelect={() => {
+                    onSelect(model);
+                    setOpen(false);
+                  }}
+                >
+                  <ModelSelectorLogo provider={group.provider} />
+                  <ModelSelectorName>{model.name}</ModelSelectorName>
+                </ModelSelectorItem>
+              ))}
+              {index < groups.length - 1 && <ModelSelectorSeparator />}
+            </ModelSelectorGroup>
+          ))}
+        </ModelSelectorList>
+      </ModelSelectorContent>
+    </ModelSelector>
   );
 }
 
@@ -278,6 +275,12 @@ export function AgentConfig({
             <p className="text-sm text-muted-foreground">Priority = top → bottom (fallback order)</p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {!isLoading && (
+              <ModelPicker
+                availableModels={availableModels}
+                onSelect={(m) => onAddModel({ model: stripProviderPrefix(m.id), provider: m.provider_id ?? m.provider ?? "unknown" })}
+              />
+            )}
             {hasUnsavedChanges && (
               <Button variant="outline" onClick={onSave} disabled={isSaving} size="sm">
                 {isSaving ? "Saving..." : "Save"}
@@ -291,15 +294,17 @@ export function AgentConfig({
         <div className="py-8 text-center text-sm text-muted-foreground">Loading...</div>
       ) : (
         <>
-          <ModelPicker
-            availableModels={availableModels}
-            onSelect={(m) => onAddModel({ model: stripProviderPrefix(m.id), provider: m.provider_id ?? m.provider ?? "unknown" })}
-          />
+          {hideHeader && (
+            <ModelPicker
+              availableModels={availableModels}
+              onSelect={(m) => onAddModel({ model: stripProviderPrefix(m.id), provider: m.provider_id ?? m.provider ?? "unknown" })}
+            />
+          )}
 
           {models.length === 0 ? (
             !hideEmptyState && (
               <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
-                No models configured. Search above to add models.
+                No models configured. Use the Add model button to get started.
               </div>
             )
           ) : (

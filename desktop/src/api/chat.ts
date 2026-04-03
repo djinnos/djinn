@@ -6,6 +6,36 @@ async function getBaseUrl(): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; media_type: string; data: string }
+  | { type: "document"; media_type: string; data: string; filename?: string };
+
+function messageToContent(
+  message: ChatMessage
+): string | ContentBlock[] {
+  if (!message.attachments?.length) {
+    return message.content;
+  }
+  const blocks: ContentBlock[] = [];
+  for (const att of message.attachments) {
+    if (att.mediaType.startsWith("image/")) {
+      blocks.push({ type: "image", media_type: att.mediaType, data: att.data });
+    } else {
+      blocks.push({
+        type: "document",
+        media_type: att.mediaType,
+        data: att.data,
+        filename: att.filename,
+      });
+    }
+  }
+  if (message.content) {
+    blocks.push({ type: "text", text: message.content });
+  }
+  return blocks;
+}
+
 export interface SendChatMessageOptions {
   signal?: AbortSignal;
   systemPrompt?: string;
@@ -35,7 +65,7 @@ export async function sendChatMessage(
         system_prompt: options?.systemPrompt,
         messages: messages.map((message) => ({
           role: message.role,
-          content: message.content,
+          content: messageToContent(message),
         })),
         model,
         project: projectPath,

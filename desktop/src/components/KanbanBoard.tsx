@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
@@ -35,13 +35,27 @@ import {
   ComboboxList,
   ComboboxEmpty,
 } from "@/components/ui/combobox";
+import {
+  ModelSelector as SelectorRoot,
+  ModelSelectorContent,
+  ModelSelectorEmpty,
+  ModelSelectorInput,
+  ModelSelectorItem,
+  ModelSelectorList,
+  ModelSelectorName,
+  ModelSelectorTrigger,
+} from "@/components/ai-elements/model-selector";
+import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   InputGroup,
   InputGroupAddon,
   InputGroupInput,
 } from "@/components/ui/input-group";
-import { Search01Icon } from "@hugeicons/core-free-icons";
+import { Refresh01Icon, Search01Icon } from "@hugeicons/core-free-icons";
+import { fetchKanbanSnapshot } from "@/api/server";
+import { epicStore } from "@/stores/epicStore";
+import { projectStore } from "@/stores/projectStore";
 
 type ColumnKey = "open" | "in_progress" | "pr_ready" | "done";
 
@@ -100,6 +114,96 @@ function getEpicEmoji(epic: Epic | undefined): string {
 function getEpicTitle(epic: Epic | undefined, epicId: string | undefined): string {
   if (!epicId) return "No Epic";
   return epic?.title ?? "Unknown Epic";
+}
+
+const EPIC_STATUS_GROUPS: Array<{ key: string; label: string }> = [
+  { key: "open", label: "Open" },
+  { key: "drafting", label: "Drafting" },
+  { key: "closed", label: "Closed" },
+];
+
+function EpicFilter({
+  epics,
+  selected,
+  onChange,
+}: {
+  epics: Epic[];
+  selected: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, Epic[]>();
+    for (const epic of epics) {
+      const status = epic.status ?? "open";
+      const list = map.get(status) ?? [];
+      list.push(epic);
+      map.set(status, list);
+    }
+    return EPIC_STATUS_GROUPS
+      .filter((g) => map.has(g.key))
+      .map((g) => ({ ...g, items: map.get(g.key)! }));
+  }, [epics]);
+
+  const toggle = (id: string) => {
+    onChange(
+      selected.includes(id)
+        ? selected.filter((s) => s !== id)
+        : [...selected, id]
+    );
+  };
+
+  const label = selected.length > 0
+    ? `${selected.length} epic${selected.length > 1 ? "s" : ""}`
+    : "All epics";
+
+  return (
+    <SelectorRoot open={open} onOpenChange={setOpen}>
+      <ModelSelectorTrigger
+        className={cn(
+          "flex h-8 items-center gap-1.5 rounded-lg border border-input px-3 text-sm transition-colors dark:bg-input/30",
+          selected.length > 0 ? "text-foreground" : "text-muted-foreground",
+        )}
+      >
+        {label}
+        <HugeiconsIcon
+          icon={ArrowDown01Icon}
+          size={12}
+          className="shrink-0 text-muted-foreground"
+        />
+      </ModelSelectorTrigger>
+
+      <ModelSelectorContent title="Filter by epic">
+        <ModelSelectorInput placeholder="Search epics…" />
+        <ModelSelectorList>
+          <ModelSelectorEmpty>No epics found.</ModelSelectorEmpty>
+          {grouped.map((group) => (
+            <div key={group.key} data-slot="command-group" className="text-foreground overflow-hidden p-1">
+              <div data-slot="command-group-heading" className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
+                {group.label}
+              </div>
+              <div data-slot="command-group-items">
+                {group.items.map((epic) => (
+                  <ModelSelectorItem
+                    key={epic.id}
+                    searchValue={epic.title ?? ""}
+                    onSelect={() => toggle(epic.id)}
+                  >
+                    <span className="shrink-0 text-xs leading-none">{getEpicEmoji(epic)}</span>
+                    <ModelSelectorName>{epic.title}</ModelSelectorName>
+                    {selected.includes(epic.id) && (
+                      <HugeiconsIcon icon={Tick02Icon} size={14} className="shrink-0 text-primary" />
+                    )}
+                  </ModelSelectorItem>
+                ))}
+              </div>
+            </div>
+          ))}
+        </ModelSelectorList>
+      </ModelSelectorContent>
+    </SelectorRoot>
+  );
 }
 
 type KanbanBoardProps = {
@@ -197,6 +301,7 @@ export function KanbanBoard({
   const [searchInput, setSearchInput] = useState<string>(searchParams.get("q") ?? "");
   const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const handleTaskClick = (task: Task) => {
     navigate(`/task/${task.id}`);
@@ -204,6 +309,23 @@ export function KanbanBoard({
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
   const { hasRemote, check: checkRemote, setHasRemote } = useGitRemoteCheck(selectedProject?.path);
+
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const allPaths = !selectedProject
+        ? projectStore.getState().projects.map((p) => p.path).filter(Boolean) as string[]
+        : undefined;
+      const snapshot = await fetchKanbanSnapshot(selectedProject?.path ?? null, allPaths);
+      taskStore.getState().setTasks(snapshot.tasks);
+      epicStore.getState().setEpics(snapshot.epics);
+    } catch (error) {
+      console.error("Failed to refresh board:", error);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [selectedProject, refreshing]);
 
   // Reset epic filters when project changes (epic IDs are project-specific)
   useEffect(() => {
@@ -315,30 +437,11 @@ export function KanbanBoard({
   return (
     <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden px-4 pt-5 pb-2">
       <div className="flex flex-wrap items-center gap-3 border-b border-white/[0.04] px-4 pb-5">
-        <Combobox
-          multiple
-          value={epicFilters}
-          onValueChange={(v) => setEpicFilters(v ?? [])}
-          itemToStringLabel={(id) => {
-            const epic = epics.get(id);
-            return epic ? `${getEpicEmoji(epic)} ${epic.title}` : id;
-          }}
-        >
-          <ComboboxInput
-            placeholder={epicFilters.length > 0 ? `${epicFilters.length} epic${epicFilters.length > 1 ? "s" : ""}` : "All epics"}
-            className="w-40"
-          />
-          <ComboboxContent className="!min-w-80">
-            <ComboboxList>
-              <ComboboxEmpty>No epics found</ComboboxEmpty>
-              {epicOptions.map((epic) => (
-                <ComboboxItem key={epic.id} value={epic.id} className="truncate">
-                  {getEpicEmoji(epic)} {epic.title}
-                </ComboboxItem>
-              ))}
-            </ComboboxList>
-          </ComboboxContent>
-        </Combobox>
+        <EpicFilter
+          epics={epicOptions}
+          selected={epicFilters}
+          onChange={setEpicFilters}
+        />
 
         <div className="flex h-8 items-center gap-1 rounded-lg border border-input px-1.5 dark:bg-input/30">
           {PRIORITIES.map((priority) => {
@@ -430,16 +533,27 @@ export function KanbanBoard({
           </ComboboxContent>
         </Combobox>
 
-        <InputGroup className="ml-auto w-56">
-          <InputGroupAddon>
-            <HugeiconsIcon icon={Search01Icon} className="size-3.5" />
-          </InputGroupAddon>
-          <InputGroupInput
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search tasks..."
-          />
-        </InputGroup>
+        <div className="ml-auto flex items-center gap-1.5">
+          <InputGroup className="w-56">
+            <InputGroupAddon>
+              <HugeiconsIcon icon={Search01Icon} className="size-3.5" />
+            </InputGroupAddon>
+            <InputGroupInput
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search tasks..."
+            />
+          </InputGroup>
+          <button
+            type="button"
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            title="Refresh board"
+          >
+            <HugeiconsIcon icon={Refresh01Icon} className={cn("size-3.5", refreshing && "animate-spin")} />
+          </button>
+        </div>
       </div>
 
       <BoardHealthBanner

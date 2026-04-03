@@ -5,7 +5,7 @@ import type { Project } from "@/api/types";
 const STORAGE_KEY = "djinnos-selected-project-id";
 const LAST_VIEW_KEY = "djinnos-last-view-per-project";
 
-export type ProjectView = "kanban" | "chat" | "agents" | "metrics";
+export type ProjectView = "kanban" | "roadmap" | "chat" | "agents" | "metrics";
 
 /** Sentinel value meaning "all projects" — no project filter applied. */
 export const ALL_PROJECTS = "__all__" as const;

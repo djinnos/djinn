@@ -3,6 +3,7 @@ import { useEventSource } from "@/hooks/useEventSource";
 import { Sidebar } from "@/components/Sidebar";
 import { Titlebar } from "@/components/Titlebar";
 import { KanbanPage } from "@/pages/KanbanPage";
+import { RoadmapPage } from "@/pages/RoadmapPage";
 import { AgentsPage } from "@/pages/AgentsPage";
 import { MetricsPage } from "@/pages/MetricsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -35,6 +36,7 @@ function MainLayout() {
           <Routes>
             {/* Global views (All Projects) */}
             <Route path="/kanban" element={<KanbanPage />} />
+            <Route path="/roadmap" element={<RoadmapPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/chat/:sessionId" element={<ChatPage />} />
             <Route path="/agents" element={<AgentsPage />} />
@@ -42,6 +44,7 @@ function MainLayout() {
 
             {/* Project-scoped views */}
             <Route path="/projects/:projectId/kanban" element={<KanbanPage />} />
+            <Route path="/projects/:projectId/roadmap" element={<RoadmapPage />} />
             <Route path="/projects/:projectId/chat" element={<ChatPage />} />
             <Route path="/projects/:projectId/chat/:sessionId" element={<ChatPage />} />
             <Route path="/projects/:projectId/agents" element={<AgentsPage />} />

@@ -378,7 +378,34 @@ pub(super) struct ChatCompletionRequest {
 pub(super) struct ChatMessage {
     pub role: String,
     #[serde(default)]
-    pub content: String,
+    pub content: ChatContent,
+}
+
+/// Accepts either a plain string or an array of typed content blocks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(super) enum ChatContent {
+    Blocks(Vec<ChatContentBlock>),
+    Text(String),
+}
+
+impl Default for ChatContent {
+    fn default() -> Self {
+        ChatContent::Text(String::new())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(super) enum ChatContentBlock {
+    Text { text: String },
+    Image { media_type: String, data: String },
+    Document {
+        media_type: String,
+        data: String,
+        #[serde(default)]
+        filename: Option<String>,
+    },
 }
 
 #[derive(Serialize)]
@@ -638,9 +665,30 @@ pub(super) async fn completions_handler(
                 ));
             }
         };
+        let content_blocks = match m.content {
+            ChatContent::Text(text) => vec![ContentBlock::Text { text }],
+            ChatContent::Blocks(blocks) => blocks
+                .into_iter()
+                .map(|b| match b {
+                    ChatContentBlock::Text { text } => ContentBlock::Text { text },
+                    ChatContentBlock::Image { media_type, data } => {
+                        ContentBlock::Image { media_type, data }
+                    }
+                    ChatContentBlock::Document {
+                        media_type,
+                        data,
+                        filename,
+                    } => ContentBlock::Document {
+                        media_type,
+                        data,
+                        filename,
+                    },
+                })
+                .collect(),
+        };
         conversation.push(Message {
             role,
-            content: vec![ContentBlock::Text { text: m.content }],
+            content: content_blocks,
             metadata: None,
         });
     }

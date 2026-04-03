@@ -239,9 +239,10 @@ pub async fn retry_connection<R: Runtime>(app: &AppHandle<R>) -> Result<String, 
 
 /// Spawn a background task that periodically health-checks the server.
 ///
-/// On failure it tries to re-discover (re-read `base_url` from state) and
-/// emits `server:reconnected` or `server:disconnected` events so the frontend
-/// can react.
+/// On failure it actively tries to recover the daemon (respawn it, re-tunnel,
+/// etc.) based on the current connection mode, then emits
+/// `server:reconnected` or `server:disconnected` events so the frontend can
+/// react.
 pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
     let app_handle = app.clone();
 
@@ -250,6 +251,12 @@ pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         let mut was_healthy = true;
+        /// How many consecutive health failures before attempting recovery.
+        const FAILURES_BEFORE_RECOVERY: u32 = 2;
+        /// Backoff between recovery attempts (seconds): 5, 10, 20, 40, capped at 60.
+        const MAX_RECOVERY_BACKOFF_SECS: u64 = 60;
+        let mut consecutive_failures: u32 = 0;
+        let mut recovery_attempts: u32 = 0;
 
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -307,11 +314,16 @@ pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
                     }
 
                     was_healthy = true;
+                    consecutive_failures = 0;
+                    recovery_attempts = 0;
                 }
                 continue;
             }
 
-            log::warn!("Health monitor: server at {base_url} is unreachable");
+            consecutive_failures += 1;
+            log::warn!(
+                "Health monitor: server at {base_url} is unreachable (failure {consecutive_failures})"
+            );
 
             if was_healthy {
                 if let Some(state) = app_handle.try_state::<Mutex<ServerState>>() {
@@ -321,6 +333,146 @@ pub fn start_health_monitor<R: Runtime>(app: &AppHandle<R>) {
                 }
                 let _ = app_handle.emit("server:disconnected", ());
                 was_healthy = false;
+            }
+
+            // After enough consecutive failures, actively try to recover the
+            // server rather than just passively polling the old URL.
+            if consecutive_failures >= FAILURES_BEFORE_RECOVERY {
+                let mode = if std::env::var("DJINN_SERVER_BIN").is_ok() {
+                    crate::connection_mode::ConnectionMode::Daemon
+                } else {
+                    crate::connection_mode::load()
+                };
+
+                let recoverable = matches!(
+                    mode,
+                    crate::connection_mode::ConnectionMode::Daemon
+                        | crate::connection_mode::ConnectionMode::Wsl
+                        | crate::connection_mode::ConnectionMode::Ssh { .. }
+                );
+
+                if recoverable {
+                    recovery_attempts += 1;
+                    log::info!(
+                        "Health monitor: attempting auto-recovery (attempt {recovery_attempts})"
+                    );
+
+                    let result: Result<String, String> = match mode {
+                        crate::connection_mode::ConnectionMode::Daemon => {
+                            ensure_daemon().await
+                        }
+                        crate::connection_mode::ConnectionMode::Wsl => {
+                            crate::wsl::ensure_wsl_daemon(DEFAULT_PORT).await
+                        }
+                        crate::connection_mode::ConnectionMode::Ssh { host_id } => {
+                            let host = crate::ssh_hosts::find_host(&host_id)
+                                .ok_or_else(|| format!("SSH host '{host_id}' not found"));
+                            match host {
+                                Ok(host) => {
+                                    if let Err(e) =
+                                        crate::ssh_tunnel::ensure_remote_daemon(&host).await
+                                    {
+                                        Err(e)
+                                    } else {
+                                        match crate::ssh_tunnel::start_tunnel(&host) {
+                                            Ok(tunnel) => {
+                                                let url = format!(
+                                                    "http://127.0.0.1:{}",
+                                                    tunnel.local_port
+                                                );
+                                                crate::ssh_tunnel::set_active_tunnel(tunnel);
+                                                Ok(url)
+                                            }
+                                            Err(e) => Err(e),
+                                        }
+                                    }
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    match result {
+                        Ok(new_url) => {
+                            // Check health on the (possibly new) URL.
+                            let (ok, ver) = health_check_with_version(&new_url).await;
+                            if ok {
+                                log::info!(
+                                    "Health monitor: auto-recovery succeeded at {new_url}"
+                                );
+                                if let Some(state) =
+                                    app_handle.try_state::<Mutex<ServerState>>()
+                                {
+                                    if let Ok(mut s) = state.lock() {
+                                        s.mark_healthy(&new_url);
+                                        s.server_version = ver.clone();
+                                        s.update_available = ver
+                                            .as_ref()
+                                            .map(|v| version_lt(v, MIN_SERVER_VERSION))
+                                            .unwrap_or(false);
+                                    }
+                                }
+                                let _ = app_handle.emit("server:reconnected", &new_url);
+
+                                // Re-sync GitHub tokens — the server may have
+                                // restarted with a fresh DB.
+                                if let Some(token_state) =
+                                    crate::token_refresh::get_token_state()
+                                {
+                                    let user_login =
+                                        match crate::auth::retrieve_token().await {
+                                            Ok(Some(json)) => {
+                                                serde_json::from_str::<
+                                                    crate::auth::StoredTokens,
+                                                >(
+                                                    &json
+                                                )
+                                                .ok()
+                                                .and_then(|s| {
+                                                    if s.user_login.is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(s.user_login)
+                                                    }
+                                                })
+                                            }
+                                            _ => None,
+                                        };
+                                    crate::token_sync::sync_tokens_to_server(
+                                        &token_state.access_token,
+                                        &token_state.refresh_token,
+                                        token_state.expires_at_unix,
+                                        user_login.as_deref(),
+                                    )
+                                    .await;
+                                }
+
+                                was_healthy = true;
+                                consecutive_failures = 0;
+                                recovery_attempts = 0;
+                                continue;
+                            }
+                            log::warn!(
+                                "Health monitor: spawned daemon but health check failed at {new_url}"
+                            );
+                        }
+                        Err(e) => {
+                            log::error!("Health monitor: auto-recovery failed: {e}");
+                        }
+                    }
+
+                    // Back off before the next recovery attempt.
+                    let backoff_secs = (5u64 << (recovery_attempts - 1).min(4))
+                        .min(MAX_RECOVERY_BACKOFF_SECS);
+                    log::info!(
+                        "Health monitor: next recovery attempt in {backoff_secs}s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    // Reset the failure counter so we don't immediately re-enter
+                    // recovery on the next poll iteration.
+                    consecutive_failures = 0;
+                }
             }
         }
     });

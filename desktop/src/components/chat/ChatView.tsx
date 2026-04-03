@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchProviderModels } from '@/api/settings';
 import { sendChatMessage } from '@/api/chat';
-import { Spinner } from '@/components/ui/spinner';
+import { Shimmer } from '@/components/ai-elements/shimmer';
 import { toast } from '@/lib/toast';
-import { useChatStore, type ChatMessage } from '@/stores/chatStore';
+import { useChatStore, type ChatAttachment, type ChatMessage } from '@/stores/chatStore';
 import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
 import { ChatMessageBubble } from './ChatMessageBubble';
 import { ChatInput } from './ChatInput';
@@ -44,8 +44,8 @@ export function ChatView() {
   );
 
   const [abortController, setAbortController] = useState<AbortController | null>(null);
+  const toolCallsRef = useRef<string[]>([]);
   const [toolCalls, setToolCalls] = useState<string[]>([]);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const { data: models = [] } = useQuery({ queryKey: ['provider-models-connected'], queryFn: fetchProviderModels });
@@ -113,26 +113,7 @@ export function ChatView() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingText, activeSessionId]);
 
-  useEffect(() => {
-    const shouldShowThinking = loading && !streamingText && thinkingStartTime !== null;
-
-    if (!shouldShowThinking || thinkingStartTime === null) {
-      setElapsedSeconds(0);
-      return;
-    }
-
-    setElapsedSeconds(Math.floor((Date.now() - thinkingStartTime) / 1000));
-
-    const intervalId = window.setInterval(() => {
-      setElapsedSeconds(Math.floor((Date.now() - thinkingStartTime) / 1000));
-    }, 1000);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [loading, streamingText, thinkingStartTime]);
-
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: ChatAttachment[] = []) => {
     const sessionId = activeSessionId ?? createSession(projectPath, selectedModel !== 'unknown/model' ? selectedModel : null);
     if (!activeSessionId) setActiveSession(sessionId);
     if (selectedModel !== 'unknown/model') setSessionModel(sessionId, selectedModel);
@@ -141,11 +122,13 @@ export function ChatView() {
       id: `${Date.now()}-user`,
       role: 'user',
       content: text,
+      attachments: attachments.length > 0 ? attachments : undefined,
       createdAt: Date.now(),
     });
 
     clearStreaming(sessionId);
     setThinkingStartTime(sessionId, Date.now());
+    toolCallsRef.current = [];
     setToolCalls([]);
     const controller = new AbortController();
     setAbortController(controller);
@@ -157,13 +140,16 @@ export function ChatView() {
       selectedModel,
       projectPath,
       (delta) => appendStreamingText(sessionId, delta),
-      (toolName) => setToolCalls((prev) => [...prev, toolName]),
+      (toolName) => {
+        toolCallsRef.current = [...toolCallsRef.current, toolName];
+        setToolCalls(toolCallsRef.current);
+      },
       () => {
         finalizeStreaming(sessionId, {
           id: `${Date.now()}-assistant`,
           role: 'assistant',
           createdAt: Date.now(),
-          toolCalls: toolCalls.map((name) => ({ name })),
+          toolCalls: toolCallsRef.current.map((name) => ({ name })),
         });
 
         const state = useChatStore.getState();
@@ -203,7 +189,7 @@ export function ChatView() {
           role: 'assistant',
           content: 'Something went wrong while generating a response.',
           createdAt: Date.now(),
-          toolCalls: toolCalls.map((name) => ({ name, success: false })),
+          toolCalls: toolCallsRef.current.map((name) => ({ name, success: false })),
         });
       },
       { signal: controller.signal }
@@ -222,7 +208,7 @@ export function ChatView() {
             {isEmpty ? (
               <ChatEmptyState
                 onPromptClick={(prompt) => {
-                  void send(prompt);
+                  void send(prompt, []);
                 }}
               />
             ) : (
@@ -236,6 +222,7 @@ export function ChatView() {
                       id: 'streaming',
                       role: 'assistant',
                       content: streamingText,
+                      toolCalls: toolCalls.length > 0 ? toolCalls.map((name) => ({ name })) : undefined,
                       createdAt: Date.now(),
                     }}
                   />
@@ -247,12 +234,22 @@ export function ChatView() {
                       animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
                       transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-                      className="pl-3"
                     >
-                      <div className="inline-flex items-center gap-2 text-[13px] text-muted-foreground/70">
-                        <Spinner size="xs" />
-                        <span>Thinking...</span>
-                        <span>{elapsedSeconds}s</span>
+                      {toolCalls.length > 0 && (
+                        <ChatMessageBubble
+                          message={{
+                            id: 'thinking-tools',
+                            role: 'assistant',
+                            content: '',
+                            toolCalls: toolCalls.map((name) => ({ name })),
+                            createdAt: Date.now(),
+                          }}
+                        />
+                      )}
+                      <div className="pl-3 pt-1">
+                        <Shimmer className="text-[13px]" duration={1.5} spread={1.5}>
+                          Thinking...
+                        </Shimmer>
                       </div>
                     </motion.div>
                   )}
@@ -264,7 +261,7 @@ export function ChatView() {
 
           <div className="sticky bottom-0 bg-background pb-2">
             <ChatInput
-        onSend={(message) => void send(message)}
+        onSend={(message, attachments) => void send(message, attachments)}
         onStop={() => {
           abortController?.abort();
           if (activeSessionId) {

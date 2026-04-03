@@ -723,9 +723,12 @@ pub(super) async fn run_reply_loop(
                                 }
                             }
                             StreamEvent::Delta(ContentBlock::ToolResult { .. })
-                            | StreamEvent::Delta(ContentBlock::Thinking { .. }) => {
+                            | StreamEvent::Delta(ContentBlock::Thinking { .. })
+                            | StreamEvent::Delta(ContentBlock::Image { .. })
+                            | StreamEvent::Delta(ContentBlock::Document { .. }) => {
                                 // ToolResult: provider should not be streaming tool results.
                                 // Thinking via Delta: handled by StreamEvent::Thinking above.
+                                // Image/Document: not streamed from providers.
                             }
                             StreamEvent::Thinking(thinking) => {
                                 // Stream thinking deltas to the desktop UI.

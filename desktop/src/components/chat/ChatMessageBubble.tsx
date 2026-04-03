@@ -1,11 +1,32 @@
-import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import type { ChatMessage } from '@/stores/chatStore';
-import { ArrowRight01Icon, Copy01Icon } from '@hugeicons/core-free-icons';
+import type { ChatAttachment, ChatMessage } from '@/stores/chatStore';
+import {
+  Attachment,
+  AttachmentHoverCard,
+  AttachmentHoverCardContent,
+  AttachmentHoverCardTrigger,
+  AttachmentInfo,
+  AttachmentPreview,
+  Attachments,
+  getAttachmentLabel,
+  getMediaCategory,
+  type AttachmentData,
+} from '@/components/ai-elements/attachments';
+import { ArrowRight01Icon, Copy01Icon, Tick02Icon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Streamdown } from 'streamdown';
 import { useState } from 'react';
+
+function toAttachmentData(att: ChatAttachment): AttachmentData {
+  return {
+    type: 'file' as const,
+    id: att.id,
+    mediaType: att.mediaType,
+    filename: att.filename,
+    url: att.url ?? '',
+  };
+}
 
 interface ChatMessageBubbleProps {
   message: ChatMessage;
@@ -13,10 +34,13 @@ interface ChatMessageBubbleProps {
 
 export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
   const isUser = message.role === 'user';
-  const [toolCallsExpanded, setToolCallsExpanded] = useState(true);
+  const [toolCallsExpanded, setToolCallsExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(message.content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (
@@ -39,27 +63,22 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
             type="button"
             onClick={handleCopy}
             aria-label="Copy message"
-            className="absolute -top-2 -right-2 rounded-md border border-border bg-background/95 p-1 text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground group-hover:opacity-100"
+            className={cn(
+              'absolute -top-2 -right-2 rounded-md border border-border bg-background/95 p-1 shadow-sm transition-opacity',
+              copied ? 'text-green-500 opacity-100' : 'text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100'
+            )}
           >
-            <HugeiconsIcon icon={Copy01Icon} size={14} />
+            <HugeiconsIcon icon={copied ? Tick02Icon : Copy01Icon} size={14} />
           </button>
         )}
-        {isUser ? (
-          <p className="whitespace-pre-wrap break-words">{message.content}</p>
-        ) : (
-          <Streamdown className="prose prose-sm max-w-none break-words dark:prose-invert">
-            {message.content}
-          </Streamdown>
-        )}
-
         {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
-          <div className="mt-2 rounded-md border border-border/60 bg-muted/20">
+          <div className="mb-2 rounded-md border border-border/60 bg-muted/20">
             <button
               type="button"
               onClick={() => setToolCallsExpanded((prev) => !prev)}
               className="flex w-full items-center justify-between px-2 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
             >
-              <span>Tool calls ({message.toolCalls.length})</span>
+              <span>Used {message.toolCalls.length} tool{message.toolCalls.length !== 1 ? 's' : ''}</span>
               <motion.span
                 animate={{ rotate: toolCallsExpanded ? 90 : 0 }}
                 transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
@@ -79,16 +98,89 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
                   transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
                   className="overflow-hidden"
                 >
-                  <div className="flex flex-wrap gap-1.5 px-2 pb-2">
+                  <div className="flex flex-col gap-0.5 px-2 pb-2">
                     {message.toolCalls.map((tool, idx) => (
-                      <Badge key={`${tool.name}-${idx}`} variant="secondary" className="text-[11px]">
-                        {tool.name}
-                      </Badge>
+                      <div key={`${tool.name}-${idx}`} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <span className={cn(
+                          'size-1.5 shrink-0 rounded-full',
+                          tool.success === false ? 'bg-red-400' : 'bg-emerald-400'
+                        )} />
+                        <span className="truncate">{tool.name}</span>
+                      </div>
                     ))}
                   </div>
                 </motion.div>
               )}
             </AnimatePresence>
+          </div>
+        )}
+
+        {isUser && message.attachments && message.attachments.length > 0 && (
+          <div className="mb-2">
+            <Attachments variant="inline">
+              {message.attachments.map((att) => {
+                const attData = toAttachmentData(att);
+                const mediaCategory = getMediaCategory(attData);
+                const label = getAttachmentLabel(attData);
+                return (
+                  <AttachmentHoverCard key={att.id}>
+                    <AttachmentHoverCardTrigger>
+                      <Attachment data={attData}>
+                        <div className="relative size-5 shrink-0">
+                          <AttachmentPreview />
+                        </div>
+                        <AttachmentInfo />
+                      </Attachment>
+                    </AttachmentHoverCardTrigger>
+                    <AttachmentHoverCardContent>
+                      <div className="space-y-3">
+                        {mediaCategory === 'image' && att.url && (
+                          <div className="flex max-h-96 w-80 items-center justify-center overflow-hidden rounded-md border">
+                            <img
+                              alt={label}
+                              className="max-h-full max-w-full object-contain"
+                              height={384}
+                              src={att.url}
+                              width={320}
+                            />
+                          </div>
+                        )}
+                        <div className="space-y-1 px-0.5">
+                          <h4 className="font-semibold text-sm leading-none">{label}</h4>
+                          {att.mediaType && (
+                            <p className="font-mono text-muted-foreground text-xs">{att.mediaType}</p>
+                          )}
+                        </div>
+                      </div>
+                    </AttachmentHoverCardContent>
+                  </AttachmentHoverCard>
+                );
+              })}
+            </Attachments>
+          </div>
+        )}
+
+        {isUser ? (
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        ) : (
+          <Streamdown className="prose prose-sm max-w-none break-words dark:prose-invert">
+            {message.content}
+          </Streamdown>
+        )}
+
+        {!isUser && (
+          <div className="mt-1 flex opacity-0 transition-opacity group-hover:opacity-100">
+            <button
+              type="button"
+              onClick={handleCopy}
+              aria-label="Copy message"
+              className={cn(
+                'rounded-md p-1',
+                copied ? 'text-green-500' : 'text-muted-foreground hover:text-foreground'
+              )}
+            >
+              <HugeiconsIcon icon={copied ? Tick02Icon : Copy01Icon} size={14} />
+            </button>
           </div>
         )}
       </div>
