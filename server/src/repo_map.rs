@@ -23,6 +23,7 @@ use crate::repo_map_personalization::{
 use crate::scip_parser::ScipSymbolKind;
 
 const SCIP_ARTIFACT_EXTENSION: &str = "scip";
+const INDEXER_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_MAX_FILES: usize = 12;
 const DEFAULT_MAX_SYMBOLS_PER_FILE: usize = 4;
 const DEFAULT_MAX_RELATIONSHIPS_PER_FILE: usize = 3;
@@ -38,15 +39,21 @@ pub enum SupportedIndexer {
     Python,
     Go,
     Java,
+    Clang,
+    Ruby,
+    DotNet,
 }
 
 impl SupportedIndexer {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::RustAnalyzer,
         Self::TypeScript,
         Self::Python,
         Self::Go,
         Self::Java,
+        Self::Clang,
+        Self::Ruby,
+        Self::DotNet,
     ];
 
     pub fn binary_name(self) -> &'static str {
@@ -56,6 +63,9 @@ impl SupportedIndexer {
             Self::Python => "scip-python",
             Self::Go => "scip-go",
             Self::Java => "scip-java",
+            Self::Clang => "scip-clang",
+            Self::Ruby => "scip-ruby",
+            Self::DotNet => "scip-dotnet",
         }
     }
 
@@ -66,6 +76,9 @@ impl SupportedIndexer {
             Self::Python => "python",
             Self::Go => "go",
             Self::Java => "java",
+            Self::Clang => "cpp",
+            Self::Ruby => "ruby",
+            Self::DotNet => "csharp",
         }
     }
 
@@ -76,6 +89,9 @@ impl SupportedIndexer {
             Self::Python => &["pyproject.toml", "setup.py"],
             Self::Go => &["go.mod"],
             Self::Java => &["build.gradle", "pom.xml"],
+            Self::Clang => &["CMakeLists.txt", "compile_commands.json"],
+            Self::Ruby => &["Gemfile"],
+            Self::DotNet => &["*.csproj", "*.sln"],
         }
     }
 
@@ -109,6 +125,14 @@ impl SupportedIndexer {
             Self::Python => vec!["index".to_string(), output],
             Self::Go => vec!["index".to_string(), output],
             Self::Java => vec!["index".to_string(), output],
+            Self::Clang => vec![
+                "--compdb-path".to_string(),
+                ".".to_string(),
+                "--output-path".to_string(),
+                output,
+            ],
+            Self::Ruby => vec!["index".to_string(), output],
+            Self::DotNet => vec!["index".to_string(), output],
         }
     }
 }
@@ -354,28 +378,57 @@ pub async fn run_indexers(
 
     let available = detect_indexers();
     let plans = plan_indexer_commands(&project_root, &output_root, &available);
-    let mut commands = Vec::with_capacity(plans.len());
 
-    for plan in plans {
-        let output = process::output(plan.build_command())
-            .await
-            .with_context(|| format!("run {}", plan.indexer.binary_name()))?;
+    let timeout = std::time::Duration::from_secs(INDEXER_TIMEOUT_SECS);
+    let futures: Vec<_> = plans
+        .into_iter()
+        .map(|plan| {
+            let cmd = plan.build_command();
+            async move {
+                let result = process::output_with_timeout(cmd, timeout).await;
+                (plan, result)
+            }
+        })
+        .collect();
 
-        if !output.status.success() {
-            return Err(anyhow!(
-                "SCIP indexer {} failed with status {:?}: {}",
-                plan.indexer.binary_name(),
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
-            ));
+    let results = futures::future::join_all(futures).await;
+
+    let mut commands = Vec::with_capacity(results.len());
+    let mut failure_count = 0usize;
+    let total = results.len();
+
+    for (plan, result) in results {
+        match result {
+            Ok(output) if output.status.success() => {
+                commands.push(ExecutedIndexerCommand {
+                    plan,
+                    exit_code: output.status.code(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+            }
+            Ok(output) => {
+                failure_count += 1;
+                tracing::warn!(
+                    indexer = plan.indexer.binary_name(),
+                    exit_code = ?output.status.code(),
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "SCIP indexer failed"
+                );
+            }
+            Err(err) => {
+                failure_count += 1;
+                tracing::warn!(
+                    indexer = plan.indexer.binary_name(),
+                    error = %err,
+                    "SCIP indexer error"
+                );
+            }
         }
+    }
 
-        commands.push(ExecutedIndexerCommand {
-            plan,
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
+    if total > 0 && failure_count == total {
+        return Err(anyhow!("all {} SCIP indexers failed", total));
     }
 
     let artifacts = collect_scip_artifacts(&output_root, &commands)?;
@@ -805,7 +858,12 @@ fn matches_workspace_marker(indexer: SupportedIndexer, path: &Path) -> Result<bo
                 package_json_has_workspaces(path)
             }
         }
-        SupportedIndexer::Python | SupportedIndexer::Go | SupportedIndexer::Java => Ok(true),
+        SupportedIndexer::Python
+        | SupportedIndexer::Go
+        | SupportedIndexer::Java
+        | SupportedIndexer::Clang
+        | SupportedIndexer::Ruby
+        | SupportedIndexer::DotNet => Ok(true),
     }
 }
 

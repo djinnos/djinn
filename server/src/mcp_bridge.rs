@@ -5,10 +5,12 @@
 /// and SyncManager because both the trait (djinn-mcp) and the implementor
 /// (djinn-agent / crate::sync) are external to the server — orphan rule.
 /// AppState is a server-local type so it implements RuntimeOps and GitOps directly.
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::RwLock;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::bridge::{
     ChannelStatus, CoordinatorOps, CoordinatorStatus, GitOps, GraphNeighbor, ImpactEntry, LspOps,
@@ -22,6 +24,56 @@ use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 
 use crate::sync::SyncManager;
+
+// ── Graph cache ────────────────────────────────────────────────────────────────
+
+/// Maximum age (seconds) before a cached graph is considered stale, even if
+/// HEAD hasn't changed (guards against amended commits / rebases).
+const CACHE_MAX_AGE_SECS: u64 = 3600;
+
+/// If HEAD differs but fewer than this many files changed, use the incremental
+/// patch path instead of a full rebuild.
+const INCREMENTAL_FILE_THRESHOLD: usize = 50;
+
+struct CachedGraph {
+    graph: crate::repo_graph::RepoDependencyGraph,
+    project_path: PathBuf,
+    git_head: String,
+    built_at: std::time::Instant,
+}
+
+static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+
+async fn git_head_hash(project_path: &std::path::Path) -> Result<String, String> {
+    let output = tokio::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(project_path)
+        .output()
+        .await
+        .map_err(|e| format!("git rev-parse failed: {e}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn git_changed_files(
+    project_path: &std::path::Path,
+    from: &str,
+    to: &str,
+) -> Result<BTreeSet<PathBuf>, String> {
+    let output = tokio::process::Command::new("git")
+        .args(["diff", "--name-only", from, to])
+        .current_dir(project_path)
+        .output()
+        .await
+        .map_err(|e| format!("git diff failed: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
 
@@ -472,22 +524,127 @@ fn resolve_node(
     Err(format!("node '{key}' not found in graph"))
 }
 
-async fn build_graph_for_project(
-    project_path: &str,
-) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
-    let project_path = std::path::PathBuf::from(project_path);
-    let output_dir =
-        std::env::temp_dir().join(format!("djinn-code-graph-{}", uuid::Uuid::now_v7()));
-    let run = crate::repo_map::run_indexers(&project_path, &output_dir)
+/// Run indexers and parse the resulting SCIP artifacts. Returns the parsed
+/// indices. Cleans up the output directory on completion.
+async fn run_and_parse_indexers(
+    project_path: &Path,
+    output_dir: &Path,
+) -> Result<Vec<crate::scip_parser::ParsedScipIndex>, String> {
+    let run = crate::repo_map::run_indexers(project_path, output_dir)
         .await
         .map_err(|e| format!("failed to run indexers: {e}"))?;
     let parsed = crate::scip_parser::parse_scip_artifacts(&run.artifacts)
         .map_err(|e| format!("failed to parse SCIP artifacts: {e}"))?;
-    let _ = std::fs::remove_dir_all(&output_dir);
+    let _ = std::fs::remove_dir_all(output_dir);
     if parsed.is_empty() {
         return Err("no SCIP artifacts produced — ensure indexers are installed".to_string());
     }
+    Ok(parsed)
+}
+
+/// Full rebuild: run all indexers, parse everything, build graph from scratch.
+async fn full_rebuild_graph(
+    project_path: &Path,
+) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
+    let output_dir =
+        std::env::temp_dir().join(format!("djinn-code-graph-{}", uuid::Uuid::now_v7()));
+    let parsed = run_and_parse_indexers(project_path, &output_dir).await?;
     Ok(crate::repo_graph::RepoDependencyGraph::build(&parsed))
+}
+
+async fn build_graph_for_project(
+    project_path: &str,
+) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
+    let project_path = PathBuf::from(project_path);
+    let current_head = git_head_hash(&project_path).await?;
+
+    // ── Fast path: return cached graph if HEAD and project match ────────────
+    {
+        let cache = GRAPH_CACHE.read().await;
+        if let Some(cached) = cache.as_ref() {
+            let age = cached.built_at.elapsed().as_secs();
+            if cached.project_path == project_path
+                && cached.git_head == current_head
+                && age < CACHE_MAX_AGE_SECS
+            {
+                return Ok(cached.graph.clone());
+            }
+        }
+    }
+
+    // ── Incremental path ─────────────────────────────────────────────────
+    // When the cache exists for the same project but a different HEAD,
+    // compute changed files. If the diff is small enough, re-run indexers,
+    // filter the SCIP output to only changed files, and patch the cached
+    // graph instead of rebuilding from scratch.
+    let incremental_result = {
+        let cache = GRAPH_CACHE.read().await;
+        if let Some(cached) = cache.as_ref() {
+            if cached.project_path == project_path && cached.git_head != current_head {
+                Some((cached.graph.clone(), cached.git_head.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let graph = if let Some((cached_graph, cached_head)) = incremental_result {
+        let changed_files = git_changed_files(&project_path, &cached_head, &current_head).await?;
+
+        if changed_files.len() < INCREMENTAL_FILE_THRESHOLD {
+            tracing::info!(
+                changed = changed_files.len(),
+                "code_graph: incremental patch ({} files changed)",
+                changed_files.len(),
+            );
+            // Run indexers to get fresh SCIP data, then filter to changed
+            // files only and patch the existing graph.
+            let output_dir =
+                std::env::temp_dir().join(format!("djinn-code-graph-{}", uuid::Uuid::now_v7()));
+            match run_and_parse_indexers(&project_path, &output_dir).await {
+                Ok(parsed) => {
+                    // Filter parsed indices to only include documents for
+                    // changed files — the rest of the graph is still valid.
+                    let filtered: Vec<crate::scip_parser::ParsedScipIndex> = parsed
+                        .into_iter()
+                        .map(|mut idx| {
+                            idx.files.retain(|f| changed_files.contains(&f.relative_path));
+                            idx
+                        })
+                        .collect();
+                    cached_graph.patch_changed_files(&changed_files, &filtered)
+                }
+                Err(e) => {
+                    tracing::warn!("incremental indexing failed, falling back to cached graph: {e}");
+                    cached_graph
+                }
+            }
+        } else {
+            tracing::info!(
+                changed = changed_files.len(),
+                "code_graph: too many changes for incremental path, full rebuild",
+            );
+            full_rebuild_graph(&project_path).await?
+        }
+    } else {
+        // ── Full rebuild (no cache or different project) ───────────────
+        full_rebuild_graph(&project_path).await?
+    };
+
+    // ── Update cache ───────────────────────────────────────────────────────
+    {
+        let mut cache = GRAPH_CACHE.write().await;
+        *cache = Some(CachedGraph {
+            graph: graph.clone(),
+            project_path,
+            git_head: current_head,
+            built_at: std::time::Instant::now(),
+        });
+    }
+
+    Ok(graph)
 }
 
 impl AppState {

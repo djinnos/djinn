@@ -10,6 +10,7 @@
 
 use std::io;
 use std::process::{Command, Output};
+use std::time::Duration;
 
 /// Run a pre-configured `std::process::Command` on a blocking thread and return
 /// its output.  This is a drop-in async replacement for
@@ -18,6 +19,14 @@ pub async fn output(mut cmd: Command) -> io::Result<Output> {
     tokio::task::spawn_blocking(move || cmd.output())
         .await
         .map_err(io::Error::other)?
+}
+
+/// Like [`output`], but aborts if the command does not finish within `timeout`.
+/// Returns `io::ErrorKind::TimedOut` on expiry.
+pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<Output> {
+    tokio::time::timeout(timeout, output(cmd))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "process timed out"))?
 }
 
 /// Run a pre-configured `std::process::Command` on a blocking thread and return
