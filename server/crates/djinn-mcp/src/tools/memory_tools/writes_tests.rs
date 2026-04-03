@@ -34,6 +34,7 @@ mod tests {
                 content: "This is a research note about async Rust patterns.".to_string(),
                 note_type: "research".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
@@ -49,6 +50,7 @@ mod tests {
                 content: "This is a research note about async Rust patterns.".to_string(),
                 note_type: "research".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
@@ -79,6 +81,7 @@ mod tests {
                     .to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
@@ -123,6 +126,7 @@ mod tests {
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
@@ -136,6 +140,7 @@ mod tests {
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
                 note_type: "adr".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
@@ -197,6 +202,7 @@ mod tests {
                         .to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
@@ -221,6 +227,7 @@ mod tests {
                 content: "Alpha\r\nBeta\n".to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
@@ -247,6 +254,7 @@ mod tests {
                 content: "  Alpha\nBeta  ".to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
@@ -324,6 +332,7 @@ mod tests {
                 content: shared.to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
         assert!(r1.error.is_none(), "first write failed: {:?}", r1.error);
@@ -337,6 +346,7 @@ mod tests {
                 content: shared.to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
         assert!(r2.error.is_none(), "second write failed: {:?}", r2.error);

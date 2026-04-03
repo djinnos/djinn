@@ -859,6 +859,7 @@ mod tests {
                 content: content.to_string(),
                 note_type: note_type.to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
         response
@@ -883,6 +884,7 @@ mod tests {
                 content: "singleton body".to_string(),
                 note_type: "brief".to_string(),
                 tags: None,
+                scope_paths: None,
             },
             &decider,
         )
@@ -913,6 +915,7 @@ mod tests {
                 content: "unique phrase here".to_string(),
                 note_type: "reference".to_string(),
                 tags: None,
+                scope_paths: None,
             },
             &decider,
         )
@@ -948,6 +951,7 @@ mod tests {
                 content: "tokio spawn concurrent execution pattern for rust services".to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             },
             provider_runtime_with_response(r#"{"decision":"skip"}"#),
         )
@@ -991,6 +995,7 @@ mod tests {
                 content: shared_content.to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             },
             provider_runtime_with_response(r#"{"decision":"merge"}"#),
         )
@@ -1050,6 +1055,7 @@ mod tests {
                         .to_string(),
                 note_type: "pattern".to_string(),
                 tags: None,
+                scope_paths: None,
             },
             provider_runtime_with_resolution_error("provider unavailable"),
         )

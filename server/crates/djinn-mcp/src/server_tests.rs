@@ -60,6 +60,7 @@ mod tests {
                 content: "Sentence one. Sentence two.\n\nMore context follows here.".to_string(),
                 note_type: "reference".to_string(),
                 tags: None,
+                scope_paths: None,
             }))
             .await;
 
