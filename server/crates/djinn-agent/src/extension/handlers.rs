@@ -802,15 +802,17 @@ pub(super) async fn call_memory_build_context(
     let p: MemoryBuildContextParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
     let task_id = p.task_id.or_else(|| session_task_id.map(ToOwned::to_owned));
+    let url = p.url.unwrap_or_else(|| "/*".to_string());
+    let max_related = p.max_related.or(p.limit);
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
         djinn_mcp::tools::memory_tools::ops::memory_build_context(
             &server,
             SharedMemoryBuildContextParams {
                 project: project_path,
-                url: p.url,
+                url,
                 depth: None,
-                max_related: p.max_related,
+                max_related,
                 budget: p.budget,
                 task_id: task_id.clone(),
                 min_confidence: p.min_confidence,
@@ -1250,7 +1252,7 @@ fn extract_step_log(cleaned_log: &str, step_name: &str) -> Option<String> {
     }
 }
 
-pub(super) async fn call_shell(
+pub(crate) async fn call_shell(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
@@ -1292,7 +1294,7 @@ pub(super) async fn call_shell(
     }))
 }
 
-pub(super) async fn call_read(
+pub(crate) async fn call_read(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
@@ -1606,7 +1608,7 @@ pub(super) async fn call_apply_patch(
     }))
 }
 
-pub(super) async fn call_lsp(
+pub(crate) async fn call_lsp(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
@@ -1812,7 +1814,7 @@ pub(super) async fn call_code_graph(
 // github_search — search GitHub code via grep.app
 // ---------------------------------------------------------------------------
 
-pub(super) async fn call_github_search(
+pub(crate) async fn call_github_search(
     _state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {

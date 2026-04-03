@@ -133,12 +133,14 @@ pub(super) struct MemoryListParams {
 
 #[derive(Deserialize)]
 pub(super) struct MemoryBuildContextParams {
-    pub url: String,
+    pub url: Option<String>,
     /// Link traversal depth (default 1). Currently unused at the dispatch layer.
     pub _depth: Option<i64>,
     pub max_related: Option<i64>,
     pub budget: Option<i64>,
     pub task_id: Option<String>,
+    pub query: Option<String>,
+    pub limit: Option<i64>,
     pub min_confidence: Option<f64>,
 }
 

@@ -155,8 +155,9 @@ pub async fn memory_build_context(
 
     if url.ends_with("/*") {
         let folder = url.trim_end_matches("/*");
+        let folder_filter = if folder.is_empty() { None } else { Some(folder) };
         let all = repo
-            .list(&project_id, Some(folder))
+            .list(&project_id, folder_filter)
             .await
             .unwrap_or_default();
         return MemoryBuildContextResponse {
