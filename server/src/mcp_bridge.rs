@@ -5,7 +5,6 @@
 /// and SyncManager because both the trait (djinn-mcp) and the implementor
 /// (djinn-agent / crate::sync) are external to the server — orphan rule.
 /// AppState is a server-local type so it implements RuntimeOps and GitOps directly.
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -29,18 +28,11 @@ use crate::sync::SyncManager;
 
 // ── Graph cache ────────────────────────────────────────────────────────────────
 
-/// Maximum age (seconds) before a cached graph is considered stale, even if
-/// HEAD hasn't changed (guards against amended commits / rebases).
-const CACHE_MAX_AGE_SECS: u64 = 3600;
-
-/// If HEAD differs but fewer than this many files changed, use the incremental
-/// patch path instead of a full rebuild.
-const INCREMENTAL_FILE_THRESHOLD: usize = 50;
-
 struct CachedGraph {
     graph: crate::repo_graph::RepoDependencyGraph,
     project_path: PathBuf,
     git_head: String,
+    #[allow(dead_code)]
     built_at: std::time::Instant,
 }
 
@@ -53,36 +45,6 @@ static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
 /// step is retained, in-memory only.
 static PREVIOUS_GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
-
-async fn git_head_hash(project_path: &std::path::Path) -> Result<String, String> {
-    let output = tokio::process::Command::new("git")
-        .arg("rev-parse")
-        .arg("HEAD")
-        .current_dir(project_path)
-        .output()
-        .await
-        .map_err(|e| format!("git rev-parse failed: {e}"))?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-async fn git_changed_files(
-    project_path: &std::path::Path,
-    from: &str,
-    to: &str,
-) -> Result<BTreeSet<PathBuf>, String> {
-    let output = tokio::process::Command::new("git")
-        .args(["diff", "--name-only", from, to])
-        .current_dir(project_path)
-        .output()
-        .await
-        .map_err(|e| format!("git diff failed: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect())
-}
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
 
@@ -362,7 +324,19 @@ impl GitOps for AppState {
 
 // ── RepoGraphBridge → RepoGraphOps ──────────────────────────────────────────
 
-pub struct RepoGraphBridge;
+/// `RepoGraphOps` adapter wrapping the per-server `AppState`.  Holding the
+/// state lets graph queries route through `ensure_canonical_graph`, which
+/// owns the ADR-050 `_index/` worktree, single-flight `IndexerLock`, and
+/// per-commit `repo_graph_cache`.
+pub struct RepoGraphBridge {
+    state: AppState,
+}
+
+impl RepoGraphBridge {
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
 
 #[async_trait]
 impl RepoGraphOps for RepoGraphBridge {
@@ -374,7 +348,7 @@ impl RepoGraphOps for RepoGraphBridge {
         group_by: Option<&str>,
     ) -> Result<NeighborsResult, String> {
         use petgraph::Direction;
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let node_index = resolve_node(&graph, key)?;
         let directions: Vec<Direction> = match direction {
             Some("incoming") => vec![Direction::Incoming],
@@ -430,7 +404,7 @@ impl RepoGraphOps for RepoGraphBridge {
         limit: usize,
     ) -> Result<Vec<RankedNode>, String> {
         use crate::repo_graph::RepoGraphNodeKind;
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let ranking = graph.rank();
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
@@ -491,7 +465,7 @@ impl RepoGraphOps for RepoGraphBridge {
         symbol: &str,
     ) -> Result<Vec<String>, String> {
         use crate::repo_graph::RepoGraphEdgeKind;
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let node_index = graph
             .symbol_node(symbol)
             .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
@@ -517,7 +491,7 @@ impl RepoGraphOps for RepoGraphBridge {
         max_depth: usize,
         group_by: Option<&str>,
     ) -> Result<ImpactResult, String> {
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let start = resolve_node(&graph, key)?;
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
@@ -571,7 +545,7 @@ impl RepoGraphOps for RepoGraphBridge {
         limit: usize,
     ) -> Result<Vec<SearchHit>, String> {
         use crate::repo_graph::RepoGraphNodeKind;
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -600,7 +574,7 @@ impl RepoGraphOps for RepoGraphBridge {
         min_size: usize,
     ) -> Result<Vec<CycleGroup>, String> {
         use crate::repo_graph::RepoGraphNodeKind;
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -639,7 +613,7 @@ impl RepoGraphOps for RepoGraphBridge {
     ) -> Result<Vec<OrphanEntry>, String> {
         use crate::repo_graph::RepoGraphNodeKind;
         use crate::scip_parser::ScipVisibility;
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -681,7 +655,7 @@ impl RepoGraphOps for RepoGraphBridge {
         to: &str,
         max_depth: Option<usize>,
     ) -> Result<Option<PathResult>, String> {
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let from_idx = resolve_node(&graph, from)?;
         let to_idx = resolve_node(&graph, to)?;
         let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
@@ -720,7 +694,7 @@ impl RepoGraphOps for RepoGraphBridge {
         limit: usize,
     ) -> Result<Vec<EdgeEntry>, String> {
         use globset::Glob;
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let from_matcher = Glob::new(from_glob)
             .map_err(|e| format!("invalid from_glob '{from_glob}': {e}"))?
             .compile_matcher();
@@ -783,7 +757,7 @@ impl RepoGraphOps for RepoGraphBridge {
             }
         }
         // Ensure the current canonical graph for this project is built / cached.
-        let _ = build_graph_for_project(project_path).await?;
+        let _ = build_graph_for_project(&self.state, project_path).await?;
 
         let current = {
             let cache = GRAPH_CACHE.read().await;
@@ -823,7 +797,7 @@ impl RepoGraphOps for RepoGraphBridge {
         project_path: &str,
         key: &str,
     ) -> Result<Option<SymbolDescription>, String> {
-        let graph = build_graph_for_project(project_path).await?;
+        let graph = build_graph_for_project(&self.state, project_path).await?;
         let node_index = match resolve_node(&graph, key) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
@@ -1066,134 +1040,179 @@ fn resolve_node(
     Err(format!("node '{key}' not found in graph"))
 }
 
-/// Run indexers and parse the resulting SCIP artifacts. Returns the parsed
-/// indices. Cleans up the output directory on completion.
-async fn run_and_parse_indexers(
-    project_path: &Path,
-    output_dir: &Path,
-) -> Result<Vec<crate::scip_parser::ParsedScipIndex>, String> {
-    let run = crate::repo_map::run_indexers(project_path, output_dir)
+/// ADR-050 §3 Chunk C canonical-main graph entrypoint.
+///
+/// Idempotently makes the SCIP graph for `origin/main` of the supplied
+/// project available, returning a clone of the cached `RepoDependencyGraph`.
+/// Flow:
+///
+/// 1. `IndexTree::ensure(project_id, project_root)` brings up
+///    `<project_root>/.djinn/worktrees/_index/`.
+/// 2. `fetch_if_stale(60s)` runs `git fetch origin main` against the
+///    project root unless the cooldown blocks it.
+/// 3. `reset_to_origin_main()` hard-resets the index tree to the freshly
+///    fetched `origin/main` commit.
+/// 4. Look up `repo_graph_cache[(project_id, commit_sha)]`.
+///    - **Hit**: deserialize, install as canonical (moving the prior
+///      canonical into the in-memory previous slot per ADR-050 §3 diff
+///      contract), return.
+///    - **Miss**: acquire the server-wide `IndexerLock`, re-check the cache
+///      under the lock, then run SCIP indexers in the index tree, build
+///      the graph, persist to `repo_graph_cache`, install as canonical,
+///      release the lock, and return.
+///
+/// The returned `IndexTreeHandle` is also exposed to callers so they can
+/// reuse its `path()` as the architect/chat `working_root` and so worker
+/// dispatch sites can render the canonical skeleton from the same path.
+pub async fn ensure_canonical_graph(
+    state: &AppState,
+    project_id: &str,
+    project_root: &Path,
+) -> Result<
+    (
+        crate::index_tree::IndexTreeHandle,
+        crate::repo_graph::RepoDependencyGraph,
+    ),
+    String,
+> {
+    use djinn_db::{RepoGraphCacheInsert, RepoGraphCacheRepository};
+
+    let mut handle = crate::index_tree::IndexTree::ensure(project_id, project_root)
         .await
-        .map_err(|e| format!("failed to run indexers: {e}"))?;
-    let parsed = crate::scip_parser::parse_scip_artifacts(&run.artifacts)
-        .map_err(|e| format!("failed to parse SCIP artifacts: {e}"))?;
-    let _ = std::fs::remove_dir_all(output_dir);
-    if parsed.is_empty() {
-        return Err("no SCIP artifacts produced — ensure indexers are installed".to_string());
+        .map_err(|e| format!("ensure index tree: {e}"))?;
+    // Best-effort: a missing remote is fine for tests / fresh repos.
+    let _ = handle
+        .fetch_if_stale(crate::index_tree::DEFAULT_FETCH_COOLDOWN)
+        .await;
+    // Best-effort reset; if origin/main is unavailable we keep whatever
+    // commit the index tree was created on.
+    let _ = handle.reset_to_origin_main().await;
+
+    let commit_sha = handle.commit_sha().to_string();
+    let cache_repo = RepoGraphCacheRepository::new(state.db().clone());
+
+    // ── In-memory fast path ─────────────────────────────────────────────
+    {
+        let cache = GRAPH_CACHE.read().await;
+        if let Some(cached) = cache.as_ref() {
+            if cached.project_path == handle.path() && cached.git_head == commit_sha {
+                return Ok((handle, cached.graph.clone()));
+            }
+        }
     }
-    Ok(parsed)
-}
 
-/// Full rebuild: run all indexers, parse everything, build graph from scratch.
-async fn full_rebuild_graph(
-    project_path: &Path,
-) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
+    // ── Persistent cache path ───────────────────────────────────────────
+    if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
+        let blob_str = std::str::from_utf8(&row.graph_blob)
+            .map_err(|e| format!("graph_blob is not valid UTF-8: {e}"))?;
+        let graph = crate::repo_graph::RepoDependencyGraph::deserialize_artifact(blob_str)
+            .map_err(|e| format!("deserialize cached graph: {e}"))?;
+        install_as_canonical(handle.path().to_path_buf(), commit_sha.clone(), graph.clone()).await;
+        return Ok((handle, graph));
+    }
+
+    // ── Cache miss: single-flight indexer run ───────────────────────────
+    let lock = state.indexer_lock();
+    let _permit = lock.lock().await;
+
+    // Re-check both caches under the lock; another task may have populated
+    // them while we were queued.
+    {
+        let cache = GRAPH_CACHE.read().await;
+        if let Some(cached) = cache.as_ref() {
+            if cached.project_path == handle.path() && cached.git_head == commit_sha {
+                return Ok((handle, cached.graph.clone()));
+            }
+        }
+    }
+    if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
+        let blob_str = std::str::from_utf8(&row.graph_blob)
+            .map_err(|e| format!("graph_blob is not valid UTF-8: {e}"))?;
+        let graph = crate::repo_graph::RepoDependencyGraph::deserialize_artifact(blob_str)
+            .map_err(|e| format!("deserialize cached graph: {e}"))?;
+        install_as_canonical(handle.path().to_path_buf(), commit_sha.clone(), graph.clone()).await;
+        return Ok((handle, graph));
+    }
+
     let output_dir =
-        std::env::temp_dir().join(format!("djinn-code-graph-{}", uuid::Uuid::now_v7()));
-    let parsed = run_and_parse_indexers(project_path, &output_dir).await?;
-    Ok(crate::repo_graph::RepoDependencyGraph::build(&parsed))
+        std::env::temp_dir().join(format!("djinn-canonical-graph-{}", uuid::Uuid::now_v7()));
+    let target_dir = handle.target_dir().to_path_buf();
+    let run = crate::repo_map::run_indexers_single_flight(
+        // The single-flight gate is already held above, but the wrapper
+        // accepts any mutex; pass a fresh dummy so we don't deadlock.
+        std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        handle.path(),
+        &output_dir,
+        Some(&target_dir),
+    )
+    .await
+    .map_err(|e| format!("run_indexers: {e}"))?;
+    let parsed = crate::scip_parser::parse_scip_artifacts(&run.artifacts)
+        .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
+    let _ = std::fs::remove_dir_all(&output_dir);
+
+    let graph = crate::repo_graph::RepoDependencyGraph::build(&parsed);
+
+    // Persist (best-effort — failure is logged but does not abort).
+    match graph.serialize_artifact() {
+        Ok(json) => {
+            if let Err(e) = cache_repo
+                .upsert(RepoGraphCacheInsert {
+                    project_id,
+                    commit_sha: &commit_sha,
+                    graph_blob: json.as_bytes(),
+                })
+                .await
+            {
+                tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "ensure_canonical_graph: failed to serialize graph for cache");
+        }
+    }
+
+    install_as_canonical(handle.path().to_path_buf(), commit_sha.clone(), graph.clone()).await;
+    Ok((handle, graph))
 }
 
+/// Replace the in-memory canonical graph slot, moving the previous canonical
+/// into the diff predecessor slot per ADR-050 §3.
+async fn install_as_canonical(
+    project_path: PathBuf,
+    git_head: String,
+    graph: crate::repo_graph::RepoDependencyGraph,
+) {
+    let mut cache = GRAPH_CACHE.write().await;
+    let old = cache.take();
+    if let Some(prior) = old {
+        let mut previous = PREVIOUS_GRAPH_CACHE.write().await;
+        *previous = Some(prior);
+    }
+    *cache = Some(CachedGraph {
+        graph,
+        project_path,
+        git_head,
+        built_at: std::time::Instant::now(),
+    });
+}
+
+/// `RepoGraphOps` shim used by every operation: resolves the project ID for
+/// the supplied `project_path` and delegates to `ensure_canonical_graph`,
+/// returning the cached graph clone.
 async fn build_graph_for_project(
+    state: &AppState,
     project_path: &str,
 ) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
-    let project_path = PathBuf::from(project_path);
-    let current_head = git_head_hash(&project_path).await?;
-
-    // ── Fast path: return cached graph if HEAD and project match ────────────
-    {
-        let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache.as_ref() {
-            let age = cached.built_at.elapsed().as_secs();
-            if cached.project_path == project_path
-                && cached.git_head == current_head
-                && age < CACHE_MAX_AGE_SECS
-            {
-                return Ok(cached.graph.clone());
-            }
-        }
-    }
-
-    // ── Incremental path ─────────────────────────────────────────────────
-    // When the cache exists for the same project but a different HEAD,
-    // compute changed files. If the diff is small enough, re-run indexers,
-    // filter the SCIP output to only changed files, and patch the cached
-    // graph instead of rebuilding from scratch.
-    let incremental_result = {
-        let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache.as_ref() {
-            if cached.project_path == project_path && cached.git_head != current_head {
-                Some((cached.graph.clone(), cached.git_head.clone()))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-
-    let graph = if let Some((cached_graph, cached_head)) = incremental_result {
-        let changed_files = git_changed_files(&project_path, &cached_head, &current_head).await?;
-
-        if changed_files.len() < INCREMENTAL_FILE_THRESHOLD {
-            tracing::info!(
-                changed = changed_files.len(),
-                "code_graph: incremental patch ({} files changed)",
-                changed_files.len(),
-            );
-            // Run indexers to get fresh SCIP data, then filter to changed
-            // files only and patch the existing graph.
-            let output_dir =
-                std::env::temp_dir().join(format!("djinn-code-graph-{}", uuid::Uuid::now_v7()));
-            match run_and_parse_indexers(&project_path, &output_dir).await {
-                Ok(parsed) => {
-                    // Filter parsed indices to only include documents for
-                    // changed files — the rest of the graph is still valid.
-                    let filtered: Vec<crate::scip_parser::ParsedScipIndex> = parsed
-                        .into_iter()
-                        .map(|mut idx| {
-                            idx.files
-                                .retain(|f| changed_files.contains(&f.relative_path));
-                            idx
-                        })
-                        .collect();
-                    cached_graph.patch_changed_files(&changed_files, &filtered)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "incremental indexing failed, falling back to cached graph: {e}"
-                    );
-                    cached_graph
-                }
-            }
-        } else {
-            tracing::info!(
-                changed = changed_files.len(),
-                "code_graph: too many changes for incremental path, full rebuild",
-            );
-            full_rebuild_graph(&project_path).await?
-        }
-    } else {
-        // ── Full rebuild (no cache or different project) ───────────────
-        full_rebuild_graph(&project_path).await?
-    };
-
-    // ── Update cache ───────────────────────────────────────────────────────
-    {
-        let mut cache = GRAPH_CACHE.write().await;
-        let old = cache.take();
-        if let Some(prior) = old {
-            let mut previous = PREVIOUS_GRAPH_CACHE.write().await;
-            *previous = Some(prior);
-        }
-        *cache = Some(CachedGraph {
-            graph: graph.clone(),
-            project_path,
-            git_head: current_head,
-            built_at: std::time::Instant::now(),
-        });
-    }
-
+    use djinn_db::ProjectRepository;
+    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let project_id = repo
+        .resolve(project_path)
+        .await
+        .map_err(|e| format!("resolve project: {e}"))?
+        .ok_or_else(|| format!("no project registered for path '{project_path}'"))?;
+    let project_root = std::path::PathBuf::from(project_path);
+    let (_handle, graph) = ensure_canonical_graph(state, &project_id, &project_root).await?;
     Ok(graph)
 }
 
@@ -1253,7 +1272,7 @@ impl AppState {
             Arc::new(SyncBridge(self.sync_manager().clone())),
             Arc::new(self.clone()),
             Arc::new(self.clone()),
-            Arc::new(RepoGraphBridge),
+            Arc::new(RepoGraphBridge::new(self.clone())),
         )
     }
 }

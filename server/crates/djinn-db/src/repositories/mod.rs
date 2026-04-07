@@ -6,6 +6,7 @@ pub mod init;
 pub mod models;
 pub mod note;
 pub mod project;
+pub mod repo_graph_cache;
 pub mod repo_map_cache;
 pub mod session;
 pub mod session_message;
