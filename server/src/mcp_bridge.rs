@@ -1101,12 +1101,27 @@ pub async fn ensure_canonical_graph(
 
     // ── Persistent cache path ───────────────────────────────────────────
     if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
-        let blob_str = std::str::from_utf8(&row.graph_blob)
-            .map_err(|e| format!("graph_blob is not valid UTF-8: {e}"))?;
-        let graph = crate::repo_graph::RepoDependencyGraph::deserialize_artifact(blob_str)
-            .map_err(|e| format!("deserialize cached graph: {e}"))?;
-        install_as_canonical(handle.path().to_path_buf(), commit_sha.clone(), graph.clone()).await;
-        return Ok((handle, graph));
+        match bincode::deserialize::<crate::repo_graph::RepoGraphArtifact>(&row.graph_blob) {
+            Ok(artifact) => {
+                let graph = crate::repo_graph::RepoDependencyGraph::from_artifact(&artifact);
+                install_as_canonical(
+                    handle.path().to_path_buf(),
+                    commit_sha.clone(),
+                    graph.clone(),
+                )
+                .await;
+                return Ok((handle, graph));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    project_id = %project_id,
+                    commit_sha = %commit_sha,
+                    error = %e,
+                    "ensure_canonical_graph: stale JSON-encoded graph_blob; re-indexing"
+                );
+                // Fall through to the cache-miss path.
+            }
+        }
     }
 
     // ── Cache miss: single-flight indexer run ───────────────────────────
@@ -1124,12 +1139,27 @@ pub async fn ensure_canonical_graph(
         }
     }
     if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
-        let blob_str = std::str::from_utf8(&row.graph_blob)
-            .map_err(|e| format!("graph_blob is not valid UTF-8: {e}"))?;
-        let graph = crate::repo_graph::RepoDependencyGraph::deserialize_artifact(blob_str)
-            .map_err(|e| format!("deserialize cached graph: {e}"))?;
-        install_as_canonical(handle.path().to_path_buf(), commit_sha.clone(), graph.clone()).await;
-        return Ok((handle, graph));
+        match bincode::deserialize::<crate::repo_graph::RepoGraphArtifact>(&row.graph_blob) {
+            Ok(artifact) => {
+                let graph = crate::repo_graph::RepoDependencyGraph::from_artifact(&artifact);
+                install_as_canonical(
+                    handle.path().to_path_buf(),
+                    commit_sha.clone(),
+                    graph.clone(),
+                )
+                .await;
+                return Ok((handle, graph));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    project_id = %project_id,
+                    commit_sha = %commit_sha,
+                    error = %e,
+                    "ensure_canonical_graph: stale JSON-encoded graph_blob; re-indexing"
+                );
+                // Fall through to the indexer-run path below.
+            }
+        }
     }
 
     let output_dir =
@@ -1160,13 +1190,13 @@ pub async fn ensure_canonical_graph(
     persist_canonical_skeleton(state, project_id, project_root, &commit_sha, &graph).await;
 
     // Persist (best-effort — failure is logged but does not abort).
-    match graph.serialize_artifact() {
-        Ok(json) => {
+    match bincode::serialize(&graph.to_artifact()) {
+        Ok(blob) => {
             if let Err(e) = cache_repo
                 .upsert(RepoGraphCacheInsert {
                     project_id,
                     commit_sha: &commit_sha,
-                    graph_blob: json.as_bytes(),
+                    graph_blob: &blob,
                 })
                 .await
             {
@@ -1762,13 +1792,13 @@ mod ensure_canonical_graph_tests {
         let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
 
         let graph = graph_bridge_tests::build_test_graph();
-        let blob = graph.serialize_artifact().expect("serialize fixture graph");
+        let blob = bincode::serialize(&graph.to_artifact()).expect("serialize fixture graph");
         let cache_repo = RepoGraphCacheRepository::new(db.clone());
         cache_repo
             .upsert(RepoGraphCacheInsert {
                 project_id: &project.id,
                 commit_sha: &head_sha,
-                graph_blob: blob.as_bytes(),
+                graph_blob: &blob,
             })
             .await
             .expect("seed cache");
@@ -1815,12 +1845,12 @@ mod ensure_canonical_graph_tests {
         let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
 
         let graph = graph_bridge_tests::build_test_graph();
-        let blob = graph.serialize_artifact().expect("serialize");
+        let blob = bincode::serialize(&graph.to_artifact()).expect("serialize");
         RepoGraphCacheRepository::new(db.clone())
             .upsert(RepoGraphCacheInsert {
                 project_id: &project.id,
                 commit_sha: &head_sha,
-                graph_blob: blob.as_bytes(),
+                graph_blob: &blob,
             })
             .await
             .expect("seed cache");
@@ -1843,5 +1873,65 @@ mod ensure_canonical_graph_tests {
         let b = b.expect("task b panicked").expect("b result");
         assert_eq!(a.1.node_count(), b.1.node_count());
         assert_eq!(a.1.node_count(), graph.node_count());
+    }
+
+    /// Stale-blob path: a row whose `graph_blob` is not bincode-decodable
+    /// (e.g. left over from the brief Chunk C JSON era) must be treated as
+    /// a cache miss.  We seed garbage bytes and assert that
+    /// `ensure_canonical_graph` does NOT bubble the deserialize error;
+    /// instead it falls through to the indexer path.  In this test
+    /// environment the indexer has no SCIP toolchain available, so the
+    /// expected outcome is a failure with an indexer-shaped error message
+    /// (NOT a "deserialize cached graph" / UTF-8 error from the cache
+    /// path).
+    #[tokio::test]
+    async fn ensure_canonical_graph_treats_stale_blob_as_cache_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = make_project(tmp.path()).await;
+
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        let project = proj_repo
+            .create("test-canonical-stale", project_root.to_string_lossy().as_ref())
+            .await
+            .expect("create project");
+
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .unwrap();
+        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        // Seed an undecodable blob.  Pure ASCII so a UTF-8 path would
+        // _not_ trip; the only thing that should reject it is bincode.
+        let garbage = b"this is definitely not a bincoded RepoDependencyGraph";
+        RepoGraphCacheRepository::new(db.clone())
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &head_sha,
+                graph_blob: garbage,
+            })
+            .await
+            .expect("seed cache");
+
+        // The call must NOT short-circuit with a cache-deserialize error;
+        // it must fall through to the indexer.  In tests the indexer has
+        // no SCIP toolchain, so we expect either Err(indexer-shaped) or
+        // Ok (if the host happens to have rust-analyzer on PATH).  In
+        // either case, the failure mode we are guarding against — a hard
+        // error mentioning the cache deserialize path — must NOT occur.
+        let result =
+            ensure_canonical_graph(&state, &project.id, &project_root).await;
+        if let Err(msg) = &result {
+            assert!(
+                !msg.contains("deserialize cached graph")
+                    && !msg.contains("graph_blob is not valid UTF-8"),
+                "stale blob bubbled cache-path error instead of falling through: {msg}"
+            );
+        }
     }
 }
