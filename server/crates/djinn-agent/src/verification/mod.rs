@@ -1,3 +1,4 @@
+pub mod mcp_json;
 pub mod scoped;
 pub mod service;
 pub mod settings;

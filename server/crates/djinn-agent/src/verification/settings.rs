@@ -16,6 +16,15 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     /// Command to launch the MCP server over stdio (e.g. `my-mcp-server --flag`).
     pub command: Option<String>,
+    /// Positional arguments for `command` when using stdio transport.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables to provide to the launched MCP server.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// HTTP headers to attach when connecting to a remote MCP server.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 /// A single verification rule: a glob pattern matched against changed file paths,
@@ -44,22 +53,6 @@ pub struct DjinnSettings {
     /// changed file matches that pattern.
     #[serde(default)]
     pub verification_rules: Vec<VerificationRule>,
-    /// Named MCP server registry for this project.
-    ///
-    /// Keys are server names (referenced by `agent_roles.mcp_servers`).
-    /// Values describe how to connect to each server.
-    ///
-    /// Example:
-    /// ```json
-    /// {
-    ///   "mcp_servers": {
-    ///     "my-db-tool": { "url": "http://localhost:9000/mcp" },
-    ///     "github": { "command": "github-mcp-server stdio" }
-    ///   }
-    /// }
-    /// ```
-    #[serde(default)]
-    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 /// Load the full project settings from `.djinn/settings.json` in the worktree.
@@ -97,34 +90,13 @@ pub fn load_setup_commands(worktree_path: &Path) -> Result<Vec<CommandSpec>, Str
     load_settings(worktree_path).map(|s| s.setup)
 }
 
-/// Load the MCP server registry from `.djinn/settings.json` in the worktree.
+/// Load the MCP server registry from standard discovery files in the worktree.
 ///
-/// Returns an empty map when the file is absent or when no `mcp_servers` key exists.
-/// Logs a warning on parse failures but returns an empty map (non-fatal).
+/// Discovery order is `mcp.json`, `.cursor/mcp.json`, `.opencode/mcp.json`, with
+/// first-found-wins precedence by server name. Invalid files are logged and skipped.
+/// `.djinn/settings.json` is intentionally ignored for MCP registry resolution.
 pub fn load_mcp_server_registry(worktree_path: &Path) -> HashMap<String, McpServerConfig> {
-    let settings_path = worktree_path.join(".djinn/settings.json");
-    match std::fs::read_to_string(&settings_path) {
-        Ok(content) => match serde_json::from_str::<DjinnSettings>(&content) {
-            Ok(settings) => settings.mcp_servers,
-            Err(e) => {
-                tracing::warn!(
-                    path = %settings_path.display(),
-                    error = %e,
-                    "failed to parse .djinn/settings.json for MCP server registry; using empty"
-                );
-                HashMap::new()
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-        Err(e) => {
-            tracing::warn!(
-                path = %settings_path.display(),
-                error = %e,
-                "failed to read .djinn/settings.json for MCP server registry; using empty"
-            );
-            HashMap::new()
-        }
-    }
+    crate::verification::mcp_json::load_mcp_server_registry(worktree_path)
 }
 
 /// Resolve a list of role-level MCP server names against the project's registry.
@@ -164,7 +136,7 @@ pub fn resolve_mcp_servers<'a>(
                     task_id = %task_short_id,
                     role = %role_name,
                     server_name = %name,
-                    "Lifecycle: role references unknown MCP server name; skipping (not in .djinn/settings.json)"
+                    "Lifecycle: role references unknown MCP server name; skipping (not in discovered mcp.json registry)"
                 );
             }
         }
@@ -257,82 +229,6 @@ mod tests {
         assert_eq!(setup.len(), 1);
     }
 
-    // ── MCP server registry tests ─────────────────────────────────────────────
-
-    #[test]
-    fn load_mcp_server_registry_returns_empty_when_no_file() {
-        let dir = tempdir_in_tmp();
-        let registry = load_mcp_server_registry(dir.path());
-        assert!(registry.is_empty());
-    }
-
-    #[test]
-    fn load_mcp_server_registry_returns_empty_when_no_mcp_servers_key() {
-        let dir = tempdir_in_tmp();
-        write_settings(&dir, r#"{"setup": [], "verification": []}"#);
-        let registry = load_mcp_server_registry(dir.path());
-        assert!(registry.is_empty());
-    }
-
-    #[test]
-    fn load_mcp_server_registry_parses_url_server() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{
-                "mcp_servers": {
-                    "my-db-tool": {"url": "http://localhost:9000/mcp"}
-                }
-            }"#,
-        );
-        let registry = load_mcp_server_registry(dir.path());
-        assert_eq!(registry.len(), 1);
-        let cfg = registry
-            .get("my-db-tool")
-            .expect("my-db-tool should be in registry");
-        assert_eq!(cfg.url.as_deref(), Some("http://localhost:9000/mcp"));
-        assert!(cfg.command.is_none());
-    }
-
-    #[test]
-    fn load_mcp_server_registry_parses_command_server() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{
-                "mcp_servers": {
-                    "github": {"command": "github-mcp-server stdio"}
-                }
-            }"#,
-        );
-        let registry = load_mcp_server_registry(dir.path());
-        let cfg = registry
-            .get("github")
-            .expect("github should be in registry");
-        assert!(cfg.url.is_none());
-        assert_eq!(cfg.command.as_deref(), Some("github-mcp-server stdio"));
-    }
-
-    #[test]
-    fn load_mcp_server_registry_parses_multiple_servers() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{
-                "mcp_servers": {
-                    "server-a": {"url": "http://localhost:9001/mcp"},
-                    "server-b": {"command": "mcp-b --stdio"},
-                    "server-c": {"url": "http://localhost:9003/mcp", "command": "mcp-c"}
-                }
-            }"#,
-        );
-        let registry = load_mcp_server_registry(dir.path());
-        assert_eq!(registry.len(), 3);
-        assert!(registry.contains_key("server-a"));
-        assert!(registry.contains_key("server-b"));
-        assert!(registry.contains_key("server-c"));
-    }
-
     #[test]
     fn resolve_mcp_servers_returns_empty_for_empty_role_list() {
         let registry = HashMap::new();
@@ -348,6 +244,9 @@ mod tests {
             McpServerConfig {
                 url: Some("http://localhost:9000/mcp".to_string()),
                 command: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                headers: HashMap::new(),
             },
         );
 
@@ -381,6 +280,9 @@ mod tests {
             McpServerConfig {
                 url: Some("http://localhost:9000/mcp".to_string()),
                 command: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                headers: HashMap::new(),
             },
         );
 
@@ -401,6 +303,9 @@ mod tests {
             McpServerConfig {
                 url: Some("http://localhost:9000/mcp".to_string()),
                 command: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                headers: HashMap::new(),
             },
         );
 
@@ -456,6 +361,5 @@ mod tests {
         let settings = load_settings(dir.path()).expect("load settings on missing file");
         assert!(settings.setup.is_empty());
         assert!(settings.verification_rules.is_empty());
-        assert!(settings.mcp_servers.is_empty());
     }
 }
