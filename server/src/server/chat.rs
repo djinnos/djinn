@@ -707,24 +707,54 @@ pub(super) async fn completions_handler(
     let mcp = DjinnMcpServer::new(state.mcp_state());
     let mut tool_schemas = mcp.all_tool_schemas();
 
-    // Resolve project path for chat extension tools (shell, read, lsp, github_search).
-    let project_path = if let Some(project_ref) = req.project.as_deref() {
-        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-        match project_repo.resolve(project_ref).await {
-            Ok(Some(id)) => match project_repo.get(&id).await {
-                Ok(Some(project)) => Some(std::path::PathBuf::from(&project.path)),
+    // Resolve project path + ID for chat extension tools (shell, read, lsp,
+    // github_search, code_graph).
+    let project_resolution: Option<(std::path::PathBuf, String)> =
+        if let Some(project_ref) = req.project.as_deref() {
+            let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+            match project_repo.resolve(project_ref).await {
+                Ok(Some(id)) => match project_repo.get(&id).await {
+                    Ok(Some(project)) => {
+                        Some((std::path::PathBuf::from(&project.path), project.id))
+                    }
+                    _ => None,
+                },
                 _ => None,
-            },
-            _ => None,
-        }
-    } else {
-        None
-    };
+            }
+        } else {
+            None
+        };
+    let project_path = project_resolution
+        .as_ref()
+        .map(|(path, _)| path.clone());
 
-    // When we have a project, add codebase tools from the agent extension layer.
-    let agent_ctx = if project_path.is_some() {
+    // ── ADR-050 Chunk C: chat session first-use canonical graph hook ──────
+    // On session start (per-request, since each chat completion is its own
+    // session loop), warm up the canonical-main graph and pin the chat
+    // working_root to the index tree so `read`/`shell`/`lsp`/`code_graph`
+    // resolve against `origin/main`, not the user's working tree.  Best
+    // effort: failures degrade to the project root with a warning.
+    let agent_ctx = if let Some((project_path_buf, project_id)) = project_resolution.as_ref() {
         tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
-        Some(state.agent_context())
+        let mut ctx = state.agent_context();
+        match crate::mcp_bridge::ensure_canonical_graph(&state, project_id, project_path_buf).await {
+            Ok((handle, _graph)) => {
+                tracing::debug!(
+                    project_id = %project_id,
+                    index_tree = %handle.path().display(),
+                    "chat session: pinned working_root to canonical index tree"
+                );
+                ctx.working_root = Some(handle.path().to_path_buf());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    project_id = %project_id,
+                    error = %e,
+                    "chat session: ensure_canonical_graph failed; falling back to project root"
+                );
+            }
+        }
+        Some(ctx)
     } else {
         None
     };

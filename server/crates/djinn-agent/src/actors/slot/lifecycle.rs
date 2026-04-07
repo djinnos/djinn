@@ -112,7 +112,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         project_path,
         mut model_id,
         role,
-        app_state,
+        mut app_state,
         cancel,
         pause,
         event_tx,
@@ -466,6 +466,60 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     let _ = runtime_role
         .prepare_worktree(&worktree_path, &task, &app_state)
         .await;
+
+    // ── ADR-050 Chunk C: architect working_root pre-flight ───────────────────
+    // Architect sessions read against the canonical `_index/` worktree pinned
+    // to `origin/main`, NOT the per-task review-task worktree.  We:
+    //   1. Best-effort create `<project_root>/.djinn/worktrees/_index` if it
+    //      does not yet exist (so `read`/`shell` succeed before the architect
+    //      makes its first `code_graph` call which will lazily build the
+    //      canonical graph via `ensure_canonical_graph`).
+    //   2. Bake the index-tree path into `app_state.working_root` so the
+    //      tool dispatch layer routes `read`/`shell`/`lsp`/`code_graph`
+    //      against it.  Worker/reviewer/planner/lead leave this `None`.
+    if runtime_role.config().name == "architect" {
+        let index_tree_path = djinn_core::index_tree::index_tree_path(&project_dir);
+        if !index_tree_path.join(".git").exists() {
+            if let Ok(git) = app_state.git_actor(&project_dir).await {
+                let _ = git
+                    .run_command(vec!["worktree".into(), "prune".into()])
+                    .await;
+                let attempt = git
+                    .run_command(vec![
+                        "worktree".into(),
+                        "add".into(),
+                        "--detach".into(),
+                        index_tree_path.to_string_lossy().into_owned(),
+                        "origin/main".into(),
+                    ])
+                    .await;
+                if attempt.is_err() {
+                    let _ = git
+                        .run_command(vec![
+                            "worktree".into(),
+                            "add".into(),
+                            "--detach".into(),
+                            index_tree_path.to_string_lossy().into_owned(),
+                            "HEAD".into(),
+                        ])
+                        .await;
+                }
+            }
+        }
+        if index_tree_path.exists() {
+            tracing::info!(
+                task_id = %task_id,
+                index_tree = %index_tree_path.display(),
+                "Lifecycle: pinning architect working_root to canonical index tree"
+            );
+            app_state.working_root = Some(index_tree_path);
+        } else {
+            tracing::warn!(
+                task_id = %task_id,
+                "Lifecycle: index tree unavailable; architect will read against review worktree"
+            );
+        }
+    }
 
     emit_step(&task.id, "preflight_checking", serde_json::json!({}));
     if !worktree_path.exists() || !worktree_path.is_dir() {
