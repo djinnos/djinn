@@ -188,6 +188,14 @@ impl PlannedIndexerCommand {
         let mut command = Command::new(&self.binary_path);
         command.current_dir(&self.working_directory);
         command.args(&self.args);
+        // ADR-050 §3 non-negotiable cap: SCIP indexers commonly invoke
+        // `cargo check` which fans out into a parallel `cc` build for
+        // native deps (openssl-sys et al).  Two simultaneous indexer
+        // runs are already serialized by `IndexerLock`, but a single
+        // run can still saturate the host without this cap.  4 jobs is
+        // empirically sufficient to keep `rust-analyzer scip` warm
+        // without melting the box.
+        command.env("CARGO_BUILD_JOBS", "4");
         command
     }
 }
@@ -381,6 +389,49 @@ pub fn plan_indexer_commands(
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// ADR-050 §3 single-flight wrapper around [`run_indexers`].
+///
+/// Acquires the supplied server-wide indexer mutex before spawning any
+/// SCIP subprocesses, releasing it only once the run completes.  This
+/// guarantees at most one indexer run is in flight at a time across the
+/// whole server, regardless of how many architect / chat / worker code
+/// paths fan in concurrently.  The `CARGO_BUILD_JOBS=4` cap is set
+/// unconditionally inside `PlannedIndexerCommand::build_command`.
+///
+/// `target_dir`, when supplied, becomes the dedicated `CARGO_TARGET_DIR`
+/// for the spawned indexer subprocesses.  This is used by the canonical
+/// `_index/` worktree to keep its build outputs isolated from worker
+/// worktree caches while still sharing sccache.
+pub async fn run_indexers_single_flight(
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    project_root: impl AsRef<Path>,
+    output_root: impl AsRef<Path>,
+    target_dir: Option<&Path>,
+) -> Result<IndexingRun> {
+    let _permit = lock.lock().await;
+    if let Some(dir) = target_dir {
+        // SAFETY: setting an env var for the current process is racy
+        // when other tasks read CARGO_TARGET_DIR concurrently, but the
+        // single-flight lock above guarantees no other indexer task is
+        // active.  Restoring the previous value on drop keeps unrelated
+        // subsystems unaffected after the run completes.
+        let previous = std::env::var_os("CARGO_TARGET_DIR");
+        // SAFETY: see comment above; serialised under `lock` so no race.
+        unsafe { std::env::set_var("CARGO_TARGET_DIR", dir) };
+        let result = run_indexers(project_root, output_root).await;
+        // SAFETY: same justification.
+        unsafe {
+            match previous {
+                Some(prev) => std::env::set_var("CARGO_TARGET_DIR", prev),
+                None => std::env::remove_var("CARGO_TARGET_DIR"),
+            }
+        }
+        result
+    } else {
+        run_indexers(project_root, output_root).await
+    }
 }
 
 pub async fn run_indexers(

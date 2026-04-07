@@ -58,6 +58,12 @@ struct Inner {
     pub file_time: Arc<FileTime>,
     pub lsp: LspManager,
     pub active_tasks: djinn_agent::context::ActivityTracker,
+    /// ADR-050 §3 single-flight gate for SCIP indexer subprocess
+    /// invocations.  At most one `run_indexers` call is allowed to spawn
+    /// a child process server-wide; additional callers queue on this
+    /// mutex.  Combined with the `CARGO_BUILD_JOBS` cap this prevents
+    /// the parallel-indexer cc-fanout meltdown.
+    pub indexer_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -87,8 +93,15 @@ impl AppState {
                 file_time: Arc::new(FileTime::new()),
                 lsp: LspManager::new(),
                 active_tasks: djinn_agent::context::ActivityTracker::default(),
+                indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
             }),
         }
+    }
+
+    /// Server-wide single-flight gate for SCIP indexer subprocess
+    /// invocations (ADR-050 §3).
+    pub fn indexer_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner.indexer_lock.clone()
     }
 
     pub fn db(&self) -> &Database {
