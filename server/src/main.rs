@@ -254,34 +254,6 @@ fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {
     }
 }
 
-#[cfg(test)]
-mod strip_deleted_suffix_tests {
-    use super::strip_deleted_suffix;
-    use std::path::PathBuf;
-
-    #[test]
-    fn strips_trailing_deleted_marker() {
-        let input = PathBuf::from("/usr/bin/foo (deleted)");
-        assert_eq!(strip_deleted_suffix(input), PathBuf::from("/usr/bin/foo"));
-    }
-
-    #[test]
-    fn leaves_unrelated_paths_alone() {
-        let input = PathBuf::from("/usr/bin/foo");
-        assert_eq!(strip_deleted_suffix(input), PathBuf::from("/usr/bin/foo"));
-    }
-
-    #[test]
-    fn does_not_strip_deleted_inside_path() {
-        // "(deleted) " in the middle is a legitimate filename component.
-        let input = PathBuf::from("/weird/ (deleted) /bin");
-        assert_eq!(
-            strip_deleted_suffix(input),
-            PathBuf::from("/weird/ (deleted) /bin")
-        );
-    }
-}
-
 fn resolve_upstream_url(
     override_url: Option<String>,
     daemon_info: Option<&daemon::DaemonInfo>,
@@ -352,5 +324,33 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod strip_deleted_suffix_tests {
+    use super::strip_deleted_suffix;
+    use std::path::PathBuf;
+
+    #[test]
+    fn strips_trailing_deleted_marker() {
+        let input = PathBuf::from("/usr/bin/foo (deleted)");
+        assert_eq!(strip_deleted_suffix(input), PathBuf::from("/usr/bin/foo"));
+    }
+
+    #[test]
+    fn leaves_unrelated_paths_alone() {
+        let input = PathBuf::from("/usr/bin/foo");
+        assert_eq!(strip_deleted_suffix(input), PathBuf::from("/usr/bin/foo"));
+    }
+
+    #[test]
+    fn does_not_strip_deleted_inside_path() {
+        // "(deleted) " in the middle is a legitimate filename component.
+        let input = PathBuf::from("/weird/ (deleted) /bin");
+        assert_eq!(
+            strip_deleted_suffix(input),
+            PathBuf::from("/weird/ (deleted) /bin")
+        );
     }
 }
