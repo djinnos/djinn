@@ -25,11 +25,18 @@ pub(super) fn is_context_length_error(e: &anyhow::Error) -> bool {
 /// Responses API. These happen when a `tool` role message references a
 /// `tool_call_id` that doesn't exist in any preceding assistant message —
 /// typically after compaction removed the assistant message but left orphaned
-/// tool results.
-pub(super) fn is_orphaned_tool_call_error(e: &anyhow::Error) -> bool {
-    let msg = e.to_string().to_lowercase();
+/// tool results. Also matches the inverse "No tool output found for function
+/// call ..." which fires when an assistant function_call has no matching
+/// tool_output entry (e.g. session was interrupted mid-turn).
+pub(crate) fn is_orphaned_tool_call_error_str(msg: &str) -> bool {
+    let msg = msg.to_lowercase();
     msg.contains("no tool call found for function call output")
+        || msg.contains("no tool output found for function call")
         || msg.contains("no function call found")
+}
+
+pub(super) fn is_orphaned_tool_call_error(e: &anyhow::Error) -> bool {
+    is_orphaned_tool_call_error_str(&e.to_string())
 }
 
 /// Providers confirmed to handle `tool_choice: "required"` correctly,
@@ -117,6 +124,24 @@ pub(super) fn tool_choice_for_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_orphaned_tool_call_variants() {
+        // Variant the existing detector already covered.
+        assert!(is_orphaned_tool_call_error_str(
+            "No tool call found for function call output call_abc"
+        ));
+        assert!(is_orphaned_tool_call_error_str("No function call found"));
+        // The 400 message we observed in production for poisoned sessions.
+        assert!(is_orphaned_tool_call_error_str(
+            "provider stream event failed: display=provider API error 400 Bad Request: { \
+             \"error\": { \"message\": \"No tool output found for function call \
+             call_GTQn9uVLax1RG4uWvMNrl3Sq.\", \"type\": \"invalid_request_error\" } }"
+        ));
+        // Negative cases.
+        assert!(!is_orphaned_tool_call_error_str("rate limited"));
+        assert!(!is_orphaned_tool_call_error_str("context length exceeded"));
+    }
 
     #[test]
     fn tool_choice_auto_for_unsupported_providers() {

@@ -14,7 +14,7 @@ use crate::provider::{LlmProvider, StreamEvent};
 use djinn_core::events::DjinnEventEnvelope;
 
 use super::*;
-mod error_handling;
+pub(super) mod error_handling;
 use error_handling::{
     MAX_COMPACTION_RETRIES, is_context_length_error, is_orphaned_tool_call_error,
     next_nudge_message, should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,

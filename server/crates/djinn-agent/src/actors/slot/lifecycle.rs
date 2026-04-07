@@ -19,6 +19,7 @@ use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 use djinn_db::repositories::session::CreateSessionParams;
 
+use super::reply_loop::error_handling::is_orphaned_tool_call_error_str;
 use super::reply_loop::{ReplyLoopContext, run_reply_loop};
 use super::*;
 use crate::AgentType;
@@ -1784,6 +1785,22 @@ async fn apply_transition_and_dispatch(
         );
         let is_conflict_rejection = action == TransitionAction::TaskReviewRejectConflict;
         let is_submit_verification = action == TransitionAction::SubmitVerification;
+        // If the session died because the persisted conversation has an
+        // orphaned tool_call / function_call (typically after a mid-turn
+        // interruption — db lock, idle kill, prior crash), the OpenAI
+        // Responses API rejects every replay with HTTP 400. Resuming will
+        // hit the same wall forever, so drop the paused session record and
+        // let the next dispatch start fresh against the same worktree.
+        let is_orphaned_tool_call = reason
+            .as_deref()
+            .map(is_orphaned_tool_call_error_str)
+            .unwrap_or(false);
+        if is_orphaned_tool_call {
+            tracing::warn!(
+                task_id = %task_id,
+                "Lifecycle: dropping poisoned session due to orphaned tool call; next dispatch will start a fresh session"
+            );
+        }
         if let Err(e) = task_repo
             .transition(
                 task_id,
@@ -1826,7 +1843,7 @@ async fn apply_transition_and_dispatch(
                 }
             }
         }
-        if is_conflict_rejection {
+        if is_conflict_rejection || is_orphaned_tool_call {
             interrupt_paused_worker_session(task_id, app_state).await;
         }
         if is_submit_verification {
