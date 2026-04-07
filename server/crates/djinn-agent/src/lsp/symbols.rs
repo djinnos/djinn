@@ -41,6 +41,28 @@ pub(crate) struct ResolvedSymbol {
     pub(crate) position: StablePosition,
 }
 
+pub(crate) fn format_document_symbols(
+    symbols: &[serde_json::Value],
+    query: &SymbolQuery,
+) -> String {
+    format_symbol_entries(&parse_symbol_tree(symbols, query))
+}
+
+pub(crate) fn resolve_symbol_position(
+    symbols: &[serde_json::Value],
+    symbol_query: &str,
+) -> Result<StablePosition, String> {
+    let query = parse_symbol_lookup_query(symbol_query)?;
+    let entries = parse_symbol_tree(symbols, &SymbolQuery::default());
+    if entries.is_empty() {
+        return Err(
+            "No symbols found in this document. Use `lsp symbols` to inspect available name paths."
+                .to_string(),
+        );
+    }
+    Ok(resolve_symbol_entries(&entries, &query)?.position)
+}
+
 pub(crate) fn parse_symbol_tree(
     symbols: &[serde_json::Value],
     query: &SymbolQuery,
@@ -143,7 +165,7 @@ pub(crate) fn filter_symbol_entries(
 }
 
 fn symbol_location(symbol: &serde_json::Value) -> Option<String> {
-    symbol.get("location").map(format_location).or_else(|| {
+    symbol.get("location").map(render_location).or_else(|| {
         symbol_stable_position(symbol).map(|position| {
             if position.character == 0 {
                 format!("line {}", position.line + 1)
@@ -459,7 +481,7 @@ pub(crate) fn symbol_kind_name(kind: u64) -> &'static str {
     }
 }
 
-pub(crate) fn format_location(loc: &serde_json::Value) -> String {
+fn render_location(loc: &serde_json::Value) -> String {
     let uri = loc
         .get("uri")
         .or_else(|| loc.get("targetUri"))
@@ -501,7 +523,7 @@ mod tests {
                 "end": { "line": 9, "character": 10 }
             }
         });
-        assert_eq!(format_location(&loc), "/foo/bar.rs:10:5");
+        assert_eq!(render_location(&loc), "/foo/bar.rs:10:5");
     }
 
     #[test]
@@ -513,7 +535,7 @@ mod tests {
                 "end": { "line": 0, "character": 5 }
             }
         });
-        assert_eq!(format_location(&loc), "/foo/bar.rs:1:1");
+        assert_eq!(render_location(&loc), "/foo/bar.rs:1:1");
     }
 
     fn sample_symbols() -> Vec<serde_json::Value> {

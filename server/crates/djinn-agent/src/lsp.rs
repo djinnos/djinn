@@ -19,11 +19,8 @@ use client::{
 use diagnostics::{clear_uri, collect_for_worktree};
 use serde_json::json;
 use server_config::{language_id_for_path, server_for_path};
-use symbols::{
-    ResolvedSymbol, SymbolEntry, filter_symbol_entries, format_location, format_symbol_entries,
-    parse_symbol_lookup_query, parse_symbol_tree, resolve_symbol_entries,
-};
 pub use symbols::{SymbolQuery, parse_symbol_kind_filter};
+use symbols::{format_document_symbols, resolve_symbol_position};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 use workspace::find_root;
@@ -337,11 +334,11 @@ impl LspManager {
 }
 
 impl LspManager {
-    async fn fetch_document_symbol_entries(
+    async fn fetch_document_symbols(
         &self,
         worktree: &Path,
         path: &Path,
-    ) -> Result<Vec<SymbolEntry>, String> {
+    ) -> Result<Vec<serde_json::Value>, String> {
         let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
         let uri = ensure_did_open(&stdin, path, &opened).await?;
 
@@ -366,7 +363,7 @@ impl LspManager {
             return Ok(Vec::new());
         }
 
-        Ok(parse_symbol_tree(&symbols, &SymbolQuery::default()))
+        Ok(symbols)
     }
 
     async fn resolve_symbol_to_position(
@@ -374,16 +371,10 @@ impl LspManager {
         worktree: &Path,
         path: &Path,
         symbol_query: &str,
-    ) -> Result<ResolvedSymbol, String> {
-        let query = parse_symbol_lookup_query(symbol_query)?;
-        let entries = self.fetch_document_symbol_entries(worktree, path).await?;
-        if entries.is_empty() {
-            return Err(
-                "No symbols found in this document. Use `lsp symbols` to inspect available name paths."
-                    .to_string(),
-            );
-        }
-        resolve_symbol_entries(&entries, &query)
+    ) -> Result<(u32, u32), String> {
+        let symbols = self.fetch_document_symbols(worktree, path).await?;
+        let position = resolve_symbol_position(&symbols, symbol_query)?;
+        Ok((position.line, position.character))
     }
 
     /// Get or spawn the LSP client for a file and return refs for making requests.
@@ -573,14 +564,12 @@ impl LspManager {
         path: &Path,
         query: SymbolQuery,
     ) -> Result<String, String> {
-        let entries = self.fetch_document_symbol_entries(worktree, path).await?;
-        if entries.is_empty() {
+        let symbols = self.fetch_document_symbols(worktree, path).await?;
+        if symbols.is_empty() {
             return Ok("No symbols found in this document.".to_string());
         }
 
-        Ok(format_symbol_entries(&filter_symbol_entries(
-            entries, &query,
-        )))
+        Ok(format_document_symbols(&symbols, &query))
     }
 
     pub async fn hover_symbol(
@@ -589,16 +578,10 @@ impl LspManager {
         path: &Path,
         symbol_query: &str,
     ) -> Result<String, String> {
-        let resolved = self
+        let (line, character) = self
             .resolve_symbol_to_position(worktree, path, symbol_query)
             .await?;
-        self.hover(
-            worktree,
-            path,
-            resolved.position.line,
-            resolved.position.character,
-        )
-        .await
+        self.hover(worktree, path, line, character).await
     }
 
     pub async fn go_to_definition_symbol(
@@ -607,16 +590,10 @@ impl LspManager {
         path: &Path,
         symbol_query: &str,
     ) -> Result<String, String> {
-        let resolved = self
+        let (line, character) = self
             .resolve_symbol_to_position(worktree, path, symbol_query)
             .await?;
-        self.go_to_definition(
-            worktree,
-            path,
-            resolved.position.line,
-            resolved.position.character,
-        )
-        .await
+        self.go_to_definition(worktree, path, line, character).await
     }
 
     pub async fn find_references_symbol(
@@ -625,17 +602,31 @@ impl LspManager {
         path: &Path,
         symbol_query: &str,
     ) -> Result<String, String> {
-        let resolved = self
+        let (line, character) = self
             .resolve_symbol_to_position(worktree, path, symbol_query)
             .await?;
-        self.find_references(
-            worktree,
-            path,
-            resolved.position.line,
-            resolved.position.character,
-        )
-        .await
+        self.find_references(worktree, path, line, character).await
     }
+}
+
+fn format_location(loc: &serde_json::Value) -> String {
+    let uri = loc
+        .get("uri")
+        .or_else(|| loc.get("targetUri"))
+        .and_then(|u| u.as_str())
+        .unwrap_or("?");
+    let range = loc.get("range").or_else(|| loc.get("targetSelectionRange"));
+    let (line, character) = match range {
+        Some(r) => {
+            let start = r.get("start").unwrap_or(r);
+            let l = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+            let c = start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+            (l, c)
+        }
+        None => (1, 1),
+    };
+    let file = uri.strip_prefix("file://").unwrap_or(uri);
+    format!("{file}:{line}:{character}")
 }
 
 #[cfg(test)]
