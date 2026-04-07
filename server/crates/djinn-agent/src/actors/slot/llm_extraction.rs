@@ -864,7 +864,6 @@ mod tests {
         let taxonomy = SessionTaxonomy {
             files_changed: 5,
             errors: 3,
-            git_ops: 2,
             tools_used: 8,
             notes_read: 1,
             notes_written: 2,

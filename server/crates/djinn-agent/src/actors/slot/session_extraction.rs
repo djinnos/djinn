@@ -4,7 +4,7 @@
 //! 1. Collect which notes were read (via `memory_read` tool calls).
 //! 2. Determine which notes were read but never subsequently referenced in tool
 //!    call arguments (staleness signal).
-//! 3. Build an event taxonomy: counts of files_changed, errors, git_ops,
+//! 3. Build an event taxonomy: counts of files_changed, errors,
 //!    tools_used, notes_read, notes_written, and tasks_transitioned.
 //! 4. Store the taxonomy as JSON on the session record.
 //! 5. Flush co-access pairs from the read notes to `note_associations`.
@@ -23,12 +23,10 @@ use crate::context::AgentContext;
 /// Aggregated event counts extracted from a completed session's tool log.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionTaxonomy {
-    /// Number of distinct files mentioned in tool calls (write_file, edit_file, etc.)
+    /// Number of distinct files mentioned in tool calls (write, edit, apply_patch)
     pub files_changed: u32,
     /// Number of tool call errors (tool results with `is_error: true`)
     pub errors: u32,
-    /// Number of git operation tool calls (git_commit, git_push, git_status, etc.)
-    pub git_ops: u32,
     /// Total number of unique tool names invoked
     pub tools_used: u32,
     /// Number of notes read via memory_read
@@ -56,39 +54,38 @@ pub struct ExtractionQuality {
 
 // ── Tool name classification ──────────────────────────────────────────────────
 
-fn is_git_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "git_commit"
-            | "git_push"
-            | "git_status"
-            | "git_diff"
-            | "git_log"
-            | "git_checkout"
-            | "git_branch"
-            | "git_add"
-            | "git_rebase"
-            | "git_merge"
-            | "git_stash"
-            | "git_reset"
-    )
-}
-
 fn is_memory_write_tool(name: &str) -> bool {
     matches!(name, "memory_write" | "memory_edit" | "memory_move")
 }
 
 fn is_file_change_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "write_file"
-            | "edit_file"
-            | "create_file"
-            | "delete_file"
-            | "patch_file"
-            | "str_replace_editor"
-            | "text_editor"
-    )
+    matches!(name, "write" | "edit" | "apply_patch")
+}
+
+/// Parse an `apply_patch` tool input and extract all affected file paths from
+/// the embedded multi-file patch blob.
+fn extract_apply_patch_paths(input: &serde_json::Value) -> Vec<String> {
+    let Some(patch) = input.get("patch").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for line in patch.lines() {
+        let trimmed = line.trim_end();
+        for prefix in [
+            "*** Update File: ",
+            "*** Add File: ",
+            "*** Delete File: ",
+        ] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                let path = rest.trim();
+                if !path.is_empty() {
+                    paths.push(path.to_string());
+                }
+                break;
+            }
+        }
+    }
+    paths
 }
 
 // ── Extraction logic ──────────────────────────────────────────────────────────
@@ -195,13 +192,14 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
                         } else if is_memory_write_tool(name) {
                             taxonomy.notes_written += 1;
                             memory_write_tool_use_ids.insert(id.clone());
-                        } else if is_git_tool(name) {
-                            taxonomy.git_ops += 1;
                         } else if name == "task_transition" {
                             taxonomy.tasks_transitioned += 1;
                         } else if is_file_change_tool(name) {
-                            // Extract file path from input
-                            if let Some(path) = input
+                            if name == "apply_patch" {
+                                for p in extract_apply_patch_paths(input) {
+                                    files_changed_set.insert(p);
+                                }
+                            } else if let Some(path) = input
                                 .get("path")
                                 .or_else(|| input.get("file_path"))
                                 .or_else(|| input.get("filename"))
@@ -312,7 +310,6 @@ pub(crate) async fn run_structural_extraction(
         notes_written_permalinks = signals.notes_written_permalinks.len(),
         files_changed = signals.taxonomy.files_changed,
         errors = signals.taxonomy.errors,
-        git_ops = signals.taxonomy.git_ops,
         tools_used = signals.taxonomy.tools_used,
         notes_written = signals.taxonomy.notes_written,
         tasks_transitioned = signals.taxonomy.tasks_transitioned,
@@ -712,16 +709,6 @@ mod tests {
     }
 
     #[test]
-    fn git_tool_counted() {
-        let msgs = vec![
-            tool_use("git_commit", serde_json::json!({"message": "fix"})),
-            tool_use("git_push", serde_json::json!({})),
-        ];
-        let signals = extract_session_signals(&msgs);
-        assert_eq!(signals.taxonomy.git_ops, 2);
-    }
-
-    #[test]
     fn task_transition_counted() {
         let msgs = vec![tool_use(
             "task_transition",
@@ -734,7 +721,7 @@ mod tests {
     #[test]
     fn error_tool_result_increments_errors() {
         let msgs = vec![
-            tool_use("write_file", serde_json::json!({"path": "src/main.rs"})),
+            tool_use("write", serde_json::json!({"path": "src/main.rs"})),
             tool_result_error("test-id"),
         ];
         let signals = extract_session_signals(&msgs);
@@ -744,7 +731,7 @@ mod tests {
     #[test]
     fn ok_tool_result_does_not_increment_errors() {
         let msgs = vec![
-            tool_use("write_file", serde_json::json!({"path": "src/main.rs"})),
+            tool_use("write", serde_json::json!({"path": "src/main.rs"})),
             tool_result_ok("test-id"),
         ];
         let signals = extract_session_signals(&msgs);
@@ -755,16 +742,35 @@ mod tests {
     fn files_changed_deduplication() {
         let msgs = vec![
             tool_use(
-                "write_file",
+                "write",
                 serde_json::json!({"path": "src/main.rs", "content": "fn main() {}"}),
             ),
             tool_use(
-                "edit_file",
+                "edit",
                 serde_json::json!({"path": "src/main.rs", "diff": "..."}),
             ),
         ];
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.taxonomy.files_changed, 1); // same file edited twice
+    }
+
+    #[test]
+    fn apply_patch_collects_all_paths() {
+        let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n context\n-old\n+new\n*** Add File: src/b.rs\n+content\n*** Delete File: src/c.rs\n*** End Patch\n";
+        let msgs = vec![tool_use(
+            "apply_patch",
+            serde_json::json!({"patch": patch}),
+        )];
+        let signals = extract_session_signals(&msgs);
+        assert_eq!(signals.taxonomy.files_changed, 3);
+        assert_eq!(
+            signals.taxonomy.changed_file_paths,
+            vec![
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "src/c.rs".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -794,11 +800,11 @@ mod tests {
                 "memory_read",
                 serde_json::json!({"identifier": "y", "project": "/tmp"}),
             ),
-            tool_use("git_commit", serde_json::json!({"message": "msg"})),
-            tool_use("write_file", serde_json::json!({"path": "a.rs"})),
+            tool_use("task_transition", serde_json::json!({"task_id": "abc", "action": "done"})),
+            tool_use("write", serde_json::json!({"path": "a.rs"})),
         ];
         let signals = extract_session_signals(&msgs);
-        assert_eq!(signals.taxonomy.tools_used, 3); // memory_read, git_commit, write_file
+        assert_eq!(signals.taxonomy.tools_used, 3); // memory_read, task_transition, write
     }
 
     #[test]
@@ -808,7 +814,10 @@ mod tests {
                 "memory_read",
                 serde_json::json!({"identifier": "decisions/adr-unused", "project": "/tmp"}),
             ),
-            tool_use("git_commit", serde_json::json!({"message": "done"})),
+            tool_use(
+                "task_transition",
+                serde_json::json!({"task_id": "abc", "action": "done"}),
+            ),
         ];
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.notes_read_ids, vec!["decisions/adr-unused"]);
@@ -839,7 +848,6 @@ mod tests {
         let tax = SessionTaxonomy {
             files_changed: 3,
             errors: 1,
-            git_ops: 2,
             tools_used: 5,
             notes_read: 4,
             notes_written: 1,

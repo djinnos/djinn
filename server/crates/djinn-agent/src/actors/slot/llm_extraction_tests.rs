@@ -205,8 +205,8 @@ fn structural_extraction_produces_correct_taxonomy() {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "t3".into(),
-                name: "git_commit".into(),
-                input: serde_json::json!({"message": "implement feature"}),
+                name: "write".into(),
+                input: serde_json::json!({"path": "src/main.rs", "content": "fn main() {}"}),
             }],
             metadata: None,
         },
@@ -223,24 +223,6 @@ fn structural_extraction_produces_correct_taxonomy() {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "t4".into(),
-                name: "git_push".into(),
-                input: serde_json::json!({}),
-            }],
-            metadata: None,
-        },
-        Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "t5".into(),
-                name: "write_file".into(),
-                input: serde_json::json!({"path": "src/main.rs", "content": "fn main() {}"}),
-            }],
-            metadata: None,
-        },
-        Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "t6".into(),
                 name: "task_transition".into(),
                 input: serde_json::json!({"task_id": "abc", "action": "done"}),
             }],
@@ -251,11 +233,10 @@ fn structural_extraction_produces_correct_taxonomy() {
     let signals = extract_session_signals(&messages);
 
     assert_eq!(signals.taxonomy.notes_read, 2);
-    assert_eq!(signals.taxonomy.git_ops, 2);
     assert_eq!(signals.taxonomy.errors, 1);
     assert_eq!(signals.taxonomy.files_changed, 1);
     assert_eq!(signals.taxonomy.tasks_transitioned, 1);
-    assert_eq!(signals.taxonomy.tools_used, 5);
+    assert_eq!(signals.taxonomy.tools_used, 3);
     assert_eq!(signals.notes_read_ids.len(), 2);
     assert!(
         signals
@@ -360,7 +341,6 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
     let taxonomy = SessionTaxonomy {
         files_changed: 3,
         errors: 2,
-        git_ops: 1,
         tools_used: 6,
         notes_read: 1,
         notes_written: 2,
@@ -430,7 +410,6 @@ async fn llm_extracted_notes_have_confidence_0_5() {
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
-        git_ops: 1,
         tools_used: 4,
         notes_read: 0,
         notes_written: 1,
@@ -499,7 +478,6 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
     let taxonomy = SessionTaxonomy {
         files_changed: 5,
         errors: 3,
-        git_ops: 2,
         tools_used: 8,
         notes_read: 1,
         notes_written: 2,
@@ -526,7 +504,6 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 0,
-        git_ops: 1,
         tools_used: 3,
         notes_read: 0,
         notes_written: 1,
@@ -582,7 +559,6 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
-        git_ops: 1,
         tools_used: 4,
         notes_read: 0,
         notes_written: 1,
@@ -642,7 +618,6 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
     let taxonomy = SessionTaxonomy {
         files_changed: 1,
         errors: 0,
-        git_ops: 1,
         tools_used: 2,
         notes_read: 0,
         notes_written: 1,
@@ -695,17 +670,8 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "t1".into(),
-                name: "write_file".into(),
+                name: "write".into(),
                 input: serde_json::json!({"path": "src/feature.rs", "content": "// impl"}),
-            }],
-            metadata: None,
-        },
-        Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "t2".into(),
-                name: "git_commit".into(),
-                input: serde_json::json!({"message": "feat: implement feature"}),
             }],
             metadata: None,
         },
@@ -739,7 +705,6 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
     assert!(taxonomy.is_some());
     let taxonomy = taxonomy.expect("taxonomy present");
     assert_eq!(taxonomy.files_changed, 1);
-    assert_eq!(taxonomy.git_ops, 1);
     assert_eq!(taxonomy.notes_written, 1);
     assert_eq!(taxonomy.tasks_transitioned, 1);
 
@@ -760,7 +725,6 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
         serde_json::from_str(stored_json.as_deref().expect("stored taxonomy text"))
             .expect("deserialize stored taxonomy");
     assert_eq!(stored_taxonomy.files_changed, 1);
-    assert_eq!(stored_taxonomy.git_ops, 1);
 
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx_llm, provider).await;
