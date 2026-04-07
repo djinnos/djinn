@@ -54,6 +54,10 @@ pub struct RunningTaskInfo {
     /// Seconds since the session last produced a stream event or completed a
     /// tool call.  Used by stall detection to kill idle sessions.
     pub idle_seconds: u64,
+    /// Project UUID the task belongs to, tracked in the pool so project-scoped
+    /// queries can filter running tasks without depending on a DB session row
+    /// (which does not exist during pre-session lifecycle stages).
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -40,6 +40,9 @@ pub struct RunningTaskInfo {
     pub slot_id: usize,
     pub duration_seconds: u64,
     pub idle_seconds: u64,
+    /// Project UUID the task belongs to, tracked by the slot pool so
+    /// project-scoped status queries can filter pre-session lifecycles.
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

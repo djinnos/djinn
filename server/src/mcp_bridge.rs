@@ -165,6 +165,7 @@ impl SlotPoolOps for SlotPoolBridge {
                     slot_id: t.slot_id,
                     duration_seconds: t.duration_seconds,
                     idle_seconds: t.idle_seconds,
+                    project_id: t.project_id,
                 })
                 .collect(),
         })
@@ -189,6 +190,7 @@ impl SlotPoolOps for SlotPoolBridge {
             slot_id: t.slot_id,
             duration_seconds: t.duration_seconds,
             idle_seconds: t.idle_seconds,
+            project_id: t.project_id,
         }))
     }
 

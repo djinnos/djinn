@@ -544,12 +544,27 @@ impl DjinnMcpServer {
         let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let mut sessions = Vec::new();
         for running in pool_status.running_tasks {
+            // Filter by project BEFORE hitting the session repo so pre-session
+            // lifecycles (no DB session row yet) are included when they belong
+            // to the requested project. Prefer the pool's tracked project_id;
+            // only fall back to the DB session's project_id when the pool has
+            // not yet recorded one.
+            if let Some(project_id_filter) = project_id.as_deref() {
+                let pool_project = running.project_id.as_deref();
+                let matches_pool = pool_project == Some(project_id_filter);
+                if !matches_pool && pool_project.is_some() {
+                    continue;
+                }
+                // pool_project is None: fall through to DB session check below.
+            }
+
             let db_session = session_repo
                 .active_for_task(&running.task_id)
                 .await
                 .ok()
                 .flatten();
             if let Some(project_id_filter) = project_id.as_deref()
+                && running.project_id.is_none()
                 && db_session
                     .as_ref()
                     .map(|s| s.project_id.as_str())

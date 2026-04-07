@@ -341,12 +341,14 @@ impl SlotPool {
                     .app_state
                     .idle_seconds(task_id)
                     .unwrap_or(duration_seconds);
+                let project_id = self.task_projects.get(task_id).cloned();
                 Some(super::types::RunningTaskInfo {
                     task_id: task_id.clone(),
                     model_id,
                     slot_id: *slot_id,
                     duration_seconds,
                     idle_seconds,
+                    project_id,
                 })
             })
             .collect();
@@ -376,12 +378,14 @@ impl SlotPool {
             .app_state
             .idle_seconds(task_id)
             .unwrap_or(duration_seconds);
+        let project_id = self.task_projects.get(task_id).cloned();
         Some(super::types::RunningTaskInfo {
             task_id: task_id.to_string(),
             model_id,
             slot_id: *slot_id,
             duration_seconds,
             idle_seconds,
+            project_id,
         })
     }
 
