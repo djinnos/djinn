@@ -135,6 +135,14 @@ export function initSSEEventHandlers(): () => void {
     if (!("session_count" in task)) task.session_count = existing.session_count;
     if (!("duration_seconds" in task)) task.duration_seconds = existing.duration_seconds;
 
+    // When a task leaves in_progress, clear any stale lifecycle steps so the
+    // "setting up" badge doesn't linger. This matters when a lifecycle aborts
+    // pre-session (credential load, worktree prep, etc.) and never emits the
+    // session_started / session_ended events that normally trigger cleanup.
+    if (existing.status === "in_progress" && task.status !== "in_progress") {
+      verificationStore.getState().clearLifecycleSteps(task.id);
+    }
+
     taskStore.getState().updateTask(task);
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
       current?.map((t) => (t.id === task.id ? task : t))
