@@ -3,10 +3,10 @@
 # Usage:
 #   docker compose -f docker/docker-compose.langfuse.yml up -d
 #
-# Dashboard: http://localhost:3000
-# OTLP endpoint: http://localhost:3000/api/public/otel/v1/traces
+# Dashboard: http://localhost:5000
+# OTLP endpoint: http://localhost:5000/api/public/otel/v1/traces
 #
-# First run: sign up at http://localhost:3000, then grab your API keys from
+# First run: sign up at http://localhost:5000, then grab your API keys from
 # Settings > API Keys in the dashboard.
 #
 # Then configure Djinn:
@@ -25,10 +25,10 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "5000:3000"
     environment:
       NODE_ENV: production
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: http://localhost:5000
       NEXTAUTH_SECRET: djinn-local-dev-nextauth-secret-CHANGEME
       SALT: djinn-local-dev-salt-CHANGEME
       ENCRYPTION_KEY: 60f637c6ac9d2a532f9c8c8ee286617cb7090dcf92d88eebe857119e67dbc2a0
