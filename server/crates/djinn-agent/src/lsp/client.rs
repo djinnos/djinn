@@ -10,8 +10,9 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 
+use super::INIT_TIMEOUT;
 use super::diagnostics::{Diagnostic, DiagnosticsMap, new_diagnostics_map, publish};
-use super::{INIT_TIMEOUT, ServerDef, djinn_bin_dir, language_id_for_path, resolve_binary};
+use super::server_config::{ServerDef, djinn_bin_dir, language_id_for_path, resolve_binary};
 
 pub type PendingResponses =
     Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
