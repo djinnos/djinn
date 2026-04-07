@@ -1141,6 +1141,7 @@ impl CoordinatorActor {
             coordinator: Arc::new(tokio::sync::Mutex::new(None)),
             active_tasks: crate::context::ActivityTracker::default(),
             task_ops_project_path_override: None,
+            working_root: None,
         };
 
         // Use Reopen as a sentinel for "leave in approved / retry next tick".

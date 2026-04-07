@@ -48,6 +48,26 @@ pub struct AgentContext {
     pub coordinator: Arc<tokio::sync::Mutex<Option<CoordinatorHandle>>>,
     pub active_tasks: ActivityTracker,
     pub task_ops_project_path_override: Option<PathBuf>,
+    /// Per-ADR-050 working root for code-reading tools (`read`, `shell`, `lsp`,
+    /// `code_graph`).  When `Some`, the dispatch layer routes those tools
+    /// against this path instead of the per-task worktree.  Used by the
+    /// Architect and Chat surfaces to read against the canonical
+    /// `.djinn/worktrees/_index/` checkout pinned to `origin/main`.  Workers,
+    /// reviewers, planners, and lead leave this `None` so their tools continue
+    /// to resolve against their task worktree.
+    pub working_root: Option<PathBuf>,
+}
+
+impl AgentContext {
+    /// Returns the working root for code-reading tool dispatch (read, shell,
+    /// lsp, code_graph).  When `working_root` is `Some` it takes precedence
+    /// over the supplied fallback (typically the worker's worktree path).
+    pub fn working_root_for(&self, fallback: &Path) -> PathBuf {
+        match self.working_root.as_deref() {
+            Some(p) => p.to_path_buf(),
+            None => fallback.to_path_buf(),
+        }
+    }
 }
 
 struct AgentSyncOps;

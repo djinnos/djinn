@@ -174,6 +174,7 @@ impl AppState {
             coordinator: self.inner.coordinator.clone(),
             active_tasks: self.inner.active_tasks.clone(),
             task_ops_project_path_override: None,
+            working_root: None,
         }
     }
 

@@ -49,13 +49,17 @@ pub async fn dispatch_chat_tool(
     use crate::extension::handlers;
 
     let arguments = args.as_object().cloned();
+    // ADR-050 Chunk C: respect `working_root` if the caller installed one on
+    // the AgentContext (e.g. the chat first-use hook resolves the canonical
+    // index-tree path).  Falls back to the supplied `project_root`.
+    let effective_root = state.working_root_for(project_root);
+    let effective_root_str = effective_root.to_string_lossy().into_owned();
     match name {
-        "shell" => handlers::call_shell(&arguments, project_root).await,
-        "read" => handlers::call_read(state, &arguments, project_root).await,
-        "lsp" => handlers::call_lsp(state, &arguments, project_root).await,
+        "shell" => handlers::call_shell(&arguments, &effective_root).await,
+        "read" => handlers::call_read(state, &arguments, &effective_root).await,
+        "lsp" => handlers::call_lsp(state, &arguments, &effective_root).await,
         "code_graph" => {
-            let project_root_str = project_root.to_string_lossy();
-            handlers::call_code_graph(state, &arguments, project_root_str.as_ref()).await
+            handlers::call_code_graph(state, &arguments, &effective_root_str).await
         }
         "github_search" => handlers::call_github_search(state, &arguments).await,
         _ => Err(format!("unknown chat extension tool: {name}")),

@@ -135,13 +135,32 @@ where
         }
         "agent_create" => call_agent_create(state, &call.arguments, &worktree_project_path).await,
         "ci_job_log" => call_ci_job_log(state, &call.arguments, session_task_id).await,
-        "shell" => call_shell(&call.arguments, worktree_path).await,
-        "read" => call_read(state, &call.arguments, worktree_path).await,
+        // ADR-050 Chunk C: route code-reading tools through `working_root` so
+        // architect/chat sessions resolve them against the canonical
+        // `.djinn/worktrees/_index/` checkout instead of the per-task worktree.
+        // Workers leave `working_root` unset and continue to see their own
+        // worktree state.  Write/edit/apply_patch always target the worktree —
+        // only architect/chat omit those tools entirely.
+        "shell" => {
+            let root = state.working_root_for(worktree_path);
+            call_shell(&call.arguments, &root).await
+        }
+        "read" => {
+            let root = state.working_root_for(worktree_path);
+            call_read(state, &call.arguments, &root).await
+        }
         "write" => call_write(state, &call.arguments, worktree_path).await,
         "edit" => call_edit(state, &call.arguments, worktree_path).await,
         "apply_patch" => call_apply_patch(state, &call.arguments, worktree_path).await,
-        "lsp" => call_lsp(state, &call.arguments, worktree_path).await,
-        "code_graph" => call_code_graph(state, &call.arguments, &worktree_project_path).await,
+        "lsp" => {
+            let root = state.working_root_for(worktree_path);
+            call_lsp(state, &call.arguments, &root).await
+        }
+        "code_graph" => {
+            let root = state.working_root_for(worktree_path);
+            let root_str = root.to_string_lossy().into_owned();
+            call_code_graph(state, &call.arguments, &root_str).await
+        }
         "github_search" => call_github_search(state, &call.arguments).await,
         other => {
             if let Some(registry) = mcp_registry
