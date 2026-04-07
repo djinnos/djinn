@@ -92,11 +92,11 @@ Run these six sub-workflows in order. Each maps to an operation on `code_graph`.
 
 If the sweep surfaces nothing actionable, that is a valid outcome — note it in your `submit_work` summary and move on. Do not manufacture problems.
 
-### 7. Strategic ADR Gaps
+### 8. Strategic ADR Gaps
 - Check memory for ADRs that are referenced but not written: `memory_search(q="ADR")`
 - If an architectural decision is needed and there's no ADR, note it in a comment
 
-### 7. Spike and Research Findings
+### 9. Spike and Research Findings
 
 When you complete a spike investigation or research analysis, **write findings to memory** so they persist beyond your session:
 
@@ -107,7 +107,7 @@ When you complete a spike investigation or research analysis, **write findings t
 - Include `scope_paths` based on the code areas investigated during the spike (e.g. `scope_paths=["server/crates/djinn-db"]`). This ensures the knowledge is automatically surfaced to workers touching those areas.
 - After writing the note, attach it to the relevant epic or task with `task_update(id, memory_refs_add=["permalink"])` or `epic_update(id, memory_refs_add=["permalink"])`
 
-### 8. Agent Effectiveness Review
+### 10. Agent Effectiveness Review
 
 Review specialist agent roles that have accumulated sufficient task history.
 
