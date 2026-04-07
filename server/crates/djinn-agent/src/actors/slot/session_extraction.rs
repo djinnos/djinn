@@ -598,10 +598,14 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
 /// For each file path, strips the project root prefix and takes the parent
 /// directory. This is language-agnostic: works for Rust, Go, Python, JS, etc.
 ///
+/// Files at the project root produce the scope `"."`, which is the canonical
+/// marker for the root scope.
+///
 /// Examples:
 /// - `server/crates/djinn-db/src/repositories/agent.rs` → `server/crates/djinn-db/src/repositories`
 /// - `internal/auth/login/handler.go` → `internal/auth/login`
 /// - `packages/ui/src/Button.tsx` → `packages/ui/src`
+/// - `README.md` → `.`
 pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<String> {
     let mut scopes: std::collections::HashSet<String> = std::collections::HashSet::new();
     let root_prefix = project_root.trim_end_matches('/');
@@ -613,12 +617,19 @@ pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<Stri
             .unwrap_or(path)
             .trim_start_matches('/');
 
-        // Take the parent directory (strip the filename)
+        if relative.is_empty() {
+            continue;
+        }
+
         if let Some(idx) = relative.rfind('/') {
             let dir = &relative[..idx];
             if !dir.is_empty() {
                 scopes.insert(dir.to_string());
+            } else {
+                scopes.insert(".".to_string());
             }
+        } else {
+            scopes.insert(".".to_string());
         }
     }
 
