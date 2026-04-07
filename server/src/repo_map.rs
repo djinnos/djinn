@@ -391,6 +391,47 @@ pub fn plan_indexer_commands(
         .collect()
 }
 
+/// RAII guard that temporarily sets `CARGO_TARGET_DIR` to a caller-supplied
+/// path and restores the previous value (or unsets it) on drop, including on
+/// panic unwind.  Constructed only inside the indexer single-flight critical
+/// section so the env mutation is serialised against other indexer runs.
+///
+/// SAFETY contract: at most one [`CargoTargetDirGuard`] may be alive at a
+/// time across the whole server.  This invariant is enforced by the
+/// `IndexerLock` (`AppState::indexer_lock`) — every construction site must
+/// be inside a critical section that holds that lock (either directly or
+/// transitively).  Violating the contract leads to a torn env-var state.
+struct CargoTargetDirGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl CargoTargetDirGuard {
+    /// Set `CARGO_TARGET_DIR=dir` for the current process and capture the
+    /// previous value so [`Drop`] can restore it.
+    fn new(dir: &Path) -> Self {
+        let previous = std::env::var_os("CARGO_TARGET_DIR");
+        // SAFETY: env mutation is serialised by the IndexerLock invariant
+        // documented on the type.  See contract above.
+        unsafe { std::env::set_var("CARGO_TARGET_DIR", dir) };
+        Self { previous }
+    }
+}
+
+impl Drop for CargoTargetDirGuard {
+    fn drop(&mut self) {
+        // SAFETY: env mutation is serialised by the IndexerLock invariant
+        // documented on the type.  Drop runs unconditionally on scope exit
+        // (including panic unwind), guaranteeing the host process never
+        // observes a leaked CARGO_TARGET_DIR after a panic mid-indexer-run.
+        unsafe {
+            match self.previous.take() {
+                Some(prev) => std::env::set_var("CARGO_TARGET_DIR", prev),
+                None => std::env::remove_var("CARGO_TARGET_DIR"),
+            }
+        }
+    }
+}
+
 /// ADR-050 §3 single-flight wrapper around [`run_indexers`].
 ///
 /// Acquires the supplied server-wide indexer mutex before spawning any
@@ -411,27 +452,8 @@ pub async fn run_indexers_single_flight(
     target_dir: Option<&Path>,
 ) -> Result<IndexingRun> {
     let _permit = lock.lock().await;
-    if let Some(dir) = target_dir {
-        // SAFETY: setting an env var for the current process is racy
-        // when other tasks read CARGO_TARGET_DIR concurrently, but the
-        // single-flight lock above guarantees no other indexer task is
-        // active.  Restoring the previous value on drop keeps unrelated
-        // subsystems unaffected after the run completes.
-        let previous = std::env::var_os("CARGO_TARGET_DIR");
-        // SAFETY: see comment above; serialised under `lock` so no race.
-        unsafe { std::env::set_var("CARGO_TARGET_DIR", dir) };
-        let result = run_indexers(project_root, output_root).await;
-        // SAFETY: same justification.
-        unsafe {
-            match previous {
-                Some(prev) => std::env::set_var("CARGO_TARGET_DIR", prev),
-                None => std::env::remove_var("CARGO_TARGET_DIR"),
-            }
-        }
-        result
-    } else {
-        run_indexers(project_root, output_root).await
-    }
+    let _guard = target_dir.map(CargoTargetDirGuard::new);
+    run_indexers(project_root, output_root).await
 }
 
 pub async fn run_indexers(
@@ -1729,5 +1751,75 @@ mod tests {
             syntax_kind: None,
             override_documentation: vec![],
         }
+    }
+
+    // ── CargoTargetDirGuard tests (ADR-050 Chunk C cleanup) ─────────────
+    //
+    // These tests touch the process-global `CARGO_TARGET_DIR` env var and
+    // therefore must serialise against each other.  In production the
+    // server-wide `IndexerLock` provides this guarantee; in tests we use a
+    // local `Mutex` so the tests are deterministic regardless of how cargo
+    // schedules them.
+
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn cargo_target_dir_guard_round_trip_restores_previous() {
+        let _serial = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialised by ENV_TEST_LOCK above.
+        unsafe { std::env::set_var("CARGO_TARGET_DIR", "/tmp/sentinel-original") };
+
+        let new_dir = std::path::PathBuf::from("/tmp/sentinel-guarded");
+        {
+            let _g = CargoTargetDirGuard::new(&new_dir);
+            assert_eq!(
+                std::env::var_os("CARGO_TARGET_DIR"),
+                Some(new_dir.clone().into_os_string())
+            );
+        }
+        assert_eq!(
+            std::env::var_os("CARGO_TARGET_DIR"),
+            Some(std::ffi::OsString::from("/tmp/sentinel-original"))
+        );
+        // SAFETY: serialised by ENV_TEST_LOCK above.
+        unsafe { std::env::remove_var("CARGO_TARGET_DIR") };
+    }
+
+    #[test]
+    fn cargo_target_dir_guard_unsets_when_previous_was_unset() {
+        let _serial = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialised by ENV_TEST_LOCK above.
+        unsafe { std::env::remove_var("CARGO_TARGET_DIR") };
+        assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
+
+        {
+            let _g = CargoTargetDirGuard::new(Path::new("/tmp/sentinel-temp"));
+            assert!(std::env::var_os("CARGO_TARGET_DIR").is_some());
+        }
+        assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
+    }
+
+    #[test]
+    fn cargo_target_dir_guard_restores_on_panic_unwind() {
+        let _serial = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialised by ENV_TEST_LOCK above.
+        unsafe { std::env::set_var("CARGO_TARGET_DIR", "/tmp/sentinel-pre-panic") };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = CargoTargetDirGuard::new(Path::new("/tmp/sentinel-during-panic"));
+            assert_eq!(
+                std::env::var_os("CARGO_TARGET_DIR"),
+                Some(std::ffi::OsString::from("/tmp/sentinel-during-panic"))
+            );
+            panic!("simulated indexer panic");
+        }));
+        assert!(result.is_err(), "expected panic to propagate");
+        // After unwind the previous value must be back in place.
+        assert_eq!(
+            std::env::var_os("CARGO_TARGET_DIR"),
+            Some(std::ffi::OsString::from("/tmp/sentinel-pre-panic"))
+        );
+        // SAFETY: serialised by ENV_TEST_LOCK above.
+        unsafe { std::env::remove_var("CARGO_TARGET_DIR") };
     }
 }
