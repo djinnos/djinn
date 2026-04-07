@@ -489,3 +489,173 @@ async fn lifecycle_provider_failure_preserves_worktree_for_retry() {
         "worktree directory should be preserved after provider failure for retry, but was removed at {worktree_path:?}"
     );
 }
+
+// ─── ADR-050 Chunk C cold-start canonical-graph warming ──────────────────────
+
+/// Test double for `CanonicalGraphWarmer` that records each `warm` invocation
+/// and lets the test pick whether to return Ok or Err.
+#[derive(Clone, Default)]
+struct RecordingWarmer {
+    calls: Arc<std::sync::Mutex<Vec<(String, std::path::PathBuf)>>>,
+    fail: bool,
+}
+
+impl RecordingWarmer {
+    fn ok() -> Self {
+        Self::default()
+    }
+    fn failing() -> Self {
+        Self {
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail: true,
+        }
+    }
+    fn calls(&self) -> Vec<(String, std::path::PathBuf)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::context::CanonicalGraphWarmer for RecordingWarmer {
+    async fn warm(&self, project_id: &str, project_root: &Path) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((project_id.to_string(), project_root.to_path_buf()));
+        if self.fail {
+            Err("synthetic warmer failure".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Worker dispatch must call `CanonicalGraphWarmer::warm` exactly once with
+/// the task's `project_id` and the project root path.  Without this the
+/// cold-start cache stays empty and workers start without a skeleton.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_worker_dispatch_warms_canonical_graph_cache() {
+    let repo = create_git_repo().await;
+    let db = create_test_db();
+    let cancel = CancellationToken::new();
+    let mut app_state = agent_context_from_db(db.clone(), cancel.clone());
+    let warmer = Arc::new(RecordingWarmer::ok());
+    app_state.canonical_graph_warmer = Some(warmer.clone());
+
+    let project = register_project(&db, repo.path()).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_open_task(&db, &project.id, &epic.id).await;
+
+    let provider = Arc::new(FakeProvider::tool_call(
+        "finalize-1",
+        "submit_work",
+        serde_json::json!({
+            "task_id": task.short_id,
+            "summary": "warm cache test"
+        }),
+    ));
+
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    run_task_lifecycle(TaskLifecycleParams {
+        task_id: task.id.clone(),
+        project_path: project.path.clone(),
+        model_id: "synthetic/test-model".to_string(),
+        role: role_impl_for(AgentType::Worker),
+        app_state: app_state.clone(),
+        cancel: cancel.clone(),
+        pause: CancellationToken::new(),
+        event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        role_verification_command: None,
+        mcp_registry_override: None,
+        provider_override: Some(provider),
+    })
+    .await
+    .expect("lifecycle should succeed");
+    recv_slot_event(&mut event_rx).await;
+
+    let calls = warmer.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "worker dispatch should warm the canonical graph exactly once, got {calls:?}"
+    );
+    assert_eq!(calls[0].0, task.project_id);
+    assert_eq!(calls[0].1, std::path::PathBuf::from(&project.path));
+
+    // Workers must NOT have their working_root pinned to the index tree —
+    // their tools still resolve against the per-task worktree.
+    assert!(
+        app_state.working_root.is_none(),
+        "worker dispatch must not pin working_root, was {:?}",
+        app_state.working_root
+    );
+}
+
+/// Warming failure must not abort the lifecycle: the agent runtime should
+/// still start (and the worker session should still complete) even when
+/// `ensure_canonical_graph` returns an error.  Mirrors the existing
+/// best-effort semantics of the architect index-tree pre-flight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_worker_continues_when_canonical_graph_warming_fails() {
+    let repo = create_git_repo().await;
+    let db = create_test_db();
+    let cancel = CancellationToken::new();
+    let mut app_state = agent_context_from_db(db.clone(), cancel.clone());
+    let warmer = Arc::new(RecordingWarmer::failing());
+    app_state.canonical_graph_warmer = Some(warmer.clone());
+
+    let project = register_project(&db, repo.path()).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_open_task(&db, &project.id, &epic.id).await;
+
+    let provider = Arc::new(FakeProvider::tool_call(
+        "finalize-1",
+        "submit_work",
+        serde_json::json!({
+            "task_id": task.short_id,
+            "summary": "warm-failure tolerated"
+        }),
+    ));
+
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    run_task_lifecycle(TaskLifecycleParams {
+        task_id: task.id.clone(),
+        project_path: project.path.clone(),
+        model_id: "synthetic/test-model".to_string(),
+        role: role_impl_for(AgentType::Worker),
+        app_state: app_state.clone(),
+        cancel: cancel.clone(),
+        pause: CancellationToken::new(),
+        event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        role_verification_command: None,
+        mcp_registry_override: None,
+        provider_override: Some(provider),
+    })
+    .await
+    .expect("lifecycle should not propagate warming failure");
+    recv_slot_event(&mut event_rx).await;
+
+    assert_eq!(
+        warmer.calls().len(),
+        1,
+        "warmer should still be invoked even on failure"
+    );
+    // The session must have made it past the warming step and reached the
+    // provider — confirm by checking SessionRepository for at least one row.
+    let sessions = SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .list_for_task(&task.id)
+        .await
+        .expect("list sessions");
+    assert!(
+        !sessions.is_empty(),
+        "lifecycle must have created a session despite warming failure"
+    );
+}

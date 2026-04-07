@@ -467,16 +467,53 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         .prepare_worktree(&worktree_path, &task, &app_state)
         .await;
 
-    // ── ADR-050 Chunk C: architect working_root pre-flight ───────────────────
-    // Architect sessions read against the canonical `_index/` worktree pinned
-    // to `origin/main`, NOT the per-task review-task worktree.  We:
+    // ── ADR-050 Chunk C: canonical-graph cache warming ───────────────────────
+    // Every dispatched task — worker, reviewer, planner, lead, AND architect —
+    // proactively warms the canonical-main graph cache before its session
+    // starts.  `ensure_canonical_graph` builds (or fetches from cache) the
+    // graph and persists the rendered skeleton as a `repo_map_cache` row plus
+    // a `repo_map` note, which workers consume through the standard note
+    // pipeline.  Without this, the first cold-start dispatch on a fresh
+    // server saw no skeleton at all until something else (architect dispatch,
+    // chat session) happened to invoke the warmer.
+    //
+    // Best-effort: `ensure_canonical_graph` may legitimately fail (network
+    // blip on `git fetch`, missing rust-analyzer, compile error on cold
+    // cache).  We log a warning and let the agent runtime start anyway —
+    // the worker degrades to "no skeleton" instead of refusing to run.
+    if let Some(warmer) = app_state.canonical_graph_warmer.clone() {
+        match warmer.warm(&task.project_id, &project_dir).await {
+            Ok(()) => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    project_id = %task.project_id,
+                    "Lifecycle: canonical graph cache warmed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    project_id = %task.project_id,
+                    error = %e,
+                    "Lifecycle: ensure_canonical_graph warming failed; agent will run without a fresh skeleton"
+                );
+            }
+        }
+    }
+
+    // ── ADR-050 Chunk C: architect working_root pin ──────────────────────────
+    // Architect sessions additionally read against the canonical `_index/`
+    // worktree pinned to `origin/main`, NOT the per-task review-task
+    // worktree.  We:
     //   1. Best-effort create `<project_root>/.djinn/worktrees/_index` if it
-    //      does not yet exist (so `read`/`shell` succeed before the architect
-    //      makes its first `code_graph` call which will lazily build the
-    //      canonical graph via `ensure_canonical_graph`).
+    //      does not yet exist (so `read`/`shell` succeed against it).  The
+    //      canonical graph is already warm by this point thanks to the
+    //      warming block above, so the architect's first `code_graph` call
+    //      hits the cache.
     //   2. Bake the index-tree path into `app_state.working_root` so the
     //      tool dispatch layer routes `read`/`shell`/`lsp`/`code_graph`
-    //      against it.  Worker/reviewer/planner/lead leave this `None`.
+    //      against it.  Worker/reviewer/planner/lead leave this `None` so
+    //      their tools continue to resolve against the per-task worktree.
     if runtime_role.config().name == "architect" {
         let index_tree_path = djinn_core::index_tree::index_tree_path(&project_dir);
         if !index_tree_path.join(".git").exists() {
