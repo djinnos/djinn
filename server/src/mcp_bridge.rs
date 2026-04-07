@@ -1461,7 +1461,7 @@ mod graph_bridge_tests {
         }
     }
 
-    fn build_test_graph() -> RepoDependencyGraph {
+    pub(super) fn build_test_graph() -> RepoDependencyGraph {
         RepoDependencyGraph::build(&[fixture_index()])
     }
 
@@ -1689,5 +1689,164 @@ mod graph_bridge_tests {
             diff.removed_nodes.is_empty(),
             "no nodes should be removed in this scenario"
         );
+    }
+}
+
+#[cfg(test)]
+mod ensure_canonical_graph_tests {
+    use super::*;
+    use crate::test_helpers::create_test_db;
+    use djinn_db::{
+        ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    /// Build a tiny on-disk git project with a single commit so
+    /// `ensure_canonical_graph` can resolve a HEAD SHA without touching
+    /// any remote.
+    async fn make_project(tmp: &std::path::Path) -> std::path::PathBuf {
+        let project_root = tmp.join("repo");
+        tokio::fs::create_dir_all(&project_root).await.unwrap();
+        let run = |args: &[&str]| {
+            let pr = project_root.clone();
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            async move {
+                tokio::process::Command::new("git")
+                    .current_dir(&pr)
+                    .args(&args)
+                    .output()
+                    .await
+                    .unwrap()
+            }
+        };
+        run(&["init", "-q", "-b", "main"]).await;
+        run(&["config", "user.email", "t@t"]).await;
+        run(&["config", "user.name", "t"]).await;
+        tokio::fs::write(project_root.join("a.txt"), "hi").await.unwrap();
+        run(&["add", "a.txt"]).await;
+        run(&["commit", "-q", "-m", "init"]).await;
+        project_root
+    }
+
+    /// Cache-hit path: when `repo_graph_cache` already contains a row for
+    /// `(project_id, commit_sha)`, `ensure_canonical_graph` deserializes it
+    /// and returns the graph WITHOUT spawning the SCIP indexer.  In tests
+    /// the indexer would fail (no rust-analyzer on PATH and no SCIP files
+    /// in tempdir), so a successful return is itself the proof.
+    #[tokio::test]
+    async fn ensure_canonical_graph_serves_cache_hit_without_running_indexer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = make_project(tmp.path()).await;
+
+        // Build AppState wired to a fresh in-memory DB.
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+
+        // Register the project so `build_graph_for_project` would resolve
+        // it (this test calls `ensure_canonical_graph` directly so the
+        // registration is only needed for parity with the prod path).
+        let proj_repo =
+            ProjectRepository::new(db.clone(), state.event_bus());
+        let project = proj_repo
+            .create("test-canonical", project_root.to_string_lossy().as_ref())
+            .await
+            .expect("create project");
+
+        // Pre-build a tiny graph and stash it in repo_graph_cache for
+        // BOTH possible commit SHAs the index tree could end up on
+        // (origin/main fetch fails in tests, so the index tree resets to
+        // HEAD).  We resolve HEAD before the call so we know which key
+        // matters.
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .unwrap();
+        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        let graph = graph_bridge_tests::build_test_graph();
+        let blob = graph.serialize_artifact().expect("serialize fixture graph");
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &head_sha,
+                graph_blob: blob.as_bytes(),
+            })
+            .await
+            .expect("seed cache");
+
+        // Cache-hit path must succeed.  If it ran the indexer it would
+        // fail (no SCIP artifacts produced).
+        let result =
+            ensure_canonical_graph(&state, &project.id, &project_root).await;
+        assert!(
+            result.is_ok(),
+            "expected cache-hit success, got {result:?}"
+        );
+        let (_handle, returned_graph) = result.unwrap();
+        // The deserialized graph should be structurally identical to the
+        // fixture (round-trip equality is the contract Chunk B added).
+        assert_eq!(returned_graph.node_count(), graph.node_count());
+    }
+
+    /// IndexerLock contention: two concurrent `ensure_canonical_graph`
+    /// calls against the same project should serialize on the lock and
+    /// both succeed via the cache (the second is forced through the
+    /// re-check-under-lock path).
+    #[tokio::test]
+    async fn ensure_canonical_graph_serializes_concurrent_callers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = make_project(tmp.path()).await;
+
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let proj_repo =
+            ProjectRepository::new(db.clone(), state.event_bus());
+        let project = proj_repo
+            .create("test-canonical-concurrent", project_root.to_string_lossy().as_ref())
+            .await
+            .expect("create project");
+
+        let head_out = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&project_root)
+            .output()
+            .await
+            .unwrap();
+        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        let graph = graph_bridge_tests::build_test_graph();
+        let blob = graph.serialize_artifact().expect("serialize");
+        RepoGraphCacheRepository::new(db.clone())
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &head_sha,
+                graph_blob: blob.as_bytes(),
+            })
+            .await
+            .expect("seed cache");
+
+        let state_a = state.clone();
+        let project_root_a = project_root.clone();
+        let project_id_a = project.id.clone();
+        let state_b = state.clone();
+        let project_root_b = project_root.clone();
+        let project_id_b = project.id.clone();
+        let (a, b) = tokio::join!(
+            tokio::spawn(async move {
+                ensure_canonical_graph(&state_a, &project_id_a, &project_root_a).await
+            }),
+            tokio::spawn(async move {
+                ensure_canonical_graph(&state_b, &project_id_b, &project_root_b).await
+            }),
+        );
+        let a = a.expect("task a panicked").expect("a result");
+        let b = b.expect("task b panicked").expect("b result");
+        assert_eq!(a.1.node_count(), b.1.node_count());
+        assert_eq!(a.1.node_count(), graph.node_count());
     }
 }

@@ -63,6 +63,24 @@ fn last_fetch_map() -> &'static Mutex<HashMap<String, Instant>> {
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Process-wide async mutex serializing concurrent `IndexTree::ensure`
+/// invocations against the same project.  Without this, two callers can
+/// race the initial `git worktree add` and one races to a "dir already
+/// exists" error.
+fn ensure_locks() -> &'static tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>> {
+    static MAP: OnceLock<
+        tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    > = OnceLock::new();
+    MAP.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+async fn ensure_lock_for(project_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut map = ensure_locks().lock().await;
+    map.entry(project_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 /// Process-wide handle to a project's canonical indexing worktree.  Cheap to
 /// construct via [`IndexTree::ensure`].
 #[derive(Debug, Clone)]
@@ -143,6 +161,12 @@ impl IndexTree {
         let index_tree_path = worktrees_dir.join(INDEX_TREE_DIR_NAME);
         let target_dir = worktrees_dir.join(INDEX_TREE_TARGET_DIR_NAME);
 
+        // Serialise concurrent `ensure` calls for the same project so we
+        // do not race the initial `git worktree add`.  Different projects
+        // remain independent.
+        let lock = ensure_lock_for(project_id).await;
+        let _permit = lock.lock().await;
+
         if !index_tree_path.join(".git").exists() {
             tokio::fs::create_dir_all(&worktrees_dir)
                 .await
@@ -168,7 +192,7 @@ impl IndexTree {
             .await;
 
             if attempt_origin.is_err() {
-                run_git(
+                let attempt_head = run_git(
                     project_root,
                     &[
                         "worktree",
@@ -178,10 +202,13 @@ impl IndexTree {
                         "HEAD",
                     ],
                 )
-                .await
-                .with_context(|| {
-                    format!("create index tree at {}", index_tree_path.display())
-                })?;
+                .await;
+                if attempt_head.is_err() && !index_tree_path.join(".git").exists() {
+                    return Err(anyhow!(
+                        "create index tree at {}",
+                        index_tree_path.display()
+                    ));
+                }
             }
         }
 

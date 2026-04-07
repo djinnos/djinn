@@ -30,3 +30,27 @@ pub fn index_tree_path(project_root: &Path) -> PathBuf {
 pub fn is_reserved_worktree_entry(entry_name: &str) -> bool {
     entry_name.starts_with(RESERVED_WORKTREE_PREFIX)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_tree_path_resolves_under_djinn_worktrees() {
+        let root = Path::new("/tmp/example/project");
+        assert_eq!(
+            index_tree_path(root),
+            Path::new("/tmp/example/project/.djinn/worktrees/_index"),
+        );
+    }
+
+    #[test]
+    fn reserved_filter_matches_underscore_entries_only() {
+        assert!(is_reserved_worktree_entry("_index"));
+        assert!(is_reserved_worktree_entry("_health_check"));
+        assert!(is_reserved_worktree_entry("_index-target"));
+        assert!(!is_reserved_worktree_entry("task-123"));
+        assert!(!is_reserved_worktree_entry("worker-abc"));
+        assert!(!is_reserved_worktree_entry(".sync-foo"));
+    }
+}
