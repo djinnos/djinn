@@ -24,6 +24,26 @@ pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
     ]
 }
 
+pub(crate) fn tool_epic_create() -> RmcpTool {
+    RmcpTool::new(
+        "epic_create".to_string(),
+        "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — typically when an Architect health sweep or chat planning session identifies a gap that needs its own delivery container. Returns the created epic.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["title"],
+            "properties": {
+                "title": {"type": "string", "description": "Epic title"},
+                "description": {"type": "string", "description": "Epic description / problem statement"},
+                "emoji": {"type": "string", "description": "Optional emoji for the epic"},
+                "color": {"type": "string", "description": "Optional color tag for the epic"},
+                "owner": {"type": "string", "description": "Optional owner"},
+                "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory reference URLs (e.g. ADR permalinks) to attach to the epic"},
+                "status": {"type": "string", "description": "Initial status: 'drafting' (default) or 'open'"}
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_epic_close() -> RmcpTool {
     RmcpTool::new(
         "epic_close".to_string(),

@@ -310,7 +310,7 @@ pub(crate) fn tool_lsp() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_code_graph() -> RmcpTool {
+pub(crate) fn tool_code_graph() -> RmcpTool {
     RmcpTool::new(
         "code_graph".to_string(),
         "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol).".to_string(),
@@ -390,7 +390,10 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
     tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
     tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
-    tool_values.push(serde_json::to_value(tool_code_graph()).expect("serialize tool_code_graph"));
+    // NOTE: `tool_code_graph()` is intentionally NOT in the base schema set.
+    // Per ADR-050, the code-graph tool is exclusive to the Architect (autonomous patrol form)
+    // and the Chat surface (interactive form). Worker, reviewer, planner, and lead do not
+    // see it. The architect's role-specific schema function appends it directly.
     tool_values.push(serde_json::to_value(tool_ci_job_log()).expect("serialize tool_ci_job_log"));
     tool_values
         .push(serde_json::to_value(tool_github_search()).expect("serialize tool_github_search"));
@@ -493,9 +496,26 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
 /// Does not include write/edit/apply_patch. The Architect diagnoses and directs but does not write code.
 pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
+    // Per ADR-050, the Architect (and only the Architect among agent roles) gets the
+    // `code_graph` tool. Inserted at the position the base set used to occupy so the
+    // schema ordering matches the historical layout.
+    let lsp_pos = tool_values
+        .iter()
+        .position(|v| v.get("name").and_then(|n| n.as_str()) == Some("lsp"))
+        .map(|i| i + 1)
+        .unwrap_or(tool_values.len());
+    tool_values.insert(
+        lsp_pos,
+        serde_json::to_value(tool_code_graph()).expect("serialize tool_code_graph"),
+    );
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }
+    // Per ADR-050 §2, parity contract: chat exposes `epic_create`; the Architect must too.
+    tool_values.push(
+        serde_json::to_value(shared_schemas::tool_epic_create())
+            .expect("serialize tool_epic_create"),
+    );
     tool_values.push(
         serde_json::to_value(shared_schemas::tool_task_transition())
             .expect("serialize tool_task_transition"),
