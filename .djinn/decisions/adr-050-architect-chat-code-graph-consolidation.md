@@ -4,13 +4,14 @@ type: adr
 tags: ["adr","architecture","agent","architect","chat","scip","code-graph","repo-map","performance"]
 ---
 
+
 # ADR-050: Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions
 
 ## Status: Draft
 
 Date: 2026-04-07
 
-Related: [[ADR-043 Repository Map — SCIP-Powered Structural Context]], [[ADR-044 Interactive Code Intelligence]], [[ADR-046 Chat-Driven Planning]], [[ADR-047 Repo-Graph Query Seam]], [[ADR-034 Agent Role Hierarchy]]
+Related: [[ADR-043 Repository Map — SCIP-Powered Structural Context]], [[ADR-044 Interactive Code Intelligence]], [[ADR-046: Chat-Driven Planning — Drafting Epics, Research Agent Deliverables, and Memory Write Access]], [[ADR-047 Repo-Graph Query Seam]], [[ADR-034 Agent Role Hierarchy]]
 
 ## Context
 
