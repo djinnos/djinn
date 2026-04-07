@@ -67,7 +67,8 @@ fn last_fetch_map() -> &'static Mutex<HashMap<String, Instant>> {
 /// invocations against the same project.  Without this, two callers can
 /// race the initial `git worktree add` and one races to a "dir already
 /// exists" error.
-fn ensure_locks() -> &'static tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>> {
+fn ensure_locks()
+-> &'static tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>> {
     static MAP: OnceLock<
         tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     > = OnceLock::new();
@@ -126,10 +127,10 @@ impl IndexTreeHandle {
     pub async fn fetch_if_stale(&self, cooldown: Duration) -> Result<bool> {
         {
             let map = last_fetch_map().lock().expect("poisoned fetch map");
-            if let Some(last) = map.get(&self.project_id) {
-                if last.elapsed() < cooldown {
-                    return Ok(false);
-                }
+            if let Some(last) = map.get(&self.project_id)
+                && last.elapsed() < cooldown
+            {
+                return Ok(false);
             }
         }
         run_git(&self.project_root, &["fetch", "origin", "main"]).await?;
@@ -250,10 +251,7 @@ async fn read_head_sha(path: &Path) -> Result<String> {
 /// independent test cases.
 #[cfg(test)]
 pub(crate) fn reset_last_fetch_for_tests() {
-    last_fetch_map()
-        .lock()
-        .expect("poisoned fetch map")
-        .clear();
+    last_fetch_map().lock().expect("poisoned fetch map").clear();
 }
 
 #[cfg(test)]
@@ -284,7 +282,9 @@ mod tests {
         run_git(&project_root, &["config", "user.name", "t"])
             .await
             .unwrap();
-        tokio::fs::write(project_root.join("a.txt"), "hi").await.unwrap();
+        tokio::fs::write(project_root.join("a.txt"), "hi")
+            .await
+            .unwrap();
         run_git(&project_root, &["add", "a.txt"]).await.unwrap();
         run_git(&project_root, &["commit", "-q", "-m", "init"])
             .await
@@ -318,8 +318,13 @@ mod tests {
         let bare = tmp.path().join("origin.git");
         run_git(
             &project_root,
-            &["clone", "--bare", "-q", project_root.to_string_lossy().as_ref(),
-              bare.to_string_lossy().as_ref()],
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                project_root.to_string_lossy().as_ref(),
+                bare.to_string_lossy().as_ref(),
+            ],
         )
         .await
         .unwrap();

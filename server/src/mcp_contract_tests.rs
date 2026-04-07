@@ -2726,4 +2726,3 @@ mod provider_tools {
         assert!(result.get("oauth_supported").is_some());
     }
 }
-

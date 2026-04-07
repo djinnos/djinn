@@ -722,10 +722,10 @@ impl RepoGraphOps for RepoGraphBridge {
                 continue;
             }
             let kind_label = format!("{:?}", edge_ref.weight().kind);
-            if let Some(filter) = edge_kind {
-                if !kind_label.eq_ignore_ascii_case(filter) {
-                    continue;
-                }
+            if let Some(filter) = edge_kind
+                && !kind_label.eq_ignore_ascii_case(filter)
+            {
+                continue;
             }
             out.push(EdgeEntry {
                 from: src_key,
@@ -1092,10 +1092,11 @@ pub async fn ensure_canonical_graph(
     // ── In-memory fast path ─────────────────────────────────────────────
     {
         let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache.as_ref() {
-            if cached.project_path == handle.path() && cached.git_head == commit_sha {
-                return Ok((handle, cached.graph.clone()));
-            }
+        if let Some(cached) = cache.as_ref()
+            && cached.project_path == handle.path()
+            && cached.git_head == commit_sha
+        {
+            return Ok((handle, cached.graph.clone()));
         }
     }
 
@@ -1132,10 +1133,11 @@ pub async fn ensure_canonical_graph(
     // them while we were queued.
     {
         let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache.as_ref() {
-            if cached.project_path == handle.path() && cached.git_head == commit_sha {
-                return Ok((handle, cached.graph.clone()));
-            }
+        if let Some(cached) = cache.as_ref()
+            && cached.project_path == handle.path()
+            && cached.git_head == commit_sha
+        {
+            return Ok((handle, cached.graph.clone()));
         }
     }
     if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
@@ -1168,13 +1170,10 @@ pub async fn ensure_canonical_graph(
     // The server-wide IndexerLock is already held above (`_permit`); use the
     // `_already_locked` entrypoint instead of re-acquiring it via a dummy
     // mutex.  ADR-050 Chunk C cleanup.
-    let run = crate::repo_map::run_indexers_already_locked(
-        handle.path(),
-        &output_dir,
-        Some(&target_dir),
-    )
-    .await
-    .map_err(|e| format!("run_indexers: {e}"))?;
+    let run =
+        crate::repo_map::run_indexers_already_locked(handle.path(), &output_dir, Some(&target_dir))
+            .await
+            .map_err(|e| format!("run_indexers: {e}"))?;
     let parsed = crate::scip_parser::parse_scip_artifacts(&run.artifacts)
         .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
     let _ = std::fs::remove_dir_all(&output_dir);
@@ -1208,7 +1207,12 @@ pub async fn ensure_canonical_graph(
         }
     }
 
-    install_as_canonical(handle.path().to_path_buf(), commit_sha.clone(), graph.clone()).await;
+    install_as_canonical(
+        handle.path().to_path_buf(),
+        commit_sha.clone(),
+        graph.clone(),
+    )
+    .await;
     Ok((handle, graph))
 }
 
@@ -1224,9 +1228,7 @@ async fn persist_canonical_skeleton(
     commit_sha: &str,
     graph: &crate::repo_graph::RepoDependencyGraph,
 ) {
-    use djinn_db::{
-        NoteRepository, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository,
-    };
+    use djinn_db::{NoteRepository, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository};
     const SKELETON_TOKEN_BUDGET: usize = 1200;
     let ranking = graph.rank();
     let rendered = match crate::repo_map::render_repo_map(
@@ -1721,9 +1723,7 @@ mod graph_bridge_tests {
 mod ensure_canonical_graph_tests {
     use super::*;
     use crate::test_helpers::create_test_db;
-    use djinn_db::{
-        ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository,
-    };
+    use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
     use tokio_util::sync::CancellationToken;
 
     /// Build a tiny on-disk git project with a single commit so
@@ -1747,7 +1747,9 @@ mod ensure_canonical_graph_tests {
         run(&["init", "-q", "-b", "main"]).await;
         run(&["config", "user.email", "t@t"]).await;
         run(&["config", "user.name", "t"]).await;
-        tokio::fs::write(project_root.join("a.txt"), "hi").await.unwrap();
+        tokio::fs::write(project_root.join("a.txt"), "hi")
+            .await
+            .unwrap();
         run(&["add", "a.txt"]).await;
         run(&["commit", "-q", "-m", "init"]).await;
         project_root
@@ -1771,8 +1773,7 @@ mod ensure_canonical_graph_tests {
         // Register the project so `build_graph_for_project` would resolve
         // it (this test calls `ensure_canonical_graph` directly so the
         // registration is only needed for parity with the prod path).
-        let proj_repo =
-            ProjectRepository::new(db.clone(), state.event_bus());
+        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
         let project = proj_repo
             .create("test-canonical", project_root.to_string_lossy().as_ref())
             .await
@@ -1805,12 +1806,8 @@ mod ensure_canonical_graph_tests {
 
         // Cache-hit path must succeed.  If it ran the indexer it would
         // fail (no SCIP artifacts produced).
-        let result =
-            ensure_canonical_graph(&state, &project.id, &project_root).await;
-        assert!(
-            result.is_ok(),
-            "expected cache-hit success, got {result:?}"
-        );
+        let result = ensure_canonical_graph(&state, &project.id, &project_root).await;
+        assert!(result.is_ok(), "expected cache-hit success, got {result:?}");
         let (_handle, returned_graph) = result.unwrap();
         // The deserialized graph should be structurally identical to the
         // fixture (round-trip equality is the contract Chunk B added).
@@ -1829,10 +1826,12 @@ mod ensure_canonical_graph_tests {
         let db = create_test_db();
         let cancel = CancellationToken::new();
         let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo =
-            ProjectRepository::new(db.clone(), state.event_bus());
+        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
         let project = proj_repo
-            .create("test-canonical-concurrent", project_root.to_string_lossy().as_ref())
+            .create(
+                "test-canonical-concurrent",
+                project_root.to_string_lossy().as_ref(),
+            )
             .await
             .expect("create project");
 
@@ -1894,7 +1893,10 @@ mod ensure_canonical_graph_tests {
         let state = crate::server::AppState::new(db.clone(), cancel);
         let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
         let project = proj_repo
-            .create("test-canonical-stale", project_root.to_string_lossy().as_ref())
+            .create(
+                "test-canonical-stale",
+                project_root.to_string_lossy().as_ref(),
+            )
             .await
             .expect("create project");
 
@@ -1924,8 +1926,7 @@ mod ensure_canonical_graph_tests {
         // Ok (if the host happens to have rust-analyzer on PATH).  In
         // either case, the failure mode we are guarding against — a hard
         // error mentioning the cache deserialize path — must NOT occur.
-        let result =
-            ensure_canonical_graph(&state, &project.id, &project_root).await;
+        let result = ensure_canonical_graph(&state, &project.id, &project_root).await;
         if let Err(msg) = &result {
             assert!(
                 !msg.contains("deserialize cached graph")

@@ -516,31 +516,31 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     //      their tools continue to resolve against the per-task worktree.
     if runtime_role.config().name == "architect" {
         let index_tree_path = djinn_core::index_tree::index_tree_path(&project_dir);
-        if !index_tree_path.join(".git").exists() {
-            if let Ok(git) = app_state.git_actor(&project_dir).await {
+        if !index_tree_path.join(".git").exists()
+            && let Ok(git) = app_state.git_actor(&project_dir).await
+        {
+            let _ = git
+                .run_command(vec!["worktree".into(), "prune".into()])
+                .await;
+            let attempt = git
+                .run_command(vec![
+                    "worktree".into(),
+                    "add".into(),
+                    "--detach".into(),
+                    index_tree_path.to_string_lossy().into_owned(),
+                    "origin/main".into(),
+                ])
+                .await;
+            if attempt.is_err() {
                 let _ = git
-                    .run_command(vec!["worktree".into(), "prune".into()])
-                    .await;
-                let attempt = git
                     .run_command(vec![
                         "worktree".into(),
                         "add".into(),
                         "--detach".into(),
                         index_tree_path.to_string_lossy().into_owned(),
-                        "origin/main".into(),
+                        "HEAD".into(),
                     ])
                     .await;
-                if attempt.is_err() {
-                    let _ = git
-                        .run_command(vec![
-                            "worktree".into(),
-                            "add".into(),
-                            "--detach".into(),
-                            index_tree_path.to_string_lossy().into_owned(),
-                            "HEAD".into(),
-                        ])
-                        .await;
-                }
             }
         }
         if index_tree_path.exists() {

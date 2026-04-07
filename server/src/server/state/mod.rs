@@ -116,11 +116,7 @@ impl AppState {
     /// Look up a previously cached canonical working root for a chat
     /// session, if one was already warmed this process lifetime.  ADR-050
     /// Chunk C cleanup.
-    pub fn chat_session_warmed_root(
-        &self,
-        session_id: &str,
-        project_id: &str,
-    ) -> Option<PathBuf> {
+    pub fn chat_session_warmed_root(&self, session_id: &str, project_id: &str) -> Option<PathBuf> {
         self.inner
             .chat_warmed_sessions
             .lock()
@@ -142,7 +138,10 @@ impl AppState {
             .chat_warmed_sessions
             .lock()
             .expect("poisoned")
-            .insert((session_id.to_string(), project_id.to_string()), working_root);
+            .insert(
+                (session_id.to_string(), project_id.to_string()),
+                working_root,
+            );
     }
 
     pub fn db(&self) -> &Database {

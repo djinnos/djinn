@@ -34,11 +34,7 @@ impl RepoGraphCacheRepository {
         Self { db }
     }
 
-    pub async fn get(
-        &self,
-        project_id: &str,
-        commit_sha: &str,
-    ) -> Result<Option<CachedRepoGraph>> {
+    pub async fn get(&self, project_id: &str, commit_sha: &str) -> Result<Option<CachedRepoGraph>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, CachedRepoGraph>(
             "SELECT project_id, commit_sha, graph_blob, built_at
@@ -89,11 +85,7 @@ mod tests {
         .await
         .expect("upsert");
 
-        let cached = repo
-            .get("p1", "abc123")
-            .await
-            .expect("get")
-            .expect("hit");
+        let cached = repo.get("p1", "abc123").await.expect("get").expect("hit");
         assert_eq!(cached.graph_blob, blob);
         assert_eq!(cached.project_id, "p1");
         assert_eq!(cached.commit_sha, "abc123");

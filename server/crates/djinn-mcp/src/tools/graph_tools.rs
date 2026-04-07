@@ -200,7 +200,7 @@ fn require_query(params: &CodeGraphParams) -> Result<&str, String> {
         .ok_or_else(|| format!("'query' is required for operation '{}'", params.operation))
 }
 
-fn require_from_to<'a>(params: &'a CodeGraphParams) -> Result<(&'a str, &'a str), String> {
+fn require_from_to(params: &CodeGraphParams) -> Result<(&str, &str), String> {
     let from = params
         .from
         .as_deref()
@@ -214,7 +214,7 @@ fn require_from_to<'a>(params: &'a CodeGraphParams) -> Result<(&'a str, &'a str)
     Ok((from, to))
 }
 
-fn require_globs<'a>(params: &'a CodeGraphParams) -> Result<(&'a str, &'a str), String> {
+fn require_globs(params: &CodeGraphParams) -> Result<(&str, &str), String> {
     let from = params
         .from_glob
         .as_deref()

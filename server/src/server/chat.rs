@@ -709,24 +709,21 @@ pub(super) async fn completions_handler(
 
     // Resolve project path + ID for chat extension tools (shell, read, lsp,
     // github_search, code_graph).
-    let project_resolution: Option<(std::path::PathBuf, String)> =
-        if let Some(project_ref) = req.project.as_deref() {
-            let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-            match project_repo.resolve(project_ref).await {
-                Ok(Some(id)) => match project_repo.get(&id).await {
-                    Ok(Some(project)) => {
-                        Some((std::path::PathBuf::from(&project.path), project.id))
-                    }
-                    _ => None,
-                },
+    let project_resolution: Option<(std::path::PathBuf, String)> = if let Some(project_ref) =
+        req.project.as_deref()
+    {
+        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+        match project_repo.resolve(project_ref).await {
+            Ok(Some(id)) => match project_repo.get(&id).await {
+                Ok(Some(project)) => Some((std::path::PathBuf::from(&project.path), project.id)),
                 _ => None,
-            }
-        } else {
-            None
-        };
-    let project_path = project_resolution
-        .as_ref()
-        .map(|(path, _)| path.clone());
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let project_path = project_resolution.as_ref().map(|(path, _)| path.clone());
 
     // ── ADR-050 Chunk C: chat session first-use canonical graph hook ──────
     // On the FIRST chat completion request for a given session, warm up
@@ -749,7 +746,9 @@ pub(super) async fn completions_handler(
             );
             ctx.working_root = Some(cached_root);
         } else {
-            match crate::mcp_bridge::ensure_canonical_graph(&state, project_id, project_path_buf).await {
+            match crate::mcp_bridge::ensure_canonical_graph(&state, project_id, project_path_buf)
+                .await
+            {
                 Ok((handle, _graph)) => {
                     let root = handle.path().to_path_buf();
                     tracing::debug!(

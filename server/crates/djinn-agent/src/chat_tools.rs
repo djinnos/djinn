@@ -58,9 +58,7 @@ pub async fn dispatch_chat_tool(
         "shell" => handlers::call_shell(&arguments, &effective_root).await,
         "read" => handlers::call_read(state, &arguments, &effective_root).await,
         "lsp" => handlers::call_lsp(state, &arguments, &effective_root).await,
-        "code_graph" => {
-            handlers::call_code_graph(state, &arguments, &effective_root_str).await
-        }
+        "code_graph" => handlers::call_code_graph(state, &arguments, &effective_root_str).await,
         "github_search" => handlers::call_github_search(state, &arguments).await,
         _ => Err(format!("unknown chat extension tool: {name}")),
     }

@@ -155,6 +155,7 @@ impl RepoDependencyGraph {
     /// 1. exact name match
     /// 2. suffix match on the display name
     /// 3. substring match
+    ///
     /// then by alphabetical key for stability.
     pub fn search_by_name(
         &self,
@@ -180,10 +181,10 @@ impl RepoDependencyGraph {
             };
             for &node_index in indices {
                 let node = &self.graph[node_index];
-                if let Some(filter) = kind_filter {
-                    if node.kind != filter {
-                        continue;
-                    }
+                if let Some(filter) = kind_filter
+                    && node.kind != filter
+                {
+                    continue;
                 }
                 hits.push(RepoGraphSearchHit { node_index, score });
             }
@@ -257,15 +258,15 @@ impl RepoDependencyGraph {
             if node.is_external {
                 continue;
             }
-            if let Some(filter) = kind_filter {
-                if node.kind != filter {
-                    continue;
-                }
+            if let Some(filter) = kind_filter
+                && node.kind != filter
+            {
+                continue;
             }
-            if let Some(vis) = visibility_filter {
-                if node.visibility != Some(vis) {
-                    continue;
-                }
+            if let Some(vis) = visibility_filter
+                && node.visibility != Some(vis)
+            {
+                continue;
             }
             let has_incoming_reference =
                 self.graph.edges_directed(node_index, Incoming).any(|edge| {
@@ -299,10 +300,10 @@ impl RepoDependencyGraph {
             |_| 0.0,
         );
         let (_cost, nodes) = result?;
-        if let Some(max) = max_depth {
-            if nodes.len().saturating_sub(1) > max {
-                return None;
-            }
+        if let Some(max) = max_depth
+            && nodes.len().saturating_sub(1) > max
+        {
+            return None;
         }
         Some(nodes)
     }

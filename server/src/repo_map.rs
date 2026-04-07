@@ -1830,6 +1830,7 @@ mod tests {
     /// already taken the server-wide IndexerLock — replacing the previous
     /// "fresh dummy mutex" workaround.  ADR-050 Chunk C cleanup.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // ENV_TEST_LOCK serialises env-mutating tests
     async fn run_indexers_already_locked_callable_without_outer_lock() {
         let _serial = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1841,8 +1842,7 @@ mod tests {
         // this returns Ok with an empty artifact list and never spawns a
         // subprocess.  The point of the test is the call site itself: no
         // mutex passed in, no panic, no env-var leak.
-        let result =
-            run_indexers_already_locked(&project_root, &output_root, None).await;
+        let result = run_indexers_already_locked(&project_root, &output_root, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         // No target_dir → no guard installed → env stays unset.
         assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
