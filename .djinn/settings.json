@@ -57,7 +57,7 @@
       ]
     },
     {
-      "match": "desktop/src/**",
+      "match": "desktop/{src,electron}/**",
       "commands": [
         "cd desktop && pnpm install --frozen-lockfile",
         "cd desktop && pnpm tsc --noEmit",
