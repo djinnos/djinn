@@ -12,6 +12,7 @@ use std::future::Future;
 #[cfg(test)]
 use std::pin::Pin;
 
+use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{Peer, RoleClient};
@@ -165,7 +166,7 @@ pub(crate) async fn connect_and_discover(
         };
 
         // Connect to the MCP server.
-        let peer = match connect_to_server(&url).await {
+        let peer = match connect_to_server(&url, &config.headers).await {
             Ok(peer) => {
                 tracing::info!(
                     task_id = %task_short_id,
@@ -258,8 +259,21 @@ pub(crate) async fn connect_and_discover(
 }
 
 /// Establish a connection to an MCP server via Streamable HTTP transport.
-async fn connect_to_server(url: &str) -> Result<Peer<RoleClient>, String> {
-    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
+async fn connect_to_server(
+    url: &str,
+    headers: &HashMap<String, String>,
+) -> Result<Peer<RoleClient>, String> {
+    let mut custom_headers = HashMap::new();
+    for (name, value) in headers {
+        let header_name = HeaderName::try_from(name.as_str())
+            .map_err(|e| format!("invalid header name `{name}` for `{url}`: {e}"))?;
+        let header_value = HeaderValue::try_from(value.as_str())
+            .map_err(|e| format!("invalid header value for `{name}` on `{url}`: {e}"))?;
+        custom_headers.insert(header_name, header_value);
+    }
+
+    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string())
+        .custom_headers(custom_headers);
     let transport = StreamableHttpClientTransport::from_config(config);
     let service = ()
         .serve(transport)
@@ -401,6 +415,9 @@ mod tests {
             McpServerConfig {
                 url: None,
                 command: Some("my-server".to_string()),
+                args: Vec::new(),
+                env: HashMap::new(),
+                headers: HashMap::new(),
             },
         )];
         let result = connect_and_discover("test", "worker", &servers).await;
@@ -414,6 +431,9 @@ mod tests {
             McpServerConfig {
                 url: Some("http://127.0.0.1:1/mcp".to_string()),
                 command: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                headers: HashMap::new(),
             },
         )];
         let result = connect_and_discover("test", "worker", &servers).await;
