@@ -336,11 +336,10 @@ impl AppState {
             self.cancel().clone(),
         );
 
-        crate::watchers::spawn_repo_map_refresh_watchers(
-            self.db().clone(),
-            self.events().clone(),
-            self.cancel().clone(),
-        );
+        // ADR-050 Chunk C: the filesystem-watcher SCIP trigger has been
+        // removed.  SCIP indexing now happens lazily via
+        // `ensure_canonical_graph` on architect dispatch and chat first
+        // use.  Per-worktree skeleton refresh is no longer required.
 
         crate::task_confidence::spawn_task_outcome_listener(self.clone());
     }

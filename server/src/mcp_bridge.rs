@@ -1153,6 +1153,14 @@ pub async fn ensure_canonical_graph(
 
     let graph = crate::repo_graph::RepoDependencyGraph::build(&parsed);
 
+    // ── ADR-050 Chunk C C10: render canonical skeleton + persist as a
+    // canonical `repo_map_cache` row + `repo_map` note so workers
+    // (which still consume the rendered skeleton through the
+    // existing note pipeline) and the chat (which reads
+    // `RepoMapCacheRepository` directly) see the new graph.  Best
+    // effort: failures are logged but do not abort the graph hand-off.
+    persist_canonical_skeleton(state, project_id, project_root, &commit_sha, &graph).await;
+
     // Persist (best-effort — failure is logged but does not abort).
     match graph.serialize_artifact() {
         Ok(json) => {
@@ -1174,6 +1182,78 @@ pub async fn ensure_canonical_graph(
 
     install_as_canonical(handle.path().to_path_buf(), commit_sha.clone(), graph.clone()).await;
     Ok((handle, graph))
+}
+
+/// ADR-050 Chunk C C10: render the canonical-main repo-map skeleton from a
+/// freshly built graph and persist it via the existing
+/// `RepoMapCacheRepository` + `repo_map` note pipeline so worker sessions
+/// (which consume the skeleton through the standard note path) see the
+/// canonical view.  Failures are logged and do not propagate.
+async fn persist_canonical_skeleton(
+    state: &AppState,
+    project_id: &str,
+    project_root: &Path,
+    commit_sha: &str,
+    graph: &crate::repo_graph::RepoDependencyGraph,
+) {
+    use djinn_db::{
+        NoteRepository, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository,
+    };
+    const SKELETON_TOKEN_BUDGET: usize = 1200;
+    let ranking = graph.rank();
+    let rendered = match crate::repo_map::render_repo_map(
+        graph,
+        &ranking,
+        &crate::repo_map::RepoMapRenderOptions::new(SKELETON_TOKEN_BUDGET),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                commit_sha = %commit_sha,
+                error = ?e,
+                "persist_canonical_skeleton: render failed"
+            );
+            return;
+        }
+    };
+
+    let project_path = project_root.to_string_lossy().into_owned();
+    let cache_repo = RepoMapCacheRepository::new(state.db().clone());
+    if let Err(e) = cache_repo
+        .insert(RepoMapCacheInsert {
+            key: RepoMapCacheKey {
+                project_id,
+                project_path: &project_path,
+                worktree_path: None,
+                commit_sha,
+            },
+            rendered_map: &rendered.content,
+            token_estimate: rendered.token_estimate as i64,
+            included_entries: rendered.included_entries as i64,
+            graph_artifact: graph.serialize_artifact().ok().as_deref(),
+        })
+        .await
+    {
+        tracing::warn!(
+            project_id = %project_id,
+            commit_sha = %commit_sha,
+            error = %e,
+            "persist_canonical_skeleton: repo_map_cache insert failed"
+        );
+    }
+
+    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    if let Err(e) =
+        crate::repo_map::persist_repo_map_note(&note_repo, project_id, commit_sha, &rendered).await
+    {
+        tracing::warn!(
+            project_id = %project_id,
+            commit_sha = %commit_sha,
+            error = %e,
+            "persist_canonical_skeleton: repo_map note persist failed"
+        );
+    }
 }
 
 /// Replace the in-memory canonical graph slot, moving the previous canonical
