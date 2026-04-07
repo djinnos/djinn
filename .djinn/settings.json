@@ -1,12 +1,6 @@
 {
   "verification_timeout_secs": 1800,
-  "setup": [
-    {
-      "name": "server-shared-target",
-      "command": "mkdir -p server/.cargo && sed -i \"s|^target-dir.*|target-dir = \\\"/tmp/djinn-targets/$(basename $PWD)-server\\\"|\" server/.cargo/config.toml",
-      "timeout_secs": 5
-    }
-  ],
+  "setup": [],
   "verification_rules": [
     {
       "match": "server/crates/djinn-agent/**",

@@ -233,8 +233,53 @@ async fn run_stdio_bridge(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn ensure_daemon_running(port: u16, db_path: Option<&std::path::Path>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("resolve current exe: {e}"))?;
+    // On Linux, /proc/self/exe resolves with a trailing " (deleted)" suffix
+    // when the backing binary has been replaced on disk (e.g. after a cargo
+    // rebuild while the stdio bridge is still running). `current_exe()`
+    // returns that literal string, and handing it to `Command::new` fails
+    // with ENOENT. Strip the suffix so we exec the freshly-rebuilt file at
+    // the original path instead.
+    let exe = strip_deleted_suffix(exe);
     daemon::ensure_running(port, db_path, &exe).await?;
     Ok(())
+}
+
+/// Strip the trailing `" (deleted)"` marker that Linux procfs appends to a
+/// `/proc/self/exe` symlink whose target inode has been unlinked.
+fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {
+    const SUFFIX: &str = " (deleted)";
+    match path.to_str() {
+        Some(s) if s.ends_with(SUFFIX) => std::path::PathBuf::from(&s[..s.len() - SUFFIX.len()]),
+        _ => path,
+    }
+}
+
+#[cfg(test)]
+mod strip_deleted_suffix_tests {
+    use super::strip_deleted_suffix;
+    use std::path::PathBuf;
+
+    #[test]
+    fn strips_trailing_deleted_marker() {
+        let input = PathBuf::from("/usr/bin/foo (deleted)");
+        assert_eq!(strip_deleted_suffix(input), PathBuf::from("/usr/bin/foo"));
+    }
+
+    #[test]
+    fn leaves_unrelated_paths_alone() {
+        let input = PathBuf::from("/usr/bin/foo");
+        assert_eq!(strip_deleted_suffix(input), PathBuf::from("/usr/bin/foo"));
+    }
+
+    #[test]
+    fn does_not_strip_deleted_inside_path() {
+        // "(deleted) " in the middle is a legitimate filename component.
+        let input = PathBuf::from("/weird/ (deleted) /bin");
+        assert_eq!(
+            strip_deleted_suffix(input),
+            PathBuf::from("/weird/ (deleted) /bin")
+        );
+    }
 }
 
 fn resolve_upstream_url(
