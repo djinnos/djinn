@@ -468,7 +468,9 @@ impl Conversation {
                             ContentBlock::Image { media_type, data } => {
                                 vec![json!({"inlineData": {"mimeType": media_type, "data": data}})]
                             }
-                            ContentBlock::Document { media_type, data, .. } => {
+                            ContentBlock::Document {
+                                media_type, data, ..
+                            } => {
                                 vec![json!({"inlineData": {"mimeType": media_type, "data": data}})]
                             }
                             ContentBlock::Thinking { .. } => {
@@ -538,7 +540,11 @@ impl Conversation {
                                     "image_url": format!("data:{media_type};base64,{data}")
                                 }));
                             }
-                            ContentBlock::Document { data, media_type, filename } => {
+                            ContentBlock::Document {
+                                data,
+                                media_type,
+                                filename,
+                            } => {
                                 // OpenAI Responses API supports file content via input_file
                                 text_items.push(json!({
                                     "type": "input_file",
@@ -665,7 +671,11 @@ fn content_block_to_anthropic(block: &ContentBlock) -> serde_json::Value {
                 "data": data,
             }
         }),
-        ContentBlock::Document { media_type, data, filename } => {
+        ContentBlock::Document {
+            media_type,
+            data,
+            filename,
+        } => {
             let mut block = json!({
                 "type": "document",
                 "source": {

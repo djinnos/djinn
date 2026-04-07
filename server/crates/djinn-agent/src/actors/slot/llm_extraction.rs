@@ -509,8 +509,7 @@ async fn process_extracted_note(
     } else {
         note.scope_paths.clone()
     };
-    let scope_paths_json =
-        serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
+    let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
     match extraction_context
         .note_repo
         .create_db_note_with_scope(

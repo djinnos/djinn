@@ -398,8 +398,13 @@ impl Default for ChatContent {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum ChatContentBlock {
-    Text { text: String },
-    Image { media_type: String, data: String },
+    Text {
+        text: String,
+    },
+    Image {
+        media_type: String,
+        data: String,
+    },
     Document {
         media_type: String,
         data: String,

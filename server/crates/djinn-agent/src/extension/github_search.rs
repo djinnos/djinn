@@ -245,8 +245,7 @@ mod tests {
 
     #[test]
     fn extract_line_numbers_works() {
-        let html =
-            r#"<tr data-line="10"><td>code</td></tr><tr data-line="25"><td>more</td></tr>"#;
+        let html = r#"<tr data-line="10"><td>code</td></tr><tr data-line="25"><td>more</td></tr>"#;
         assert_eq!(extract_line_numbers(html), vec![10, 25]);
     }
 
@@ -292,11 +291,16 @@ mod tests {
         assert_eq!(result["results"].as_array().unwrap().len(), 1);
         assert_eq!(result["results"][0]["repository"], "tokio-rs/tokio");
         assert_eq!(result["results"][0]["language"], "rust");
-        assert_eq!(result["results"][0]["line_numbers"], serde_json::json!([10]));
-        assert!(result["results"][0]["snippet"]
-            .as_str()
-            .unwrap()
-            .contains("pub fn new()"));
+        assert_eq!(
+            result["results"][0]["line_numbers"],
+            serde_json::json!([10])
+        );
+        assert!(
+            result["results"][0]["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("pub fn new()")
+        );
     }
 
     #[test]

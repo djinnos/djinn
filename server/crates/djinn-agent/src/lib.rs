@@ -11,8 +11,8 @@ pub(crate) mod compaction;
 pub mod config;
 pub mod context;
 // Extension tools: `pub(crate)` internals, `chat_tools` re-exports the chat-safe subset.
-pub(crate) mod extension;
 pub mod chat_tools;
+pub(crate) mod extension;
 pub mod file_time;
 pub mod lsp;
 pub(crate) mod task_merge;

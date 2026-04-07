@@ -2767,15 +2767,17 @@ mod project_add_repo_map_refresh {
         // 4. Seed a fake GitHub App OAuth token so `validate_github_remote`
         //    passes the `has_tokens` check. The actual API call will warn but
         //    not block project creation.
-        let cred_repo = CredentialRepository::new(
-            db.clone(),
-            crate::events::event_bus_for(state.events()),
-        );
+        let cred_repo =
+            CredentialRepository::new(db.clone(), crate::events::event_bus_for(state.events()));
         let fake_tokens = serde_json::json!({
             "access_token": "ghu_fake_test_token_for_contract"
         });
         cred_repo
-            .set("github_app", GITHUB_APP_OAUTH_DB_KEY, &fake_tokens.to_string())
+            .set(
+                "github_app",
+                GITHUB_APP_OAUTH_DB_KEY,
+                &fake_tokens.to_string(),
+            )
             .await
             .expect("failed to seed GitHub App OAuth credential");
 
@@ -2846,13 +2848,11 @@ mod project_add_repo_map_refresh {
 
         // 7. Wait (bounded) for the repo-map watcher to schedule a refresh
         //    for the newly created project.
-        let scheduled_project_id = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for repo-map refresh to be scheduled")
-        .expect("refresh channel closed without a message");
+        let scheduled_project_id =
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("timed out waiting for repo-map refresh to be scheduled")
+                .expect("refresh channel closed without a message");
 
         // Verify the scheduled refresh is for the project we just created.
         assert_eq!(

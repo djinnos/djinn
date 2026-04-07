@@ -881,10 +881,9 @@ pub(crate) fn derive_task_scope_paths(
     use regex::Regex;
     // Match paths like: crates/foo, src/bar/baz, server/crates/djinn-db
     // Looking for patterns with at least 2 slash-separated segments
-    let re = Regex::new(
-        r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#,
-    )
-    .unwrap_or_else(|_| Regex::new(r"[a-z]+/[a-z]+").unwrap());
+    let re =
+        Regex::new(r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#)
+            .unwrap_or_else(|_| Regex::new(r"[a-z]+/[a-z]+").unwrap());
 
     let mut paths = std::collections::HashSet::new();
 

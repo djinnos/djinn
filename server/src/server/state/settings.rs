@@ -34,8 +34,8 @@ impl AppState {
             .keys()
             .filter(|id| id.contains('/') && !listed.contains(id.as_str()))
             .count();
-        let total_model_count = models_list.iter().filter(|id| id.contains('/')).count()
-            + extra_model_count;
+        let total_model_count =
+            models_list.iter().filter(|id| id.contains('/')).count() + extra_model_count;
 
         // Compute auto-detected default slots per model from system memory.
         let auto_default = Self::auto_default_slots(total_model_count);

@@ -392,9 +392,8 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
     tool_values.push(serde_json::to_value(tool_code_graph()).expect("serialize tool_code_graph"));
     tool_values.push(serde_json::to_value(tool_ci_job_log()).expect("serialize tool_ci_job_log"));
-    tool_values.push(
-        serde_json::to_value(tool_github_search()).expect("serialize tool_github_search"),
-    );
+    tool_values
+        .push(serde_json::to_value(tool_github_search()).expect("serialize tool_github_search"));
     tool_values.push(serde_json::to_value(tool_output_view()).expect("serialize tool_output_view"));
     tool_values.push(serde_json::to_value(tool_output_grep()).expect("serialize tool_output_grep"));
     tool_values

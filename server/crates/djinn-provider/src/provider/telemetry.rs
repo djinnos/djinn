@@ -320,7 +320,10 @@ impl LlmSpan {
     pub fn record_thinking(&self, thinking: &str) {
         self.cx.span().set_attribute(KeyValue::new(
             "langfuse.observation.metadata",
-            format!(r#"{{"thinking":{}}}"#, serde_json::json!(truncate(thinking, 50_000))),
+            format!(
+                r#"{{"thinking":{}}}"#,
+                serde_json::json!(truncate(thinking, 50_000))
+            ),
         ));
     }
 

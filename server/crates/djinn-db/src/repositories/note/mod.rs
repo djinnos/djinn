@@ -78,6 +78,5 @@ impl NoteRepository {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

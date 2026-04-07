@@ -878,23 +878,22 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
 
     // ── Build knowledge context from scope-matched notes ─────────────
     let knowledge_context = {
-        let note_repo = djinn_db::NoteRepository::new(
-            app_state.db.clone(),
-            app_state.event_bus.clone(),
-        );
+        let note_repo =
+            djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
         let task_paths = derive_task_scope_paths(&task, epic_context.as_deref());
 
-        match note_repo.query_by_scope_overlap(
-            &task.project_id,
-            &task_paths,
-            &["pattern", "pitfall", "case"],
-            0.3,
-            10,
-        ).await {
-            Ok(notes) if !notes.is_empty() => {
-                Some(format_knowledge_notes(&notes, 2000))
-            }
+        match note_repo
+            .query_by_scope_overlap(
+                &task.project_id,
+                &task_paths,
+                &["pattern", "pitfall", "case"],
+                0.3,
+                10,
+            )
+            .await
+        {
+            Ok(notes) if !notes.is_empty() => Some(format_knowledge_notes(&notes, 2000)),
             Ok(_) => None,
             Err(e) => {
                 tracing::debug!(
@@ -1288,8 +1287,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     // Commit a WIP snapshot for interrupted / non-worker sessions.
     // Skip this for successful worker sessions — they get a proper commit
     // with the message from submit_work in commit_final_work_if_needed below.
-    let worker_completed_ok =
-        reply_result.is_ok() && runtime_role.config().preserves_session;
+    let worker_completed_ok = reply_result.is_ok() && runtime_role.config().preserves_session;
     if !worker_completed_ok {
         commit_wip_if_needed(&task_id, &worktree_path, &app_state).await;
     }

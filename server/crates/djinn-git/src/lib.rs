@@ -349,11 +349,7 @@ async fn verify_branch_ref(path: &Path, branch: &str) -> Result<(), GitError> {
     let full_ref = format!("refs/heads/{branch}");
     run_git_command(
         path.to_path_buf(),
-        vec![
-            "rev-parse".into(),
-            "--verify".into(),
-            full_ref,
-        ],
+        vec!["rev-parse".into(), "--verify".into(), full_ref],
     )
     .await
     .inspect_err(|_| {

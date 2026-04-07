@@ -444,7 +444,7 @@ impl NoteRepository {
 
         let mut query = sqlx::query_as::<_, Note>(&sql);
         query = query.bind(&bind_values[0]); // project_id
-        query = query.bind(min_confidence);   // ?2
+        query = query.bind(min_confidence); // ?2
         for val in &bind_values[1..] {
             query = query.bind(val);
         }

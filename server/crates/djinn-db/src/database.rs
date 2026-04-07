@@ -143,7 +143,10 @@ async fn backfill_missing_content_hashes(pool: &SqlitePool) -> DbResult<()> {
         return Ok(());
     }
 
-    let mut tx = pool.begin().await.map_err(|e| DbError::InvalidData(e.to_string()))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| DbError::InvalidData(e.to_string()))?;
     for (id, content) in &rows {
         let hash = note_content_hash(content);
         sqlx::query("UPDATE notes SET content_hash = ?2 WHERE id = ?1")
@@ -153,7 +156,9 @@ async fn backfill_missing_content_hashes(pool: &SqlitePool) -> DbResult<()> {
             .await
             .map_err(|e| DbError::InvalidData(e.to_string()))?;
     }
-    tx.commit().await.map_err(|e| DbError::InvalidData(e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| DbError::InvalidData(e.to_string()))?;
 
     Ok(())
 }

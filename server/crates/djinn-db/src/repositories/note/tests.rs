@@ -1685,7 +1685,14 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     .bind("")
     .bind("open")
     .bind(0_i64)
-    .bind(serde_json::json!([blocker_note.id.clone(), epic_note.id.clone(), overlap_note.id.clone()]).to_string())
+    .bind(
+        serde_json::json!([
+            blocker_note.id.clone(),
+            epic_note.id.clone(),
+            overlap_note.id.clone()
+        ])
+        .to_string(),
+    )
     .execute(db.pool())
     .await
     .unwrap();
@@ -2137,14 +2144,12 @@ async fn temporal_scores_recent_update_wins_same_access_count() {
         .await
         .unwrap();
 
-    sqlx::query(
-        "UPDATE notes SET created_at = datetime('now', '-30 day') WHERE id IN (?1, ?2)",
-    )
-    .bind(&recent.id)
-    .bind(&stale.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    sqlx::query("UPDATE notes SET created_at = datetime('now', '-30 day') WHERE id IN (?1, ?2)")
+        .bind(&recent.id)
+        .bind(&stale.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
 
     sqlx::query("UPDATE notes SET updated_at = datetime('now') WHERE id = ?1")
         .bind(&recent.id)
@@ -2565,8 +2570,7 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn consolidation_resolve_source_session_ids_returns_deduped_sorted_recursive_provenance()
-{
+async fn consolidation_resolve_source_session_ids_returns_deduped_sorted_recursive_provenance() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
     let (tx, _rx) = broadcast::channel(256);
@@ -2620,8 +2624,7 @@ async fn consolidation_resolve_source_session_ids_returns_deduped_sorted_recursi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn consolidation_resolve_source_session_ids_returns_empty_when_notes_have_no_provenance()
-{
+async fn consolidation_resolve_source_session_ids_returns_empty_when_notes_have_no_provenance() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
     let (tx, _rx) = broadcast::channel(256);
@@ -3373,8 +3376,7 @@ async fn session_scoped_clusters_do_not_include_cross_session_notes() {
         .await
         .unwrap();
     assert_eq!(clusters_all.len(), 1);
-    let all_ids: std::collections::HashSet<_> =
-        clusters_all[0].note_ids.iter().cloned().collect();
+    let all_ids: std::collections::HashSet<_> = clusters_all[0].note_ids.iter().cloned().collect();
     assert!(
         all_ids.contains(&note_d.id),
         "unscoped query should include the cross-session note"

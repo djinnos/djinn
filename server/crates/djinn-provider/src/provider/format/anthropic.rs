@@ -168,10 +168,9 @@ impl AnthropicProvider {
     /// Whether prompt caching is active for this conversation (i.e. at least one
     /// system message carries the `anthropic_cache_breakpoint` metadata).
     fn has_cache_metadata(conversation: &Conversation) -> bool {
-        conversation
-            .messages
-            .iter()
-            .any(|m| m.role == djinn_core::message::Role::System && Self::maybe_cache_control(m).is_some())
+        conversation.messages.iter().any(|m| {
+            m.role == djinn_core::message::Role::System && Self::maybe_cache_control(m).is_some()
+        })
     }
 
     /// Inject a `cache_control: {"type": "ephemeral"}` marker on the last
@@ -186,10 +185,7 @@ impl AnthropicProvider {
             && let Some(last_block) = content.last_mut()
             && let Some(obj) = last_block.as_object_mut()
         {
-            obj.insert(
-                "cache_control".to_string(),
-                json!({"type": "ephemeral"}),
-            );
+            obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
         }
     }
 
@@ -208,7 +204,11 @@ impl AnthropicProvider {
             Self::add_message_cache_breakpoint(&mut messages);
         }
 
-        let max_tokens = self.config.capabilities.max_tokens_default.unwrap_or(64_000);
+        let max_tokens = self
+            .config
+            .capabilities
+            .max_tokens_default
+            .unwrap_or(64_000);
 
         let mut body = json!({
             "model": self.config.model_id,

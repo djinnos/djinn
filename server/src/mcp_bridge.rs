@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::bridge::{
     ChannelStatus, CoordinatorOps, CoordinatorStatus, GitOps, GraphNeighbor, ImpactEntry, LspOps,
@@ -18,6 +17,7 @@ use djinn_mcp::bridge::{
     SlotPoolOps, SyncOps, SyncResult,
 };
 use petgraph::visit::EdgeRef;
+use tokio::sync::RwLock;
 
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
@@ -610,14 +610,17 @@ async fn build_graph_for_project(
                     let filtered: Vec<crate::scip_parser::ParsedScipIndex> = parsed
                         .into_iter()
                         .map(|mut idx| {
-                            idx.files.retain(|f| changed_files.contains(&f.relative_path));
+                            idx.files
+                                .retain(|f| changed_files.contains(&f.relative_path));
                             idx
                         })
                         .collect();
                     cached_graph.patch_changed_files(&changed_files, &filtered)
                 }
                 Err(e) => {
-                    tracing::warn!("incremental indexing failed, falling back to cached graph: {e}");
+                    tracing::warn!(
+                        "incremental indexing failed, falling back to cached graph: {e}"
+                    );
                     cached_graph
                 }
             }

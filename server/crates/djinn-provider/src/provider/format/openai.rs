@@ -59,7 +59,11 @@ impl OpenAIProvider {
                             }
                         }));
                     }
-                    ContentBlock::Document { media_type, data, filename } => {
+                    ContentBlock::Document {
+                        media_type,
+                        data,
+                        filename,
+                    } => {
                         text_blocks.push(json!({
                             "type": "file",
                             "file": {

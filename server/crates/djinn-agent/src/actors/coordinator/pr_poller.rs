@@ -182,8 +182,7 @@ impl CoordinatorActor {
                     "PR poller: no CI check-runs found after min-age guard — treating as passed"
                 );
             } else {
-                let all_completed =
-                    checks.check_runs.iter().all(|cr| cr.status == "completed");
+                let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
                 if !all_completed {
                     // CI checks still running — skip, check next tick.
                     continue;

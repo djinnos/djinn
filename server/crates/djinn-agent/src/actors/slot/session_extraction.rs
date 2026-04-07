@@ -71,11 +71,7 @@ fn extract_apply_patch_paths(input: &serde_json::Value) -> Vec<String> {
     let mut paths = Vec::new();
     for line in patch.lines() {
         let trimmed = line.trim_end();
-        for prefix in [
-            "*** Update File: ",
-            "*** Add File: ",
-            "*** Delete File: ",
-        ] {
+        for prefix in ["*** Update File: ", "*** Add File: ", "*** Delete File: "] {
             if let Some(rest) = trimmed.strip_prefix(prefix) {
                 let path = rest.trim();
                 if !path.is_empty() {
@@ -768,10 +764,7 @@ mod tests {
     #[test]
     fn apply_patch_collects_all_paths() {
         let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n context\n-old\n+new\n*** Add File: src/b.rs\n+content\n*** Delete File: src/c.rs\n*** End Patch\n";
-        let msgs = vec![tool_use(
-            "apply_patch",
-            serde_json::json!({"patch": patch}),
-        )];
+        let msgs = vec![tool_use("apply_patch", serde_json::json!({"patch": patch}))];
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.taxonomy.files_changed, 3);
         assert_eq!(
@@ -811,7 +804,10 @@ mod tests {
                 "memory_read",
                 serde_json::json!({"identifier": "y", "project": "/tmp"}),
             ),
-            tool_use("task_transition", serde_json::json!({"task_id": "abc", "action": "done"})),
+            tool_use(
+                "task_transition",
+                serde_json::json!({"task_id": "abc", "action": "done"}),
+            ),
             tool_use("write", serde_json::json!({"path": "a.rs"})),
         ];
         let signals = extract_session_signals(&msgs);

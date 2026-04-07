@@ -115,7 +115,12 @@ impl NoteRepository {
         scope_paths: &str,
     ) -> Result<Note> {
         self.create_internal(CreateNoteParams::db_with_scope(
-            project_id, title, content, note_type, tags, scope_paths,
+            project_id,
+            title,
+            content,
+            note_type,
+            tags,
+            scope_paths,
         ))
         .await
     }

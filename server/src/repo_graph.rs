@@ -695,11 +695,10 @@ impl RepoDependencyGraph {
 /// - symbol nodes whose `file_path` is in the set *and* that are not external
 fn is_owned_by_changed_file(node: &RepoGraphNode, changed_files: &BTreeSet<PathBuf>) -> bool {
     match &node.kind {
-        RepoGraphNodeKind::File => {
-            node.file_path
-                .as_ref()
-                .is_some_and(|p| changed_files.contains(p))
-        }
+        RepoGraphNodeKind::File => node
+            .file_path
+            .as_ref()
+            .is_some_and(|p| changed_files.contains(p)),
         RepoGraphNodeKind::Symbol => {
             !node.is_external
                 && node
@@ -944,8 +943,7 @@ mod tests {
     fn artifact_json_round_trip_preserves_graph() {
         let graph = RepoDependencyGraph::build(&[fixture_index()]);
         let json = graph.serialize_artifact().expect("serialize");
-        let restored =
-            RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize");
+        let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize");
 
         assert_eq!(restored.node_count(), graph.node_count());
         assert_eq!(restored.edge_count(), graph.edge_count());
@@ -963,14 +961,15 @@ mod tests {
         );
 
         // Verify edge metadata survived.
-        let app_idx = restored
-            .file_node("src/app.rs")
-            .expect("app file");
+        let app_idx = restored.file_node("src/app.rs").expect("app file");
         let has_contains_def = restored
             .graph()
             .edges(app_idx)
             .any(|e| e.weight().kind == RepoGraphEdgeKind::ContainsDefinition);
-        assert!(has_contains_def, "expected ContainsDefinition edge from app file");
+        assert!(
+            has_contains_def,
+            "expected ContainsDefinition edge from app file"
+        );
     }
 
     #[test]
@@ -980,8 +979,7 @@ mod tests {
             edges: vec![],
         };
         let json = serde_json::to_string(&empty).expect("serialize empty");
-        let restored =
-            RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
+        let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
         assert_eq!(restored.node_count(), 0);
         assert_eq!(restored.edge_count(), 0);
     }
@@ -998,7 +996,11 @@ mod tests {
         // The original graph has src/helper.rs and src/app.rs.
         assert!(original.file_node("src/app.rs").is_some());
         assert!(original.file_node("src/helper.rs").is_some());
-        assert!(original.symbol_node("scip-rust pkg src/app.rs `main`().").is_some());
+        assert!(
+            original
+                .symbol_node("scip-rust pkg src/app.rs `main`().")
+                .is_some()
+        );
 
         // Build a replacement for src/app.rs that has a new symbol "run"
         // instead of "main" and no reference to helper.
@@ -1028,17 +1030,25 @@ mod tests {
 
         // The old "main" symbol should be gone; the new "run" symbol should exist.
         assert!(
-            patched.symbol_node("scip-rust pkg src/app.rs `main`().").is_none(),
+            patched
+                .symbol_node("scip-rust pkg src/app.rs `main`().")
+                .is_none(),
             "old main symbol should be removed after patch"
         );
         assert!(
-            patched.symbol_node("scip-rust pkg src/app.rs `run`().").is_some(),
+            patched
+                .symbol_node("scip-rust pkg src/app.rs `run`().")
+                .is_some(),
             "new run symbol should be present after patch"
         );
 
         // src/helper.rs and its symbol should be untouched.
         assert!(patched.file_node("src/helper.rs").is_some());
-        assert!(patched.symbol_node("scip-rust pkg src/helper.rs `helper`().").is_some());
+        assert!(
+            patched
+                .symbol_node("scip-rust pkg src/helper.rs `helper`().")
+                .is_some()
+        );
 
         // src/app.rs file node should still exist (re-added by the new index).
         assert!(patched.file_node("src/app.rs").is_some());
@@ -1101,7 +1111,11 @@ mod tests {
 
         // New file and symbol added.
         assert!(patched.file_node("src/new.rs").is_some());
-        assert!(patched.symbol_node("scip-rust pkg src/new.rs `new_fn`().").is_some());
+        assert!(
+            patched
+                .symbol_node("scip-rust pkg src/new.rs `new_fn`().")
+                .is_some()
+        );
         // Original nodes preserved.
         assert!(patched.node_count() > original_node_count);
         assert!(patched.file_node("src/app.rs").is_some());
@@ -1148,12 +1162,9 @@ mod tests {
         let changed = BTreeSet::from([PathBuf::from("src/app.rs")]);
         let patched = original.patch_changed_files(&changed, &[new_index]);
         let patched_ranking = patched.rank();
-        let patched_rendered = render_repo_map(
-            &patched,
-            &patched_ranking,
-            &RepoMapRenderOptions::new(2000),
-        )
-        .expect("render patched");
+        let patched_rendered =
+            render_repo_map(&patched, &patched_ranking, &RepoMapRenderOptions::new(2000))
+                .expect("render patched");
 
         // The rendered maps should differ because the file content changed.
         assert_ne!(

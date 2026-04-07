@@ -416,7 +416,15 @@ pub(crate) async fn compact_conversation(
 
     // 1d. Partial compaction: summarise only the tail, preserving the prefix
     //     for prompt-cache hits.
-    match partial_compact(provider, conversation, &ctx, context_window, &last_user_text).await {
+    match partial_compact(
+        provider,
+        conversation,
+        &ctx,
+        context_window,
+        &last_user_text,
+    )
+    .await
+    {
         Ok(true) => {
             tracing::info!(
                 task_id = %task_id,
@@ -464,14 +472,8 @@ pub(crate) async fn compact_conversation(
     // 3. Ask the LLM to summarise, with overflow retry logic.
     //    If do_compact fails because the compaction input itself exceeds the
     //    model's context, progressively drop the oldest message groups and retry.
-    let compact_result = do_compact_with_overflow_retry(
-        provider,
-        conversation,
-        &ctx,
-        task_id,
-        session_id,
-    )
-    .await;
+    let compact_result =
+        do_compact_with_overflow_retry(provider, conversation, &ctx, task_id, session_id).await;
 
     match compact_result {
         Ok(summary) => {
@@ -670,7 +672,11 @@ fn is_compaction_context_error(e: &anyhow::Error) -> bool {
 /// always preserved.
 fn drop_oldest_message_groups(messages: &mut Vec<Message>, fraction: f64) {
     // Preserve system prompt.
-    let start = if messages.first().map(|m| m.role == Role::System).unwrap_or(false) {
+    let start = if messages
+        .first()
+        .map(|m| m.role == Role::System)
+        .unwrap_or(false)
+    {
         1
     } else {
         0
@@ -860,7 +866,10 @@ async fn do_partial_compact(
         match call_llm_for_summary(provider, &compact_conv).await {
             Ok(summary) if !summary.is_empty() => return Ok(summary),
             Ok(_) => {
-                tracing::debug!(pct, "partial_compact: empty summary at removal pct, retrying");
+                tracing::debug!(
+                    pct,
+                    "partial_compact: empty summary at removal pct, retrying"
+                );
             }
             Err(e) => {
                 let msg = e.to_string().to_lowercase();
@@ -1040,7 +1049,10 @@ fn format_messages_as_text(messages: &[Message]) -> String {
                 }
                 ContentBlock::Image { .. } => format!("[{role}]: [image]"),
                 ContentBlock::Document { filename, .. } => {
-                    format!("[{role}]: [document: {}]", filename.as_deref().unwrap_or("file"))
+                    format!(
+                        "[{role}]: [document: {}]",
+                        filename.as_deref().unwrap_or("file")
+                    )
                 }
                 // Thinking blocks are not relevant for compaction summaries.
                 ContentBlock::Thinking { .. } => continue,
@@ -1799,7 +1811,10 @@ mod tests {
         for (_, msg) in tool_results.iter().rev().take(exempt_tool_results) {
             for block in &msg.content {
                 if let ContentBlock::ToolResult { content, .. } = block {
-                    let text = content.iter().filter_map(|b| b.as_text()).collect::<String>();
+                    let text = content
+                        .iter()
+                        .filter_map(|b| b.as_text())
+                        .collect::<String>();
                     assert!(
                         !text.starts_with("[Cleared"),
                         "recent tool result should not be cleared: {text}"
@@ -1876,7 +1891,10 @@ mod tests {
         // to preserve a large prefix.
         assert!(PARTIAL_COMPACTION_PIVOT > 0.0);
         assert!(PARTIAL_COMPACTION_PIVOT < 1.0);
-        assert!(PARTIAL_COMPACTION_PIVOT >= 0.5, "pivot should preserve at least half");
+        assert!(
+            PARTIAL_COMPACTION_PIVOT >= 0.5,
+            "pivot should preserve at least half"
+        );
     }
 
     #[test]
@@ -2079,10 +2097,7 @@ mod tests {
         ];
         for msg in cases {
             let e = anyhow::anyhow!("{msg}");
-            assert!(
-                is_compaction_context_error(&e),
-                "should detect: {msg}"
-            );
+            assert!(is_compaction_context_error(&e), "should detect: {msg}");
         }
 
         // Non-context errors should not match.
@@ -2096,12 +2111,8 @@ mod tests {
         let mut conv_aggressive = build_tool_conversation(10);
 
         let tokens_default = microcompact(&mut conv_default, 10);
-        let tokens_aggressive = microcompact_with_thresholds(
-            &mut conv_aggressive,
-            10,
-            AGGRESSIVE_MICROCOMPACT_AGE,
-            0,
-        );
+        let tokens_aggressive =
+            microcompact_with_thresholds(&mut conv_aggressive, 10, AGGRESSIVE_MICROCOMPACT_AGE, 0);
 
         // Aggressive should clear more than default.
         assert!(

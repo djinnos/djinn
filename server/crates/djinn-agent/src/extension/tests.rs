@@ -1,8 +1,8 @@
-use super::*;
 use super::handlers::*;
 use super::helpers::*;
 use super::tool_defs::*;
 use super::types::*;
+use super::*;
 use crate::AgentType;
 use crate::test_helpers::create_test_db;
 use crate::test_helpers::{
@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) mod fuzzy_replace_tests {
-    use super::*;
     use super::super::fuzzy::{fuzzy_replace, reindent_replacement};
+    use super::*;
 
     #[test]
     fn rebases_multiline_replacement_using_matched_indentation() {
@@ -35,8 +35,7 @@ pub(crate) mod fuzzy_replace_tests {
 
     #[test]
     fn preserves_later_nested_indent_when_first_replacement_line_is_less_indented() {
-        let content =
-            "impl Example {\n        if condition {\n            run();\n        }\n}\n";
+        let content = "impl Example {\n        if condition {\n            run();\n        }\n}\n";
         let old_text = "if condition {\n    run();\n}";
         let new_text =
             "if condition {\n    let nested = || {\n        run();\n    };\n    nested();\n}";

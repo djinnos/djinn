@@ -6,9 +6,9 @@ use super::consolidation::ConsolidationRunner;
 use crate::actors::slot::SlotPoolHandle;
 use crate::roles::RoleRegistry;
 use djinn_core::events::DjinnEventEnvelope;
+use djinn_db::Database;
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
-use djinn_db::Database;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -60,7 +60,10 @@ impl CoordinatorDeps {
 
     #[cfg(test)]
     #[allow(dead_code)]
-    pub(super) fn with_consolidation_runner(mut self, runner: Arc<dyn ConsolidationRunner>) -> Self {
+    pub(super) fn with_consolidation_runner(
+        mut self,
+        runner: Arc<dyn ConsolidationRunner>,
+    ) -> Self {
         self.consolidation_runner = Some(runner);
         self
     }

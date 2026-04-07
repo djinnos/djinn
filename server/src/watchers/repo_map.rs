@@ -446,17 +446,8 @@ async fn refresh_worktree_if_needed(
         Some(worktree.to_path_buf())
     };
 
-    if let Some(identity) =
-        repo_identity(app_state, &project.id, &project_path, wt).await
-    {
-        maybe_refresh_identity(
-            app_state.db(),
-            events,
-            in_flight,
-            last_completion,
-            identity,
-        )
-        .await;
+    if let Some(identity) = repo_identity(app_state, &project.id, &project_path, wt).await {
+        maybe_refresh_identity(app_state.db(), events, in_flight, last_completion, identity).await;
     }
 
     Ok(())
@@ -488,7 +479,14 @@ async fn refresh_project_and_worktrees(
     }
 
     if let Some(identity) = repo_identity(app_state, project_id, project_path, None).await {
-        maybe_refresh_identity(app_state.db(), events, in_flight.clone(), last_completion.clone(), identity).await;
+        maybe_refresh_identity(
+            app_state.db(),
+            events,
+            in_flight.clone(),
+            last_completion.clone(),
+            identity,
+        )
+        .await;
     }
 
     let git = app_state.git_actor(project_path).await?;
@@ -500,7 +498,14 @@ async fn refresh_project_and_worktrees(
         }
         if let Some(identity) = repo_identity(app_state, project_id, project_path, Some(path)).await
         {
-            maybe_refresh_identity(app_state.db(), events, in_flight.clone(), last_completion.clone(), identity).await;
+            maybe_refresh_identity(
+                app_state.db(),
+                events,
+                in_flight.clone(),
+                last_completion.clone(),
+                identity,
+            )
+            .await;
         }
     }
     Ok(())
@@ -620,15 +625,7 @@ async fn maybe_refresh_identity(
             && let Some(artifact_json) = &cached.graph_artifact
             && !changed_files.is_empty()
         {
-            match patch_cached_repo_map(
-                db,
-                events,
-                &identity,
-                artifact_json,
-                changed_files,
-            )
-            .await
-            {
+            match patch_cached_repo_map(db, events, &identity, artifact_json, changed_files).await {
                 Ok(()) => return,
                 Err(error) => {
                     tracing::warn!(
@@ -816,7 +813,8 @@ async fn patch_cached_repo_map(
         .worktree_path
         .as_deref()
         .unwrap_or(&identity.project_path);
-    let output_dir = std::env::temp_dir().join(format!("djinn-repo-map-patch-{}", uuid::Uuid::now_v7()));
+    let output_dir =
+        std::env::temp_dir().join(format!("djinn-repo-map-patch-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&output_dir)?;
     let run = run_indexers(repo_root, &output_dir).await?;
     let parsed = parse_scip_artifacts(&run.artifacts)?;
@@ -1244,7 +1242,11 @@ mod tests {
             reuse_plan: WorktreeReusePlan {
                 base_commit_sha: Some("base-commit".into()),
                 diff_file_count: Some(3),
-                changed_files: Some(vec![PathBuf::from("a.rs"), PathBuf::from("b.rs"), PathBuf::from("c.rs")]),
+                changed_files: Some(vec![
+                    PathBuf::from("a.rs"),
+                    PathBuf::from("b.rs"),
+                    PathBuf::from("c.rs"),
+                ]),
             },
         };
 
@@ -1359,11 +1361,8 @@ mod tests {
         // and the spawned indexer task does meaningful work; without a
         // marker file the planner produces zero plans and the in-flight
         // slot is released before this test asserts on it.
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[workspace]\nmembers = []\n",
-        )
-        .expect("write workspace marker");
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace marker");
 
         let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
         let project = project_repo
@@ -1765,8 +1764,7 @@ mod tests {
 
         // Non-existent path: cannot resolve HEAD, so should need refresh (safe default).
         let needs =
-            startup_needs_refresh(&app_state, "p1", Path::new("/tmp/nonexistent-repo-12345"))
-                .await;
+            startup_needs_refresh(&app_state, "p1", Path::new("/tmp/nonexistent-repo-12345")).await;
         assert!(
             needs,
             "startup_needs_refresh must return true when HEAD cannot be resolved"
@@ -1784,7 +1782,9 @@ mod tests {
 
         // Build a real graph artifact to persist.
         use crate::repo_graph::RepoDependencyGraph;
-        use crate::scip_parser::{ParsedScipIndex, ScipFile, ScipMetadata, ScipSymbol, ScipSymbolKind};
+        use crate::scip_parser::{
+            ParsedScipIndex, ScipFile, ScipMetadata, ScipSymbol, ScipSymbolKind,
+        };
         let index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
@@ -1832,7 +1832,10 @@ mod tests {
             reuse_plan: WorktreeReusePlan {
                 base_commit_sha: Some("base-commit".into()),
                 diff_file_count: Some(2),
-                changed_files: Some(vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/main.rs")]),
+                changed_files: Some(vec![
+                    PathBuf::from("src/lib.rs"),
+                    PathBuf::from("src/main.rs"),
+                ]),
             },
         };
 

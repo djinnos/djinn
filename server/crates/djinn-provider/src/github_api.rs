@@ -454,11 +454,7 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "reopen_pull_request failed ({}): {}",
-                status,
-                body
-            ));
+            return Err(anyhow!("reopen_pull_request failed ({}): {}", status, body));
         }
         Ok(resp.json().await?)
     }

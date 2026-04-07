@@ -96,7 +96,10 @@ fn parse_meminfo_contents(contents: &str) -> Option<(u64, u64)> {
 /// Parse a value like `"  16384000 kB"` into bytes.
 fn parse_kb_value(s: &str) -> Option<u64> {
     let s = s.trim();
-    let kb_str = s.strip_suffix("kB").or_else(|| s.strip_suffix("KB"))?.trim();
+    let kb_str = s
+        .strip_suffix("kB")
+        .or_else(|| s.strip_suffix("KB"))?
+        .trim();
     let kb: u64 = kb_str.parse().ok()?;
     Some(kb * 1024)
 }
@@ -145,7 +148,9 @@ fn read_cgroup_limit() -> Option<u64> {
     // cgroup v2: /sys/fs/cgroup/memory.max
     if let Ok(contents) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
         let trimmed = contents.trim();
-        if trimmed != "max" && let Ok(val) = trimmed.parse::<u64>() {
+        if trimmed != "max"
+            && let Ok(val) = trimmed.parse::<u64>()
+        {
             return Some(val);
         }
     }

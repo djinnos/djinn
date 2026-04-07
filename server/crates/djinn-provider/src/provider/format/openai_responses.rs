@@ -890,9 +890,7 @@ mod tests {
         match parse_responses_line(line, &mut acc) {
             ParsedLine::Events(events) => {
                 assert_eq!(events.len(), 1);
-                assert!(
-                    matches!(&events[0], StreamEvent::Thinking(t) if t == "The user wants to")
-                );
+                assert!(matches!(&events[0], StreamEvent::Thinking(t) if t == "The user wants to"));
             }
             ParsedLine::ProviderError(e) => panic!("unexpected error: {e}"),
         }
@@ -918,7 +916,9 @@ mod tests {
             r#"{"type":"response.reasoning_summary_part.done","item_id":"rs_abc","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"Full summary."},"sequence_number":11}"#,
         ] {
             match parse_responses_line(line, &mut acc) {
-                ParsedLine::Events(events) => assert!(events.is_empty(), "expected no events for lifecycle event"),
+                ParsedLine::Events(events) => {
+                    assert!(events.is_empty(), "expected no events for lifecycle event")
+                }
                 ParsedLine::ProviderError(e) => panic!("unexpected error: {e}"),
             }
         }

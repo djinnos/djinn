@@ -8,9 +8,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::consolidation::{ConsolidationRunner, DbConsolidationRunner};
 use super::health;
+use super::messages::CoordinatorMessage;
 use super::rules;
 use super::types::*;
-use super::messages::CoordinatorMessage;
 use crate::actors::slot::SlotPoolHandle;
 use crate::roles::RoleRegistry;
 use djinn_core::events::DjinnEventEnvelope;
@@ -911,7 +911,9 @@ impl CoordinatorActor {
     pub(super) fn cancel_idle_consolidation(&mut self) {
         if let Some(token) = self.idle_consolidation_cancel.take() {
             token.cancel();
-            tracing::debug!("CoordinatorActor: cancelled idle consolidation sweep (new work arrived)");
+            tracing::debug!(
+                "CoordinatorActor: cancelled idle consolidation sweep (new work arrived)"
+            );
         }
         // Drop the handle — the spawned task will wind down on its own.
         self.idle_consolidation_handle = None;

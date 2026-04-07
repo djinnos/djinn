@@ -210,80 +210,101 @@ async fn dispatch_single_tool<'a>(
                 if let Some(ts) = &tool_span {
                     ts.record_output(&err, true);
                 }
-                (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
+                (
+                    vec![ContentBlock::Text {
+                        text: format!("error: {err}"),
+                    }],
+                    true,
+                )
             }
         };
         if let Some(ts) = tool_span {
-            if is_error { ts.end_error("tool returned error"); } else { ts.end_ok(); }
+            if is_error {
+                ts.end_error("tool returned error");
+            } else {
+                ts.end_ok();
+            }
         }
-        return (idx, ContentBlock::ToolResult {
-            tool_use_id: id,
-            content,
-            is_error,
-        });
+        return (
+            idx,
+            ContentBlock::ToolResult {
+                tool_use_id: id,
+                content,
+                is_error,
+            },
+        );
     }
 
     // ── MCP tool dispatch (takes priority for MCP-registered names) ──
     if let Some(registry) = mcp_registry
-        && registry.has_tool(&name) {
-            tracing::debug!(
-                task_id = %task_id,
-                tool = %name,
-                "ReplyLoop: dispatching to MCP server"
-            );
-            let mcp_result = registry.call_tool(&name, args.clone()).await;
-            let (content, is_error) = match mcp_result {
-                Ok(value) => {
-                    let text = if value.is_string() {
-                        value.as_str().unwrap_or("").to_string()
-                    } else {
-                        serde_json::to_string_pretty(&value)
-                            .unwrap_or_else(|_| value.to_string())
-                    };
-                    if let Some(ts) = &tool_span {
-                        ts.record_output(&text, false);
-                    }
-                    (vec![ContentBlock::Text { text }], false)
+        && registry.has_tool(&name)
+    {
+        tracing::debug!(
+            task_id = %task_id,
+            tool = %name,
+            "ReplyLoop: dispatching to MCP server"
+        );
+        let mcp_result = registry.call_tool(&name, args.clone()).await;
+        let (content, is_error) = match mcp_result {
+            Ok(value) => {
+                let text = if value.is_string() {
+                    value.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+                };
+                if let Some(ts) = &tool_span {
+                    ts.record_output(&text, false);
                 }
-                Err(err) => {
-                    if let Some(ts) = &tool_span {
-                        ts.record_output(&err, true);
-                    }
-                    (vec![ContentBlock::Text { text: format!("error: {err}") }], true)
-                }
-            };
-            if let Some(ts) = tool_span {
-                if is_error { ts.end_error("MCP tool returned error"); } else { ts.end_ok(); }
+                (vec![ContentBlock::Text { text }], false)
             }
-            return (idx, ContentBlock::ToolResult {
+            Err(err) => {
+                if let Some(ts) = &tool_span {
+                    ts.record_output(&err, true);
+                }
+                (
+                    vec![ContentBlock::Text {
+                        text: format!("error: {err}"),
+                    }],
+                    true,
+                )
+            }
+        };
+        if let Some(ts) = tool_span {
+            if is_error {
+                ts.end_error("MCP tool returned error");
+            } else {
+                ts.end_ok();
+            }
+        }
+        return (
+            idx,
+            ContentBlock::ToolResult {
                 tool_use_id: id,
                 content,
                 is_error,
-            });
-        }
+            },
+        );
+    }
 
     // ── Normal tool dispatch ────────────────────────────────────────
     // Retry logic for SQLite BUSY errors.
-    let mut result =
-        extension::call_tool(
-            app_state,
-            &name,
-            args.clone(),
-            worktree_path,
-            Some(task_id),
-            Some(role_name),
-            mcp_registry,
-        )
-            .await;
+    let mut result = extension::call_tool(
+        app_state,
+        &name,
+        args.clone(),
+        worktree_path,
+        Some(task_id),
+        Some(role_name),
+        mcp_registry,
+    )
+    .await;
     {
         let mut retries = 0u32;
         while retries < 5 {
             match &result {
                 Err(e) if e.contains("database is locked") => {
                     retries += 1;
-                    let backoff = std::time::Duration::from_millis(
-                        100 * (1 << retries.min(4)),
-                    );
+                    let backoff = std::time::Duration::from_millis(100 * (1 << retries.min(4)));
                     tracing::warn!(
                         task_id = %task_id,
                         tool = %name,
@@ -307,58 +328,47 @@ async fn dispatch_single_tool<'a>(
             }
         }
     }
-    let (content, is_error) =
-        match result {
-            Ok(value) => {
-                let mut text = if value.is_string() {
-                    value.as_str().unwrap_or("").to_string()
-                } else {
-                    serde_json::to_string_pretty(&value)
-                        .unwrap_or_else(|_| value.to_string())
-                };
-                if text.len() > MAX_TOOL_RESULT_CHARS {
-                    let stash_text = extract_stash_content(&name, &value)
-                        .unwrap_or_else(|| text.clone());
-                    stash.lock().unwrap().insert(
-                        id.clone(),
-                        name.clone(),
-                        stash_text,
-                    );
-                    let full_bytes = text.len();
-                    text = crate::truncate::smart_truncate(
-                        &text,
-                        MAX_TOOL_RESULT_CHARS,
-                    );
-                    text.push_str(&format!(
-                        "\n\n[Full output stashed ({full_bytes} bytes). \
+    let (content, is_error) = match result {
+        Ok(value) => {
+            let mut text = if value.is_string() {
+                value.as_str().unwrap_or("").to_string()
+            } else {
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+            };
+            if text.len() > MAX_TOOL_RESULT_CHARS {
+                let stash_text =
+                    extract_stash_content(&name, &value).unwrap_or_else(|| text.clone());
+                stash
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), name.clone(), stash_text);
+                let full_bytes = text.len();
+                text = crate::truncate::smart_truncate(&text, MAX_TOOL_RESULT_CHARS);
+                text.push_str(&format!(
+                    "\n\n[Full output stashed ({full_bytes} bytes). \
                          Use output_view(tool_use_id=\"{id}\") to paginate \
                          or output_grep(tool_use_id=\"{id}\", pattern=\"...\") to search.]"
-                    ));
-                }
-                if let Some(ts) = &tool_span {
-                    ts.record_output(&text, false);
-                }
-                (vec![ContentBlock::Text { text }], false)
+                ));
             }
-            Err(err) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    tool = %name,
-                    error = %err,
-                    "ReplyLoop: tool call returned error"
-                );
-                let err_text = format!("error: {err}");
-                if let Some(ts) = &tool_span {
-                    ts.record_output(&err_text, true);
-                }
-                (
-                    vec![ContentBlock::Text {
-                        text: err_text,
-                    }],
-                    true,
-                )
+            if let Some(ts) = &tool_span {
+                ts.record_output(&text, false);
             }
-        };
+            (vec![ContentBlock::Text { text }], false)
+        }
+        Err(err) => {
+            tracing::warn!(
+                task_id = %task_id,
+                tool = %name,
+                error = %err,
+                "ReplyLoop: tool call returned error"
+            );
+            let err_text = format!("error: {err}");
+            if let Some(ts) = &tool_span {
+                ts.record_output(&err_text, true);
+            }
+            (vec![ContentBlock::Text { text: err_text }], true)
+        }
+    };
     if let Some(ts) = tool_span {
         if is_error {
             ts.end_error("tool returned error");
@@ -366,11 +376,14 @@ async fn dispatch_single_tool<'a>(
             ts.end_ok();
         }
     }
-    (idx, ContentBlock::ToolResult {
-        tool_use_id: id,
-        content,
-        is_error,
-    })
+    (
+        idx,
+        ContentBlock::ToolResult {
+            tool_use_id: id,
+            content,
+            is_error,
+        },
+    )
 }
 
 pub(crate) struct ReplyLoopContext<'a> {

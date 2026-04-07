@@ -38,8 +38,10 @@ mod inner {
             }
 
             // memory.max — hard limit, OOM-killed if exceeded.
-            if let Err(e) = fs::write(session_dir.join("memory.max"), memory_limit_bytes.to_string())
-            {
+            if let Err(e) = fs::write(
+                session_dir.join("memory.max"),
+                memory_limit_bytes.to_string(),
+            ) {
                 tracing::debug!(
                     error = %e,
                     "failed to write memory.max, removing cgroup dir"
