@@ -275,6 +275,30 @@ pub(super) struct CodeGraphParams {
     pub kind_filter: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub from_glob: Option<String>,
+    #[serde(default)]
+    pub to_glob: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub min_size: Option<usize>,
+    #[serde(default)]
+    pub visibility: Option<String>,
+    #[serde(default)]
+    pub sort_by: Option<String>,
+    #[serde(default)]
+    pub group_by: Option<String>,
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+    #[serde(default)]
+    pub edge_kind: Option<String>,
 }
 
 #[derive(Deserialize)]

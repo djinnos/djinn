@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::scip_parser::{
     ParsedScipIndex, ScipFile, ScipOccurrence, ScipRelationship, ScipRelationshipKind, ScipSymbol,
-    ScipSymbolKind,
+    ScipSymbolKind, ScipVisibility,
 };
 
 const PAGE_RANK_DAMPING_FACTOR: f64 = 0.85;
@@ -33,6 +33,9 @@ const SYMBOL_KIND_DEFAULT_MULTIPLIER: f64 = 0.9;
 pub struct RepoDependencyGraph {
     graph: DiGraph<RepoGraphNode, RepoGraphEdge>,
     node_lookup: BTreeMap<RepoNodeKey, NodeIndex>,
+    /// Index from lowercased `display_name` to the nodes that use it.
+    /// Populated at build time so `search` is O(log N + k).
+    name_index: BTreeMap<String, Vec<NodeIndex>>,
 }
 
 impl RepoDependencyGraph {
@@ -126,6 +129,191 @@ impl RepoDependencyGraph {
             .map(|edge| edge.weight().weight)
             .sum()
     }
+
+    /// Total inbound edge weight at a node (publicly exposed for ops layer).
+    pub fn inbound_edge_weight(&self, node_index: NodeIndex) -> f64 {
+        self.total_edge_weight(node_index, Incoming)
+    }
+
+    /// Total outbound edge weight at a node (publicly exposed for ops layer).
+    pub fn outbound_edge_weight(&self, node_index: NodeIndex) -> f64 {
+        self.total_edge_weight(node_index, Outgoing)
+    }
+
+    /// Total in-degree at a node (count of inbound edges, regardless of weight).
+    pub fn in_degree(&self, node_index: NodeIndex) -> usize {
+        self.graph.edges_directed(node_index, Incoming).count()
+    }
+
+    /// Total out-degree at a node.
+    pub fn out_degree(&self, node_index: NodeIndex) -> usize {
+        self.graph.edges_directed(node_index, Outgoing).count()
+    }
+
+    /// Search the name index by lowercased display-name. Returns hits ranked
+    /// by:
+    /// 1. exact name match
+    /// 2. suffix match on the display name
+    /// 3. substring match
+    /// then by alphabetical key for stability.
+    pub fn search_by_name(
+        &self,
+        query: &str,
+        kind_filter: Option<RepoGraphNodeKind>,
+        limit: usize,
+    ) -> Vec<RepoGraphSearchHit> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let q = query.to_lowercase();
+        let mut hits: Vec<RepoGraphSearchHit> = Vec::new();
+        for (name, indices) in &self.name_index {
+            if !name.contains(&q) {
+                continue;
+            }
+            let score = if name == &q {
+                3.0
+            } else if name.ends_with(&q) {
+                2.0
+            } else {
+                1.0
+            };
+            for &node_index in indices {
+                let node = &self.graph[node_index];
+                if let Some(filter) = kind_filter {
+                    if node.kind != filter {
+                        continue;
+                    }
+                }
+                hits.push(RepoGraphSearchHit { node_index, score });
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.score.total_cmp(&a.score).then_with(|| {
+                let an = &self.graph[a.node_index].display_name;
+                let bn = &self.graph[b.node_index].display_name;
+                an.len().cmp(&bn.len()).then_with(|| an.cmp(bn))
+            })
+        });
+        hits.truncate(limit);
+        hits
+    }
+
+    /// Strongly-connected components of size >= `min_size` (defaulting filter
+    /// is up to the caller). Trivial single-node SCCs without a self-edge are
+    /// always filtered out.
+    ///
+    /// When `kind_filter` is `Some(File)` or `Some(Symbol)`, the SCC search
+    /// runs over the subgraph restricted to that node kind, so mixed
+    /// file/symbol strongly-connected components (which the raw graph always
+    /// contains because of `ContainsDefinition`/`DeclaredInFile` pairs) do
+    /// not mask the cycles we actually care about.
+    pub fn strongly_connected_components(
+        &self,
+        kind_filter: Option<RepoGraphNodeKind>,
+        min_size: usize,
+    ) -> Vec<Vec<NodeIndex>> {
+        use petgraph::visit::NodeFiltered;
+
+        let sccs = if let Some(filter) = kind_filter {
+            let filtered = NodeFiltered::from_fn(&self.graph, |n| self.graph[n].kind == filter);
+            petgraph::algo::tarjan_scc(&filtered)
+        } else {
+            petgraph::algo::tarjan_scc(&self.graph)
+        };
+        sccs.into_iter()
+            .filter(|component| {
+                if component.len() < min_size {
+                    return false;
+                }
+                if component.len() == 1 {
+                    let n = component[0];
+                    let has_self_edge = self
+                        .graph
+                        .edges_directed(n, Outgoing)
+                        .any(|e| e.target() == n);
+                    if !has_self_edge {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect()
+    }
+
+    /// Find orphan nodes (no incoming *reference* edges) optionally filtered
+    /// by kind and SCIP visibility. `ContainsDefinition` and `DeclaredInFile`
+    /// edges — which are structural "this symbol lives in this file" links,
+    /// not uses of the symbol — are not counted as incoming references.
+    pub fn orphans(
+        &self,
+        kind_filter: Option<RepoGraphNodeKind>,
+        visibility_filter: Option<ScipVisibility>,
+        limit: usize,
+    ) -> Vec<NodeIndex> {
+        let mut out: Vec<NodeIndex> = Vec::new();
+        for node_index in self.graph.node_indices() {
+            let node = &self.graph[node_index];
+            if node.is_external {
+                continue;
+            }
+            if let Some(filter) = kind_filter {
+                if node.kind != filter {
+                    continue;
+                }
+            }
+            if let Some(vis) = visibility_filter {
+                if node.visibility != Some(vis) {
+                    continue;
+                }
+            }
+            let has_incoming_reference =
+                self.graph.edges_directed(node_index, Incoming).any(|edge| {
+                    !matches!(
+                        edge.weight().kind,
+                        RepoGraphEdgeKind::ContainsDefinition | RepoGraphEdgeKind::DeclaredInFile
+                    )
+                });
+            if !has_incoming_reference {
+                out.push(node_index);
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Shortest dependency path between two nodes using A* over edge weights.
+    pub fn shortest_path(
+        &self,
+        from: NodeIndex,
+        to: NodeIndex,
+        max_depth: Option<usize>,
+    ) -> Option<Vec<NodeIndex>> {
+        let result = petgraph::algo::astar(
+            &self.graph,
+            from,
+            |finish| finish == to,
+            |edge| edge.weight().weight,
+            |_| 0.0,
+        );
+        let (_cost, nodes) = result?;
+        if let Some(max) = max_depth {
+            if nodes.len().saturating_sub(1) > max {
+                return None;
+            }
+        }
+        Some(nodes)
+    }
+}
+
+/// Internal hit returned by `search_by_name`. The bridge converts this to the
+/// public `SearchHit` data type.
+#[derive(Debug, Clone)]
+pub struct RepoGraphSearchHit {
+    pub node_index: NodeIndex,
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -151,6 +339,16 @@ pub struct RepoGraphNode {
     pub symbol: Option<String>,
     pub symbol_kind: Option<ScipSymbolKind>,
     pub is_external: bool,
+    /// Visibility of the underlying SCIP symbol, when known. `None` for file
+    /// nodes and for synthetic placeholder symbols.
+    #[serde(default)]
+    pub visibility: Option<ScipVisibility>,
+    /// Symbol signature, copied from `ScipSymbol::signature` when present.
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// Symbol documentation, copied from `ScipSymbol::documentation`.
+    #[serde(default)]
+    pub documentation: Vec<String>,
 }
 
 impl RepoGraphNode {
@@ -366,6 +564,9 @@ impl RepoDependencyGraphBuilder {
             symbol: None,
             symbol_kind: None,
             is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -396,6 +597,9 @@ impl RepoDependencyGraphBuilder {
             symbol: Some(symbol.symbol.clone()),
             symbol_kind: symbol.kind.clone(),
             is_external,
+            visibility: symbol.visibility,
+            signature: symbol.signature.clone(),
+            documentation: symbol.documentation.clone(),
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -432,6 +636,9 @@ impl RepoDependencyGraphBuilder {
             signature: None,
             documentation: Vec::new(),
             relationships: Vec::new(),
+            visibility: Some(crate::scip_parser::ScipVisibility::from_symbol_identifier(
+                &occurrence.symbol,
+            )),
         };
         self.ensure_symbol_node(
             &symbol,
@@ -452,6 +659,7 @@ impl RepoDependencyGraphBuilder {
 
         let file_path = self.symbol_file.get(symbol).cloned();
         let language = self.symbol_language.get(symbol).cloned();
+        let is_external = !self.declared_symbols.contains(symbol);
         let node = RepoGraphNode {
             id: RepoNodeKey::Symbol(symbol.to_string()),
             kind: RepoGraphNodeKind::Symbol,
@@ -460,7 +668,10 @@ impl RepoDependencyGraphBuilder {
             file_path,
             symbol: Some(symbol.to_string()),
             symbol_kind: None,
-            is_external: !self.declared_symbols.contains(symbol),
+            is_external,
+            visibility: Some(ScipVisibility::from_symbol_identifier(symbol)),
+            signature: None,
+            documentation: Vec::new(),
         };
         let key = node.id.clone();
         let node_index = self.graph.add_node(node);
@@ -494,11 +705,25 @@ impl RepoDependencyGraphBuilder {
             );
         }
 
+        let name_index = build_name_index(&self.graph);
         RepoDependencyGraph {
             graph: self.graph,
             node_lookup: self.node_lookup,
+            name_index,
         }
     }
+}
+
+fn build_name_index(
+    graph: &DiGraph<RepoGraphNode, RepoGraphEdge>,
+) -> BTreeMap<String, Vec<NodeIndex>> {
+    let mut index: BTreeMap<String, Vec<NodeIndex>> = BTreeMap::new();
+    for node_index in graph.node_indices() {
+        let node = &graph[node_index];
+        let key = node.display_name.to_lowercase();
+        index.entry(key).or_default().push(node_index);
+    }
+    index
 }
 
 /// Minimal serializable artifact capturing the per-file and per-symbol graph
@@ -576,7 +801,12 @@ impl RepoDependencyGraph {
             );
         }
 
-        RepoDependencyGraph { graph, node_lookup }
+        let name_index = build_name_index(&graph);
+        RepoDependencyGraph {
+            graph,
+            node_lookup,
+            name_index,
+        }
     }
 
     /// Serialize the graph artifact to a JSON string for DB storage.
@@ -821,6 +1051,7 @@ mod tests {
             signature: Some("fn helper()".to_string()),
             documentation: vec!["returns a value".to_string()],
             relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
         let trait_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -829,6 +1060,7 @@ mod tests {
             signature: None,
             documentation: vec![],
             relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
         let main_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -841,6 +1073,7 @@ mod tests {
                 target_symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
                 kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
             }],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
 
         ParsedScipIndex {
@@ -1011,6 +1244,7 @@ mod tests {
             signature: Some("fn run()".to_string()),
             documentation: vec![],
             relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
         let new_index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -1092,6 +1326,7 @@ mod tests {
             signature: None,
             documentation: vec![],
             relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
         let new_index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -1145,6 +1380,7 @@ mod tests {
             signature: Some("struct Widget".to_string()),
             documentation: vec![],
             relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
         let new_index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -1181,5 +1417,172 @@ mod tests {
             !patched_rendered.content.contains("main"),
             "patched map should not contain the removed main symbol"
         );
+    }
+
+    // ── Chunk B: search / cycles / orphans / path tests ─────────────────────
+
+    #[test]
+    fn search_by_name_finds_substring_and_ranks_exact_first() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let hits = graph.search_by_name("helper", None, 10);
+        assert!(!hits.is_empty(), "expected at least one hit for 'helper'");
+        // The exact-name hit (display_name = "helper") should be first.
+        let first = &graph.node(hits[0].node_index).display_name;
+        assert_eq!(first.to_lowercase(), "helper");
+    }
+
+    #[test]
+    fn search_by_name_respects_kind_filter() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let hits = graph.search_by_name("helper", Some(RepoGraphNodeKind::Symbol), 10);
+        for hit in &hits {
+            assert_eq!(graph.node(hit.node_index).kind, RepoGraphNodeKind::Symbol);
+        }
+    }
+
+    #[test]
+    fn cycles_finds_symbol_cycle_via_relationships() {
+        // Two mutually-referencing symbols via SCIP relationships create a
+        // symbol-level cycle that tarjan_scc must report.
+        let a_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/a.rs `a_fn`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("a_fn".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![ScipRelationship {
+                source_symbol: "scip-rust pkg src/a.rs `a_fn`().".to_string(),
+                target_symbol: "scip-rust pkg src/b.rs `b_fn`().".to_string(),
+                kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
+            }],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let b_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/b.rs `b_fn`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("b_fn".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![ScipRelationship {
+                source_symbol: "scip-rust pkg src/b.rs `b_fn`().".to_string(),
+                target_symbol: "scip-rust pkg src/a.rs `a_fn`().".to_string(),
+                kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
+            }],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/a.rs"),
+                    definitions: vec![definition_occurrence(&a_sym.symbol)],
+                    references: vec![],
+                    occurrences: vec![definition_occurrence(&a_sym.symbol)],
+                    symbols: vec![a_sym.clone()],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/b.rs"),
+                    definitions: vec![definition_occurrence(&b_sym.symbol)],
+                    references: vec![],
+                    occurrences: vec![definition_occurrence(&b_sym.symbol)],
+                    symbols: vec![b_sym.clone()],
+                },
+            ],
+            external_symbols: vec![],
+        };
+        let graph = RepoDependencyGraph::build(&[index]);
+        let sccs = graph.strongly_connected_components(Some(RepoGraphNodeKind::Symbol), 2);
+        let has_two_symbol_cycle = sccs.iter().any(|component| {
+            component.len() >= 2
+                && component
+                    .iter()
+                    .all(|n| graph.node(*n).kind == RepoGraphNodeKind::Symbol)
+        });
+        assert!(
+            has_two_symbol_cycle,
+            "expected a symbol-level cycle of size >= 2; got SCCs: {sccs:?}"
+        );
+    }
+
+    #[test]
+    fn orphans_filters_by_visibility() {
+        let public_unused = ScipSymbol {
+            symbol: "scip-rust pkg src/lib.rs `PublicUnused`#".to_string(),
+            kind: Some(ScipSymbolKind::Type),
+            display_name: Some("PublicUnused".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let private_unused = ScipSymbol {
+            symbol: "local 1".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("private_unused".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Private),
+        };
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/lib.rs"),
+                definitions: vec![
+                    definition_occurrence(&public_unused.symbol),
+                    definition_occurrence(&private_unused.symbol),
+                ],
+                references: vec![],
+                occurrences: vec![
+                    definition_occurrence(&public_unused.symbol),
+                    definition_occurrence(&private_unused.symbol),
+                ],
+                symbols: vec![public_unused.clone(), private_unused.clone()],
+            }],
+            external_symbols: vec![],
+        };
+        let graph = RepoDependencyGraph::build(&[index]);
+
+        let public_orphans = graph.orphans(
+            Some(RepoGraphNodeKind::Symbol),
+            Some(crate::scip_parser::ScipVisibility::Public),
+            100,
+        );
+        let public_names: Vec<String> = public_orphans
+            .iter()
+            .map(|idx| graph.node(*idx).display_name.clone())
+            .collect();
+        assert!(public_names.iter().any(|n| n == "PublicUnused"));
+        assert!(!public_names.iter().any(|n| n == "private_unused"));
+
+        let private_orphans = graph.orphans(
+            Some(RepoGraphNodeKind::Symbol),
+            Some(crate::scip_parser::ScipVisibility::Private),
+            100,
+        );
+        let private_names: Vec<String> = private_orphans
+            .iter()
+            .map(|idx| graph.node(*idx).display_name.clone())
+            .collect();
+        assert!(private_names.iter().any(|n| n == "private_unused"));
+        assert!(!private_names.iter().any(|n| n == "PublicUnused"));
+    }
+
+    #[test]
+    fn shortest_path_finds_route_between_two_nodes() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let from = graph.file_node("src/app.rs").expect("app file");
+        let to = graph
+            .symbol_node("scip-rust pkg src/helper.rs `helper`().")
+            .expect("helper symbol");
+        let path = graph
+            .shortest_path(from, to, None)
+            .expect("there should be a path from app to helper");
+        assert!(path.len() >= 2);
+        assert_eq!(path[0], from);
+        assert_eq!(*path.last().unwrap(), to);
     }
 }

@@ -1800,6 +1800,7 @@ mod tests {
                     signature: None,
                     documentation: vec![],
                     relationships: vec![],
+                    visibility: Some(crate::scip_parser::ScipVisibility::Public),
                 }],
             }],
             external_symbols: vec![],

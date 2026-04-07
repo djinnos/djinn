@@ -67,6 +67,42 @@ pub struct ScipSymbol {
     pub signature: Option<String>,
     pub documentation: Vec<String>,
     pub relationships: Vec<ScipRelationship>,
+    pub visibility: Option<ScipVisibility>,
+}
+
+/// Symbol visibility, derived from the SCIP symbol identifier shape.
+///
+/// SCIP 0.7 does not carry a dedicated visibility flag on `SymbolInformation`,
+/// so we approximate it: identifiers prefixed with `local ` are document-local
+/// (treated as `Private`); all other global identifiers are reachable across
+/// documents and treated as `Public`. Anything we cannot classify falls back to
+/// `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScipVisibility {
+    Public,
+    Private,
+    Unknown,
+}
+
+impl ScipVisibility {
+    pub fn from_symbol_identifier(symbol: &str) -> Self {
+        if symbol.is_empty() {
+            ScipVisibility::Unknown
+        } else if symbol.starts_with("local ") {
+            ScipVisibility::Private
+        } else {
+            ScipVisibility::Public
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScipVisibility::Public => "public",
+            ScipVisibility::Private => "private",
+            ScipVisibility::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +307,8 @@ fn normalize_symbol(symbol: SymbolInformation) -> Result<ScipSymbol> {
         .map(|relationship| normalize_relationship(&source_symbol, relationship))
         .collect();
 
+    let visibility = ScipVisibility::from_symbol_identifier(&symbol.symbol);
+
     Ok(ScipSymbol {
         symbol: symbol.symbol,
         kind: map_symbol_kind(symbol.kind.enum_value().ok()),
@@ -278,6 +316,7 @@ fn normalize_symbol(symbol: SymbolInformation) -> Result<ScipSymbol> {
         signature,
         documentation: symbol.documentation,
         relationships,
+        visibility: Some(visibility),
     })
 }
 

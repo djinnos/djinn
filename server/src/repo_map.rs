@@ -1592,6 +1592,7 @@ mod tests {
             signature: Some("fn helper()".to_string()),
             documentation: vec!["returns a value".to_string()],
             relationships: vec![],
+            visibility: None,
         };
         let trait_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -1600,6 +1601,7 @@ mod tests {
             signature: None,
             documentation: vec![],
             relationships: vec![],
+            visibility: None,
         };
         let main_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -1612,6 +1614,7 @@ mod tests {
                 target_symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
                 kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
             }],
+            visibility: None,
         };
 
         ParsedScipIndex {

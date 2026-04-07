@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::{
     McpState, bridge,
-    bridge::{GraphNeighbor, ImpactEntry, RankedNode, RepoGraphOps},
+    bridge::{
+        CycleGroup, EdgeEntry, GraphDiff, ImpactResult, NeighborsResult, OrphanEntry, PathResult,
+        RankedNode, RepoGraphOps, SearchHit, SymbolDescription,
+    },
     tools::task_tools::ErrorResponse,
 };
 use tokio::sync::Mutex;
@@ -117,16 +120,75 @@ impl RepoGraphOps for AgentRepoGraphOps {
         _: &str,
         _: &str,
         _: Option<&str>,
-    ) -> Result<Vec<GraphNeighbor>, String> {
+        _: Option<&str>,
+    ) -> Result<NeighborsResult, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn ranked(&self, _: &str, _: Option<&str>, _: usize) -> Result<Vec<RankedNode>, String> {
+    async fn ranked(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<RankedNode>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn impact(&self, _: &str, _: &str, _: usize) -> Result<Vec<ImpactEntry>, String> {
+    async fn impact(
+        &self,
+        _: &str,
+        _: &str,
+        _: usize,
+        _: Option<&str>,
+    ) -> Result<ImpactResult, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<SearchHit>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn cycles(&self, _: &str, _: Option<&str>, _: usize) -> Result<Vec<CycleGroup>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn orphans(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<OrphanEntry>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn path(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: Option<usize>,
+    ) -> Result<Option<PathResult>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn edges(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<EdgeEntry>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn diff(&self, _: &str, _: Option<&str>) -> Result<Option<GraphDiff>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn describe(&self, _: &str, _: &str) -> Result<Option<SymbolDescription>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
 }

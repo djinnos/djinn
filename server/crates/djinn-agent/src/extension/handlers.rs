@@ -1770,14 +1770,24 @@ pub(crate) async fn call_code_graph(
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'neighbors'")?;
             let neighbors = graph_ops
-                .neighbors(effective_path, key, p.direction.as_deref())
+                .neighbors(
+                    effective_path,
+                    key,
+                    p.direction.as_deref(),
+                    p.group_by.as_deref(),
+                )
                 .await?;
             serde_json::to_value(&neighbors).map_err(|e| format!("serialize error: {e}"))?
         }
         "ranked" => {
             let limit = p.limit.unwrap_or(20);
             let ranked = graph_ops
-                .ranked(effective_path, p.kind_filter.as_deref(), limit)
+                .ranked(
+                    effective_path,
+                    p.kind_filter.as_deref(),
+                    p.sort_by.as_deref(),
+                    limit,
+                )
                 .await?;
             serde_json::to_value(&ranked).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -1797,13 +1807,98 @@ pub(crate) async fn call_code_graph(
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'impact'")?;
             let depth = p.limit.unwrap_or(3);
-            let impact = graph_ops.impact(effective_path, key, depth).await?;
+            let impact = graph_ops
+                .impact(effective_path, key, depth, p.group_by.as_deref())
+                .await?;
             serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "search" => {
+            let query = p
+                .query
+                .as_deref()
+                .filter(|q| !q.is_empty())
+                .ok_or("'query' is required for 'search'")?;
+            let limit = p.limit.unwrap_or(20);
+            let hits = graph_ops
+                .search(effective_path, query, p.kind_filter.as_deref(), limit)
+                .await?;
+            serde_json::to_value(&hits).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "cycles" => {
+            let min_size = p.min_size.unwrap_or(2);
+            let cycles = graph_ops
+                .cycles(effective_path, p.kind_filter.as_deref(), min_size)
+                .await?;
+            serde_json::to_value(&cycles).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "orphans" => {
+            let limit = p.limit.unwrap_or(50);
+            let orphans = graph_ops
+                .orphans(
+                    effective_path,
+                    p.kind_filter.as_deref(),
+                    p.visibility.as_deref(),
+                    limit,
+                )
+                .await?;
+            serde_json::to_value(&orphans).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "path" => {
+            let from = p
+                .from
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or("'from' is required for 'path'")?;
+            let to =
+                p.to.as_deref()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("'to' is required for 'path'")?;
+            let path = graph_ops
+                .path(effective_path, from, to, p.max_depth)
+                .await?;
+            serde_json::to_value(&path).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "edges" => {
+            let from_glob = p
+                .from_glob
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or("'from_glob' is required for 'edges'")?;
+            let to_glob = p
+                .to_glob
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or("'to_glob' is required for 'edges'")?;
+            let limit = p.limit.unwrap_or(100);
+            let edges = graph_ops
+                .edges(
+                    effective_path,
+                    from_glob,
+                    to_glob,
+                    p.edge_kind.as_deref(),
+                    limit,
+                )
+                .await?;
+            serde_json::to_value(&edges).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "diff" => {
+            let diff = graph_ops.diff(effective_path, p.since.as_deref()).await?;
+            serde_json::to_value(&diff).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "describe" => {
+            let key = p
+                .key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .ok_or("'key' is required for 'describe'")?;
+            let description = graph_ops.describe(effective_path, key).await?;
+            serde_json::to_value(&description).map_err(|e| format!("serialize error: {e}"))?
         }
         other => {
             return Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
-                 'neighbors', 'ranked', 'impact', 'implementations'"
+                 'neighbors', 'ranked', 'impact', 'implementations', \
+                 'search', 'cycles', 'orphans', 'path', 'edges', 'diff', 'describe'"
             ));
         }
     };

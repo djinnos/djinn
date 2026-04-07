@@ -173,6 +173,118 @@ pub struct RankedNode {
     pub score: f64,
     pub page_rank: f64,
     pub structural_weight: f64,
+    pub inbound_edge_weight: f64,
+    pub outbound_edge_weight: f64,
+}
+
+/// A search hit from the name-index lookup. Returned by `search`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchHit {
+    pub key: String,
+    pub kind: String,
+    pub display_name: String,
+    pub score: f64,
+    pub file: Option<String>,
+}
+
+/// A member of a strongly-connected component.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CycleMember {
+    pub key: String,
+    pub display_name: String,
+    pub kind: String,
+}
+
+/// A strongly-connected component returned by `cycles`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CycleGroup {
+    pub size: usize,
+    pub members: Vec<CycleMember>,
+}
+
+/// An orphan node (zero incoming references) returned by `orphans`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OrphanEntry {
+    pub key: String,
+    pub kind: String,
+    pub display_name: String,
+    pub file: Option<String>,
+    pub visibility: String,
+}
+
+/// A single hop in a `path` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PathHop {
+    pub key: String,
+    pub edge_kind: String,
+}
+
+/// Result of a `path` query — the shortest dependency path from one node to
+/// another.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PathResult {
+    pub from: String,
+    pub to: String,
+    pub hops: Vec<PathHop>,
+    pub length: usize,
+}
+
+/// An edge enumerated by `edges`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct EdgeEntry {
+    pub from: String,
+    pub to: String,
+    pub edge_kind: String,
+    pub edge_weight: f64,
+}
+
+/// A node referenced by a graph diff.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GraphDiffNode {
+    pub key: String,
+    pub kind: String,
+    pub display_name: String,
+}
+
+/// An edge referenced by a graph diff.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GraphDiffEdge {
+    pub from: String,
+    pub to: String,
+    pub edge_kind: String,
+}
+
+/// Result of a `diff` query — what changed between two graph snapshots.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GraphDiff {
+    pub base_commit: Option<String>,
+    pub head_commit: Option<String>,
+    pub added_nodes: Vec<GraphDiffNode>,
+    pub removed_nodes: Vec<GraphDiffNode>,
+    pub added_edges: Vec<GraphDiffEdge>,
+    pub removed_edges: Vec<GraphDiffEdge>,
+}
+
+/// A symbol description sourced from `ScipSymbol` fields without an LSP round
+/// trip.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SymbolDescription {
+    pub key: String,
+    pub kind: String,
+    pub display_name: String,
+    pub signature: Option<String>,
+    pub documentation: Option<String>,
+    pub file: Option<String>,
+}
+
+/// Per-file rollup of `impact`/`neighbors` results, returned when
+/// `group_by="file"` is set.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FileGroupEntry {
+    pub file: String,
+    pub occurrence_count: usize,
+    pub max_depth: usize,
+    pub sample_keys: Vec<String>,
 }
 
 /// An impact-set entry: a node transitively dependent on the queried node.
@@ -182,21 +294,40 @@ pub struct ImpactEntry {
     pub depth: usize,
 }
 
+/// Either symbol-level neighbors/impact or per-file rollup.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum NeighborsResult {
+    Detailed(Vec<GraphNeighbor>),
+    Grouped(Vec<FileGroupEntry>),
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ImpactResult {
+    Detailed(Vec<ImpactEntry>),
+    Grouped(Vec<FileGroupEntry>),
+}
+
 #[async_trait]
 pub trait RepoGraphOps: Send + Sync {
-    /// Neighbors of a file or symbol node (edges in/out).
+    /// Neighbors of a file or symbol node (edges in/out). When `group_by` is
+    /// `Some("file")`, results are collapsed into per-file rollups.
     async fn neighbors(
         &self,
         project_path: &str,
         key: &str,
         direction: Option<&str>,
-    ) -> Result<Vec<GraphNeighbor>, String>;
+        group_by: Option<&str>,
+    ) -> Result<NeighborsResult, String>;
 
-    /// Top-ranked nodes by PageRank + structural weight.
+    /// Top-ranked nodes by PageRank + structural weight. `sort_by` can be one
+    /// of `pagerank` (default), `in_degree`, `out_degree`, or `total_degree`.
     async fn ranked(
         &self,
         project_path: &str,
         kind_filter: Option<&str>,
+        sort_by: Option<&str>,
         limit: usize,
     ) -> Result<Vec<RankedNode>, String>;
 
@@ -207,11 +338,75 @@ pub trait RepoGraphOps: Send + Sync {
         symbol: &str,
     ) -> Result<Vec<String>, String>;
 
-    /// Transitive impact set — nodes that depend on the queried node.
+    /// Transitive impact set — nodes that depend on the queried node. When
+    /// `group_by` is `Some("file")`, results are collapsed into per-file
+    /// rollups.
     async fn impact(
         &self,
         project_path: &str,
         key: &str,
         depth: usize,
-    ) -> Result<Vec<ImpactEntry>, String>;
+        group_by: Option<&str>,
+    ) -> Result<ImpactResult, String>;
+
+    /// Name-based symbol search.
+    async fn search(
+        &self,
+        project_path: &str,
+        query: &str,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, String>;
+
+    /// Strongly-connected components of size >= `min_size`.
+    async fn cycles(
+        &self,
+        project_path: &str,
+        kind_filter: Option<&str>,
+        min_size: usize,
+    ) -> Result<Vec<CycleGroup>, String>;
+
+    /// Bulk dead-symbol enumeration (nodes with zero incoming references).
+    async fn orphans(
+        &self,
+        project_path: &str,
+        kind_filter: Option<&str>,
+        visibility: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OrphanEntry>, String>;
+
+    /// Shortest dependency path between two nodes.
+    async fn path(
+        &self,
+        project_path: &str,
+        from: &str,
+        to: &str,
+        max_depth: Option<usize>,
+    ) -> Result<Option<PathResult>, String>;
+
+    /// Enumerate edges matching path globs.
+    async fn edges(
+        &self,
+        project_path: &str,
+        from_glob: &str,
+        to_glob: &str,
+        edge_kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<EdgeEntry>, String>;
+
+    /// Diff between the current canonical graph and its in-memory predecessor.
+    /// `since` accepts `None` or `Some("previous")`. Anything else returns an
+    /// error explaining persistent diff is not yet supported.
+    async fn diff(
+        &self,
+        project_path: &str,
+        since: Option<&str>,
+    ) -> Result<Option<GraphDiff>, String>;
+
+    /// Detailed description of a single symbol.
+    async fn describe(
+        &self,
+        project_path: &str,
+        key: &str,
+    ) -> Result<Option<SymbolDescription>, String>;
 }

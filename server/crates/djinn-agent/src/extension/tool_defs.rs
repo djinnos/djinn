@@ -313,14 +313,28 @@ pub(crate) fn tool_lsp() -> RmcpTool {
 pub(crate) fn tool_code_graph() -> RmcpTool {
     RmcpTool::new(
         "code_graph".to_string(),
-        "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol).".to_string(),
+        "Query the repository dependency graph built from SCIP indexer output. Operations: \
+         neighbors (edges in/out of a node; group_by=file for per-file rollup), \
+         ranked (top nodes by PageRank or degree; sort_by pagerank|in_degree|out_degree|total_degree), \
+         impact (transitive dependents; group_by=file for per-file rollup), \
+         implementations (find implementors of a trait/interface symbol), \
+         search (name-based symbol lookup via query substring), \
+         cycles (strongly-connected components of size >= min_size), \
+         orphans (zero-incoming-reference nodes filtered by visibility public|private|any), \
+         path (shortest dependency path from→to), \
+         edges (enumerate edges matching from_glob→to_glob), \
+         diff (what changed since the previous canonical graph — only since=previous supported), \
+         describe (symbol signature/documentation without an LSP round trip).".to_string(),
         object!({
             "type": "object",
             "required": ["operation", "project_path"],
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["neighbors", "ranked", "impact", "implementations"],
+                    "enum": [
+                        "neighbors", "ranked", "impact", "implementations",
+                        "search", "cycles", "orphans", "path", "edges", "diff", "describe"
+                    ],
                     "description": "Graph query to perform"
                 },
                 "project_path": {
@@ -329,7 +343,7 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                 },
                 "key": {
                     "type": "string",
-                    "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations)"
+                    "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe)"
                 },
                 "direction": {
                     "type": "string",
@@ -339,12 +353,65 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                 "kind_filter": {
                     "type": "string",
                     "enum": ["file", "symbol"],
-                    "description": "Node kind filter for ranked"
+                    "description": "Node kind filter for ranked/search/cycles/orphans"
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max results for ranked (default 20) or max traversal depth for impact (default 3)"
+                    "description": "Max results (ranked/search/orphans/edges) or max traversal depth (impact)"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Substring query for search"
+                },
+                "from": {
+                    "type": "string",
+                    "description": "Source node for path"
+                },
+                "to": {
+                    "type": "string",
+                    "description": "Destination node for path"
+                },
+                "from_glob": {
+                    "type": "string",
+                    "description": "Source path glob for edges"
+                },
+                "to_glob": {
+                    "type": "string",
+                    "description": "Destination path glob for edges"
+                },
+                "since": {
+                    "type": "string",
+                    "description": "Diff base selector for diff (currently only 'previous')"
+                },
+                "min_size": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "description": "Minimum SCC size for cycles (default 2)"
+                },
+                "visibility": {
+                    "type": "string",
+                    "enum": ["public", "private", "any"],
+                    "description": "Visibility filter for orphans (default any)"
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["pagerank", "in_degree", "out_degree", "total_degree"],
+                    "description": "Sort key for ranked (default pagerank)"
+                },
+                "group_by": {
+                    "type": "string",
+                    "enum": ["file"],
+                    "description": "Group impact/neighbors results by file"
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum depth for path"
+                },
+                "edge_kind": {
+                    "type": "string",
+                    "description": "Edge-kind filter for edges"
                 }
             }
         }),

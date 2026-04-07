@@ -248,7 +248,7 @@ expression: tool_schemas_architect()
     "name": "lsp"
   },
   {
-    "description": "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol).",
+    "description": "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node; group_by=file for per-file rollup), ranked (top nodes by PageRank or degree; sort_by pagerank|in_degree|out_degree|total_degree), impact (transitive dependents; group_by=file for per-file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup via query substring), cycles (strongly-connected components of size >= min_size), orphans (zero-incoming-reference nodes filtered by visibility public|private|any), path (shortest dependency path from→to), edges (enumerate edges matching from_glob→to_glob), diff (what changed since the previous canonical graph — only since=previous supported), describe (symbol signature/documentation without an LSP round trip).",
     "inputSchema": {
       "properties": {
         "direction": {
@@ -259,12 +259,31 @@ expression: tool_schemas_architect()
           ],
           "type": "string"
         },
+        "edge_kind": {
+          "description": "Edge-kind filter for edges",
+          "type": "string"
+        },
+        "from": {
+          "description": "Source node for path",
+          "type": "string"
+        },
+        "from_glob": {
+          "description": "Source path glob for edges",
+          "type": "string"
+        },
+        "group_by": {
+          "description": "Group impact/neighbors results by file",
+          "enum": [
+            "file"
+          ],
+          "type": "string"
+        },
         "key": {
-          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations)",
+          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe)",
           "type": "string"
         },
         "kind_filter": {
-          "description": "Node kind filter for ranked",
+          "description": "Node kind filter for ranked/search/cycles/orphans",
           "enum": [
             "file",
             "symbol"
@@ -272,8 +291,18 @@ expression: tool_schemas_architect()
           "type": "string"
         },
         "limit": {
-          "description": "Max results for ranked (default 20) or max traversal depth for impact (default 3)",
+          "description": "Max results (ranked/search/orphans/edges) or max traversal depth (impact)",
           "minimum": 1,
+          "type": "integer"
+        },
+        "max_depth": {
+          "description": "Maximum depth for path",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "min_size": {
+          "description": "Minimum SCC size for cycles (default 2)",
+          "minimum": 2,
           "type": "integer"
         },
         "operation": {
@@ -282,12 +311,54 @@ expression: tool_schemas_architect()
             "neighbors",
             "ranked",
             "impact",
-            "implementations"
+            "implementations",
+            "search",
+            "cycles",
+            "orphans",
+            "path",
+            "edges",
+            "diff",
+            "describe"
           ],
           "type": "string"
         },
         "project_path": {
           "description": "Absolute path to project root",
+          "type": "string"
+        },
+        "query": {
+          "description": "Substring query for search",
+          "type": "string"
+        },
+        "since": {
+          "description": "Diff base selector for diff (currently only 'previous')",
+          "type": "string"
+        },
+        "sort_by": {
+          "description": "Sort key for ranked (default pagerank)",
+          "enum": [
+            "pagerank",
+            "in_degree",
+            "out_degree",
+            "total_degree"
+          ],
+          "type": "string"
+        },
+        "to": {
+          "description": "Destination node for path",
+          "type": "string"
+        },
+        "to_glob": {
+          "description": "Destination path glob for edges",
+          "type": "string"
+        },
+        "visibility": {
+          "description": "Visibility filter for orphans (default any)",
+          "enum": [
+            "public",
+            "private",
+            "any"
+          ],
           "type": "string"
         }
       },

@@ -12,9 +12,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::bridge::{
-    ChannelStatus, CoordinatorOps, CoordinatorStatus, GitOps, GraphNeighbor, ImpactEntry, LspOps,
-    LspWarning, ModelPoolStatus, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo, RuntimeOps,
-    SlotPoolOps, SyncOps, SyncResult,
+    ChannelStatus, CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry,
+    FileGroupEntry, GitOps, GraphDiff, GraphDiffEdge, GraphDiffNode, GraphNeighbor, ImpactEntry,
+    ImpactResult, LspOps, LspWarning, ModelPoolStatus, NeighborsResult, OrphanEntry, PathHop,
+    PathResult, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit,
+    SlotPoolOps, SymbolDescription, SyncOps, SyncResult,
 };
 use petgraph::visit::EdgeRef;
 use tokio::sync::RwLock;
@@ -43,6 +45,13 @@ struct CachedGraph {
 }
 
 static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+
+/// Previous canonical graph, kept around so `code_graph(operation="diff")`
+/// can compare the current graph against the most recent prior version. The
+/// slot is replaced (not accumulated) on every rebuild — only one historical
+/// step is retained, in-memory only.
+static PREVIOUS_GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
 
 async fn git_head_hash(project_path: &std::path::Path) -> Result<String, String> {
@@ -362,7 +371,8 @@ impl RepoGraphOps for RepoGraphBridge {
         project_path: &str,
         key: &str,
         direction: Option<&str>,
-    ) -> Result<Vec<GraphNeighbor>, String> {
+        group_by: Option<&str>,
+    ) -> Result<NeighborsResult, String> {
         use petgraph::Direction;
         let graph = build_graph_for_project(project_path).await?;
         let node_index = resolve_node(&graph, key)?;
@@ -384,23 +394,39 @@ impl RepoGraphOps for RepoGraphBridge {
                     Direction::Incoming => edge.source(),
                 };
                 let other_node = graph.node(other_index);
-                neighbors.push(GraphNeighbor {
-                    key: format_node_key(&other_node.id),
-                    kind: format!("{:?}", other_node.kind).to_lowercase(),
-                    display_name: other_node.display_name.clone(),
-                    edge_kind: format!("{:?}", edge.weight().kind),
-                    edge_weight: edge.weight().weight,
-                    direction: dir_label.to_string(),
-                });
+                neighbors.push((
+                    other_node,
+                    GraphNeighbor {
+                        key: format_node_key(&other_node.id),
+                        kind: format!("{:?}", other_node.kind).to_lowercase(),
+                        display_name: other_node.display_name.clone(),
+                        edge_kind: format!("{:?}", edge.weight().kind),
+                        edge_weight: edge.weight().weight,
+                        direction: dir_label.to_string(),
+                    },
+                ));
             }
         }
-        Ok(neighbors)
+
+        match group_by {
+            None => Ok(NeighborsResult::Detailed(
+                neighbors.into_iter().map(|(_, n)| n).collect(),
+            )),
+            Some("file") => {
+                let groups = group_neighbors_by_file(&neighbors);
+                Ok(NeighborsResult::Grouped(groups))
+            }
+            Some(other) => Err(format!(
+                "invalid group_by '{other}': only 'file' is supported"
+            )),
+        }
     }
 
     async fn ranked(
         &self,
         project_path: &str,
         kind_filter: Option<&str>,
+        sort_by: Option<&str>,
         limit: usize,
     ) -> Result<Vec<RankedNode>, String> {
         use crate::repo_graph::RepoGraphNodeKind;
@@ -411,11 +437,10 @@ impl RepoGraphOps for RepoGraphBridge {
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
             _ => None,
         };
-        let nodes: Vec<RankedNode> = ranking
+        let mut nodes: Vec<RankedNode> = ranking
             .nodes
             .iter()
             .filter(|node| filter.is_none() || Some(node.kind) == filter)
-            .take(limit)
             .map(|node| {
                 let graph_node = graph.node(node.node_index);
                 RankedNode {
@@ -425,9 +450,38 @@ impl RepoGraphOps for RepoGraphBridge {
                     score: node.score,
                     page_rank: node.page_rank,
                     structural_weight: node.structural_weight,
+                    inbound_edge_weight: node.inbound_edge_weight,
+                    outbound_edge_weight: node.outbound_edge_weight,
                 }
             })
             .collect();
+
+        match sort_by {
+            None | Some("pagerank") => {
+                // already in pagerank order
+            }
+            Some("in_degree") => {
+                nodes.sort_by(|a, b| b.inbound_edge_weight.total_cmp(&a.inbound_edge_weight));
+            }
+            Some("out_degree") => {
+                nodes.sort_by(|a, b| b.outbound_edge_weight.total_cmp(&a.outbound_edge_weight));
+            }
+            Some("total_degree") => {
+                nodes.sort_by(|a, b| {
+                    let total_b = b.inbound_edge_weight + b.outbound_edge_weight;
+                    let total_a = a.inbound_edge_weight + a.outbound_edge_weight;
+                    total_b.total_cmp(&total_a)
+                });
+            }
+            Some(other) => {
+                return Err(format!(
+                    "invalid sort_by '{other}': expected 'pagerank', 'in_degree', \
+                     'out_degree', or 'total_degree'"
+                ));
+            }
+        }
+
+        nodes.truncate(limit);
         Ok(nodes)
     }
 
@@ -441,7 +495,6 @@ impl RepoGraphOps for RepoGraphBridge {
         let node_index = graph
             .symbol_node(symbol)
             .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
-        // Find nodes that have SymbolRelationshipImplementation edges pointing TO this symbol
         let mut impls = Vec::new();
         for edge in graph
             .graph()
@@ -462,23 +515,26 @@ impl RepoGraphOps for RepoGraphBridge {
         project_path: &str,
         key: &str,
         max_depth: usize,
-    ) -> Result<Vec<ImpactEntry>, String> {
+        group_by: Option<&str>,
+    ) -> Result<ImpactResult, String> {
         let graph = build_graph_for_project(project_path).await?;
         let start = resolve_node(&graph, key)?;
-        // BFS over incoming edges to find nodes that depend on this node
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((start, 0usize));
-        let mut result = Vec::new();
+        let mut result: Vec<(petgraph::graph::NodeIndex, ImpactEntry)> = Vec::new();
 
         while let Some((current, depth)) = queue.pop_front() {
             if depth > 0 {
                 let node = graph.node(current);
-                result.push(ImpactEntry {
-                    key: format_node_key(&node.id),
-                    depth,
-                });
+                result.push((
+                    current,
+                    ImpactEntry {
+                        key: format_node_key(&node.id),
+                        depth,
+                    },
+                ));
             }
             if depth < max_depth {
                 for edge in graph
@@ -492,7 +548,493 @@ impl RepoGraphOps for RepoGraphBridge {
                 }
             }
         }
-        Ok(result)
+
+        match group_by {
+            None => Ok(ImpactResult::Detailed(
+                result.into_iter().map(|(_, e)| e).collect(),
+            )),
+            Some("file") => {
+                let groups = group_impact_by_file(&graph, &result);
+                Ok(ImpactResult::Grouped(groups))
+            }
+            Some(other) => Err(format!(
+                "invalid group_by '{other}': only 'file' is supported"
+            )),
+        }
+    }
+
+    async fn search(
+        &self,
+        project_path: &str,
+        query: &str,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, String> {
+        use crate::repo_graph::RepoGraphNodeKind;
+        let graph = build_graph_for_project(project_path).await?;
+        let filter = match kind_filter {
+            Some("file") => Some(RepoGraphNodeKind::File),
+            Some("symbol") => Some(RepoGraphNodeKind::Symbol),
+            _ => None,
+        };
+        let hits = graph.search_by_name(query, filter, limit);
+        Ok(hits
+            .into_iter()
+            .map(|hit| {
+                let node = graph.node(hit.node_index);
+                SearchHit {
+                    key: format_node_key(&node.id),
+                    kind: format!("{:?}", node.kind).to_lowercase(),
+                    display_name: node.display_name.clone(),
+                    score: hit.score,
+                    file: node.file_path.as_ref().map(|p| p.display().to_string()),
+                }
+            })
+            .collect())
+    }
+
+    async fn cycles(
+        &self,
+        project_path: &str,
+        kind_filter: Option<&str>,
+        min_size: usize,
+    ) -> Result<Vec<CycleGroup>, String> {
+        use crate::repo_graph::RepoGraphNodeKind;
+        let graph = build_graph_for_project(project_path).await?;
+        let filter = match kind_filter {
+            Some("file") => Some(RepoGraphNodeKind::File),
+            Some("symbol") => Some(RepoGraphNodeKind::Symbol),
+            _ => None,
+        };
+        let min = min_size.max(2);
+        let sccs = graph.strongly_connected_components(filter, min);
+        Ok(sccs
+            .into_iter()
+            .map(|component| {
+                let members = component
+                    .iter()
+                    .map(|idx| {
+                        let node = graph.node(*idx);
+                        CycleMember {
+                            key: format_node_key(&node.id),
+                            display_name: node.display_name.clone(),
+                            kind: format!("{:?}", node.kind).to_lowercase(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                CycleGroup {
+                    size: component.len(),
+                    members,
+                }
+            })
+            .collect())
+    }
+
+    async fn orphans(
+        &self,
+        project_path: &str,
+        kind_filter: Option<&str>,
+        visibility: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OrphanEntry>, String> {
+        use crate::repo_graph::RepoGraphNodeKind;
+        use crate::scip_parser::ScipVisibility;
+        let graph = build_graph_for_project(project_path).await?;
+        let filter = match kind_filter {
+            Some("file") => Some(RepoGraphNodeKind::File),
+            Some("symbol") => Some(RepoGraphNodeKind::Symbol),
+            _ => None,
+        };
+        let vis = match visibility {
+            Some("public") => Some(ScipVisibility::Public),
+            Some("private") => Some(ScipVisibility::Private),
+            None | Some("any") => None,
+            Some(other) => {
+                return Err(format!(
+                    "invalid visibility '{other}': expected 'public', 'private', or 'any'"
+                ));
+            }
+        };
+        let nodes = graph.orphans(filter, vis, limit);
+        Ok(nodes
+            .into_iter()
+            .map(|idx| {
+                let node = graph.node(idx);
+                OrphanEntry {
+                    key: format_node_key(&node.id),
+                    kind: format!("{:?}", node.kind).to_lowercase(),
+                    display_name: node.display_name.clone(),
+                    file: node.file_path.as_ref().map(|p| p.display().to_string()),
+                    visibility: node
+                        .visibility
+                        .map(|v| v.as_str().to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                }
+            })
+            .collect())
+    }
+
+    async fn path(
+        &self,
+        project_path: &str,
+        from: &str,
+        to: &str,
+        max_depth: Option<usize>,
+    ) -> Result<Option<PathResult>, String> {
+        let graph = build_graph_for_project(project_path).await?;
+        let from_idx = resolve_node(&graph, from)?;
+        let to_idx = resolve_node(&graph, to)?;
+        let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let mut hops = Vec::with_capacity(path.len());
+        for window in path.windows(2) {
+            let (src, dst) = (window[0], window[1]);
+            let edge_kind = graph
+                .graph()
+                .edges_directed(src, petgraph::Direction::Outgoing)
+                .find(|edge| edge.target() == dst)
+                .map(|edge| format!("{:?}", edge.weight().kind))
+                .unwrap_or_else(|| "unknown".to_string());
+            let dst_node = graph.node(dst);
+            hops.push(PathHop {
+                key: format_node_key(&dst_node.id),
+                edge_kind,
+            });
+        }
+        Ok(Some(PathResult {
+            from: format_node_key(&graph.node(from_idx).id),
+            to: format_node_key(&graph.node(to_idx).id),
+            length: hops.len(),
+            hops,
+        }))
+    }
+
+    async fn edges(
+        &self,
+        project_path: &str,
+        from_glob: &str,
+        to_glob: &str,
+        edge_kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<EdgeEntry>, String> {
+        use globset::Glob;
+        let graph = build_graph_for_project(project_path).await?;
+        let from_matcher = Glob::new(from_glob)
+            .map_err(|e| format!("invalid from_glob '{from_glob}': {e}"))?
+            .compile_matcher();
+        let to_matcher = Glob::new(to_glob)
+            .map_err(|e| format!("invalid to_glob '{to_glob}': {e}"))?
+            .compile_matcher();
+        let mut out = Vec::new();
+        for edge_ref in graph.graph().edge_references() {
+            let src_node = graph.node(edge_ref.source());
+            let dst_node = graph.node(edge_ref.target());
+            let src_key = format_node_key(&src_node.id);
+            let dst_key = format_node_key(&dst_node.id);
+            let src_match_target = src_node
+                .file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| src_node.display_name.clone());
+            let dst_match_target = dst_node
+                .file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| dst_node.display_name.clone());
+            if !from_matcher.is_match(&src_match_target) {
+                continue;
+            }
+            if !to_matcher.is_match(&dst_match_target) {
+                continue;
+            }
+            let kind_label = format!("{:?}", edge_ref.weight().kind);
+            if let Some(filter) = edge_kind {
+                if !kind_label.eq_ignore_ascii_case(filter) {
+                    continue;
+                }
+            }
+            out.push(EdgeEntry {
+                from: src_key,
+                to: dst_key,
+                edge_kind: kind_label,
+                edge_weight: edge_ref.weight().weight,
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    async fn diff(
+        &self,
+        project_path: &str,
+        since: Option<&str>,
+    ) -> Result<Option<GraphDiff>, String> {
+        match since {
+            None | Some("previous") => {}
+            Some(other) => {
+                return Err(format!(
+                    "invalid since '{other}': only 'previous' is currently supported \
+                     (persistent cross-commit diff is not yet implemented)"
+                ));
+            }
+        }
+        // Ensure the current canonical graph for this project is built / cached.
+        let _ = build_graph_for_project(project_path).await?;
+
+        let current = {
+            let cache = GRAPH_CACHE.read().await;
+            cache
+                .as_ref()
+                .map(|c| (c.graph.clone(), c.git_head.clone()))
+        };
+        let previous = {
+            let cache = PREVIOUS_GRAPH_CACHE.read().await;
+            cache
+                .as_ref()
+                .map(|c| (c.graph.clone(), c.git_head.clone()))
+        };
+        let Some((current, head_commit)) = current else {
+            return Ok(None);
+        };
+        let Some((previous, base_commit)) = previous else {
+            return Ok(Some(GraphDiff {
+                base_commit: None,
+                head_commit: Some(head_commit),
+                added_nodes: collect_diff_nodes(&current),
+                removed_nodes: vec![],
+                added_edges: collect_diff_edges(&current),
+                removed_edges: vec![],
+            }));
+        };
+        Ok(Some(compute_graph_diff(
+            &previous,
+            base_commit,
+            &current,
+            head_commit,
+        )))
+    }
+
+    async fn describe(
+        &self,
+        project_path: &str,
+        key: &str,
+    ) -> Result<Option<SymbolDescription>, String> {
+        let graph = build_graph_for_project(project_path).await?;
+        let node_index = match resolve_node(&graph, key) {
+            Ok(idx) => idx,
+            Err(_) => return Ok(None),
+        };
+        let node = graph.node(node_index);
+        let documentation = if node.documentation.is_empty() {
+            None
+        } else {
+            Some(node.documentation.join("\n"))
+        };
+        Ok(Some(SymbolDescription {
+            key: format_node_key(&node.id),
+            kind: format!("{:?}", node.kind).to_lowercase(),
+            display_name: node.display_name.clone(),
+            signature: node.signature.clone(),
+            documentation,
+            file: node.file_path.as_ref().map(|p| p.display().to_string()),
+        }))
+    }
+}
+
+fn group_neighbors_by_file(
+    neighbors: &[(&crate::repo_graph::RepoGraphNode, GraphNeighbor)],
+) -> Vec<FileGroupEntry> {
+    let mut by_file: std::collections::BTreeMap<String, FileGroupEntry> =
+        std::collections::BTreeMap::new();
+    for (node, neighbor) in neighbors {
+        let file_label = node
+            .file_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| match &node.id {
+                crate::repo_graph::RepoNodeKey::File(p) => p.display().to_string(),
+                crate::repo_graph::RepoNodeKey::Symbol(s) => s.clone(),
+            });
+        let entry = by_file.entry(file_label.clone()).or_insert(FileGroupEntry {
+            file: file_label,
+            occurrence_count: 0,
+            max_depth: 1,
+            sample_keys: Vec::new(),
+        });
+        entry.occurrence_count += 1;
+        if entry.sample_keys.len() < 5 {
+            entry.sample_keys.push(neighbor.key.clone());
+        }
+    }
+    by_file.into_values().collect()
+}
+
+fn group_impact_by_file(
+    graph: &crate::repo_graph::RepoDependencyGraph,
+    entries: &[(petgraph::graph::NodeIndex, ImpactEntry)],
+) -> Vec<FileGroupEntry> {
+    let mut by_file: std::collections::BTreeMap<String, FileGroupEntry> =
+        std::collections::BTreeMap::new();
+    for (idx, entry) in entries {
+        let node = graph.node(*idx);
+        let file_label = node
+            .file_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| node.display_name.clone());
+        let group = by_file.entry(file_label.clone()).or_insert(FileGroupEntry {
+            file: file_label,
+            occurrence_count: 0,
+            max_depth: 0,
+            sample_keys: Vec::new(),
+        });
+        group.occurrence_count += 1;
+        if entry.depth > group.max_depth {
+            group.max_depth = entry.depth;
+        }
+        if group.sample_keys.len() < 5 {
+            group.sample_keys.push(entry.key.clone());
+        }
+    }
+    by_file.into_values().collect()
+}
+
+fn collect_diff_nodes(graph: &crate::repo_graph::RepoDependencyGraph) -> Vec<GraphDiffNode> {
+    graph
+        .graph()
+        .node_indices()
+        .map(|idx| {
+            let node = graph.node(idx);
+            GraphDiffNode {
+                key: format_node_key(&node.id),
+                kind: format!("{:?}", node.kind).to_lowercase(),
+                display_name: node.display_name.clone(),
+            }
+        })
+        .collect()
+}
+
+fn collect_diff_edges(graph: &crate::repo_graph::RepoDependencyGraph) -> Vec<GraphDiffEdge> {
+    graph
+        .graph()
+        .edge_references()
+        .map(|edge| GraphDiffEdge {
+            from: format_node_key(&graph.node(edge.source()).id),
+            to: format_node_key(&graph.node(edge.target()).id),
+            edge_kind: format!("{:?}", edge.weight().kind),
+        })
+        .collect()
+}
+
+fn compute_graph_diff(
+    previous: &crate::repo_graph::RepoDependencyGraph,
+    base_commit: String,
+    current: &crate::repo_graph::RepoDependencyGraph,
+    head_commit: String,
+) -> GraphDiff {
+    use std::collections::BTreeSet;
+
+    fn node_keys(graph: &crate::repo_graph::RepoDependencyGraph) -> BTreeSet<String> {
+        graph
+            .graph()
+            .node_indices()
+            .map(|idx| format_node_key(&graph.node(idx).id))
+            .collect()
+    }
+
+    fn edge_keys(
+        graph: &crate::repo_graph::RepoDependencyGraph,
+    ) -> BTreeSet<(String, String, String)> {
+        graph
+            .graph()
+            .edge_references()
+            .map(|edge| {
+                (
+                    format_node_key(&graph.node(edge.source()).id),
+                    format_node_key(&graph.node(edge.target()).id),
+                    format!("{:?}", edge.weight().kind),
+                )
+            })
+            .collect()
+    }
+
+    let prev_nodes = node_keys(previous);
+    let curr_nodes = node_keys(current);
+    let prev_edges = edge_keys(previous);
+    let curr_edges = edge_keys(current);
+
+    let added_nodes: Vec<GraphDiffNode> = curr_nodes
+        .difference(&prev_nodes)
+        .map(|key| {
+            let display = current
+                .graph()
+                .node_indices()
+                .find(|idx| format_node_key(&current.node(*idx).id) == *key)
+                .map(|idx| {
+                    let node = current.node(idx);
+                    (
+                        node.display_name.clone(),
+                        format!("{:?}", node.kind).to_lowercase(),
+                    )
+                })
+                .unwrap_or_else(|| (key.clone(), "unknown".to_string()));
+            GraphDiffNode {
+                key: key.clone(),
+                kind: display.1,
+                display_name: display.0,
+            }
+        })
+        .collect();
+    let removed_nodes: Vec<GraphDiffNode> = prev_nodes
+        .difference(&curr_nodes)
+        .map(|key| {
+            let display = previous
+                .graph()
+                .node_indices()
+                .find(|idx| format_node_key(&previous.node(*idx).id) == *key)
+                .map(|idx| {
+                    let node = previous.node(idx);
+                    (
+                        node.display_name.clone(),
+                        format!("{:?}", node.kind).to_lowercase(),
+                    )
+                })
+                .unwrap_or_else(|| (key.clone(), "unknown".to_string()));
+            GraphDiffNode {
+                key: key.clone(),
+                kind: display.1,
+                display_name: display.0,
+            }
+        })
+        .collect();
+    let added_edges: Vec<GraphDiffEdge> = curr_edges
+        .difference(&prev_edges)
+        .map(|(from, to, edge_kind)| GraphDiffEdge {
+            from: from.clone(),
+            to: to.clone(),
+            edge_kind: edge_kind.clone(),
+        })
+        .collect();
+    let removed_edges: Vec<GraphDiffEdge> = prev_edges
+        .difference(&curr_edges)
+        .map(|(from, to, edge_kind)| GraphDiffEdge {
+            from: from.clone(),
+            to: to.clone(),
+            edge_kind: edge_kind.clone(),
+        })
+        .collect();
+
+    GraphDiff {
+        base_commit: Some(base_commit),
+        head_commit: Some(head_commit),
+        added_nodes,
+        removed_nodes,
+        added_edges,
+        removed_edges,
     }
 }
 
@@ -639,6 +1181,11 @@ async fn build_graph_for_project(
     // ── Update cache ───────────────────────────────────────────────────────
     {
         let mut cache = GRAPH_CACHE.write().await;
+        let old = cache.take();
+        if let Some(prior) = old {
+            let mut previous = PREVIOUS_GRAPH_CACHE.write().await;
+            *previous = Some(prior);
+        }
         *cache = Some(CachedGraph {
             graph: graph.clone(),
             project_path,
@@ -648,6 +1195,36 @@ async fn build_graph_for_project(
     }
 
     Ok(graph)
+}
+
+/// Test helper: install a graph as the current canonical graph and the
+/// supplied predecessor in the previous slot. Used by integration tests for
+/// the `diff` operation.
+#[cfg(test)]
+#[allow(dead_code)]
+async fn install_test_graphs(
+    project_path: &Path,
+    previous: Option<crate::repo_graph::RepoDependencyGraph>,
+    current: crate::repo_graph::RepoDependencyGraph,
+) {
+    {
+        let mut prev_cache = PREVIOUS_GRAPH_CACHE.write().await;
+        *prev_cache = previous.map(|graph| CachedGraph {
+            graph,
+            project_path: project_path.to_path_buf(),
+            git_head: "previous".into(),
+            built_at: std::time::Instant::now(),
+        });
+    }
+    {
+        let mut cache = GRAPH_CACHE.write().await;
+        *cache = Some(CachedGraph {
+            graph: current,
+            project_path: project_path.to_path_buf(),
+            git_head: "current".into(),
+            built_at: std::time::Instant::now(),
+        });
+    }
 }
 
 impl AppState {
@@ -701,6 +1278,7 @@ mod graph_bridge_tests {
             signature: Some("fn helper()".to_string()),
             documentation: vec![],
             relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
         let trait_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -709,6 +1287,7 @@ mod graph_bridge_tests {
             signature: None,
             documentation: vec![],
             relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
         let main_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -721,6 +1300,7 @@ mod graph_bridge_tests {
                 target_symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
                 kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
             }],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
 
         fn def_occ(symbol: &str) -> ScipOccurrence {
@@ -870,6 +1450,8 @@ mod graph_bridge_tests {
                     score: node.score,
                     page_rank: node.page_rank,
                     structural_weight: node.structural_weight,
+                    inbound_edge_weight: node.inbound_edge_weight,
+                    outbound_edge_weight: node.outbound_edge_weight,
                 }
             })
             .collect();
@@ -940,6 +1522,73 @@ mod graph_bridge_tests {
         assert!(
             !result.is_empty(),
             "expected at least one node in the impact set"
+        );
+    }
+
+    #[test]
+    fn compute_graph_diff_reports_added_and_removed_nodes() {
+        // Previous graph has one file; current graph has that file plus a new one.
+        let previous = build_test_graph();
+        let current = {
+            let new_index = ParsedScipIndex {
+                metadata: ScipMetadata::default(),
+                files: vec![ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/new_module.rs"),
+                    definitions: vec![ScipOccurrence {
+                        symbol: "scip-rust pkg src/new_module.rs `new_sym`().".to_string(),
+                        range: ScipRange {
+                            start_line: 0,
+                            start_character: 0,
+                            end_line: 0,
+                            end_character: 6,
+                        },
+                        enclosing_range: None,
+                        roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                        syntax_kind: None,
+                        override_documentation: vec![],
+                    }],
+                    references: vec![],
+                    occurrences: vec![],
+                    symbols: vec![ScipSymbol {
+                        symbol: "scip-rust pkg src/new_module.rs `new_sym`().".to_string(),
+                        kind: Some(ScipSymbolKind::Function),
+                        display_name: Some("new_sym".to_string()),
+                        signature: None,
+                        documentation: vec![],
+                        relationships: vec![],
+                        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+                    }],
+                }],
+                external_symbols: vec![],
+            };
+            let mut files = fixture_index().files;
+            files.push(new_index.files.into_iter().next().unwrap());
+            RepoDependencyGraph::build(&[ParsedScipIndex {
+                metadata: ScipMetadata::default(),
+                files,
+                external_symbols: vec![],
+            }])
+        };
+
+        let diff = compute_graph_diff(&previous, "base".to_string(), &current, "head".to_string());
+        assert_eq!(diff.base_commit.as_deref(), Some("base"));
+        assert_eq!(diff.head_commit.as_deref(), Some("head"));
+        let added_names: Vec<String> = diff
+            .added_nodes
+            .iter()
+            .map(|n| n.display_name.clone())
+            .collect();
+        assert!(
+            added_names
+                .iter()
+                .any(|n| n.contains("new_module") || n == "new_sym"),
+            "expected new_module.rs or new_sym in added nodes, got {:?}",
+            added_names
+        );
+        assert!(
+            diff.removed_nodes.is_empty(),
+            "no nodes should be removed in this scenario"
         );
     }
 }

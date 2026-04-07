@@ -269,12 +269,14 @@ pub(crate) mod stubs {
             _: &str,
             _: &str,
             _: Option<&str>,
-        ) -> Result<Vec<GraphNeighbor>, String> {
-            Ok(vec![])
+            _: Option<&str>,
+        ) -> Result<crate::bridge::NeighborsResult, String> {
+            Ok(crate::bridge::NeighborsResult::Detailed(vec![]))
         }
         async fn ranked(
             &self,
             _: &str,
+            _: Option<&str>,
             _: Option<&str>,
             _: usize,
         ) -> Result<Vec<RankedNode>, String> {
@@ -283,8 +285,73 @@ pub(crate) mod stubs {
         async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
             Ok(vec![])
         }
-        async fn impact(&self, _: &str, _: &str, _: usize) -> Result<Vec<ImpactEntry>, String> {
+        async fn impact(
+            &self,
+            _: &str,
+            _: &str,
+            _: usize,
+            _: Option<&str>,
+        ) -> Result<crate::bridge::ImpactResult, String> {
+            Ok(crate::bridge::ImpactResult::Detailed(vec![]))
+        }
+        async fn search(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::SearchHit>, String> {
             Ok(vec![])
+        }
+        async fn cycles(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::CycleGroup>, String> {
+            Ok(vec![])
+        }
+        async fn orphans(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::OrphanEntry>, String> {
+            Ok(vec![])
+        }
+        async fn path(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<usize>,
+        ) -> Result<Option<crate::bridge::PathResult>, String> {
+            Ok(None)
+        }
+        async fn edges(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::EdgeEntry>, String> {
+            Ok(vec![])
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Option<crate::bridge::GraphDiff>, String> {
+            Ok(None)
+        }
+        async fn describe(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<crate::bridge::SymbolDescription>, String> {
+            Ok(None)
         }
     }
 

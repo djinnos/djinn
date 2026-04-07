@@ -841,6 +841,7 @@ dependencies = [
  "djinn-provider",
  "futures",
  "git2",
+ "globset",
  "http-body-util",
  "insta",
  "landlock",
