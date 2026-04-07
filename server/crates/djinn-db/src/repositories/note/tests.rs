@@ -2533,6 +2533,7 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
             overview: Some("overview summary"),
             confidence: 1.2,
             source_session_ids: &[&session_a, &session_b],
+            scope_paths: "[]",
         })
         .await
         .unwrap();

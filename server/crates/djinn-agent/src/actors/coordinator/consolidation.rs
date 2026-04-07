@@ -118,6 +118,7 @@ async fn consolidate_clusters(
             overview: synthesized.overview.as_deref(),
             confidence: synthesized.confidence,
             source_session_ids: &source_session_refs,
+            scope_paths: &synthesized.scope_paths,
         })
         .await?;
 
@@ -150,6 +151,7 @@ struct SynthesizedClusterNote {
     abstract_: Option<String>,
     overview: Option<String>,
     confidence: f64,
+    scope_paths: String,
 }
 
 fn synthesize_cluster(cluster: &ConsolidationCluster) -> SynthesizedClusterNote {
@@ -159,6 +161,26 @@ fn synthesize_cluster(cluster: &ConsolidationCluster) -> SynthesizedClusterNote 
             .cmp(&right.permalink)
             .then_with(|| left.id.cmp(&right.id))
     });
+
+    let mut scope_union: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for note in &notes {
+        match serde_json::from_str::<Vec<String>>(&note.scope_paths) {
+            Ok(paths) => {
+                for p in paths {
+                    scope_union.insert(p);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    permalink = %note.permalink,
+                    error = %error,
+                    "synthesize_cluster: failed to parse source note scope_paths; treating as empty"
+                );
+            }
+        }
+    }
+    let scope_paths = serde_json::to_string(&scope_union.into_iter().collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".to_string());
 
     let primary = notes[0];
     let title = format!("Canonical {}: {}", primary.note_type, primary.title.trim());
@@ -220,6 +242,7 @@ fn synthesize_cluster(cluster: &ConsolidationCluster) -> SynthesizedClusterNote 
         abstract_,
         overview,
         confidence: bounded_confidence(notes.len()),
+        scope_paths,
     }
 }
 

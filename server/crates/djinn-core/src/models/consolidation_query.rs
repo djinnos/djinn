@@ -20,6 +20,7 @@ pub struct ConsolidationNote {
     pub title: String,
     pub note_type: String,
     pub folder: String,
+    pub scope_paths: String,
     pub content: String,
     pub abstract_: Option<String>,
     pub overview: Option<String>,

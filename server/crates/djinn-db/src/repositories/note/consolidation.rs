@@ -37,6 +37,7 @@ pub struct CreateCanonicalConsolidatedNote<'a> {
     pub overview: Option<&'a str>,
     pub confidence: f64,
     pub source_session_ids: &'a [&'a str],
+    pub scope_paths: &'a str,
 }
 
 pub struct CreatedCanonicalConsolidatedNote {
@@ -93,7 +94,7 @@ impl NoteConsolidationRepository {
         self.db.ensure_initialized().await?;
 
         sqlx::query_as::<_, ConsolidationNote>(
-            "SELECT id, project_id, permalink, title, note_type, folder, content,
+            "SELECT id, project_id, permalink, title, note_type, folder, scope_paths, content,
                     abstract as abstract_, overview, confidence
              FROM notes
              WHERE project_id = ?1
@@ -129,7 +130,7 @@ impl NoteConsolidationRepository {
         self.db.ensure_initialized().await?;
 
         sqlx::query_as::<_, ConsolidationNote>(
-            "SELECT n.id, n.project_id, n.permalink, n.title, n.note_type, n.folder, n.content,
+            "SELECT n.id, n.project_id, n.permalink, n.title, n.note_type, n.folder, n.scope_paths, n.content,
                     n.abstract as abstract_, n.overview, n.confidence
              FROM notes n
              JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
@@ -204,6 +205,7 @@ impl NoteConsolidationRepository {
             overview,
             confidence,
             source_session_ids,
+            scope_paths,
         } = params;
 
         for session_id in source_session_ids {
@@ -224,7 +226,7 @@ impl NoteConsolidationRepository {
 
         let note_repo = NoteRepository::new(self.db.clone(), EventBus::noop());
         let created = note_repo
-            .create_db_note(project_id, title, content, note_type, tags)
+            .create_db_note_with_scope(project_id, title, content, note_type, tags, scope_paths)
             .await?;
 
         note_repo.set_confidence(&created.id, confidence).await?;
