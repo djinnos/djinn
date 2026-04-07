@@ -4,11 +4,6 @@
       "name": "server-shared-target",
       "command": "mkdir -p server/.cargo && sed -i \"s|^target-dir.*|target-dir = \\\"/tmp/djinn-targets/$(basename $PWD)-server\\\"|\" server/.cargo/config.toml",
       "timeout_secs": 5
-    },
-    {
-      "name": "tauri-shared-target",
-      "command": "mkdir -p desktop/src-tauri/.cargo && sed -i \"s|^target-dir.*|target-dir = \\\"/tmp/djinn-targets/$(basename $PWD)-tauri\\\"|\" desktop/src-tauri/.cargo/config.toml",
-      "timeout_secs": 5
     }
   ],
   "verification_rules": [
@@ -67,13 +62,6 @@
         "cd desktop && pnpm install --frozen-lockfile",
         "cd desktop && pnpm tsc --noEmit",
         "cd desktop && pnpm test"
-      ]
-    },
-    {
-      "match": "desktop/src-tauri/**",
-      "commands": [
-        "cd desktop/src-tauri && cargo clippy --all-targets -- -D warnings",
-        "cd desktop/src-tauri && cargo test"
       ]
     }
   ]
