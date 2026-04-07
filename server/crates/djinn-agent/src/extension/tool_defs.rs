@@ -3,6 +3,10 @@ use rmcp::object;
 
 use super::shared_schemas;
 
+fn serialize_tool(tool: RmcpTool, concurrent_safe: bool) -> serde_json::Value {
+    shared_schemas::serialize_tool_schema(tool, concurrent_safe)
+}
+
 pub(super) fn tool_request_lead() -> RmcpTool {
     RmcpTool::new(
         "request_lead".to_string(),
@@ -454,41 +458,33 @@ pub(crate) fn tool_github_search() -> RmcpTool {
 
 fn base_tool_schemas() -> Vec<serde_json::Value> {
     let mut tool_values = shared_schemas::shared_base_tool_schemas();
-    tool_values.push(serde_json::to_value(tool_shell()).expect("serialize tool_shell"));
-    tool_values.push(serde_json::to_value(tool_read()).expect("serialize tool_read"));
-    tool_values.push(serde_json::to_value(tool_lsp()).expect("serialize tool_lsp"));
+    tool_values.push(serialize_tool(tool_shell(), false));
+    tool_values.push(serialize_tool(tool_read(), true));
+    tool_values.push(serialize_tool(tool_lsp(), true));
     // NOTE: `tool_code_graph()` is intentionally NOT in the base schema set.
     // Per ADR-050, the code-graph tool is exclusive to the Architect (autonomous patrol form)
     // and the Chat surface (interactive form). Worker, reviewer, planner, and lead do not
     // see it. The architect's role-specific schema function appends it directly.
-    tool_values.push(serde_json::to_value(tool_ci_job_log()).expect("serialize tool_ci_job_log"));
-    tool_values
-        .push(serde_json::to_value(tool_github_search()).expect("serialize tool_github_search"));
-    tool_values.push(serde_json::to_value(tool_output_view()).expect("serialize tool_output_view"));
-    tool_values.push(serde_json::to_value(tool_output_grep()).expect("serialize tool_output_grep"));
+    tool_values.push(serialize_tool(tool_ci_job_log(), true));
+    tool_values.push(serialize_tool(tool_github_search(), true));
+    tool_values.push(serialize_tool(tool_output_view(), true));
+    tool_values.push(serialize_tool(tool_output_grep(), true));
     tool_values
 }
 
 /// Tool schemas for Worker and Resolver: base + file-editing tools.
 pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    tool_values.push(serde_json::to_value(tool_write()).expect("serialize tool_write"));
-    tool_values.push(serde_json::to_value(tool_edit()).expect("serialize tool_edit"));
-    tool_values.push(serde_json::to_value(tool_apply_patch()).expect("serialize tool_apply_patch"));
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_memory_write())
-            .expect("serialize tool_memory_write"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_memory_edit())
-            .expect("serialize tool_memory_edit"),
-    );
-    tool_values
-        .push(serde_json::to_value(tool_request_lead()).expect("serialize tool_request_lead"));
-    tool_values.push(
-        serde_json::to_value(crate::roles::finalize::tool_submit_work())
-            .expect("serialize tool_submit_work"),
-    );
+    tool_values.push(serialize_tool(tool_write(), false));
+    tool_values.push(serialize_tool(tool_edit(), false));
+    tool_values.push(serialize_tool(tool_apply_patch(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
+    tool_values.push(serialize_tool(tool_request_lead(), false));
+    tool_values.push(serialize_tool(
+        crate::roles::finalize::tool_submit_work(),
+        false,
+    ));
     tool_values
 }
 
@@ -496,10 +492,10 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
 /// task_update_ac is excluded — submit_review sets AC atomically.
 pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    tool_values.push(
-        serde_json::to_value(crate::roles::finalize::tool_submit_review())
-            .expect("serialize tool_submit_review"),
-    );
+    tool_values.push(serialize_tool(
+        crate::roles::finalize::tool_submit_review(),
+        false,
+    ));
     tool_values
 }
 
@@ -517,15 +513,12 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
         tool_values.push(value);
     }
     for value in [
-        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
-        serde_json::to_value(tool_task_archive_activity())
-            .expect("serialize tool_task_archive_activity"),
-        serde_json::to_value(tool_task_reset_counters())
-            .expect("serialize tool_task_reset_counters"),
-        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
-        serde_json::to_value(tool_request_architect()).expect("serialize tool_request_architect"),
-        serde_json::to_value(crate::roles::finalize::tool_submit_decision())
-            .expect("serialize tool_submit_decision"),
+        serialize_tool(tool_task_delete_branch(), false),
+        serialize_tool(tool_task_archive_activity(), false),
+        serialize_tool(tool_task_reset_counters(), false),
+        serialize_tool(tool_task_kill_session(), false),
+        serialize_tool(tool_request_architect(), false),
+        serialize_tool(crate::roles::finalize::tool_submit_decision(), false),
     ] {
         tool_values.push(value);
     }
@@ -539,19 +532,16 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_task_transition())
-            .expect("serialize tool_task_transition"),
-    );
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_transition(),
+        false,
+    ));
     for value in [
-        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
-        serde_json::to_value(tool_task_archive_activity())
-            .expect("serialize tool_task_archive_activity"),
-        serde_json::to_value(tool_task_reset_counters())
-            .expect("serialize tool_task_reset_counters"),
-        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
-        serde_json::to_value(crate::roles::finalize::tool_submit_grooming())
-            .expect("serialize tool_submit_grooming"),
+        serialize_tool(tool_task_delete_branch(), false),
+        serialize_tool(tool_task_archive_activity(), false),
+        serialize_tool(tool_task_reset_counters(), false),
+        serialize_tool(tool_task_kill_session(), false),
+        serialize_tool(crate::roles::finalize::tool_submit_grooming(), false),
     ] {
         tool_values.push(value);
     }
@@ -571,68 +561,41 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         .position(|v| v.get("name").and_then(|n| n.as_str()) == Some("lsp"))
         .map(|i| i + 1)
         .unwrap_or(tool_values.len());
-    tool_values.insert(
-        lsp_pos,
-        serde_json::to_value(tool_code_graph()).expect("serialize tool_code_graph"),
-    );
+    tool_values.insert(lsp_pos, serialize_tool(tool_code_graph(), true));
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }
     // Per ADR-050 §2, parity contract: chat exposes `epic_create`; the Architect must too.
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_epic_create())
-            .expect("serialize tool_epic_create"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_task_transition())
-            .expect("serialize tool_task_transition"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_task_comment_add())
-            .expect("serialize tool_task_comment_add"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_memory_build_context())
-            .expect("serialize tool_memory_build_context"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_memory_health())
-            .expect("serialize tool_memory_health"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_memory_broken_links())
-            .expect("serialize tool_memory_broken_links"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_memory_orphans())
-            .expect("serialize tool_memory_orphans"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_role_metrics())
-            .expect("serialize tool_role_metrics"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_role_create())
-            .expect("serialize tool_role_create"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_memory_write())
-            .expect("serialize tool_memory_write"),
-    );
-    tool_values.push(
-        serde_json::to_value(shared_schemas::tool_memory_edit())
-            .expect("serialize tool_memory_edit"),
-    );
+    tool_values.push(serialize_tool(shared_schemas::tool_epic_create(), false));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_transition(),
+        false,
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_comment_add(),
+        false,
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        true,
+    ));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_health(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_broken_links(),
+        true,
+    ));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_orphans(), true));
+    tool_values.push(serialize_tool(shared_schemas::tool_role_metrics(), true));
+    tool_values.push(serialize_tool(shared_schemas::tool_role_create(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
     for value in [
-        serde_json::to_value(tool_task_delete_branch()).expect("serialize tool_task_delete_branch"),
-        serde_json::to_value(tool_task_archive_activity())
-            .expect("serialize tool_task_archive_activity"),
-        serde_json::to_value(tool_task_reset_counters())
-            .expect("serialize tool_task_reset_counters"),
-        serde_json::to_value(tool_task_kill_session()).expect("serialize tool_task_kill_session"),
-        serde_json::to_value(tool_role_amend_prompt()).expect("serialize tool_role_amend_prompt"),
-        serde_json::to_value(crate::roles::finalize::tool_submit_work())
-            .expect("serialize tool_submit_work"),
+        serialize_tool(tool_task_delete_branch(), false),
+        serialize_tool(tool_task_archive_activity(), false),
+        serialize_tool(tool_task_reset_counters(), false),
+        serialize_tool(tool_task_kill_session(), false),
+        serialize_tool(tool_role_amend_prompt(), false),
+        serialize_tool(crate::roles::finalize::tool_submit_work(), false),
     ] {
         tool_values.push(value);
     }

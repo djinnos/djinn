@@ -10,7 +10,16 @@ use tokio_util::sync::CancellationToken;
 fn dummy_tool_schema(name: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "function",
-        "function": { "name": name, "description": "test", "parameters": {"type": "object"} }
+        "function": { "name": name, "description": "test", "parameters": {"type": "object"} },
+        "concurrent_safe": false
+    })
+}
+
+fn dummy_tool_schema_with_safety(name: &str, concurrent_safe: bool) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": { "name": name, "description": "test", "parameters": {"type": "object"} },
+        "concurrent_safe": concurrent_safe
     })
 }
 
@@ -328,4 +337,109 @@ async fn provider_error_propagates_from_shared_failing_provider() {
             .to_string()
             .contains("scripted provider failure for reply loop")
     );
+}
+
+#[tokio::test]
+async fn metadata_drives_streaming_dispatch_for_safe_tools() {
+    let tools = vec![
+        dummy_tool_schema_with_safety("output_view", true),
+        dummy_tool_schema_with_safety("submit_work", false),
+    ];
+    let provider = FakeProvider::script(vec![
+        vec![
+            StreamEvent::Delta(ContentBlock::ToolUse {
+                id: "tool-1".into(),
+                name: "output_view".into(),
+                input: serde_json::json!({"tool_use_id": "missing", "limit": 5}),
+            }),
+            StreamEvent::Done,
+        ],
+        vec![
+            StreamEvent::Delta(ContentBlock::ToolUse {
+                id: "fin-1".into(),
+                name: "submit_work".into(),
+                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            }),
+            StreamEvent::Done,
+        ],
+    ]);
+    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let mut conversation = base_conversation();
+
+    let (result, output, _, _) = run_with_provider(
+        &provider,
+        &tools,
+        &mut conversation,
+        &app_state,
+        &project_path,
+        &task_id,
+        &cancel,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "metadata-driven dispatch should succeed: {result:?}"
+    );
+    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
+    assert!(matches!(
+        &conversation.messages[3].content[..],
+        [ContentBlock::ToolResult { tool_use_id, .. }] if tool_use_id == "tool-1"
+    ));
+}
+
+#[tokio::test]
+async fn missing_metadata_defaults_to_unsafe_dispatch() {
+    let tools = vec![
+        serde_json::json!({
+            "type": "function",
+            "function": { "name": "output_view", "description": "test", "parameters": {"type": "object"} }
+        }),
+        dummy_tool_schema("submit_work"),
+    ];
+    let provider = FakeProvider::script(vec![
+        vec![
+            StreamEvent::Delta(ContentBlock::ToolUse {
+                id: "tool-1".into(),
+                name: "output_view".into(),
+                input: serde_json::json!({"tool_use_id": "missing", "limit": 5}),
+            }),
+            StreamEvent::Done,
+        ],
+        vec![
+            StreamEvent::Delta(ContentBlock::ToolUse {
+                id: "fin-1".into(),
+                name: "submit_work".into(),
+                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            }),
+            StreamEvent::Done,
+        ],
+    ]);
+    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let mut conversation = base_conversation();
+
+    let (result, output, _, _) = run_with_provider(
+        &provider,
+        &tools,
+        &mut conversation,
+        &app_state,
+        &project_path,
+        &task_id,
+        &cancel,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "default-unsafe dispatch should succeed: {result:?}"
+    );
+    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
+    assert!(matches!(
+        &conversation.messages[2].content[..],
+        [ContentBlock::ToolUse { id, name, .. }] if id == "tool-1" && name == "output_view"
+    ));
+    assert!(matches!(
+        &conversation.messages[3].content[..],
+        [ContentBlock::ToolResult { tool_use_id, is_error, .. }] if tool_use_id == "tool-1" && *is_error
+    ));
 }

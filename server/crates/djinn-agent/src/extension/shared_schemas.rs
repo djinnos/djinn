@@ -1,26 +1,41 @@
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
+pub(crate) fn serialize_tool_schema(tool: RmcpTool, concurrent_safe: bool) -> serde_json::Value {
+    let mut value = serde_json::to_value(tool).expect("serialize tool schema");
+    annotate_concurrent_safe(&mut value, concurrent_safe);
+    value
+}
+
+pub(crate) fn annotate_concurrent_safe(value: &mut serde_json::Value, concurrent_safe: bool) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "concurrent_safe".to_string(),
+            serde_json::Value::Bool(concurrent_safe),
+        );
+    }
+}
+
 pub(crate) fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
     vec![
-        serde_json::to_value(tool_task_show()).expect("serialize tool_task_show"),
-        serde_json::to_value(tool_task_list()).expect("serialize tool_task_list"),
-        serde_json::to_value(tool_task_activity_list()).expect("serialize tool_task_activity_list"),
-        serde_json::to_value(tool_memory_read()).expect("serialize tool_memory_read"),
-        serde_json::to_value(tool_memory_search()).expect("serialize tool_memory_search"),
-        serde_json::to_value(tool_memory_list()).expect("serialize tool_memory_list"),
+        serialize_tool_schema(tool_task_show(), true),
+        serialize_tool_schema(tool_task_list(), true),
+        serialize_tool_schema(tool_task_activity_list(), true),
+        serialize_tool_schema(tool_memory_read(), true),
+        serialize_tool_schema(tool_memory_search(), true),
+        serialize_tool_schema(tool_memory_list(), true),
     ]
 }
 
 pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
     vec![
-        serde_json::to_value(tool_task_create()).expect("serialize tool_task_create"),
-        serde_json::to_value(tool_task_update()).expect("serialize tool_task_update"),
-        serde_json::to_value(tool_task_blocked_list()).expect("serialize tool_task_blocked_list"),
-        serde_json::to_value(tool_epic_show()).expect("serialize tool_epic_show"),
-        serde_json::to_value(tool_epic_update()).expect("serialize tool_epic_update"),
-        serde_json::to_value(tool_epic_tasks()).expect("serialize tool_epic_tasks"),
-        serde_json::to_value(tool_epic_close()).expect("serialize tool_epic_close"),
+        serialize_tool_schema(tool_task_create(), false),
+        serialize_tool_schema(tool_task_update(), false),
+        serialize_tool_schema(tool_task_blocked_list(), true),
+        serialize_tool_schema(tool_epic_show(), true),
+        serialize_tool_schema(tool_epic_update(), false),
+        serialize_tool_schema(tool_epic_tasks(), true),
+        serialize_tool_schema(tool_epic_close(), false),
     ]
 }
 

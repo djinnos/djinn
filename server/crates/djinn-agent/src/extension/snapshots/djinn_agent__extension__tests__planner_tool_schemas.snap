@@ -4,6 +4,7 @@ expression: tool_schemas_planner()
 ---
 [
   {
+    "concurrent_safe": true,
     "description": "Show details of a work item including recent activity and blockers.",
     "inputSchema": {
       "properties": {
@@ -20,6 +21,7 @@ expression: tool_schemas_planner()
     "name": "task_show"
   },
   {
+    "concurrent_safe": true,
     "description": "List tasks with optional filters and pagination.",
     "inputSchema": {
       "properties": {
@@ -58,6 +60,7 @@ expression: tool_schemas_planner()
     "name": "task_list"
   },
   {
+    "concurrent_safe": true,
     "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
     "inputSchema": {
       "properties": {
@@ -86,6 +89,7 @@ expression: tool_schemas_planner()
     "name": "task_activity_list"
   },
   {
+    "concurrent_safe": true,
     "description": "Read a note by permalink or title.",
     "inputSchema": {
       "properties": {
@@ -102,6 +106,7 @@ expression: tool_schemas_planner()
     "name": "memory_read"
   },
   {
+    "concurrent_safe": true,
     "description": "Search notes in project memory.",
     "inputSchema": {
       "properties": {
@@ -130,6 +135,7 @@ expression: tool_schemas_planner()
     "name": "memory_search"
   },
   {
+    "concurrent_safe": true,
     "description": "List notes in project memory. Returns compact summaries without full content.",
     "inputSchema": {
       "properties": {
@@ -151,6 +157,7 @@ expression: tool_schemas_planner()
     "name": "memory_list"
   },
   {
+    "concurrent_safe": false,
     "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
     "inputSchema": {
       "properties": {
@@ -171,6 +178,7 @@ expression: tool_schemas_planner()
     "name": "shell"
   },
   {
+    "concurrent_safe": true,
     "description": "Read a file with line numbers and pagination. Rejects binary files.",
     "inputSchema": {
       "properties": {
@@ -194,6 +202,7 @@ expression: tool_schemas_planner()
     "name": "read"
   },
   {
+    "concurrent_safe": true,
     "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
     "inputSchema": {
       "properties": {
@@ -248,6 +257,7 @@ expression: tool_schemas_planner()
     "name": "lsp"
   },
   {
+    "concurrent_safe": true,
     "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
     "inputSchema": {
       "properties": {
@@ -268,6 +278,7 @@ expression: tool_schemas_planner()
     "name": "ci_job_log"
   },
   {
+    "concurrent_safe": true,
     "description": "Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.",
     "inputSchema": {
       "properties": {
@@ -296,6 +307,7 @@ expression: tool_schemas_planner()
     "name": "github_search"
   },
   {
+    "concurrent_safe": true,
     "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
     "inputSchema": {
       "properties": {
@@ -322,6 +334,7 @@ expression: tool_schemas_planner()
     "name": "output_view"
   },
   {
+    "concurrent_safe": true,
     "description": "Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.",
     "inputSchema": {
       "properties": {
@@ -348,6 +361,7 @@ expression: tool_schemas_planner()
     "name": "output_grep"
   },
   {
+    "concurrent_safe": false,
     "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
     "inputSchema": {
       "properties": {
@@ -410,6 +424,7 @@ expression: tool_schemas_planner()
     "name": "task_create"
   },
   {
+    "concurrent_safe": false,
     "description": "Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.",
     "inputSchema": {
       "properties": {
@@ -478,6 +493,7 @@ expression: tool_schemas_planner()
     "name": "task_update"
   },
   {
+    "concurrent_safe": true,
     "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
     "inputSchema": {
       "properties": {
@@ -494,6 +510,7 @@ expression: tool_schemas_planner()
     "name": "task_blocked_list"
   },
   {
+    "concurrent_safe": true,
     "description": "Show details for an epic by UUID or short ID.",
     "inputSchema": {
       "properties": {
@@ -510,6 +527,7 @@ expression: tool_schemas_planner()
     "name": "epic_show"
   },
   {
+    "concurrent_safe": false,
     "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
     "inputSchema": {
       "properties": {
@@ -547,6 +565,7 @@ expression: tool_schemas_planner()
     "name": "epic_update"
   },
   {
+    "concurrent_safe": true,
     "description": "List tasks for an epic with pagination.",
     "inputSchema": {
       "properties": {
@@ -569,6 +588,7 @@ expression: tool_schemas_planner()
     "name": "epic_tasks"
   },
   {
+    "concurrent_safe": false,
     "description": "Close an epic. Use when all work is complete and no further waves are needed.",
     "inputSchema": {
       "properties": {
@@ -585,6 +605,7 @@ expression: tool_schemas_planner()
     "name": "epic_close"
   },
   {
+    "concurrent_safe": false,
     "description": "Transition a task using a named workflow action.",
     "inputSchema": {
       "properties": {
@@ -617,6 +638,7 @@ expression: tool_schemas_planner()
     "name": "task_transition"
   },
   {
+    "concurrent_safe": false,
     "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
     "inputSchema": {
       "properties": {
@@ -633,6 +655,7 @@ expression: tool_schemas_planner()
     "name": "task_delete_branch"
   },
   {
+    "concurrent_safe": false,
     "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
     "inputSchema": {
       "properties": {
@@ -649,6 +672,7 @@ expression: tool_schemas_planner()
     "name": "task_archive_activity"
   },
   {
+    "concurrent_safe": false,
     "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
     "inputSchema": {
       "properties": {
@@ -665,6 +689,7 @@ expression: tool_schemas_planner()
     "name": "task_reset_counters"
   },
   {
+    "concurrent_safe": false,
     "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
     "inputSchema": {
       "properties": {
@@ -681,6 +706,7 @@ expression: tool_schemas_planner()
     "name": "task_kill_session"
   },
   {
+    "concurrent_safe": false,
     "description": "Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.",
     "inputSchema": {
       "properties": {
