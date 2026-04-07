@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/prompts.rs
-assertion_line: 783
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
@@ -24,6 +23,7 @@ expression: section
 - `epic_update(id, description?, memory_refs_add?, memory_refs_remove?, status?, title?)` — Update epic fields (title/description) and accept memory ref delta args for planner workflows.
 - `epic_tasks(id, limit?, offset?)` — List tasks for an epic with pagination.
 - `epic_close(id)` — Close an epic. Use when all work is complete and no further waves are needed.
+- `epic_create(title, color?, description?, emoji?, memory_refs?, owner?, status?)` — Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — typically when an Architect health sweep or chat planning session identifies a gap that needs its own delivery container. Returns the created epic.
 - `task_transition(action, id, reason?, replacement_task_ids?)` — Transition a task using a named workflow action.
 - `task_comment_add(body, id)` — Add a comment or strategic observation to a task's activity log.
 - `memory_build_context(limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.

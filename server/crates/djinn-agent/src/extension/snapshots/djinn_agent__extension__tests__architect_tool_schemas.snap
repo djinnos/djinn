@@ -1,5 +1,5 @@
 ---
-source: crates/djinn-agent/src/extension/mod.rs
+source: crates/djinn-agent/src/extension/tests.rs
 expression: tool_schemas_architect()
 ---
 [
@@ -635,6 +635,49 @@ expression: tool_schemas_architect()
       "type": "object"
     },
     "name": "epic_close"
+  },
+  {
+    "description": "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — typically when an Architect health sweep or chat planning session identifies a gap that needs its own delivery container. Returns the created epic.",
+    "inputSchema": {
+      "properties": {
+        "color": {
+          "description": "Optional color tag for the epic",
+          "type": "string"
+        },
+        "description": {
+          "description": "Epic description / problem statement",
+          "type": "string"
+        },
+        "emoji": {
+          "description": "Optional emoji for the epic",
+          "type": "string"
+        },
+        "memory_refs": {
+          "description": "Memory reference URLs (e.g. ADR permalinks) to attach to the epic",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "description": "Optional owner",
+          "type": "string"
+        },
+        "status": {
+          "description": "Initial status: 'drafting' (default) or 'open'",
+          "type": "string"
+        },
+        "title": {
+          "description": "Epic title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    },
+    "name": "epic_create"
   },
   {
     "description": "Transition a task using a named workflow action.",

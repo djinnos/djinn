@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/tests.rs
-assertion_line: 1759
 expression: names
 ---
 [
@@ -25,6 +24,7 @@ expression: names
   "epic_update",
   "epic_tasks",
   "epic_close",
+  "epic_create",
   "task_transition",
   "task_comment_add",
   "memory_build_context",

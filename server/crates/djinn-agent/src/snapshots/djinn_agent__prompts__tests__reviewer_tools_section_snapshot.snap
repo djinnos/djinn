@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/prompts.rs
-assertion_line: 762
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
@@ -12,7 +11,6 @@ expression: section
 - `shell(command, timeout_ms?)` — Execute shell commands in the task worktree. Commands always run from the worktree root.
 - `read(file_path, limit?, offset?)` — Read a file with line numbers and pagination. Rejects binary files.
 - `lsp(file_path, operation, character?, depth?, kind?, line?, name_filter?, symbol?)` — Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.
-- `code_graph(operation, project_path, direction?, key?, kind_filter?, limit?)` — Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node), ranked (top nodes by PageRank), impact (transitive dependents), implementations (find implementors of a trait/interface symbol).
 - `ci_job_log(job_id, step?)` — Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.
 - `github_search(query, language?, path?, repo?)` — Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.
 - `output_view(tool_use_id, limit?, offset?)` — Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.
