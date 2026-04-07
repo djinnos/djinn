@@ -729,29 +729,46 @@ pub(super) async fn completions_handler(
         .map(|(path, _)| path.clone());
 
     // ── ADR-050 Chunk C: chat session first-use canonical graph hook ──────
-    // On session start (per-request, since each chat completion is its own
-    // session loop), warm up the canonical-main graph and pin the chat
-    // working_root to the index tree so `read`/`shell`/`lsp`/`code_graph`
-    // resolve against `origin/main`, not the user's working tree.  Best
-    // effort: failures degrade to the project root with a warning.
+    // On the FIRST chat completion request for a given session, warm up
+    // the canonical-main graph and pin the chat working_root to the index
+    // tree so `read`/`shell`/`lsp`/`code_graph` resolve against
+    // `origin/main`, not the user's working tree.  On every subsequent
+    // request in the same session we reuse the cached working_root and
+    // skip the warming call entirely (avoiding the per-request `git
+    // fetch` probe and worktree-add probe).  Best effort: failures
+    // degrade to the project root with a warning.
     let agent_ctx = if let Some((project_path_buf, project_id)) = project_resolution.as_ref() {
         tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
         let mut ctx = state.agent_context();
-        match crate::mcp_bridge::ensure_canonical_graph(&state, project_id, project_path_buf).await {
-            Ok((handle, _graph)) => {
-                tracing::debug!(
-                    project_id = %project_id,
-                    index_tree = %handle.path().display(),
-                    "chat session: pinned working_root to canonical index tree"
-                );
-                ctx.working_root = Some(handle.path().to_path_buf());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    project_id = %project_id,
-                    error = %e,
-                    "chat session: ensure_canonical_graph failed; falling back to project root"
-                );
+        if let Some(cached_root) = state.chat_session_warmed_root(&session_id, project_id) {
+            tracing::debug!(
+                session_id = %session_id,
+                project_id = %project_id,
+                index_tree = %cached_root.display(),
+                "chat session: reusing canonical working_root from first-use cache"
+            );
+            ctx.working_root = Some(cached_root);
+        } else {
+            match crate::mcp_bridge::ensure_canonical_graph(&state, project_id, project_path_buf).await {
+                Ok((handle, _graph)) => {
+                    let root = handle.path().to_path_buf();
+                    tracing::debug!(
+                        session_id = %session_id,
+                        project_id = %project_id,
+                        index_tree = %root.display(),
+                        "chat session: pinned working_root to canonical index tree"
+                    );
+                    state.chat_session_record_warmed(&session_id, project_id, root.clone());
+                    ctx.working_root = Some(root);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        project_id = %project_id,
+                        error = %e,
+                        "chat session: ensure_canonical_graph failed; falling back to project root"
+                    );
+                }
             }
         }
         Some(ctx)
