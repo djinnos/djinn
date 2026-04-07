@@ -6,6 +6,7 @@ pub mod embedded;
 pub mod error;
 pub mod events;
 pub mod housekeeping;
+pub mod index_tree;
 pub mod logging;
 pub mod mcp_bridge;
 pub mod process;
