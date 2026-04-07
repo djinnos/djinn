@@ -32,8 +32,6 @@ struct CachedGraph {
     graph: crate::repo_graph::RepoDependencyGraph,
     project_path: PathBuf,
     git_head: String,
-    #[allow(dead_code)]
-    built_at: std::time::Instant,
 }
 
 static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
@@ -1273,7 +1271,6 @@ async fn install_as_canonical(
         graph,
         project_path,
         git_head,
-        built_at: std::time::Instant::now(),
     });
 }
 
@@ -1312,7 +1309,6 @@ async fn install_test_graphs(
             graph,
             project_path: project_path.to_path_buf(),
             git_head: "previous".into(),
-            built_at: std::time::Instant::now(),
         });
     }
     {
@@ -1321,7 +1317,6 @@ async fn install_test_graphs(
             graph: current,
             project_path: project_path.to_path_buf(),
             git_head: "current".into(),
-            built_at: std::time::Instant::now(),
         });
     }
 }
