@@ -1,4 +1,5 @@
 {
+  "verification_timeout_secs": 1800,
   "setup": [
     {
       "name": "server-shared-target",

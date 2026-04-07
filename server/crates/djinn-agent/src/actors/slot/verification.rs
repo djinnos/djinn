@@ -15,24 +15,38 @@ use super::*;
 /// After this many consecutive verification failures, escalate to lead.
 const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 
-/// Minimum pipeline timeout even when no commands are configured.
-const MIN_PIPELINE_TIMEOUT_SECS: u64 = 240;
+/// Minimum pipeline timeout floor — chosen to accommodate workspace-wide
+/// `cargo test` + `cargo clippy` runs on medium-sized Rust projects.  Projects
+/// with heavier verification pipelines should set `verification_timeout_secs`
+/// in `.djinn/settings.json` explicitly.
+const MIN_PIPELINE_TIMEOUT_SECS: u64 = 900;
 /// Extra headroom on top of the sum of per-command timeouts to account for
 /// worktree creation, cache lookup, and cleanup.
 const PIPELINE_TIMEOUT_OVERHEAD_SECS: u64 = 120;
 
-/// Compute the overall pipeline timeout from the per-command `timeout_secs`
-/// in `.djinn/settings.json`.  Falls back to a safe default when the
-/// settings file is missing or unreadable.
+/// Compute the overall pipeline timeout from `.djinn/settings.json`.
+///
+/// Precedence:
+/// 1. If `verification_timeout_secs` is set, use it (clamped below by the
+///    `MIN_PIPELINE_TIMEOUT_SECS` floor).
+/// 2. Otherwise fall back to `sum(setup.timeout_secs) + overhead`, also
+///    floored to `MIN_PIPELINE_TIMEOUT_SECS`.
+///
+/// Note: `verification_rules.commands` are plain strings without per-command
+/// timeouts, so they contribute nothing to the computed sum.  That is why
+/// the `MIN_PIPELINE_TIMEOUT_SECS` floor matters in practice.
 fn compute_pipeline_timeout(project_path: &str) -> std::time::Duration {
     let path = std::path::Path::new(project_path);
-    let sum = match crate::verification::settings::load_setup_commands(path) {
-        Ok(setup) => {
-            let total: u64 = setup.iter().map(|c| c.timeout_secs.unwrap_or(300)).sum();
-            total
-        }
-        Err(_) => 0,
-    };
+    let settings = crate::verification::settings::load_settings(path).ok();
+
+    if let Some(explicit) = settings.as_ref().and_then(|s| s.verification_timeout_secs) {
+        return std::time::Duration::from_secs(explicit.max(MIN_PIPELINE_TIMEOUT_SECS));
+    }
+
+    let sum: u64 = settings
+        .as_ref()
+        .map(|s| s.setup.iter().map(|c| c.timeout_secs.unwrap_or(300)).sum())
+        .unwrap_or(0);
     let secs = (sum + PIPELINE_TIMEOUT_OVERHEAD_SECS).max(MIN_PIPELINE_TIMEOUT_SECS);
     std::time::Duration::from_secs(secs)
 }
@@ -737,6 +751,36 @@ mod tests {
 
         let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
 
+        assert_eq!(timeout, Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compute_pipeline_timeout_explicit_override_takes_precedence() {
+        let dir = tempdir_in_tmp();
+        write_settings(
+            dir.path(),
+            r#"{
+                "setup": [{"name": "fmt", "command": "cargo fmt --check", "timeout_secs": 7}],
+                "verification_timeout_secs": 1800
+            }"#,
+        );
+
+        let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
+        assert_eq!(timeout, Duration::from_secs(1800));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compute_pipeline_timeout_explicit_override_clamped_to_floor() {
+        let dir = tempdir_in_tmp();
+        write_settings(
+            dir.path(),
+            r#"{
+                "setup": [],
+                "verification_timeout_secs": 10
+            }"#,
+        );
+
+        let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
         assert_eq!(timeout, Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS));
     }
 

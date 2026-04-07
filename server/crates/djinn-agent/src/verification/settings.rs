@@ -53,6 +53,13 @@ pub struct DjinnSettings {
     /// changed file matches that pattern.
     #[serde(default)]
     pub verification_rules: Vec<VerificationRule>,
+    /// Overall verification pipeline timeout in seconds.  When set, replaces
+    /// the computed floor derived from `setup[*].timeout_secs`.  Needed
+    /// whenever `verification_rules` contain long-running commands (e.g.
+    /// workspace-wide `cargo test` / `cargo clippy`) that aren't otherwise
+    /// budgeted, since the per-rule command strings carry no timeout.
+    #[serde(default)]
+    pub verification_timeout_secs: Option<u64>,
 }
 
 /// Load the full project settings from `.djinn/settings.json` in the worktree.
