@@ -705,7 +705,8 @@ pub async fn teardown_worktree(
 ///
 /// Cleans both git worktree metadata and leftover filesystem directories under
 /// each project's `.djinn/worktrees/`. Skips entries that start with `.` (sync
-/// worktrees are transient and handled separately).
+/// worktrees are transient and handled separately) and entries that start with
+/// `_` (ADR-050 §3 reserved server infrastructure such as `_index/`).
 pub async fn purge_all_worktrees(app_state: &AgentContext) {
     let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let projects = match project_repo.list().await {
@@ -754,8 +755,12 @@ async fn purge_project_worktrees(project_path: &str, app_state: &AgentContext) {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        // Skip hidden entries (sync worktrees like `.sync-task-foo`).
-        if name_str.starts_with('.') {
+        // Skip hidden entries (sync worktrees like `.sync-task-foo`) and
+        // ADR-050 §3 reserved server-managed entries (`_index`,
+        // `_index-target`, `_health_check`, …).  Reserved entries are
+        // server infrastructure and must never be purged with task
+        // worktrees.
+        if name_str.starts_with('.') || name_str.starts_with('_') {
             continue;
         }
 

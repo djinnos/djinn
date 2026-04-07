@@ -309,7 +309,11 @@ pub(super) async fn sweep_stale_resources(
         {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') || name == "_health_check" {
+                // ADR-050 §3 reserved-name convention: entries starting with
+                // `_` (e.g. `_index`, `_index-target`, `_health_check`) are
+                // server infrastructure, not task worktrees.  Hidden dot-files
+                // are also skipped.
+                if name.starts_with('.') || name.starts_with('_') {
                     continue;
                 }
                 let wt_path = entry.path();
