@@ -283,6 +283,7 @@ impl CoordinatorActor {
                             active_tasks: crate::context::ActivityTracker::default(),
                             task_ops_project_path_override: None,
                             working_root: None,
+                            canonical_graph_warmer: None,
                         };
                         health::sweep_stale_resources(&self.db, &app_state).await;
                         self.last_stale_sweep = StdInstant::now();

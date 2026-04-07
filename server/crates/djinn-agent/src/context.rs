@@ -28,6 +28,22 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 /// Used by stall detection to kill sessions that stop producing tokens.
 pub type ActivityTracker = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>;
 
+/// Cross-crate hook into the server's `ensure_canonical_graph` machinery so
+/// the agent lifecycle can warm the canonical-main graph cache before any
+/// role (worker, reviewer, planner, lead, architect) starts its session.
+///
+/// `djinn-agent` does not depend on the server crate, so the concrete
+/// implementation is wired in `server::AppState::agent_context()`.  Tests in
+/// this crate leave the warmer as `None`, which makes the warming call a
+/// no-op.
+#[async_trait]
+pub trait CanonicalGraphWarmer: Send + Sync {
+    /// Resolve `(project_id, project_root)` to the canonical graph cache,
+    /// building it if necessary.  Best-effort: callers must treat any error
+    /// as non-fatal and let the agent continue without a warm skeleton.
+    async fn warm(&self, project_id: &str, project_root: &Path) -> Result<(), String>;
+}
+
 /// Subset of application state required by agent lifecycle, coordinator, and
 /// slot code.  Cheaply cloneable — all fields are either `Clone` or wrapped in
 /// `Arc`.
@@ -56,6 +72,12 @@ pub struct AgentContext {
     /// reviewers, planners, and lead leave this `None` so their tools continue
     /// to resolve against their task worktree.
     pub working_root: Option<PathBuf>,
+    /// Optional hook into the server's `ensure_canonical_graph` machinery.
+    /// When `Some`, the slot lifecycle calls it before starting the agent
+    /// runtime so workers/reviewers/planners/lead receive a freshly rendered
+    /// canonical-main repo-map note via the standard note pipeline.  When
+    /// `None` (tests, off-server contexts) the warming call is skipped.
+    pub canonical_graph_warmer: Option<Arc<dyn CanonicalGraphWarmer>>,
 }
 
 impl AgentContext {

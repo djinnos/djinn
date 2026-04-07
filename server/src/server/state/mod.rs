@@ -188,6 +188,9 @@ impl AppState {
             active_tasks: self.inner.active_tasks.clone(),
             task_ops_project_path_override: None,
             working_root: None,
+            canonical_graph_warmer: Some(Arc::new(AppStateCanonicalGraphWarmer {
+                state: self.clone(),
+            })),
         }
     }
 
@@ -439,6 +442,26 @@ impl AppState {
             }
             Err(e) => tracing::warn!(error = %e, "failed to parse model health state"),
         }
+    }
+}
+
+/// `CanonicalGraphWarmer` impl that bridges the agent lifecycle into
+/// `crate::mcp_bridge::ensure_canonical_graph`.  ADR-050 Chunk C cold-start
+/// fix: every dispatched task (any role) calls `warm` before its session
+/// starts, which builds (or fetches from cache) the canonical-main graph and
+/// persists the rendered skeleton as a `repo_map` note.  Workers then pick
+/// the note up via the existing note-loading machinery without needing
+/// per-worktree SCIP indexing.
+struct AppStateCanonicalGraphWarmer {
+    state: AppState,
+}
+
+#[async_trait::async_trait]
+impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer {
+    async fn warm(&self, project_id: &str, project_root: &Path) -> Result<(), String> {
+        crate::mcp_bridge::ensure_canonical_graph(&self.state, project_id, project_root)
+            .await
+            .map(|_| ())
     }
 }
 
