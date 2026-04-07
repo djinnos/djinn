@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
 use djinn_db::NoteRepository;
@@ -24,6 +25,21 @@ use crate::scip_parser::ScipSymbolKind;
 
 const SCIP_ARTIFACT_EXTENSION: &str = "scip";
 const INDEXER_TIMEOUT_SECS: u64 = 120;
+
+/// Tracks `(project_root, indexer)` pairs we have already logged a
+/// "missing indexer binary" notice for, so the periodic repo-map refresh
+/// does not spam the same info line every cycle.
+static MISSING_INDEXER_LOGGED: Mutex<Option<HashSet<(PathBuf, SupportedIndexer)>>> =
+    Mutex::new(None);
+
+fn note_missing_indexer_once(project_root: &Path, indexer: SupportedIndexer) -> bool {
+    let mut guard = match MISSING_INDEXER_LOGGED.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let set = guard.get_or_insert_with(HashSet::new);
+    set.insert((project_root.to_path_buf(), indexer))
+}
 const DEFAULT_MAX_FILES: usize = 12;
 const DEFAULT_MAX_SYMBOLS_PER_FILE: usize = 4;
 const DEFAULT_MAX_RELATIONSHIPS_PER_FILE: usize = 3;
@@ -377,6 +393,32 @@ pub async fn run_indexers(
         .with_context(|| format!("create SCIP output dir {}", output_root.display()))?;
 
     let available = detect_indexers();
+
+    // Surface a one-time INFO log for languages that *are* present in this
+    // project (i.e. they have at least one discoverable workspace) but whose
+    // SCIP indexer binary is missing from PATH.  Without this, the missing
+    // binary is silently skipped, which makes it hard to diagnose why a Go
+    // monorepo is producing no SCIP artifacts.  We deliberately log INFO
+    // (not WARN) and only once per (project, indexer) pair so we do not
+    // spam the periodic refresh loop.
+    for availability in &available {
+        if availability.is_available() {
+            continue;
+        }
+        let workspaces = discover_workspaces(&project_root, availability.indexer);
+        if workspaces.is_empty() {
+            continue;
+        }
+        if note_missing_indexer_once(&project_root, availability.indexer) {
+            tracing::info!(
+                project_root = %project_root.display(),
+                language = availability.indexer.language(),
+                indexer = availability.indexer.binary_name(),
+                "SCIP indexer binary not found on PATH; skipping language for this project"
+            );
+        }
+    }
+
     let plans = plan_indexer_commands(&project_root, &output_root, &available);
 
     let timeout = std::time::Duration::from_secs(INDEXER_TIMEOUT_SECS);
@@ -835,7 +877,15 @@ fn discover_workspaces(project_root: &Path, indexer: SupportedIndexer) -> Vec<Di
         );
     }
 
-    if discovered.is_empty() {
+    if discovered.is_empty() && !project_root.exists() {
+        // Synthetic / non-existent project root (used by unit tests and a
+        // handful of planning helpers): we cannot walk the tree, so fall back
+        // to a single workspace at the project root.  For real projects on
+        // disk, an empty result means the language is not present in this
+        // project and we must NOT fabricate a workspace -- otherwise we end
+        // up running indexers like rust-analyzer against Go projects, which
+        // fails every refresh cycle with `Error: no projects` (see ADR-043
+        // and the spammy WARN logs that motivated this guard).
         discovered.push(DiscoveredWorkspace {
             indexer,
             root: PathBuf::new(),

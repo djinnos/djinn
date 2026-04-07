@@ -1355,6 +1355,15 @@ mod tests {
             .tempdir_in(std::env::current_dir().unwrap())
             .unwrap();
         init_git_repo(dir.path());
+        // Drop a Cargo.toml so the SCIP planner discovers a Rust workspace
+        // and the spawned indexer task does meaningful work; without a
+        // marker file the planner produces zero plans and the in-flight
+        // slot is released before this test asserts on it.
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write workspace marker");
 
         let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
         let project = project_repo
