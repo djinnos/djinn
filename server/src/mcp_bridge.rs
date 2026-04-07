@@ -1137,10 +1137,10 @@ pub async fn ensure_canonical_graph(
     let output_dir =
         std::env::temp_dir().join(format!("djinn-canonical-graph-{}", uuid::Uuid::now_v7()));
     let target_dir = handle.target_dir().to_path_buf();
-    let run = crate::repo_map::run_indexers_single_flight(
-        // The single-flight gate is already held above, but the wrapper
-        // accepts any mutex; pass a fresh dummy so we don't deadlock.
-        std::sync::Arc::new(tokio::sync::Mutex::new(())),
+    // The server-wide IndexerLock is already held above (`_permit`); use the
+    // `_already_locked` entrypoint instead of re-acquiring it via a dummy
+    // mutex.  ADR-050 Chunk C cleanup.
+    let run = crate::repo_map::run_indexers_already_locked(
         handle.path(),
         &output_dir,
         Some(&target_dir),

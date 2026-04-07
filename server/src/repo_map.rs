@@ -452,6 +452,31 @@ pub async fn run_indexers_single_flight(
     target_dir: Option<&Path>,
 ) -> Result<IndexingRun> {
     let _permit = lock.lock().await;
+    run_indexers_already_locked(project_root, output_root, target_dir).await
+}
+
+/// Indexer entrypoint for callers that **already hold** the server-wide
+/// `IndexerLock` (`AppState::indexer_lock`).  Skips the lock acquisition
+/// performed by [`run_indexers_single_flight`] but otherwise behaves
+/// identically — including installing the [`CargoTargetDirGuard`] when
+/// `target_dir` is supplied.
+///
+/// # Lock contract
+///
+/// The caller MUST hold `AppState::indexer_lock` (or another mutex with
+/// equivalent server-wide single-flight semantics) for the entire duration
+/// of this call.  Otherwise the `CARGO_TARGET_DIR` mutation can race with
+/// other indexer runs and corrupt their build state.
+///
+/// Used by `mcp_bridge::ensure_canonical_graph`, which acquires the lock
+/// itself before doing several other operations and then needs to call
+/// the indexer without re-entering the lock.  Replaces the previous
+/// "fresh dummy mutex" workaround.
+pub async fn run_indexers_already_locked(
+    project_root: impl AsRef<Path>,
+    output_root: impl AsRef<Path>,
+    target_dir: Option<&Path>,
+) -> Result<IndexingRun> {
     let _guard = target_dir.map(CargoTargetDirGuard::new);
     run_indexers(project_root, output_root).await
 }
@@ -1796,6 +1821,30 @@ mod tests {
             let _g = CargoTargetDirGuard::new(Path::new("/tmp/sentinel-temp"));
             assert!(std::env::var_os("CARGO_TARGET_DIR").is_some());
         }
+        assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
+    }
+
+    /// `run_indexers_already_locked` must be callable directly, without
+    /// the caller having to acquire (or fake) any outer lock.  This is the
+    /// entrypoint `mcp_bridge::ensure_canonical_graph` uses after it has
+    /// already taken the server-wide IndexerLock — replacing the previous
+    /// "fresh dummy mutex" workaround.  ADR-050 Chunk C cleanup.
+    #[tokio::test]
+    async fn run_indexers_already_locked_callable_without_outer_lock() {
+        let _serial = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path().join("empty-project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let output_root = tmp.path().join("scip-out");
+
+        // Empty project → indexer detection produces nothing to run, so
+        // this returns Ok with an empty artifact list and never spawns a
+        // subprocess.  The point of the test is the call site itself: no
+        // mutex passed in, no panic, no env-var leak.
+        let result =
+            run_indexers_already_locked(&project_root, &output_root, None).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        // No target_dir → no guard installed → env stays unset.
         assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
     }
 
