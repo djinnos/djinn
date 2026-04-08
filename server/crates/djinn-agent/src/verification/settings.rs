@@ -48,6 +48,10 @@ pub struct VerificationRule {
 pub struct DjinnSettings {
     #[serde(default)]
     pub setup: Vec<CommandSpec>,
+    #[serde(default)]
+    pub agent_mcp_defaults: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub global_skills: Vec<String>,
     /// File-pattern-to-command rules for scoped verification.
     ///
     /// Each rule maps a glob pattern to the commands that should run when any
@@ -61,6 +65,47 @@ pub struct DjinnSettings {
     /// budgeted, since the per-rule command strings carry no timeout.
     #[serde(default)]
     pub verification_timeout_secs: Option<u64>,
+}
+
+fn dedupe_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for name in names {
+        if seen.insert(name.clone()) {
+            deduped.push(name);
+        }
+    }
+    deduped
+}
+
+pub fn default_mcp_servers_for_agent(settings: &DjinnSettings, agent_name: &str) -> Vec<String> {
+    settings
+        .agent_mcp_defaults
+        .get(agent_name)
+        .or_else(|| settings.agent_mcp_defaults.get("*"))
+        .cloned()
+        .unwrap_or_default()
+}
+
+pub fn effective_mcp_server_names(
+    settings: &DjinnSettings,
+    agent_name: &str,
+    role_mcp_servers: Option<&[String]>,
+) -> Vec<String> {
+    match role_mcp_servers {
+        Some(names) => dedupe_names(names.iter().cloned()),
+        None => dedupe_names(default_mcp_servers_for_agent(settings, agent_name)),
+    }
+}
+
+pub fn effective_skill_names(settings: &DjinnSettings, role_skills: &[String]) -> Vec<String> {
+    dedupe_names(
+        settings
+            .global_skills
+            .iter()
+            .cloned()
+            .chain(role_skills.iter().cloned()),
+    )
 }
 
 /// Load the full project settings from `.djinn/settings.json` in the worktree.
@@ -237,6 +282,90 @@ mod tests {
         let setup = load_setup_commands(dir.path()).expect("load commands");
 
         assert_eq!(setup.len(), 1);
+    }
+
+    #[test]
+    fn load_settings_parses_agent_defaults_and_global_skills() {
+        let dir = tempdir_in_tmp();
+        write_settings(
+            &dir,
+            r#"{
+                "agent_mcp_defaults": {
+                    "*": ["web", "filesystem"],
+                    "worker": ["worker-only"],
+                    "chat": ["chat-web"]
+                },
+                "global_skills": ["git", "rust"]
+            }"#,
+        );
+
+        let settings = load_settings(dir.path()).expect("settings load");
+
+        assert_eq!(settings.agent_mcp_defaults["*"], vec!["web", "filesystem"]);
+        assert_eq!(settings.agent_mcp_defaults["worker"], vec!["worker-only"]);
+        assert_eq!(settings.agent_mcp_defaults["chat"], vec!["chat-web"]);
+        assert_eq!(settings.global_skills, vec!["git", "rust"]);
+    }
+
+    #[test]
+    fn effective_mcp_server_names_prefers_named_default_then_wildcard() {
+        let settings = DjinnSettings {
+            agent_mcp_defaults: HashMap::from([
+                ("*".to_string(), vec!["web".to_string()]),
+                (
+                    "worker".to_string(),
+                    vec!["worker-web".to_string(), "worker-web".to_string()],
+                ),
+                ("chat".to_string(), vec!["chat-web".to_string()]),
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            effective_mcp_server_names(&settings, "worker", None),
+            vec!["worker-web"]
+        );
+        assert_eq!(
+            effective_mcp_server_names(&settings, "reviewer", None),
+            vec!["web"]
+        );
+        assert_eq!(
+            effective_mcp_server_names(&settings, "chat", None),
+            vec!["chat-web"]
+        );
+    }
+
+    #[test]
+    fn effective_mcp_server_names_role_assignment_overrides_defaults_and_empty_opts_out() {
+        let settings = DjinnSettings {
+            agent_mcp_defaults: HashMap::from([(
+                "*".to_string(),
+                vec!["web".to_string(), "filesystem".to_string()],
+            )]),
+            ..Default::default()
+        };
+
+        let assigned = vec!["special".to_string(), "special".to_string()];
+        let opt_out: Vec<String> = Vec::new();
+
+        assert_eq!(
+            effective_mcp_server_names(&settings, "worker", Some(&assigned)),
+            vec!["special"]
+        );
+        assert!(effective_mcp_server_names(&settings, "worker", Some(&opt_out)).is_empty());
+    }
+
+    #[test]
+    fn effective_skill_names_adds_global_skills_and_dedupes() {
+        let settings = DjinnSettings {
+            global_skills: vec!["git".to_string(), "rust".to_string(), "git".to_string()],
+            ..Default::default()
+        };
+
+        let effective =
+            effective_skill_names(&settings, &["rust".to_string(), "testing".to_string()]);
+
+        assert_eq!(effective, vec!["git", "rust", "testing"]);
     }
 
     #[test]

@@ -19,13 +19,57 @@ use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
+use djinn_agent::mcp_client::{McpToolRegistry, connect_and_discover};
 use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
 use djinn_agent::provider::{StreamEvent, TelemetryMeta, create_provider};
+use djinn_agent::verification::settings::{
+    effective_mcp_server_names, effective_skill_names, load_mcp_server_registry, load_settings,
+    resolve_mcp_servers,
+};
 use djinn_db::ProjectRepository;
 use djinn_mcp::server::DjinnMcpServer;
 
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
+
+fn apply_chat_skills(
+    base_message: Message,
+    project_path: Option<&std::path::Path>,
+) -> (Message, ResolvedChatConfig) {
+    let Some(project_path) = project_path else {
+        return (base_message, ResolvedChatConfig::default());
+    };
+
+    let settings = load_settings(project_path).unwrap_or_default();
+    let effective_skills = effective_skill_names(&settings, &[]);
+    let effective_mcp_servers = effective_mcp_server_names(&settings, "chat", None);
+    let resolved_skills = djinn_agent::skills::load_skills(project_path, &effective_skills);
+
+    let text = djinn_agent::prompts::apply_skills(&base_message.text_content(), &resolved_skills);
+    (
+        Message {
+            role: Role::System,
+            content: vec![ContentBlock::text(text)],
+            metadata: base_message.metadata.clone(),
+        },
+        ResolvedChatConfig {
+            mcp_servers: effective_mcp_servers,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedChatConfig {
+    mcp_servers: Vec<String>,
+}
+
+#[cfg(test)]
+fn chat_effective_config(project_path: &std::path::Path) -> ResolvedChatConfig {
+    let settings = load_settings(project_path).unwrap_or_default();
+    ResolvedChatConfig {
+        mcp_servers: effective_mcp_server_names(&settings, "chat", None),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ChatCompletionRequest {
@@ -223,6 +267,24 @@ pub(super) async fn completions_handler(
         }
     };
 
+    // Resolve project path + ID for chat extension tools (shell, read, lsp,
+    // github_search, code_graph).
+    let project_resolution: Option<(std::path::PathBuf, String)> = if let Some(project_ref) =
+        req.project.as_deref()
+    {
+        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+        match project_repo.resolve(project_ref).await {
+            Ok(Some(id)) => match project_repo.get(&id).await {
+                Ok(Some(project)) => Some((std::path::PathBuf::from(&project.path), project.id)),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let project_path = project_resolution.as_ref().map(|(path, _)| path.clone());
+
     let provider = create_provider(provider_config);
 
     let mut conversation = Conversation::new();
@@ -234,6 +296,7 @@ pub(super) async fn completions_handler(
         req.system.as_deref(),
         &req.model,
     );
+    let (system_message, chat_config) = apply_chat_skills(system_message, project_path.as_deref());
     conversation.push(system_message);
 
     for m in req.messages {
@@ -279,24 +342,25 @@ pub(super) async fn completions_handler(
 
     let mcp = DjinnMcpServer::new(state.mcp_state());
     let mut tool_schemas = mcp.all_tool_schemas();
-
-    // Resolve project path + ID for chat extension tools (shell, read, lsp,
-    // github_search, code_graph).
-    let project_resolution: Option<(std::path::PathBuf, String)> = if let Some(project_ref) =
-        req.project.as_deref()
-    {
-        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-        match project_repo.resolve(project_ref).await {
-            Ok(Some(id)) => match project_repo.get(&id).await {
-                Ok(Some(project)) => Some((std::path::PathBuf::from(&project.path), project.id)),
-                _ => None,
-            },
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let project_path = project_resolution.as_ref().map(|(path, _)| path.clone());
+    let chat_mcp_registry: Option<McpToolRegistry> =
+        if let Some(project_path) = project_path.as_deref() {
+            let registry = load_mcp_server_registry(project_path);
+            let resolved =
+                resolve_mcp_servers(&session_id, "chat", &chat_config.mcp_servers, &registry)
+                    .into_iter()
+                    .map(|(name, cfg)| (name, cfg.clone()))
+                    .collect::<Vec<_>>();
+            if resolved.is_empty() {
+                None
+            } else {
+                connect_and_discover(&session_id, "chat", &resolved, &state.agent_context()).await
+            }
+        } else {
+            None
+        };
+    if let Some(registry) = &chat_mcp_registry {
+        tool_schemas.extend(registry.tool_schemas().iter().cloned());
+    }
 
     // ── ADR-050 Chunk C: chat session first-use canonical graph hook ──────
     // On the FIRST chat completion request for a given session, warm up
@@ -472,6 +536,10 @@ pub(super) async fn completions_handler(
                     } else {
                         Err(format!("tool '{name}' requires a project context"))
                     }
+                } else if let Some(registry) = &chat_mcp_registry
+                    && registry.has_tool(&name)
+                {
+                    registry.call_tool(&name, input.as_object().cloned()).await
                 } else {
                     mcp.dispatch_tool(&name, args).await
                 };

@@ -229,7 +229,7 @@ impl SlotHandle {
                                 (
                                     db_role.system_prompt_extensions,
                                     db_role.learned_prompt,
-                                    mcp_servers,
+                                    Some(mcp_servers),
                                     skills,
                                     db_role.verification_command,
                                 )
@@ -241,7 +241,7 @@ impl SlotHandle {
                                     project_id = %t.project_id,
                                     "Lifecycle: no default DB role configured; using base role defaults"
                                 );
-                                (String::new(), None, Vec::new(), Vec::new(), None)
+                                (String::new(), None, None, Vec::new(), None)
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -250,11 +250,11 @@ impl SlotHandle {
                                     error = %e,
                                     "Lifecycle: failed to load default DB role; using base role defaults"
                                 );
-                                (String::new(), None, Vec::new(), Vec::new(), None)
+                                (String::new(), None, None, Vec::new(), None)
                             }
                         }
                     } else {
-                        (String::new(), None, Vec::new(), Vec::new(), None)
+                        (String::new(), None, None, Vec::new(), None)
                     };
 
                     run_task_lifecycle(crate::actors::slot::lifecycle::TaskLifecycleParams {

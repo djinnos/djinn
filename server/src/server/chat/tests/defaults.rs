@@ -1,0 +1,70 @@
+use std::path::Path;
+
+use crate::server::chat::prompt::system_message::build_system_message;
+use crate::server::chat::{apply_chat_skills, chat_effective_config};
+
+use super::super::DJINN_CHAT_SYSTEM_PROMPT;
+
+fn write_settings_file(project_path: &Path, body: &str) {
+    let djinn_dir = project_path.join(".djinn");
+    std::fs::create_dir_all(&djinn_dir).unwrap();
+    std::fs::write(djinn_dir.join("settings.json"), body).unwrap();
+}
+
+fn write_skill_file(project_path: &Path, name: &str, body: &str) {
+    let skills_dir = project_path.join(".djinn").join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    std::fs::write(skills_dir.join(format!("{name}.md")), body).unwrap();
+}
+
+#[test]
+fn chat_effective_config_uses_named_chat_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    write_settings_file(
+        dir.path(),
+        r#"{
+            "agent_mcp_defaults": {
+                "*": ["web"],
+                "chat": ["chat-web", "chat-web"]
+            }
+        }"#,
+    );
+
+    let config = chat_effective_config(dir.path());
+    assert_eq!(config.mcp_servers, vec!["chat-web"]);
+}
+
+#[test]
+fn apply_chat_skills_adds_global_skills_to_system_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    write_settings_file(
+        dir.path(),
+        r#"{
+            "global_skills": ["git", "rust"]
+        }"#,
+    );
+    write_skill_file(
+        dir.path(),
+        "git",
+        "---\ndescription: Git workflow\n---\n\nCommit cleanly.",
+    );
+    write_skill_file(
+        dir.path(),
+        "rust",
+        "---\ndescription: Rust skill\n---\n\nPrefer ownership-aware fixes.",
+    );
+
+    let base = build_system_message(
+        DJINN_CHAT_SYSTEM_PROMPT,
+        Some("project ctx"),
+        None,
+        Some("client system"),
+        "anthropic/claude-3-5-sonnet",
+    );
+
+    let (message, config) = apply_chat_skills(base, Some(dir.path()));
+
+    assert!(message.text_content().contains("**git**: Git workflow"));
+    assert!(message.text_content().contains("**rust**: Rust skill"));
+    assert!(config.mcp_servers.is_empty());
+}

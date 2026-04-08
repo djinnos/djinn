@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedSkill {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) content: String,
+pub struct ResolvedSkill {
+    pub name: String,
+    pub description: String,
+    pub content: String,
 }
 
 #[derive(Debug)]
@@ -31,7 +31,7 @@ fn parse_frontmatter(frontmatter_raw: &str) -> Option<SkillFrontmatter> {
     Some(frontmatter)
 }
 
-pub(crate) fn load_skills(project_root: &Path, names: &[String]) -> Vec<ResolvedSkill> {
+pub fn load_skills(project_root: &Path, names: &[String]) -> Vec<ResolvedSkill> {
     names
         .iter()
         .filter_map(|name| {

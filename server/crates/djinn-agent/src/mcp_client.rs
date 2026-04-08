@@ -34,7 +34,7 @@ static PLACEHOLDER_RE: LazyLock<Regex> =
 /// Holds live `Peer<RoleClient>` handles and the tool-name→server-name mapping
 /// so the reply loop can route unknown tool calls to the correct MCP server.
 #[derive(Clone)]
-pub(crate) struct McpToolRegistry {
+pub struct McpToolRegistry {
     /// tool_name → server_name
     tool_to_server: HashMap<String, String>,
     /// server_name → live peer handle
@@ -184,7 +184,7 @@ fn call_tool_result_to_json(result: CallToolResult) -> Result<serde_json::Value,
 ///
 /// Servers that fail to resolve, connect, or list tools are logged and skipped (non-fatal).
 /// Returns `None` when no tools were discovered.
-pub(crate) async fn connect_and_discover(
+pub async fn connect_and_discover(
     task_short_id: &str,
     role_name: &str,
     servers: &[(String, McpServerConfig)],
