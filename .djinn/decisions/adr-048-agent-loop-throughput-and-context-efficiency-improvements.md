@@ -5,6 +5,7 @@ tags: ["agent-loop","performance","compaction","streaming","context-window"]
 ---
 
 
+
 # ADR-048: Agent loop throughput and context efficiency improvements
 
 ## Status
@@ -46,9 +47,19 @@ Annotate each tool schema with a `concurrent_safe: bool` field (defaulting to `f
 
 Tools marked safe on day one: `memory_read`, `memory_search`, `memory_list`, `memory_build_context`, `memory_associations`, `task_show`, `task_list`, `task_count`, `task_ready`, `task_blocked_list`, `task_blockers_list`, `task_activity_list`, `task_memory_refs`, `task_timeline`, `epic_show`, `epic_list`, `epic_count`, `epic_tasks`, `agent_show`, `agent_list`, `agent_metrics`, `session_show`, `session_list`, `session_messages`, `provider_catalog`, `provider_models`, `provider_connected`, `board_health`, `model_health`, `code_graph`, `output_view`, `output_grep`, `lsp`, `read`.
 
-#### 1B. Streaming tool dispatch
 
-Begin executing tool calls as their `tool_use` blocks complete during response streaming, rather than waiting for the full response. The stream parser already emits complete `tool_use` blocks incrementally — dispatch each one through the same concurrency partitioner as 1A. Buffer results and assemble the final tool_result message once all calls and the response stream have completed.
+#### 1B. Streaming tool dispatch / side queries clarification
+
+Side queries (auxiliary read-only lookups) are **not** introduced as a separate message type or hidden provider-side channel. In the current reply-loop architecture they are modeled as ordinary `tool_use` blocks whose schemas are marked `concurrent_safe=true`.
+
+Behavioral contract:
+
+1. When a read-only lookup tool arrives mid-stream, the reply loop may dispatch it immediately using the same streaming/concurrent execution path as other concurrent-safe tools.
+2. The lookup result is buffered until the streamed assistant turn is complete.
+3. Buffered lookup results are emitted in the normal ordered `tool_result` user message for the next turn, alongside any serial/non-safe tool results from the same assistant turn.
+4. This keeps provider tool-call pairing valid and avoids introducing a second "side channel" protocol surface.
+
+Consequence: ADR-048 side-query scope is satisfied by the existing reply-loop/tool-schema architecture once this behavior is explicitly documented and tested; no extra provider primitive or separate result assembly path is required.
 
 #### 1C. Microcompaction pass
 

@@ -443,3 +443,77 @@ async fn missing_metadata_defaults_to_unsafe_dispatch() {
         [ContentBlock::ToolResult { tool_use_id, is_error, .. }] if tool_use_id == "tool-1" && *is_error
     ));
 }
+
+#[tokio::test]
+async fn side_query_tools_share_normal_tool_result_turn_and_keep_order() {
+    let tools = vec![
+        dummy_tool_schema_with_safety("output_view", true),
+        dummy_tool_schema_with_safety("shell", false),
+        dummy_tool_schema("submit_work"),
+    ];
+    let provider = FakeProvider::script(vec![
+        vec![
+            StreamEvent::Delta(ContentBlock::Text {
+                text: "Checking context before acting.".into(),
+            }),
+            StreamEvent::Delta(ContentBlock::ToolUse {
+                id: "tool-1".into(),
+                name: "output_view".into(),
+                input: serde_json::json!({"tool_use_id": "missing", "limit": 5}),
+            }),
+            StreamEvent::Delta(ContentBlock::ToolUse {
+                id: "tool-2".into(),
+                name: "shell".into(),
+                input: serde_json::json!({"command": "printf unsafe-tool"}),
+            }),
+            StreamEvent::Done,
+        ],
+        vec![
+            StreamEvent::Delta(ContentBlock::ToolUse {
+                id: "fin-1".into(),
+                name: "submit_work".into(),
+                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            }),
+            StreamEvent::Done,
+        ],
+    ]);
+    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let mut conversation = base_conversation();
+
+    let (result, output, _, _) = run_with_provider(
+        &provider,
+        &tools,
+        &mut conversation,
+        &app_state,
+        &project_path,
+        &task_id,
+        &cancel,
+    )
+    .await;
+
+    assert!(result.is_ok(), "side-query path should succeed: {result:?}");
+    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
+    assert!(matches!(
+        &conversation.messages[2],
+        Message {
+            role: Role::Assistant,
+            content,
+            ..
+        } if matches!(content.as_slice(), [
+            ContentBlock::Text { text },
+            ContentBlock::ToolUse { id: first_id, name: first_name, .. },
+            ContentBlock::ToolUse { id: second_id, name: second_name, .. }
+        ] if text == "Checking context before acting." && first_id == "tool-1" && first_name == "output_view" && second_id == "tool-2" && second_name == "shell")
+    ));
+    assert!(matches!(
+        &conversation.messages[3],
+        Message {
+            role: Role::User,
+            content,
+            ..
+        } if matches!(content.as_slice(), [
+            ContentBlock::ToolResult { tool_use_id: first_id, is_error: true, .. },
+            ContentBlock::ToolResult { tool_use_id: second_id, is_error: false, .. }
+        ] if first_id == "tool-1" && second_id == "tool-2")
+    ));
+}
