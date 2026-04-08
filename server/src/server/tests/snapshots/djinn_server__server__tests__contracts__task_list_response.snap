@@ -1,0 +1,11 @@
+---
+source: src/server/tests/contracts.rs
+expression: task_list
+---
+{
+  "has_more": false,
+  "limit": 10,
+  "offset": 0,
+  "tasks": [],
+  "total_count": 0
+}
