@@ -108,6 +108,30 @@ impl Drop for CargoTargetDirGuard {
     }
 }
 
+/// ADR-050 §3 single-flight wrapper around [`run_indexers`].
+///
+/// Acquires the supplied server-wide indexer mutex before spawning any
+/// SCIP subprocesses, releasing it only once the run completes. This
+/// guarantees at most one indexer run is in flight at a time across the
+/// whole server, regardless of how many architect / chat / worker code
+/// paths fan in concurrently. The `CARGO_BUILD_JOBS=4` cap is set
+/// unconditionally inside `PlannedIndexerCommand::build_command`.
+///
+/// `target_dir`, when supplied, becomes the dedicated `CARGO_TARGET_DIR`
+/// for the spawned indexer subprocesses. This is used by the canonical
+/// `_index/` worktree to keep its build outputs isolated from worker
+/// worktree caches while still sharing sccache.
+#[allow(dead_code)]
+pub(crate) async fn run_indexers_single_flight(
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    project_root: impl AsRef<Path>,
+    output_root: impl AsRef<Path>,
+    target_dir: Option<&Path>,
+) -> Result<IndexingRun> {
+    let _permit = lock.lock().await;
+    run_indexers_already_locked(project_root, output_root, target_dir).await
+}
+
 /// Indexer entrypoint for callers that **already hold** the server-wide
 /// `IndexerLock` (`AppState::indexer_lock`). Skips the lock acquisition
 /// a higher-level facade may perform, but otherwise behaves

@@ -1,3 +1,3 @@
 mod kb;
 
-pub use kb::spawn_kb_watchers;
+pub(crate) use kb::spawn_kb_watchers;

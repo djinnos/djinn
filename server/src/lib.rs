@@ -1,6 +1,6 @@
 #![warn(unreachable_pub)]
 
-mod canonical_graph;
+pub(crate) mod canonical_graph;
 pub mod daemon;
 pub mod db;
 pub mod embedded;
@@ -12,14 +12,14 @@ pub mod logging;
 mod mcp_bridge;
 pub mod process;
 pub mod repo_graph;
-mod repo_map;
+pub(crate) mod repo_map;
 pub mod repo_map_personalization;
-pub mod scip_parser;
+pub(crate) mod scip_parser;
 pub mod server;
 pub mod sse;
 pub mod sync;
 mod task_confidence;
-pub mod watchers;
+pub(crate) mod watchers;
 
 #[cfg(test)]
 pub mod test_helpers;

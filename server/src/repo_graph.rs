@@ -29,7 +29,7 @@ const SYMBOL_KIND_DEFAULT_MULTIPLIER: f64 = 0.9;
 
 /// Stable, reusable repository dependency graph built from normalized SCIP parse output.
 #[derive(Debug, Clone)]
-pub struct RepoDependencyGraph {
+pub(crate) struct RepoDependencyGraph {
     graph: DiGraph<RepoGraphNode, RepoGraphEdge>,
     node_lookup: BTreeMap<RepoNodeKey, NodeIndex>,
     /// Index from lowercased `display_name` to the nodes that use it.
@@ -130,7 +130,7 @@ fn compute_pagerank_sparse(
 }
 
 impl RepoDependencyGraph {
-    pub fn build(indices: &[ParsedScipIndex]) -> Self {
+    pub(crate) fn build(indices: &[ParsedScipIndex]) -> Self {
         let mut builder = RepoDependencyGraphBuilder::default();
         for index in indices {
             builder.add_index(index);
@@ -138,39 +138,40 @@ impl RepoDependencyGraph {
         builder.finish()
     }
 
-    pub fn graph(&self) -> &DiGraph<RepoGraphNode, RepoGraphEdge> {
+    pub(crate) fn graph(&self) -> &DiGraph<RepoGraphNode, RepoGraphEdge> {
         &self.graph
     }
 
-    pub fn node(&self, index: NodeIndex) -> &RepoGraphNode {
+    pub(crate) fn node(&self, index: NodeIndex) -> &RepoGraphNode {
         &self.graph[index]
     }
 
-    pub fn edge(&self, edge_index: petgraph::graph::EdgeIndex) -> &RepoGraphEdge {
+    #[allow(dead_code)]
+    pub(crate) fn edge(&self, edge_index: petgraph::graph::EdgeIndex) -> &RepoGraphEdge {
         &self.graph[edge_index]
     }
 
-    pub fn node_count(&self) -> usize {
+    pub(crate) fn node_count(&self) -> usize {
         self.graph.node_count()
     }
 
-    pub fn edge_count(&self) -> usize {
+    pub(crate) fn edge_count(&self) -> usize {
         self.graph.edge_count()
     }
 
-    pub fn file_node(&self, path: impl AsRef<Path>) -> Option<NodeIndex> {
+    pub(crate) fn file_node(&self, path: impl AsRef<Path>) -> Option<NodeIndex> {
         self.node_lookup
             .get(&RepoNodeKey::File(path.as_ref().to_path_buf()))
             .copied()
     }
 
-    pub fn symbol_node(&self, symbol: &str) -> Option<NodeIndex> {
+    pub(crate) fn symbol_node(&self, symbol: &str) -> Option<NodeIndex> {
         self.node_lookup
             .get(&RepoNodeKey::Symbol(symbol.to_string()))
             .copied()
     }
 
-    pub fn rank(&self) -> RepoGraphRanking {
+    pub(crate) fn rank(&self) -> RepoGraphRanking {
         let page_rank_scores =
             compute_pagerank_sparse(&self.graph, PAGE_RANK_DAMPING_FACTOR, PAGE_RANK_ITERATIONS);
 
@@ -222,22 +223,26 @@ impl RepoDependencyGraph {
     }
 
     /// Total inbound edge weight at a node (publicly exposed for ops layer).
-    pub fn inbound_edge_weight(&self, node_index: NodeIndex) -> f64 {
+    #[allow(dead_code)]
+    pub(crate) fn inbound_edge_weight(&self, node_index: NodeIndex) -> f64 {
         self.total_edge_weight(node_index, Incoming)
     }
 
     /// Total outbound edge weight at a node (publicly exposed for ops layer).
-    pub fn outbound_edge_weight(&self, node_index: NodeIndex) -> f64 {
+    #[allow(dead_code)]
+    pub(crate) fn outbound_edge_weight(&self, node_index: NodeIndex) -> f64 {
         self.total_edge_weight(node_index, Outgoing)
     }
 
     /// Total in-degree at a node (count of inbound edges, regardless of weight).
-    pub fn in_degree(&self, node_index: NodeIndex) -> usize {
+    #[allow(dead_code)]
+    pub(crate) fn in_degree(&self, node_index: NodeIndex) -> usize {
         self.graph.edges_directed(node_index, Incoming).count()
     }
 
     /// Total out-degree at a node.
-    pub fn out_degree(&self, node_index: NodeIndex) -> usize {
+    #[allow(dead_code)]
+    pub(crate) fn out_degree(&self, node_index: NodeIndex) -> usize {
         self.graph.edges_directed(node_index, Outgoing).count()
     }
 
@@ -248,7 +253,7 @@ impl RepoDependencyGraph {
     /// 3. substring match
     ///
     /// then by alphabetical key for stability.
-    pub fn search_by_name(
+    pub(crate) fn search_by_name(
         &self,
         query: &str,
         kind_filter: Option<RepoGraphNodeKind>,
@@ -300,7 +305,7 @@ impl RepoDependencyGraph {
     /// file/symbol strongly-connected components (which the raw graph always
     /// contains because of `ContainsDefinition`/`DeclaredInFile` pairs) do
     /// not mask the cycles we actually care about.
-    pub fn strongly_connected_components(
+    pub(crate) fn strongly_connected_components(
         &self,
         kind_filter: Option<RepoGraphNodeKind>,
         min_size: usize,
@@ -337,7 +342,7 @@ impl RepoDependencyGraph {
     /// by kind and SCIP visibility. `ContainsDefinition` and `DeclaredInFile`
     /// edges — which are structural "this symbol lives in this file" links,
     /// not uses of the symbol — are not counted as incoming references.
-    pub fn orphans(
+    pub(crate) fn orphans(
         &self,
         kind_filter: Option<RepoGraphNodeKind>,
         visibility_filter: Option<ScipVisibility>,
@@ -377,7 +382,7 @@ impl RepoDependencyGraph {
     }
 
     /// Shortest dependency path between two nodes using A* over edge weights.
-    pub fn shortest_path(
+    pub(crate) fn shortest_path(
         &self,
         from: NodeIndex,
         to: NodeIndex,
@@ -403,52 +408,52 @@ impl RepoDependencyGraph {
 /// Internal hit returned by `search_by_name`. The bridge converts this to the
 /// public `SearchHit` data type.
 #[derive(Debug, Clone)]
-pub struct RepoGraphSearchHit {
-    pub node_index: NodeIndex,
-    pub score: f64,
+pub(crate) struct RepoGraphSearchHit {
+    pub(crate) node_index: NodeIndex,
+    pub(crate) score: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum RepoNodeKey {
+pub(crate) enum RepoNodeKey {
     File(PathBuf),
     Symbol(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RepoGraphNodeKind {
+pub(crate) enum RepoGraphNodeKind {
     File,
     Symbol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepoGraphNode {
-    pub id: RepoNodeKey,
-    pub kind: RepoGraphNodeKind,
-    pub display_name: String,
-    pub language: Option<String>,
-    pub file_path: Option<PathBuf>,
-    pub symbol: Option<String>,
-    pub symbol_kind: Option<ScipSymbolKind>,
-    pub is_external: bool,
+pub(crate) struct RepoGraphNode {
+    pub(crate) id: RepoNodeKey,
+    pub(crate) kind: RepoGraphNodeKind,
+    pub(crate) display_name: String,
+    pub(crate) language: Option<String>,
+    pub(crate) file_path: Option<PathBuf>,
+    pub(crate) symbol: Option<String>,
+    pub(crate) symbol_kind: Option<ScipSymbolKind>,
+    pub(crate) is_external: bool,
     /// Visibility of the underlying SCIP symbol, when known. `None` for file
     /// nodes and for synthetic placeholder symbols.
     #[serde(default)]
-    pub visibility: Option<ScipVisibility>,
+    pub(crate) visibility: Option<ScipVisibility>,
     /// Symbol signature, copied from `ScipSymbol::signature` when present.
     #[serde(default)]
-    pub signature: Option<String>,
+    pub(crate) signature: Option<String>,
     /// Symbol documentation, copied from `ScipSymbol::documentation`.
     #[serde(default)]
-    pub documentation: Vec<String>,
+    pub(crate) documentation: Vec<String>,
 }
 
 impl RepoGraphNode {
-    pub fn key(&self) -> RepoNodeKey {
+    pub(crate) fn key(&self) -> RepoNodeKey {
         self.id.clone()
     }
 
-    pub fn kind(&self) -> RepoGraphNodeKind {
+    pub(crate) fn kind(&self) -> RepoGraphNodeKind {
         self.kind
     }
 
@@ -476,7 +481,7 @@ impl RepoGraphNode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RepoGraphEdgeKind {
+pub(crate) enum RepoGraphEdgeKind {
     ContainsDefinition,
     DeclaredInFile,
     FileReference,
@@ -488,27 +493,27 @@ pub enum RepoGraphEdgeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RepoGraphEdge {
-    pub kind: RepoGraphEdgeKind,
-    pub weight: f64,
-    pub evidence_count: usize,
+pub(crate) struct RepoGraphEdge {
+    pub(crate) kind: RepoGraphEdgeKind,
+    pub(crate) weight: f64,
+    pub(crate) evidence_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RepoGraphRanking {
-    pub nodes: Vec<RankedRepoGraphNode>,
+pub(crate) struct RepoGraphRanking {
+    pub(crate) nodes: Vec<RankedRepoGraphNode>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RankedRepoGraphNode {
-    pub node_index: NodeIndex,
-    pub key: RepoNodeKey,
-    pub kind: RepoGraphNodeKind,
-    pub score: f64,
-    pub page_rank: f64,
-    pub structural_weight: f64,
-    pub inbound_edge_weight: f64,
-    pub outbound_edge_weight: f64,
+pub(crate) struct RankedRepoGraphNode {
+    pub(crate) node_index: NodeIndex,
+    pub(crate) key: RepoNodeKey,
+    pub(crate) kind: RepoGraphNodeKind,
+    pub(crate) score: f64,
+    pub(crate) page_rank: f64,
+    pub(crate) structural_weight: f64,
+    pub(crate) inbound_edge_weight: f64,
+    pub(crate) outbound_edge_weight: f64,
 }
 
 #[derive(Default)]
@@ -825,7 +830,7 @@ fn build_name_index(
 /// operations can recover the dependency graph without re-parsing raw SCIP
 /// outputs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RepoGraphArtifact {
+pub(crate) struct RepoGraphArtifact {
     pub nodes: Vec<RepoGraphNode>,
     pub edges: Vec<RepoGraphArtifactEdge>,
 }
@@ -833,18 +838,18 @@ pub struct RepoGraphArtifact {
 /// A serializable directed edge between two graph nodes, identified by their
 /// position in the `nodes` vec of the parent [`RepoGraphArtifact`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RepoGraphArtifactEdge {
+pub(crate) struct RepoGraphArtifactEdge {
     pub source: usize,
     pub target: usize,
-    pub kind: RepoGraphEdgeKind,
-    pub weight: f64,
-    pub evidence_count: usize,
+    pub(crate) kind: RepoGraphEdgeKind,
+    pub(crate) weight: f64,
+    pub(crate) evidence_count: usize,
 }
 
 impl RepoDependencyGraph {
     /// Serialize the graph into a compact JSON artifact suitable for DB
     /// persistence.
-    pub fn to_artifact(&self) -> RepoGraphArtifact {
+    pub(crate) fn to_artifact(&self) -> RepoGraphArtifact {
         let mut index_map: BTreeMap<NodeIndex, usize> = BTreeMap::new();
         let mut nodes = Vec::with_capacity(self.graph.node_count());
         for (i, node_index) in self.graph.node_indices().enumerate() {
@@ -870,7 +875,7 @@ impl RepoDependencyGraph {
     }
 
     /// Rebuild a `RepoDependencyGraph` from a previously persisted artifact.
-    pub fn from_artifact(artifact: &RepoGraphArtifact) -> Self {
+    pub(crate) fn from_artifact(artifact: &RepoGraphArtifact) -> Self {
         let mut graph = DiGraph::new();
         let mut node_lookup = BTreeMap::new();
         let mut index_map = Vec::with_capacity(artifact.nodes.len());
@@ -902,12 +907,13 @@ impl RepoDependencyGraph {
     }
 
     /// Serialize the graph artifact to a JSON string for DB storage.
-    pub fn serialize_artifact(&self) -> Result<String, serde_json::Error> {
+    pub(crate) fn serialize_artifact(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(&self.to_artifact())
     }
 
     /// Deserialize a graph from a previously stored JSON artifact string.
-    pub fn deserialize_artifact(json: &str) -> Result<Self, serde_json::Error> {
+    #[cfg(test)]
+    pub(crate) fn deserialize_artifact(json: &str) -> Result<Self, serde_json::Error> {
         let artifact: RepoGraphArtifact = serde_json::from_str(json)?;
         Ok(Self::from_artifact(&artifact))
     }
@@ -923,7 +929,8 @@ impl RepoDependencyGraph {
     /// The caller is responsible for ensuring `new_indices` contains parsed
     /// SCIP data for exactly the changed files (additional files are harmless
     /// but defeat the purpose).
-    pub fn patch_changed_files(
+    #[cfg(test)]
+    pub(crate) fn patch_changed_files(
         &self,
         changed_files: &BTreeSet<PathBuf>,
         new_indices: &[ParsedScipIndex],
@@ -1015,6 +1022,7 @@ impl RepoDependencyGraph {
 /// Returns `true` when `node` is "owned by" one of the changed files:
 /// - file nodes whose path is in the set
 /// - symbol nodes whose `file_path` is in the set *and* that are not external
+#[cfg(test)]
 fn is_owned_by_changed_file(node: &RepoGraphNode, changed_files: &BTreeSet<PathBuf>) -> bool {
     match &node.kind {
         RepoGraphNodeKind::File => node

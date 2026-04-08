@@ -24,7 +24,7 @@ struct WatcherState {
 /// projects and triggers `reindex_from_disk` when note files change.
 ///
 /// Dynamically adds/removes watches when `ProjectCreated`/`ProjectDeleted` events fire.
-pub fn spawn_kb_watchers(
+pub(crate) fn spawn_kb_watchers(
     db: Database,
     events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
     cancel: CancellationToken,
