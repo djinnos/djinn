@@ -134,7 +134,7 @@ pub(crate) async fn run_indexers_single_flight(
 
 /// Indexer entrypoint for callers that **already hold** the server-wide
 /// `IndexerLock` (`AppState::indexer_lock`). Skips the lock acquisition
-/// performed by [`run_indexers_single_flight`] but otherwise behaves
+/// a higher-level facade may perform, but otherwise behaves
 /// identically — including installing the [`CargoTargetDirGuard`] when
 /// `target_dir` is supplied.
 ///

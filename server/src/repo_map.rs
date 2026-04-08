@@ -153,16 +153,16 @@ impl SupportedIndexer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DiscoveredWorkspace {
-    pub indexer: SupportedIndexer,
-    pub root: PathBuf,
-    pub slug: String,
+    pub(crate) indexer: SupportedIndexer,
+    pub(crate) root: PathBuf,
+    pub(crate) slug: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct IndexerAvailability {
-    pub indexer: SupportedIndexer,
-    pub binary: String,
-    pub path: Option<PathBuf>,
+    pub(crate) indexer: SupportedIndexer,
+    pub(crate) binary: String,
+    pub(crate) path: Option<PathBuf>,
 }
 
 impl IndexerAvailability {
@@ -173,12 +173,12 @@ impl IndexerAvailability {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlannedIndexerCommand {
-    pub indexer: SupportedIndexer,
-    pub binary_path: PathBuf,
-    pub args: Vec<String>,
-    pub working_directory: PathBuf,
-    pub workspace_root: PathBuf,
-    pub output_path: PathBuf,
+    pub(crate) indexer: SupportedIndexer,
+    pub(crate) binary_path: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) working_directory: PathBuf,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) output_path: PathBuf,
 }
 
 impl PlannedIndexerCommand {
@@ -200,32 +200,32 @@ impl PlannedIndexerCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExecutedIndexerCommand {
-    pub plan: PlannedIndexerCommand,
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
+    pub(crate) plan: PlannedIndexerCommand,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ScipArtifact {
-    pub path: PathBuf,
-    pub indexer: Option<SupportedIndexer>,
+    pub(crate) path: PathBuf,
+    pub(crate) indexer: Option<SupportedIndexer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct IndexingRun {
-    pub project_root: PathBuf,
-    pub output_root: PathBuf,
-    pub commands: Vec<ExecutedIndexerCommand>,
-    pub artifacts: Vec<ScipArtifact>,
+    pub(crate) project_root: PathBuf,
+    pub(crate) output_root: PathBuf,
+    pub(crate) commands: Vec<ExecutedIndexerCommand>,
+    pub(crate) artifacts: Vec<ScipArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepoMapRenderOptions {
-    pub token_budget: usize,
-    pub max_files: usize,
-    pub max_symbols_per_file: usize,
-    pub max_relationships_per_file: usize,
+    pub(crate) token_budget: usize,
+    pub(crate) max_files: usize,
+    pub(crate) max_symbols_per_file: usize,
+    pub(crate) max_relationships_per_file: usize,
 }
 
 impl RepoMapRenderOptions {
@@ -241,16 +241,16 @@ impl RepoMapRenderOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RenderedRepoMap {
-    pub content: String,
-    pub token_estimate: usize,
-    pub included_entries: usize,
+    pub(crate) content: String,
+    pub(crate) token_estimate: usize,
+    pub(crate) included_entries: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepoMapNoteSpec {
-    pub title: String,
-    pub permalink: String,
-    pub tags_json: String,
+    pub(crate) title: String,
+    pub(crate) permalink: String,
+    pub(crate) tags_json: String,
 }
 
 pub(crate) fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
@@ -312,15 +312,14 @@ struct RepoMapSymbol {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct RepoMapPersonalizationRequest<'a> {
-    pub ranked_nodes: &'a [RankedRepoGraphNode],
-    pub title: Option<&'a str>,
-    pub description: Option<&'a str>,
-    pub design: Option<&'a str>,
-    pub memory_refs: &'a [String],
-    pub note_hints: &'a [RepoMapNoteHint],
+struct RepoMapPersonalizationRequest<'a> {
+    ranked_nodes: &'a [RankedRepoGraphNode],
+    title: Option<&'a str>,
+    description: Option<&'a str>,
+    design: Option<&'a str>,
+    memory_refs: &'a [String],
+    note_hints: &'a [RepoMapNoteHint],
 }
 
 impl RepoMapNoteSearcher for NoteRepository {
@@ -347,8 +346,7 @@ pub(crate) fn render_repo_map(
 }
 
 #[cfg(test)]
-#[cfg(test)]
-pub(crate) fn personalized_repo_map_ranking(
+fn personalized_repo_map_ranking(
     graph: &RepoDependencyGraph,
     request: &RepoMapPersonalizationRequest<'_>,
 ) -> Vec<RankedRepoGraphNode> {
@@ -519,7 +517,6 @@ fn render_repo_map_from_entries(
     Ok(best)
 }
 
-#[cfg(test)]
 #[cfg(test)]
 fn repo_map_entry_boost(
     graph: &RepoDependencyGraph,

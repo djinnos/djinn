@@ -9,7 +9,7 @@ pub mod events;
 pub mod housekeeping;
 pub mod index_tree;
 pub mod logging;
-pub mod mcp_bridge;
+mod mcp_bridge;
 pub mod process;
 pub mod repo_graph;
 pub(crate) mod repo_map;
