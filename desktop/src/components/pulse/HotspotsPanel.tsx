@@ -9,11 +9,10 @@ import { callMcpTool } from "@/api/mcpClient";
 import { cn } from "@/lib/utils";
 import {
   parseRanked,
-  parseNeighbors,
+  parseFileGroups,
   truncatePathLeft,
   isPathExcluded,
   type RankedNode,
-  type GraphNeighbor,
 } from "./pulseTypes";
 
 interface HotspotsPanelProps {
@@ -21,28 +20,36 @@ interface HotspotsPanelProps {
   excludedPaths: string[];
 }
 
-function formatScore(n: number): string {
-  return n.toFixed(2);
+function formatScore(n: number, max: number): string {
+  if (max <= 0) return "—";
+  return `${Math.round((n / max) * 100)}%`;
 }
 
 function NeighborsDrilldown({
   projectPath,
   nodeKey,
+  selfFile,
 }: {
   projectPath: string;
   nodeKey: string;
+  selfFile: string;
 }) {
+  // Roll up incoming edges by file: the raw neighbor list is every SCIP
+  // symbol that references this file (local bindings, params, etc.), which
+  // isn't useful for "what depends on this file". `group_by: "file"` answers
+  // the question we actually care about.
   const { data, isLoading, error } = useQuery({
-    queryKey: ["pulse", "neighbors", projectPath, nodeKey, "incoming"],
+    queryKey: ["pulse", "neighbors", projectPath, nodeKey, "incoming", "by-file"],
     queryFn: async () => {
       const raw = await callMcpTool("code_graph", {
         project_path: projectPath,
         operation: "neighbors",
         key: nodeKey,
         direction: "incoming",
+        group_by: "file",
         limit: 8,
       });
-      return parseNeighbors(raw);
+      return parseFileGroups(raw);
     },
     staleTime: 60_000,
   });
@@ -65,42 +72,49 @@ function NeighborsDrilldown({
     );
   }
 
-  if (!data || data.length === 0) {
+  // Drop self-references — a file trivially "references" itself via its own
+  // contained symbols, which isn't interesting.
+  const groups = (data ?? []).filter((g) => g.file !== selfFile);
+
+  if (groups.length === 0) {
     return (
       <p className="mt-2 pl-8 text-xs text-muted-foreground">
-        No incoming references found.
+        No other files reference this one.
       </p>
     );
   }
 
-  const max = Math.max(...data.map((n: GraphNeighbor) => n.edge_weight), 1);
+  const max = Math.max(...groups.map((g) => g.occurrence_count), 1);
   return (
     <div className="mt-2 space-y-1.5 pl-8">
       <p className="text-[11px] font-medium text-muted-foreground">
-        Top incoming references
+        Files that reference this
       </p>
-      {data.map((n) => (
-        <div key={n.key} className="space-y-0.5">
-          <div className="flex items-center justify-between gap-2 text-xs">
-            <span
-              className="truncate font-mono text-foreground/80"
-              title={n.display_name}
-              dir="rtl"
-            >
-              {truncatePathLeft(n.display_name, 64)}
-            </span>
-            <span className="shrink-0 tabular-nums text-muted-foreground">
-              {n.edge_weight.toFixed(1)}
-            </span>
+      {groups.map((g) => {
+        const pct = Math.round((g.occurrence_count / max) * 100);
+        return (
+          <div key={g.file} className="space-y-0.5">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span
+                className="truncate font-mono text-foreground/80"
+                title={g.file}
+                dir="rtl"
+              >
+                {truncatePathLeft(g.file, 64)}
+              </span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {pct}%
+              </span>
+            </div>
+            <div className="h-1 w-full overflow-hidden rounded bg-muted">
+              <div
+                className="h-full bg-foreground/30"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
           </div>
-          <div className="h-1 w-full overflow-hidden rounded bg-muted">
-            <div
-              className="h-full bg-foreground/30"
-              style={{ width: `${(n.edge_weight / max) * 100}%` }}
-            />
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -146,7 +160,7 @@ function HotspotRow({
               {truncatePathLeft(label)}
             </span>
             <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
-              {formatScore(node.page_rank)}
+              {formatScore(node.page_rank, maxRank)}
             </span>
           </div>
           <div className="mt-1 h-1 w-full overflow-hidden rounded bg-muted">
@@ -160,7 +174,13 @@ function HotspotRow({
           </div>
         </div>
       </button>
-      {expanded && <NeighborsDrilldown projectPath={projectPath} nodeKey={node.key} />}
+      {expanded && (
+        <NeighborsDrilldown
+          projectPath={projectPath}
+          nodeKey={node.key}
+          selfFile={node.display_name || node.key}
+        />
+      )}
     </div>
   );
 }

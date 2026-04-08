@@ -8,8 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
-    CycleGroup, EdgeEntry, GraphDiff, GraphStatus, ImpactResult, NeighborsResult, OrphanEntry,
-    PathResult, RankedNode, SearchHit, SymbolDescription,
+    CycleGroup, EdgeEntry, FileGroupEntry, GraphDiff, GraphNeighbor, GraphStatus, ImpactEntry,
+    ImpactResult, NeighborsResult, OrphanEntry, PathResult, RankedNode, SearchHit,
+    SymbolDescription,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::{ErrorOr, ErrorResponse};
@@ -35,8 +36,8 @@ pub struct CodeGraphParams {
     /// Node kind filter for `ranked`/`search`/`cycles`/`orphans`: `file` or `symbol`.
     #[serde(default)]
     pub kind_filter: Option<String>,
-    /// Maximum results for `ranked`/`search`/`orphans`/`edges` (default 20) or
-    /// max traversal depth for `impact` (default 3).
+    /// Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
+    /// (default 20) or max traversal depth for `impact` (default 3).
     #[serde(default)]
     pub limit: Option<i64>,
     /// Substring query for `search`.
@@ -80,11 +81,19 @@ pub struct CodeGraphParams {
 
 // ── Response types ──────────────────────────────────────────────────────────────
 
+// NOTE: previously `result: NeighborsResult` was `#[serde(flatten)]`, but
+// `NeighborsResult` is an untagged enum of `Vec<_>` variants — serde's flatten
+// adapter only accepts map-like types, so serialization failed at runtime with
+// "can only flatten structs and maps (got a sequence)". We now emit the list
+// under a named field that matches the desktop client parsers (`neighbors` for
+// the detailed shape, `file_groups` for the `group_by=file` rollup).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct NeighborsResponse {
     pub key: String,
-    #[serde(flatten)]
-    pub result: NeighborsResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub neighbors: Option<Vec<GraphNeighbor>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_groups: Option<Vec<FileGroupEntry>>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -98,11 +107,15 @@ pub struct ImplementationsResponse {
     pub implementations: Vec<String>,
 }
 
+// See NeighborsResponse above — same flatten-on-sequence bug. Impact emits
+// its detailed list under `impact` and its file rollup under `file_groups`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactResponse {
     pub key: String,
-    #[serde(flatten)]
-    pub result: ImpactResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact: Option<Vec<ImpactEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_groups: Option<Vec<FileGroupEntry>>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -335,9 +348,31 @@ impl DjinnMcpServer {
                 params.group_by.as_deref(),
             )
             .await?;
+        // Bound the wire size — the underlying neighbors() call returns every
+        // edge incident on the node (1k+ for high-centrality files), which
+        // makes the MCP response unusably large. Sort by weight desc and cap
+        // at `limit` (default 20, matching other list operations).
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let (neighbors, file_groups) = match result {
+            NeighborsResult::Detailed(mut v) => {
+                v.sort_by(|a, b| {
+                    b.edge_weight
+                        .partial_cmp(&a.edge_weight)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                v.truncate(limit);
+                (Some(v), None)
+            }
+            NeighborsResult::Grouped(mut v) => {
+                v.sort_by(|a, b| b.occurrence_count.cmp(&a.occurrence_count));
+                v.truncate(limit);
+                (None, Some(v))
+            }
+        };
         Ok(CodeGraphResponse::Neighbors(NeighborsResponse {
             key: key.to_string(),
-            result,
+            neighbors,
+            file_groups,
         }))
     }
 
@@ -391,9 +426,14 @@ impl DjinnMcpServer {
             .repo_graph()
             .impact(&params.project_path, key, depth, params.group_by.as_deref())
             .await?;
+        let (impact, file_groups) = match result {
+            ImpactResult::Detailed(v) => (Some(v), None),
+            ImpactResult::Grouped(v) => (None, Some(v)),
+        };
         Ok(CodeGraphResponse::Impact(ImpactResponse {
             key: key.to_string(),
-            result,
+            impact,
+            file_groups,
         }))
     }
 

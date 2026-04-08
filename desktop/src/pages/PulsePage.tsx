@@ -157,7 +157,7 @@ function ReadyState({
 }) {
   const { settings, addOrphanIgnore } = usePulseSettings(projectPath);
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-4">
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-4 [&>*]:shrink-0">
       <div className="flex items-start gap-2">
         <div className="flex-1">
           <FreshnessStrip
