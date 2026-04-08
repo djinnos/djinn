@@ -112,6 +112,10 @@ static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
 static PREVIOUS_GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
 
+#[cfg(test)]
+static GRAPH_CACHE_TEST_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
 
 pub struct CoordinatorBridge(pub CoordinatorHandle);
@@ -1779,6 +1783,17 @@ mod graph_bridge_tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
+    async fn clear_graph_test_caches() {
+        {
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = None;
+        }
+        {
+            let mut cache = PREVIOUS_GRAPH_CACHE.write().await;
+            *cache = None;
+        }
+    }
+
     fn fixture_index() -> ParsedScipIndex {
         let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
         let helper_symbol = ScipSymbol {
@@ -2127,6 +2142,9 @@ mod graph_bridge_tests {
         use djinn_db::ProjectRepository;
         use tokio_util::sync::CancellationToken;
 
+        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
+        clear_graph_test_caches().await;
+
         let tmp = tempfile::tempdir().unwrap();
         // Use a unique project_root per test to avoid the global GRAPH_CACHE
         // colliding with concurrently-running test cases.
@@ -2150,6 +2168,8 @@ mod graph_bridge_tests {
         assert!(status.last_warm_at.is_none());
         assert!(status.pinned_commit.is_none());
         assert!(status.commits_since_pin.is_none());
+
+        clear_graph_test_caches().await;
     }
 
     /// `RepoGraphBridge::status` returns `warmed: true` together with
@@ -2161,6 +2181,9 @@ mod graph_bridge_tests {
         use crate::test_helpers::create_test_db;
         use djinn_db::ProjectRepository;
         use tokio_util::sync::CancellationToken;
+
+        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
+        clear_graph_test_caches().await;
 
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path().join("status-warm-repo");
@@ -2197,12 +2220,6 @@ mod graph_bridge_tests {
         let project_root_str = project_root.to_string_lossy().into_owned();
         let status = bridge.status(&project_root_str).await.expect("status ok");
 
-        // Drain the cache so we don't poison sibling tests in this process.
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-
         assert_eq!(status.project_id, project.id);
         assert!(status.warmed);
         assert_eq!(status.pinned_commit.as_deref(), Some(pinned_sha.as_str()));
@@ -2215,6 +2232,8 @@ mod graph_bridge_tests {
         // the rev-list call fails and we expect None.  This still proves the
         // status path does not panic when git is unavailable.
         assert!(status.commits_since_pin.is_none());
+
+        clear_graph_test_caches().await;
     }
 
     #[tokio::test]
@@ -2222,6 +2241,9 @@ mod graph_bridge_tests {
         use crate::test_helpers::create_test_db;
         use djinn_db::ProjectRepository;
         use tokio_util::sync::CancellationToken;
+
+        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
+        clear_graph_test_caches().await;
 
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path().join("chat-code-graph-repo");
@@ -2269,11 +2291,6 @@ mod graph_bridge_tests {
         .await
         .expect("chat code_graph ranked should succeed through agent bridge");
 
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-
         let ranked = result
             .as_array()
             .expect("ranked response should be an array");
@@ -2296,6 +2313,8 @@ mod graph_bridge_tests {
             !rendered.contains("code_graph not available in agent bridge"),
             "bridge should use the real RepoGraphOps implementation, got {rendered}"
         );
+
+        clear_graph_test_caches().await;
     }
 }
 
