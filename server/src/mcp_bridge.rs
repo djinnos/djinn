@@ -28,6 +28,27 @@ use crate::sync::SyncManager;
 
 // ── Graph cache ────────────────────────────────────────────────────────────────
 
+/// Output bundle of the CPU-bound `ensure_canonical_graph` build pipeline,
+/// produced on a `spawn_blocking` thread and consumed by the async tail that
+/// writes DB caches and installs the in-memory canonical slot.
+///
+/// Tuple layout (kept as a type alias rather than a struct so the blocking
+/// closure stays terse):
+/// `(graph, rendered, serialized_blob, parse_ms, build_ms, rank_ms,
+///   render_ms, serial_ms, node_count, edge_count)`
+type CanonicalGraphBuildOutput = (
+    crate::repo_graph::RepoDependencyGraph,
+    crate::repo_map::RenderedRepoMap,
+    Vec<u8>,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    usize,
+    usize,
+);
+
 struct CachedGraph {
     graph: crate::repo_graph::RepoDependencyGraph,
     project_path: PathBuf,
@@ -1172,41 +1193,122 @@ pub async fn ensure_canonical_graph(
     // The server-wide IndexerLock is already held above (`_permit`); use the
     // `_already_locked` entrypoint instead of re-acquiring it via a dummy
     // mutex.  ADR-050 Chunk C cleanup.
+    let t_indexers = std::time::Instant::now();
     let run =
         crate::repo_map::run_indexers_already_locked(handle.path(), &output_dir, Some(&target_dir))
             .await
             .map_err(|e| format!("run_indexers: {e}"))?;
-    let parsed = crate::scip_parser::parse_scip_artifacts(&run.artifacts)
-        .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
-    let _ = std::fs::remove_dir_all(&output_dir);
+    let indexers_ms = t_indexers.elapsed().as_millis() as u64;
 
-    let graph = crate::repo_graph::RepoDependencyGraph::build(&parsed);
+    // ── CPU-bound section on a blocking thread ─────────────────────────────
+    // Parsing a 20 MB SCIP artifact, building the DiGraph, computing
+    // PageRank, and rendering the skeleton are all synchronous CPU work.
+    // Running them on a tokio worker starves the runtime for tens of
+    // minutes on cold cache — observed 2026-04-07: a single warm pinned
+    // one `tokio-rt-worker` at ~90% CPU for 30+ min and blocked every
+    // other session lifecycle serialized behind `indexer_lock`.
+    //
+    // Moving the entire post-SCIP pipeline into `spawn_blocking` keeps
+    // the runtime healthy: other tokio tasks progress while a blocking
+    // thread churns through the graph.  Each sub-step is timed so the
+    // next recurrence names its slow step in the logs instead of
+    // forcing another offline investigation.
+    let output_dir_for_blocking = output_dir.clone();
+    let artifacts = run.artifacts;
+    const SKELETON_TOKEN_BUDGET: usize = 1200;
+    let blocking =
+        tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
+            let t_parse = std::time::Instant::now();
+            let parsed = crate::scip_parser::parse_scip_artifacts(&artifacts)
+                .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
+            let parse_ms = t_parse.elapsed().as_millis() as u64;
+            let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
-    // ── ADR-050 Chunk C C10: render canonical skeleton + persist as a
-    // canonical `repo_map_cache` row + `repo_map` note so workers
-    // (which still consume the rendered skeleton through the
-    // existing note pipeline) and the chat (which reads
-    // `RepoMapCacheRepository` directly) see the new graph.  Best
-    // effort: failures are logged but do not abort the graph hand-off.
-    persist_canonical_skeleton(state, project_id, project_root, &commit_sha, &graph).await;
+            let t_build = std::time::Instant::now();
+            let graph = crate::repo_graph::RepoDependencyGraph::build(&parsed);
+            let build_ms = t_build.elapsed().as_millis() as u64;
+            let node_count = graph.node_count();
+            let edge_count = graph.edge_count();
 
-    // Persist (best-effort — failure is logged but does not abort).
-    match bincode::serialize(&graph.to_artifact()) {
-        Ok(blob) => {
-            if let Err(e) = cache_repo
-                .upsert(RepoGraphCacheInsert {
-                    project_id,
-                    commit_sha: &commit_sha,
-                    graph_blob: &blob,
-                })
-                .await
-            {
-                tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "ensure_canonical_graph: failed to serialize graph for cache");
-        }
+            let t_rank = std::time::Instant::now();
+            let ranking = graph.rank();
+            let rank_ms = t_rank.elapsed().as_millis() as u64;
+
+            let t_render = std::time::Instant::now();
+            let rendered = crate::repo_map::render_repo_map(
+                &graph,
+                &ranking,
+                &crate::repo_map::RepoMapRenderOptions::new(SKELETON_TOKEN_BUDGET),
+            )
+            .map_err(|e| format!("render_repo_map: {e:?}"))?;
+            let render_ms = t_render.elapsed().as_millis() as u64;
+
+            let t_serial = std::time::Instant::now();
+            let serialized = bincode::serialize(&graph.to_artifact())
+                .map_err(|e| format!("bincode serialize graph: {e}"))?;
+            let serial_ms = t_serial.elapsed().as_millis() as u64;
+
+            Ok((
+                graph, rendered, serialized, parse_ms, build_ms, rank_ms, render_ms, serial_ms,
+                node_count, edge_count,
+            ))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking join: {e}"))?;
+    let (
+        graph,
+        rendered,
+        serialized_blob,
+        parse_ms,
+        build_ms,
+        rank_ms,
+        render_ms,
+        serial_ms,
+        node_count,
+        edge_count,
+    ) = blocking?;
+
+    tracing::info!(
+        project_id = %project_id,
+        commit_sha = %commit_sha,
+        indexers_ms,
+        parse_ms,
+        build_ms,
+        rank_ms,
+        render_ms,
+        serial_ms,
+        node_count,
+        edge_count,
+        "ensure_canonical_graph: build pipeline complete"
+    );
+
+    // ── ADR-050 Chunk C C10: persist canonical skeleton as a
+    // `repo_map_cache` row + `repo_map` note so workers (which consume
+    // the rendered skeleton through the existing note pipeline) and the
+    // chat (which reads `RepoMapCacheRepository` directly) see the new
+    // graph.  Best effort: failures are logged but do not abort the
+    // graph hand-off.  CPU-bound rank/render already ran inside the
+    // `spawn_blocking` above; this helper now only does async DB writes.
+    persist_canonical_skeleton(
+        state,
+        project_id,
+        project_root,
+        &commit_sha,
+        &graph,
+        &rendered,
+    )
+    .await;
+
+    // Persist bincode blob (best-effort — failure is logged but does not abort).
+    if let Err(e) = cache_repo
+        .upsert(RepoGraphCacheInsert {
+            project_id,
+            commit_sha: &commit_sha,
+            graph_blob: &serialized_blob,
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
     }
 
     install_as_canonical(
@@ -1218,37 +1320,21 @@ pub async fn ensure_canonical_graph(
     Ok((handle, graph))
 }
 
-/// ADR-050 Chunk C C10: render the canonical-main repo-map skeleton from a
-/// freshly built graph and persist it via the existing
-/// `RepoMapCacheRepository` + `repo_map` note pipeline so worker sessions
-/// (which consume the skeleton through the standard note path) see the
-/// canonical view.  Failures are logged and do not propagate.
+/// ADR-050 Chunk C C10: persist a pre-rendered canonical-main repo-map
+/// skeleton via the existing `RepoMapCacheRepository` + `repo_map` note
+/// pipeline so worker sessions (which consume the skeleton through the
+/// standard note path) see the canonical view.  The caller is responsible
+/// for producing `rendered` on a blocking thread — this function is purely
+/// async DB work.  Failures are logged and do not propagate.
 async fn persist_canonical_skeleton(
     state: &AppState,
     project_id: &str,
     project_root: &Path,
     commit_sha: &str,
     graph: &crate::repo_graph::RepoDependencyGraph,
+    rendered: &crate::repo_map::RenderedRepoMap,
 ) {
     use djinn_db::{NoteRepository, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository};
-    const SKELETON_TOKEN_BUDGET: usize = 1200;
-    let ranking = graph.rank();
-    let rendered = match crate::repo_map::render_repo_map(
-        graph,
-        &ranking,
-        &crate::repo_map::RepoMapRenderOptions::new(SKELETON_TOKEN_BUDGET),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                project_id = %project_id,
-                commit_sha = %commit_sha,
-                error = ?e,
-                "persist_canonical_skeleton: render failed"
-            );
-            return;
-        }
-    };
 
     let project_path = project_root.to_string_lossy().into_owned();
     let cache_repo = RepoMapCacheRepository::new(state.db().clone());
@@ -1277,7 +1363,7 @@ async fn persist_canonical_skeleton(
 
     let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
     if let Err(e) =
-        crate::repo_map::persist_repo_map_note(&note_repo, project_id, commit_sha, &rendered).await
+        crate::repo_map::persist_repo_map_note(&note_repo, project_id, commit_sha, rendered).await
     {
         tracing::warn!(
             project_id = %project_id,
