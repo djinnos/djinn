@@ -383,7 +383,10 @@ impl NoteRepository {
                     if is_singleton(&note_type) && self.worktree_root.is_some() {
                         (canonical_file_path.as_path(), worktree_file_path)
                     } else {
-                        (worktree_file_path.unwrap_or(canonical_file_path.as_path()), None)
+                        (
+                            worktree_file_path.unwrap_or(canonical_file_path.as_path()),
+                            None,
+                        )
                     };
                 self.remove_note_files(primary_file_path, mirror_file_path);
             }
@@ -515,7 +518,10 @@ impl NoteRepository {
             let worktree_file_path = self.existing_note_file_path(&current);
             let (primary_file_path, mirror_file_path) =
                 if is_singleton(&current.note_type) && self.worktree_root.is_some() {
-                    (canonical_file_path.as_path(), Some(worktree_file_path.as_path()))
+                    (
+                        canonical_file_path.as_path(),
+                        Some(worktree_file_path.as_path()),
+                    )
                 } else {
                     (worktree_file_path.as_path(), None)
                 };
@@ -624,7 +630,10 @@ impl NoteRepository {
             let worktree_file_path = self.existing_note_file_path(&current);
             let (primary_file_path, mirror_file_path) =
                 if is_singleton(&current.note_type) && self.worktree_root.is_some() {
-                    (canonical_file_path.as_path(), Some(worktree_file_path.as_path()))
+                    (
+                        canonical_file_path.as_path(),
+                        Some(worktree_file_path.as_path()),
+                    )
                 } else {
                     (worktree_file_path.as_path(), None)
                 };

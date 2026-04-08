@@ -431,7 +431,11 @@ mod tests {
                 worktree_root.clone(),
             )
             .await;
-        assert!(initial_roadmap.error.is_none(), "{:?}", initial_roadmap.error);
+        assert!(
+            initial_roadmap.error.is_none(),
+            "{:?}",
+            initial_roadmap.error
+        );
 
         assert_eq!(
             ops::memory_broken_links(
@@ -460,7 +464,11 @@ mod tests {
                 worktree_root.clone(),
             )
             .await;
-        assert!(updated_roadmap.error.is_none(), "{:?}", updated_roadmap.error);
+        assert!(
+            updated_roadmap.error.is_none(),
+            "{:?}",
+            updated_roadmap.error
+        );
 
         let Json(updated_brief) = server
             .memory_write_with_worktree(
@@ -524,6 +532,9 @@ mod tests {
         assert!(!remaining.contains(&("brief", "ADR-008 Example")));
         assert!(!remaining.contains(&("brief", "roadmap")));
         assert!(!remaining.contains(&("roadmap", "ADR-043 Repo Graph")));
-        assert!(remaining.is_empty(), "unexpected broken links: {remaining:?}");
+        assert!(
+            remaining.is_empty(),
+            "unexpected broken links: {remaining:?}"
+        );
     }
 }

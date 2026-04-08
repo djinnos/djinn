@@ -318,8 +318,8 @@ impl AppState {
                 role_priorities: std::collections::HashMap::new(),
             },
         );
-        let coordinator =
-            CoordinatorHandle::spawn(djinn_agent::actors::coordinator::CoordinatorDeps::new(
+        let coordinator = CoordinatorHandle::spawn(
+            djinn_agent::actors::coordinator::CoordinatorDeps::new(
                 self.events().clone(),
                 self.cancel().clone(),
                 self.db().clone(),
@@ -329,9 +329,12 @@ impl AppState {
                 self.inner.role_registry.clone(),
                 self.inner.verifying_tasks.clone(),
                 self.inner.lsp.clone(),
-            ).with_canonical_graph_warmer(Arc::new(AppStateCanonicalGraphWarmer {
+            )
+            .with_canonical_graph_warmer(Arc::new(AppStateCanonicalGraphWarmer {
                 state: self.clone(),
-            }) as Arc<dyn djinn_agent::context::CanonicalGraphWarmer>));
+            })
+                as Arc<dyn djinn_agent::context::CanonicalGraphWarmer>),
+        );
 
         *self.inner.pool.lock().await = Some(pool.clone());
         *self.inner.coordinator.lock().await = Some(coordinator.clone());

@@ -598,6 +598,88 @@ mod memory_tools {
     }
 
     #[tokio::test]
+    async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_worktree() {
+        let db = create_test_db();
+        let (proj, _dir) = create_test_project_with_dir(&db).await;
+        let project = &proj.path;
+        let worktree = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
+        let app = create_test_app_with_db(db.clone());
+        let worktree_header = worktree.path().to_string_lossy().to_string();
+        let session_id = initialize_mcp_session_with_headers(
+            &app,
+            &[("x-djinn-worktree-root", &worktree_header)],
+        )
+        .await;
+
+        let created = mcp_call_tool_with_headers(
+            &app,
+            &session_id,
+            "memory_write",
+            json!({"project": project, "title": "Project Brief", "content": "alpha", "type": "brief"}),
+            &[("x-djinn-worktree-root", &worktree_header)],
+        )
+        .await;
+        assert_eq!(created["permalink"], "brief");
+
+        let edited = mcp_call_tool_with_headers(
+            &app,
+            &session_id,
+            "memory_edit",
+            json!({"project": project, "identifier": "brief", "operation": "append", "content": "beta"}),
+            &[("x-djinn-worktree-root", &worktree_header)],
+        )
+        .await;
+        assert!(edited["content"].as_str().unwrap().contains("beta"));
+
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let note = note_repo
+            .get_by_permalink(&project_id, "brief")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(note.permalink, "brief");
+        assert_eq!(note.note_type, "brief");
+        let canonical_path = Path::new(&note.file_path).to_path_buf();
+        let worktree_path = worktree.path().join(".djinn/brief.md");
+        assert_eq!(canonical_path, Path::new(project).join(".djinn/brief.md"));
+        assert!(
+            canonical_path.exists(),
+            "singleton canonical file should exist"
+        );
+        assert!(
+            worktree_path.exists(),
+            "singleton worktree mirror should exist"
+        );
+
+        let canonical_contents =
+            std::fs::read_to_string(&canonical_path).expect("read canonical brief");
+        let worktree_contents =
+            std::fs::read_to_string(&worktree_path).expect("read worktree brief");
+        assert!(canonical_contents.contains("alpha"));
+        assert!(canonical_contents.contains("beta"));
+        assert_eq!(canonical_contents, worktree_contents);
+
+        assert!(
+            note_repo
+                .get_by_permalink(&project_id, "reference/project-brief")
+                .await
+                .unwrap()
+                .is_none(),
+            "singleton write should not retarget to reference note"
+        );
+        assert!(
+            !Path::new(project)
+                .join(".djinn/reference/project-brief.md")
+                .exists(),
+            "singleton write should not create duplicate typed note"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
         let db = create_test_db();
         let (proj, _dir) = create_test_project_with_dir(&db).await;

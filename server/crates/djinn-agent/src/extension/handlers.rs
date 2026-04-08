@@ -58,12 +58,21 @@ where
         from_value(serde_json::to_value(tool_call).map_err(|e| e.to_string())?)
             .map_err(|e| format!("invalid frontend tool payload: {e}"))?;
 
-    // Resolve project_id from worktree_path so agent tools are project-scoped.
-    let project_id = {
+    // Resolve project metadata from worktree_path so agent tools stay project-scoped
+    // while memory tools can still target canonical project-root note files.
+    let project = {
         let repo = djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
         let path_str = worktree_path.to_string_lossy();
-        repo.resolve(&path_str).await.ok().flatten()
+        match repo.resolve(&path_str).await.ok().flatten() {
+            Some(project_id) => repo.get(&project_id).await.ok().flatten(),
+            None => None,
+        }
     };
+    let project_id = project.as_ref().map(|project| project.id.clone());
+    let canonical_project_path = project
+        .as_ref()
+        .map(|project| project.path.clone())
+        .unwrap_or_else(|| worktree_path.display().to_string());
     let worktree_project_path = worktree_path.display().to_string();
 
     if let Some(schemas) = allowed_schemas
@@ -100,36 +109,56 @@ where
         "epic_update" => call_epic_update(state, &call.arguments, project_id.as_deref()).await,
         "epic_tasks" => call_epic_tasks(state, &call.arguments, project_id.as_deref()).await,
         "epic_close" => call_epic_close(state, &call.arguments, project_id.as_deref()).await,
-        "memory_read" => call_memory_read(state, &call.arguments, &worktree_project_path).await,
+        "memory_read" => call_memory_read(state, &call.arguments, &canonical_project_path).await,
         "memory_search" => {
             call_memory_search(
                 state,
                 &call.arguments,
                 session_task_id,
-                &worktree_project_path,
+                &canonical_project_path,
             )
             .await
         }
-        "memory_list" => call_memory_list(state, &call.arguments, &worktree_project_path).await,
+        "memory_list" => call_memory_list(state, &call.arguments, &canonical_project_path).await,
         "memory_build_context" => {
             call_memory_build_context(
                 state,
                 &call.arguments,
                 session_task_id,
-                &worktree_project_path,
+                &canonical_project_path,
             )
             .await
         }
-        "memory_write" => call_memory_write(state, &call.arguments, &worktree_project_path).await,
-        "memory_edit" => call_memory_edit(state, &call.arguments, &worktree_project_path).await,
-        "memory_health" => call_memory_health(state, &call.arguments, &worktree_project_path).await,
+        "memory_write" => {
+            call_memory_write(
+                state,
+                &call.arguments,
+                &canonical_project_path,
+                worktree_path,
+            )
+            .await
+        }
+        "memory_edit" => {
+            call_memory_edit(
+                state,
+                &call.arguments,
+                &canonical_project_path,
+                worktree_path,
+            )
+            .await
+        }
+        "memory_health" => {
+            call_memory_health(state, &call.arguments, &canonical_project_path).await
+        }
         "memory_broken_links" => {
-            call_memory_broken_links(state, &call.arguments, &worktree_project_path).await
+            call_memory_broken_links(state, &call.arguments, &canonical_project_path).await
         }
         "memory_orphans" => {
-            call_memory_orphans(state, &call.arguments, &worktree_project_path).await
+            call_memory_orphans(state, &call.arguments, &canonical_project_path).await
         }
-        "agent_metrics" => call_agent_metrics(state, &call.arguments, &worktree_project_path).await,
+        "agent_metrics" => {
+            call_agent_metrics(state, &call.arguments, &canonical_project_path).await
+        }
         "agent_amend_prompt" => {
             call_agent_amend_prompt(state, &call.arguments, &worktree_project_path).await
         }
@@ -867,11 +896,12 @@ pub(super) async fn call_memory_write(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_path: &str,
+    worktree_root: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryWriteParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
-    let worktree_root = Some(std::path::PathBuf::from(&project_path));
+    let worktree_root = Some(worktree_root.to_path_buf());
     let result = server
         .memory_write_with_worktree(
             rmcp::handler::server::wrapper::Parameters(SharedMemoryWriteParams {
@@ -894,11 +924,12 @@ pub(super) async fn call_memory_edit(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_path: &str,
+    worktree_root: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryEditParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
     let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
-    let worktree_root = Some(std::path::PathBuf::from(&project_path));
+    let worktree_root = Some(worktree_root.to_path_buf());
     let result = server
         .memory_edit_with_worktree(
             rmcp::handler::server::wrapper::Parameters(SharedMemoryEditParams {
