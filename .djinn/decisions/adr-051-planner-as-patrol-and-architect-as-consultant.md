@@ -8,13 +8,83 @@ tags: ["adr","architecture","agents","roles","planner","architect","patrol","aut
 
 # ADR-051: Planner-as-Patrol, Architect-as-Consultant, ADR-to-Epic Pipeline, and Auto-Dispatch Reentrance Guards
 
-## Status: Draft
+## Status: In Progress (Draft)
 
 Date: 2026-04-08
 
 Supersedes (partially): [[ADR-034 Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation]]
 Extends: [["ADR-050: Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions"]], [[ADR-046 Chat-Driven Planning]]
 Related: [[ADR-025 Backlog Grooming and Autonomous Dispatch Triggers]], [[ADR-023 Cognitive Memory Architecture]], [[ADR-043 Repository Map — SCIP-Powered Structural Context]], [[ADR-047 Repo-Graph Query Seam]]
+
+## Implementation Status (2026-04-08 — handoff to next session)
+
+This section is a living checklist of what has landed, what is partially landed, and what remains. The decision and design below this section are unchanged from the original draft; only this status block evolves as work ships. **A future session resuming this ADR should read this section first**, then jump to the Migration section to pick up the next item.
+
+### Landed on `main`
+
+| Migration step | Commit(s) | What it does |
+|---|---|---|
+| **Step 1** — agent bridge `code_graph` exposure | [`7886bcc4`](#) | Replaces the `AgentRepoGraphOps` stub at `server/crates/djinn-agent/src/context.rs:156–239` with an injected `Arc<dyn RepoGraphOps>` plumbed from `AppState::agent_context()` in `server/src/server/state/mod.rs`. Architect sessions now actually reach the real `RepoGraphBridge`. Contract: `djinn-agent` keeps zero dependency on the `server` crate (per ADR-047) — the concrete bridge is injected at the server boundary. |
+| **Step 2 (a)** — derived index caching | [`7a6f54c3`](#) | Extends `CachedGraph` in `server/src/mcp_bridge.rs` with `pagerank: Arc<RepoGraphRanking>` and `sccs: Arc<CachedSccs>` (one set per `kind_filter` variant: `None` / `File` / `Symbol`). Both populated inside the existing `spawn_blocking` boundary in `ensure_canonical_graph` so warm pays the CPU once. New `derive_graph_caches` helper + `load_cached_artifact` async helper that wraps both bincode-deserialise and derivation in `spawn_blocking` for the persistent `repo_graph_cache` hit paths. New `build_graph_with_caches_for_project` sibling of `build_graph_for_project` exposes the cached `Arc`s to read ops. `ranked` reads `cached.pagerank`; `cycles` reads the per-kind cached set and applies `min_size` at lookup time. Latency on warm reads drops from tens-of-seconds to sub-millisecond. |
+| **Step 2 (b)** — Pulse no-rebuild | [`a5f38130`](#) (user-authored) | Splits `ensure_canonical_graph` into a refresh path (background warmer + chat first-use only) and a pure-read `read_cached_canonical_graph` path used by `build_graph_for_project` and `build_graph_with_caches_for_project`. Pulse panel reads no longer trigger `fetch_if_stale + reset_to_origin_main` and never fall through to a 30-minute SCIP rebuild when local main has advanced past the architect's last warm. Cold-cache reads return `GRAPH_NOT_WARMED_ERR` so Pulse renders its empty state instead of wedging. New regression tests under `ensure_canonical_graph_tests`. |
+| **Step 5** — `request_architect` → `request_planner` | [`dfdf5b3f`](#) | Lead's toolbelt now exposes `request_planner` (was `request_architect`). The 2nd-escalation auto-route in `call_request_lead` and the PR-poller's "exceeded N rounds without approval" path both call `dispatch_planner_escalation` (was `dispatch_architect_escalation`), which creates a `review` task with `agent_type=planner` instead of `architect`. Per ADR-051 §8 the Planner is now the escalation ceiling above Lead. |
+| **Step 4 partial / Step 6 partial** — architect & chat contracts | [`dfdf5b3f`](#) | Top-of-file "Role transition (ADR-051)" notice added to `prompts/architect.md` and `prompts/chat.md` (parity per ADR-050 §2). Both gain Contract 1 (proposals only — ADR drafts target `decisions/proposed/`, suggested epics + improvement tickets are embedded in the ADR draft, no `epic_create` for new architect-discovered work) and Contract 2 (silent runs prohibited — every spike must return findings or an explicit "no new findings"). `prompts/lead.md` gains a "Beyond Lead scope — request the Planner" paragraph. The patrol body of `architect.md` is unchanged below the new notice; the full content migration is the deferred half of Epic A. |
+
+**Commits to look up with `git show <sha>` for context**: `7886bcc4`, `7a6f54c3`, `a5f38130`, `1038fb62` (this ADR initial draft), `dfdf5b3f` (Epic A v1).
+
+### Deferred — Epic A v2 (the prompt-content half)
+
+The Epic A commit `dfdf5b3f` shipped the routing change and the contract additions, but **the full prompt content migration was deferred** because the patrol body is large and was tangled with the architect's existing corrective-action workflows. Specifically:
+
+- **Migration step 3 — coordinator patrol timer rename.** The current code still has `maybe_dispatch_architect_patrol`, `DEFAULT_ARCHITECT_PATROL_INTERVAL`, `MIN_ARCHITECT_PATROL_MINUTES`, `MAX_ARCHITECT_PATROL_MINUTES`, and `CoordinatorMessage::TriggerArchitectPatrol` (test-only) in `server/crates/djinn-agent/src/actors/coordinator/`. These need renames to `*_planner_*` and the dispatched `agent_type` flips from `"architect"` to `"planner"`. The patrol task issue type (`"review"`) probably stays unchanged. Rough scope: ~10 identifier renames across `actor.rs`, `dispatch.rs`, `handle.rs`, `messages.rs`, `rules.rs`, plus regenerating any affected snapshots. The patrol-task title check at `actor.rs:592` (`task.title.contains("patrol")`) is role-agnostic and stays.
+- **Migration step 4 — board-health content migration architect.md → planner.md.** The existing `architect.md` patrol body covers: board overview (§1), epic health check (§2), approach viability (§3), stuck work detection (§4), memory health (§5), contradiction review (§6), agent effectiveness review (§10), corrective actions (stuck task / wrong sequencing / missing blockers / empty epic). All of these are *patrol* responsibilities under ADR-051 and should move to `planner.md`. The `code_graph`-driven sweep (§7) and strategic ADR gaps (§8) and spike findings memory writes (§9) stay with the architect — those are the consultant duties.
+- **Migration step 6 — strip patrol body from architect.md once §3+§4 complete.** Architect's prompt should end up containing only: identity, the two contracts (already added), the `code_graph` sweep, ADR/epic proposal authoring, spike findings memory writes, and the escalation ceiling rules. The corrective-actions section (§10 of the current prompt) goes away — architect no longer takes corrective actions on the live board.
+- **`prompts/planner.md` requires a "patrol mode" branch.** The current planner prompt is single-mode (per-epic decomposition only). It needs to detect from the task context whether it was dispatched for decomposition (existing) or for a patrol/intervention (new) and run the appropriate workflow. The architect's patrol task-detection pattern (`task.issue_type == "review" && task.title.contains("patrol")`) is the model.
+
+Why deferred: the routing-and-contracts slice (the part that landed) is high-leverage and self-contained — it changes Lead's escalation routing immediately and tells future architect runs to behave as consultants even though the patrol body is still verbatim. The content migration is bigger and would benefit from a focused session that rewrites both prompts together with a clear before/after comparison.
+
+### Not started
+
+**Epic B — Auto-dispatch reentrance guards (Migration steps 7–10).**
+
+Three failed subagent dispatches (all 529'd before doing real work). Worktree was set up at `djinn-adr51-guards` and then removed during cleanup. The audit findings in this ADR's "Audit findings (2026-04-08)" section below are still accurate and provide all the file:line anchors needed. Re-launching this work needs:
+
+- Extend `close_reason` (free-form TEXT, no migration) at `server/crates/djinn-core/src/models/task.rs:99` with `"reshape"`, `"superseded"`, `"duplicate"` literals. Apply at the planner-driven force-close sites; lead-driven verification-failure force-closes stay as `"force_closed"`.
+- Implement `should_auto_dispatch_planner(scope, event) -> bool` helper applying close-reason filter + active-session guard (in this order). Wire into `coordinator/rules.rs:42` (`on_task_closed`) and `coordinator/wave.rs:23` (`maybe_create_planning_task`).
+- Add `active_planner_for_epic` repo method on `server/crates/djinn-db/src/repositories/session.rs` joining sessions → tasks via `session.task_id → task.epic_id` filtered by `agent_type = "planner"` + `status = "running"`.
+- Exit-recheck hook on planner session end → call helper for each touched epic → dispatch if appropriate.
+- 15-minute stale safety-net sweep in `coordinator/actor.rs` modeled after existing `sweep_stale_resources`/`enforce_session_stall_timeout`.
+- Unit tests covering the 4 helper paths (reshape skip, active-planner skip, natural completion + idle dispatch, auto_breakdown=false opt-out — last one stubbed until Epic C lands).
+
+**Epic C — Proposal pipeline backend (Migration steps 11–16).**
+
+Subagent dispatched once, died from 529. Worktree set up at `djinn-adr51-proposals` and removed during cleanup. The hardest thing to keep correct here is the live-coordinator safety: **proposed-status epics MUST be excluded from the existing `epic_created → maybe_create_planning_task → dispatch breakdown planner` rule**, otherwise the entire proposal lane evaporates the moment an architect proposes an epic. Order of operations for the next session:
+
+1. Add `Proposed` to `EpicStatus` enum + state machine (find via `grep EpicStatus`; probably `server/crates/djinn-core/src/models/epic.rs`).
+2. **First**, audit and tighten the coordinator rules at `coordinator/actor.rs:554–566` and `coordinator/wave.rs:23` so they exclude `Proposed`. This is the safety guarantee — verify it works (with a unit test) before touching anything else.
+3. Add `auto_breakdown: bool` flag (default `true`) on epic creation API. Plumb through `epic_create` MCP tool. Respect it in `maybe_create_planning_task` (early-return when `false`).
+4. Add `originating_adr_id: Option<String>` column on epics. New refinery migration in `server/crates/djinn-db/migrations/V*.sql` (look at `V20260303000003__task_state_fields.sql` for the convention). Plumb through epic model + creation API.
+5. Add `.djinn/decisions/proposed/` storage helpers (filesystem CRUD + frontmatter parsing for `work_shape`, `originating_spike_id`). Look at `server/crates/djinn-mcp/src/tools/memory_tools/` (`writes.rs`, `delete_ops.rs`, `move_ops.rs`) for the existing file-manipulation patterns.
+6. Conversion-planner dispatch path: a new MCP tool (e.g. `propose_adr_accept`) or coordinator rule that fires on acceptance and dispatches a Planner with mission "convert this ADR into epic shells, do NOT create tasks". Threads accepted ADR content through to the breakdown-planner session context.
+7. Wire `originating_adr_id` into breakdown-planner session context so downstream task creation has the ADR rationale.
+
+**Live-coordinator safety rule (re-emphasized)**: under no circumstances may any code path in this epic call `mcp__plugin_djinn_djinn__epic_create` against a live MCP server. Tests must use in-process fixtures (`create_test_db`, `AppState::new(test_db, ...)`, the patterns in `server/src/mcp_bridge.rs` test modules and `server/crates/djinn-agent/src/test_helpers.rs`). The local Djinn coordinator runs in the background and will react to live epic creation by spawning real planner sessions — exactly the reentrance bug Epic B is meant to fix.
+
+### Operational notes from this session
+
+- **API was unstable on 2026-04-08.** Six of seven background subagent dispatches died on `529 Overloaded` (Epic B retry, Epic C, Epic A retry, two earlier Fix 2 attempts, and the original Epic A subagent that did manage 27 tool uses but was eventually killed). The one subagent that succeeded end-to-end was Fix 1 (agent bridge). Fix 2 (derived caches) was completed manually by the parent agent. Epic A v1 was completed manually by the parent agent in the dedicated worktree. **If the API is still unstable, the next session should expect to do this work directly rather than chasing subagent retries.**
+- **Worktree isolation behaviour to know**: when `Agent` tool dispatches were called with `isolation: "worktree"`, the file edits ended up in the parent agent's working directory rather than a separate worktree. The next session should not rely on `isolation: "worktree"` for hard separation; manually create worktrees with `git worktree add` and instruct subagents to `cd` into the explicit path.
+- **`cargo insta accept --workspace`** is the right way to update snapshots after this kind of prompt/tool rename. `INSTA_UPDATE=auto cargo test ...` does *not* auto-accept; it leaves `.snap.new` files and the test still fails.
+- **`Quality Gate` bypass on push** is authorized for ADR-051 work per the standing memory note (`feedback_merge_directly_bypass_quality_gate.md`). Local `cargo check -p djinn-agent -p djinn-server` is the verification expected before each push.
+- **Memory note `project_canonical_graph_warming_architect_only.md` is now operationally stale.** With Step 2 (b) `read_cached_canonical_graph` landed, non-warming readers no longer touch the warming pipeline at all. The note should be updated to reflect "background warmer is the only path that triggers SCIP work; reads are pure cache lookups via `read_cached_canonical_graph`; cold-cache reads return `GRAPH_NOT_WARMED_ERR`". Defer the memory update until after Epic B and C are designed (the rule may evolve again).
+
+### Recommended next-session order
+
+1. **Epic B first**, not Epic C. Reasons: (a) Epic C's safety story depends on the active-session guard that Epic B builds, (b) Epic B is mostly mechanical Rust + a clean SQL join + a small periodic check, low ambiguity, (c) Epic B unblocks Epic C's reentrance protection.
+2. **Then Epic A v2** (coordinator patrol timer rename + full content migration architect.md → planner.md). Best done in a focused session because the prompt rewrite is judgment-heavy.
+3. **Then Epic C** (proposal pipeline backend). Largest scope; benefits from Epic B already being green so the auto-dispatch guard is wired and tested.
+4. **Pulse panels** (frontend) come after Epic C. They consume the proposal lanes Epic C creates.
+5. **Memory note update** (`project_canonical_graph_warming_architect_only.md`) and **stale snapshot cleanup** (the duplicate `request_architect` snapshots under `server/crates/djinn-agent/src/snapshots/` that Epic A v1 left untouched) are housekeeping that can ride along with any of the above.
 
 ## Context
 
