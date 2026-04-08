@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use djinn_core::events::EventBus;
@@ -8,7 +9,9 @@ mod tests {
     use tokio::time::sleep;
 
     use crate::{
-        server::DjinnMcpServer, state::stubs::test_mcp_state, tools::memory_tools::WriteParams,
+        server::DjinnMcpServer,
+        state::stubs::test_mcp_state,
+        tools::memory_tools::{BrokenLinksParams, ReadParams, WriteParams, ops},
     };
 
     async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
@@ -364,5 +367,163 @@ mod tests {
         // Both notes must exist with valid confidence values
         assert!(note1.confidence > 0.0 && note1.confidence <= 1.0);
         assert!(note2.confidence > 0.0 && note2.confidence <= 1.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn singleton_worktree_writes_refresh_canonical_read_and_broken_links_view() {
+        let project_tmp = tempfile::tempdir().unwrap();
+        let worktree_tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, project_tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        repo.create(
+            &project.id,
+            project_tmp.path(),
+            "ADR-008 Example",
+            "body",
+            "adr",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project.id,
+            project_tmp.path(),
+            "ADR-043 Repo Graph",
+            "body",
+            "adr",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let worktree_root = Some(PathBuf::from(worktree_tmp.path()));
+        let project_path = project_tmp.path().to_str().unwrap().to_string();
+
+        let Json(initial_brief) = server
+            .memory_write_with_worktree(
+                Parameters(WriteParams {
+                    project: project_path.clone(),
+                    title: "Project Brief".to_string(),
+                    content: "Broken [[Missing ADR]]. Broken [[Roadmap]].".to_string(),
+                    note_type: "brief".to_string(),
+                    tags: None,
+                    scope_paths: None,
+                }),
+                worktree_root.clone(),
+            )
+            .await;
+        assert!(initial_brief.error.is_none(), "{:?}", initial_brief.error);
+
+        let Json(initial_roadmap) = server
+            .memory_write_with_worktree(
+                Parameters(WriteParams {
+                    project: project_path.clone(),
+                    title: "Project Roadmap".to_string(),
+                    content: "Broken [[Missing ADR-043]].".to_string(),
+                    note_type: "roadmap".to_string(),
+                    tags: None,
+                    scope_paths: None,
+                }),
+                worktree_root.clone(),
+            )
+            .await;
+        assert!(initial_roadmap.error.is_none(), "{:?}", initial_roadmap.error);
+
+        assert_eq!(
+            ops::memory_broken_links(
+                &server,
+                BrokenLinksParams {
+                    project: project_path.clone(),
+                    folder: None,
+                },
+            )
+            .await
+            .broken_links
+            .len(),
+            3
+        );
+
+        let Json(updated_roadmap) = server
+            .memory_write_with_worktree(
+                Parameters(WriteParams {
+                    project: project_path.clone(),
+                    title: "Project Roadmap".to_string(),
+                    content: "References [[ADR-043 Repo Graph]].".to_string(),
+                    note_type: "roadmap".to_string(),
+                    tags: None,
+                    scope_paths: None,
+                }),
+                worktree_root.clone(),
+            )
+            .await;
+        assert!(updated_roadmap.error.is_none(), "{:?}", updated_roadmap.error);
+
+        let Json(updated_brief) = server
+            .memory_write_with_worktree(
+                Parameters(WriteParams {
+                    project: project_path.clone(),
+                    title: "Project Brief".to_string(),
+                    content: "Links [[ADR-008 Example]] and [[roadmap]].".to_string(),
+                    note_type: "brief".to_string(),
+                    tags: None,
+                    scope_paths: None,
+                }),
+                worktree_root,
+            )
+            .await;
+        assert!(updated_brief.error.is_none(), "{:?}", updated_brief.error);
+
+        repo.reindex_from_disk(&project.id, project_tmp.path())
+            .await
+            .unwrap();
+
+        let brief_read = ops::memory_read(
+            &server,
+            ReadParams {
+                project: project_path.clone(),
+                identifier: "brief".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(
+            brief_read.content.as_deref(),
+            Some("\nLinks [[ADR-008 Example]] and [[roadmap]].")
+        );
+
+        let roadmap_read = ops::memory_read(
+            &server,
+            ReadParams {
+                project: project_path.clone(),
+                identifier: "roadmap".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(
+            roadmap_read.content.as_deref(),
+            Some("\nReferences [[ADR-043 Repo Graph]].")
+        );
+
+        let broken_links = ops::memory_broken_links(
+            &server,
+            BrokenLinksParams {
+                project: project_path,
+                folder: None,
+            },
+        )
+        .await;
+        assert!(broken_links.error.is_none(), "{:?}", broken_links.error);
+        let remaining: Vec<_> = broken_links
+            .broken_links
+            .iter()
+            .map(|link| (link.source_permalink.as_str(), link.raw_text.as_str()))
+            .collect();
+        assert!(!remaining.contains(&("brief", "ADR-008 Example")));
+        assert!(!remaining.contains(&("brief", "roadmap")));
+        assert!(!remaining.contains(&("roadmap", "ADR-043 Repo Graph")));
+        assert!(remaining.is_empty(), "unexpected broken links: {remaining:?}");
     }
 }
