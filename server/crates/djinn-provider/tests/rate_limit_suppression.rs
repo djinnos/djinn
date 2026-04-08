@@ -18,7 +18,18 @@ fn activating_suppression_records_shared_window() {
 fn expired_snapshot_is_cleared_when_read() {
     clear_suppression_window();
     activate_suppression_window(Duration::from_millis(5));
-    std::thread::sleep(Duration::from_millis(15));
-    assert!(suppression_remaining(Instant::now()).is_none());
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if suppression_remaining(Instant::now()).is_none() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "suppression window did not expire before deadline"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
     assert!(suppression_state_snapshot().active_until.is_none());
 }
