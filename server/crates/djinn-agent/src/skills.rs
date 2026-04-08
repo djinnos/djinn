@@ -20,8 +20,20 @@ fn parse_frontmatter(frontmatter_raw: &str) -> Option<SkillFrontmatter> {
         description: None,
     };
     for line in frontmatter_raw.lines() {
-        let (key, value) = line.split_once(':')?;
-        let value = value.trim().trim_matches('"').to_string();
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+
+        let value = value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
         match key.trim() {
             "name" => frontmatter.name = Some(value),
             "description" => frontmatter.description = Some(value),
@@ -36,10 +48,15 @@ pub fn load_skills(project_root: &Path, names: &[String]) -> Vec<ResolvedSkill> 
         .iter()
         .filter_map(|name| {
             let path = skill_path(project_root, name)?;
-            let content = fs::read_to_string(path).ok()?;
-            parse_skill_file(name, &content)
+            load_skill(&path, name)
         })
         .collect()
+}
+
+fn load_skill(path: &Path, default_name: &str) -> Option<ResolvedSkill> {
+    let content = fs::read_to_string(path).ok()?;
+    let references = skill_references_content(path);
+    parse_skill_file(default_name, &content, references.as_deref())
 }
 
 fn skill_path(project_root: &Path, name: &str) -> Option<PathBuf> {
@@ -68,7 +85,69 @@ fn skill_path(project_root: &Path, name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
-fn parse_skill_file(default_name: &str, content: &str) -> Option<ResolvedSkill> {
+fn skill_references_content(skill_path: &Path) -> Option<String> {
+    if skill_path.file_name()? != "SKILL.md" {
+        return None;
+    }
+
+    let references_dir = skill_path.parent()?.join("references");
+    if !references_dir.is_dir() {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    collect_reference_files(&references_dir, &references_dir, &mut files);
+    if files.is_empty() {
+        return None;
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let sections: Vec<String> = files
+        .into_iter()
+        .filter_map(|(relative_path, path)| {
+            let content = fs::read_to_string(path).ok()?;
+            let content = content.trim();
+            if content.is_empty() {
+                return None;
+            }
+
+            Some(format!("### {}\n\n{}", relative_path.display(), content))
+        })
+        .collect();
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(format!("## References\n\n{}", sections.join("\n\n")))
+    }
+}
+
+fn collect_reference_files(root: &Path, current_dir: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
+    let Ok(entries) = fs::read_dir(current_dir) else {
+        return;
+    };
+
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_reference_files(root, &path, files);
+        } else if path.is_file()
+            && let Ok(relative_path) = path.strip_prefix(root)
+        {
+            files.push((relative_path.to_path_buf(), path));
+        }
+    }
+}
+
+fn parse_skill_file(
+    default_name: &str,
+    content: &str,
+    references_content: Option<&str>,
+) -> Option<ResolvedSkill> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---\n") {
         return None;
@@ -93,10 +172,22 @@ fn parse_skill_file(default_name: &str, content: &str) -> Option<ResolvedSkill> 
         return None;
     }
 
+    let body = body.trim();
+    let content = match references_content
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+    {
+        Some(references_content) if !body.is_empty() => {
+            format!("{body}\n\n{references_content}")
+        }
+        Some(references_content) => references_content.to_string(),
+        None => body.to_string(),
+    };
+
     Some(ResolvedSkill {
         name,
         description,
-        content: body.trim().to_string(),
+        content,
     })
 }
 
@@ -144,7 +235,7 @@ mod tests {
     #[test]
     fn parse_skill_with_full_frontmatter() {
         let content = "---\nname: rust-safety\ndescription: Safe Rust\n---\n\nAvoid unsafe.\n";
-        let skill = parse_skill_file("fallback", content).expect("skill should parse");
+        let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
         assert_eq!(skill.name, "rust-safety");
         assert_eq!(skill.description, "Safe Rust");
         assert_eq!(skill.content, "Avoid unsafe.");
@@ -153,23 +244,57 @@ mod tests {
     #[test]
     fn parse_skill_uses_default_name_when_name_missing() {
         let content = "---\ndescription: Git workflow\n---\n\nCommit often.\n";
-        let skill = parse_skill_file("git-workflow", content).expect("skill should parse");
+        let skill = parse_skill_file("git-workflow", content, None).expect("skill should parse");
         assert_eq!(skill.name, "git-workflow");
         assert_eq!(skill.description, "Git workflow");
     }
 
     #[test]
+    fn parse_skill_tolerates_frontmatter_comments_quotes_and_extra_keys() {
+        let content = concat!(
+            "---\n",
+            "# Agent Skills metadata\n",
+            "name: \"quoted-name\"\n",
+            "\n",
+            "description: 'Quoted description'\n",
+            "extra: keep-ignoring-this\n",
+            "---\n",
+            "\n",
+            "Body content.\n"
+        );
+
+        let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
+        assert_eq!(skill.name, "quoted-name");
+        assert_eq!(skill.description, "Quoted description");
+        assert_eq!(skill.content, "Body content.");
+    }
+
+    #[test]
     fn parse_skill_returns_none_when_no_frontmatter() {
         let content = "No frontmatter here.";
-        let result = parse_skill_file("no-frontmatter", content);
+        let result = parse_skill_file("no-frontmatter", content, None);
         assert!(result.is_none());
     }
 
     #[test]
     fn parse_skill_returns_none_when_description_missing() {
         let content = "---\nname: incomplete\n---\n\nNo description field.\n";
-        let result = parse_skill_file("incomplete", content);
+        let result = parse_skill_file("incomplete", content, None);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_skill_appends_references_to_body() {
+        let content = "---\ndescription: Skill\n---\n\nPrimary body.\n";
+        let references = "## References\n\n### docs.md\n\nReference content.";
+
+        let skill =
+            parse_skill_file("fallback", content, Some(references)).expect("skill should parse");
+
+        assert_eq!(
+            skill.content,
+            "Primary body.\n\n## References\n\n### docs.md\n\nReference content."
+        );
     }
 
     #[test]
@@ -310,6 +435,67 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name, "fallback-name");
         assert_eq!(resolved[0].description, "Uses fallback name");
+    }
+
+    #[test]
+    fn load_skills_appends_directory_references_in_sorted_order() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let claude_skills = make_skill_dir(&tmp, ".claude");
+        let skill_dir = claude_skills.join("ref-skill");
+        let references_dir = skill_dir.join("references");
+
+        fs::create_dir_all(references_dir.join("nested")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Skill with references\n---\n\nPrimary body.\n",
+        )
+        .unwrap();
+        fs::write(references_dir.join("z-last.md"), "Zed reference\n").unwrap();
+        fs::write(references_dir.join("a-first.md"), "Alpha reference\n").unwrap();
+        fs::write(references_dir.join("empty.md"), "   \n\n").unwrap();
+        fs::write(
+            references_dir.join("nested").join("b-middle.md"),
+            "Nested reference\n",
+        )
+        .unwrap();
+
+        let resolved = load_skills(tmp.path(), &["ref-skill".to_string()]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].description, "Skill with references");
+        assert_eq!(
+            resolved[0].content,
+            concat!(
+                "Primary body.\n\n",
+                "## References\n\n",
+                "### a-first.md\n\n",
+                "Alpha reference\n\n",
+                "### nested/b-middle.md\n\n",
+                "Nested reference\n\n",
+                "### z-last.md\n\n",
+                "Zed reference"
+            )
+        );
+    }
+
+    #[test]
+    fn load_skills_flat_files_do_not_include_directory_references() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let djinn_skills = make_skill_dir(&tmp, ".djinn");
+        let ignored_references = djinn_skills.join("flat-skill").join("references");
+
+        write_flat_skill(
+            &djinn_skills,
+            "flat-skill",
+            "---\ndescription: Flat skill\n---\n\nFlat body.\n",
+        );
+        fs::create_dir_all(&ignored_references).unwrap();
+        fs::write(ignored_references.join("ignored.md"), "Ignored reference\n").unwrap();
+
+        let resolved = load_skills(tmp.path(), &["flat-skill".to_string()]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].content, "Flat body.");
     }
 
     #[test]
