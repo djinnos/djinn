@@ -3,6 +3,7 @@ source: src/server/tests/contracts.rs
 expression: epic_show
 ---
 {
+  "auto_breakdown": true,
   "closed_at": null,
   "closed_count": 0,
   "color": "",

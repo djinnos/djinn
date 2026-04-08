@@ -924,3 +924,4 @@ async fn lifecycle_worker_ignores_failing_canonical_graph_warmer() {
         "lifecycle must have created a session despite warming failure"
     );
 }
+

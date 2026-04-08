@@ -57,8 +57,8 @@ function NotWarmedState() {
         </span>
         <h2 className="mt-5 text-base font-medium text-foreground">Pulse not ready</h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          The architect hasn&apos;t patrolled this codebase yet. Pulse will populate
-          after the next architect dispatch.
+          The canonical code graph hasn&apos;t been warmed yet. Pulse will populate
+          on the next Planner patrol or Architect spike.
         </p>
       </div>
     </div>

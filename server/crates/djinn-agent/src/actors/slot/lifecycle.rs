@@ -513,18 +513,25 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         .prepare_worktree(&worktree_path, &task, &app_state)
         .await;
 
-    // ── ADR-050 Chunk C: canonical-graph cache warming ───────────────────────
-    // ONLY the architect triggers a warm.  Originally every role warmed so
-    // that workers/reviewers/planners/lead would receive a freshly rendered
-    // `repo_map` note through the standard note pipeline — but that meant
-    // every non-architect dispatch either hit the cache (fine) or serialized
-    // on the server-wide `indexer_lock` behind a full SCIP rebuild, which on
-    // cold cache took tens of minutes and wedged the dispatcher for every
-    // other session.  Workers tolerate a stale skeleton: whatever `repo_map`
-    // note the most recent architect warm left in the DB is picked up by
-    // the normal note-loading machinery.  Only the architect actually
-    // *needs* the graph fresh (for `code_graph` against `origin/main`), and
-    // even there we bound the wait so a slow build can never wedge dispatch.
+    // ── ADR-051 §3: canonical-graph cache warming is infrastructure ─────────
+    // Per ADR-051 §3, "the canonical graph is warmed by a server-managed
+    // pipeline, not by any agent.  Architect and Chat are *consumers* of
+    // the warm cache.  They never warm it themselves."
+    //
+    // The Architect dispatch path kept a warmer call through Epic A v2 as a
+    // belt-and-braces first-use fast path: the very first architect session
+    // after server start will hit the background warmer (single-flight,
+    // idempotent) so `code_graph` has data ready within the slot's setup
+    // window.  The *production* warm trigger is Pulse's own cold-cache read
+    // path (`read_cached_canonical_graph` kicks a detached warm when the
+    // `GRAPH_CACHE` entry is missing), so the graph is populated
+    // independently of whether any session is running.
+    //
+    // Workers / reviewers / lead / planner tolerate a stale skeleton —
+    // whatever `repo_map` note the most recent warm left in the DB is
+    // picked up by the standard note pipeline.  This avoids serializing
+    // every dispatch on the server-wide `indexer_lock` behind a cold-cache
+    // SCIP rebuild (tens of minutes wall-clock).
     //
     // Best-effort: `ensure_canonical_graph` may legitimately fail (network
     // blip on `git fetch`, missing rust-analyzer, compile error on cold
