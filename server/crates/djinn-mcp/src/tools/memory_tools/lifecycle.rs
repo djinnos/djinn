@@ -6,7 +6,7 @@ use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::Note;
 use djinn_db::folder_for_type;
 
-pub(super) fn schedule_summary_regeneration(server: &DjinnMcpServer, note_id: &str) {
+pub(crate) fn schedule_summary_regeneration(server: &DjinnMcpServer, note_id: &str) {
     let db = server.state.db().clone();
     let note_id = note_id.to_string();
     tokio::spawn(async move {
@@ -18,7 +18,7 @@ pub(super) fn schedule_summary_regeneration(server: &DjinnMcpServer, note_id: &s
     });
 }
 
-pub(super) async fn detect_emit_and_schedule_contradictions(
+pub(crate) async fn detect_emit_and_schedule_contradictions(
     server: &DjinnMcpServer,
     repo: &NoteRepository,
     note: &Note,

@@ -1,6 +1,6 @@
 use djinn_core::models::NoteDedupCandidate;
 
-use super::write_dedup::{MemoryWriteDedupDecision, MemoryWriteDedupDecisionInput};
+use super::write_dedup_types::{MemoryWriteDedupDecision, MemoryWriteDedupDecisionInput};
 
 pub(super) const MEMORY_WRITE_DEDUP_SYSTEM: &str = "You are deciding whether a new knowledge-base note should create a new note, reuse an existing candidate, or merge into an existing candidate. Respond with JSON only.\n\
 Schema: {\"action\":\"create_new|reuse_existing|merge_into_existing\",\"candidate_id\":\"optional candidate id\",\"merged_title\":\"required for merge_into_existing\",\"merged_content\":\"required for merge_into_existing\"}.\n\
@@ -49,7 +49,7 @@ fn format_candidate(candidate: &NoteDedupCandidate) -> String {
     )
 }
 
-pub(super) fn parse_memory_write_dedup_decision(
+pub(crate) fn parse_memory_write_dedup_decision(
     raw: &str,
 ) -> Result<MemoryWriteDedupDecision, String> {
     let payload = serde_json::from_str::<MemoryWriteDedupDecisionPayload>(raw.trim())
@@ -78,42 +78,5 @@ pub(super) fn parse_memory_write_dedup_decision(
                 .ok_or_else(|| "merge_into_existing requires merged_content".to_string())?,
         }),
         other => Err(format!("unknown dedup action: {other}")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_reuse_decision() {
-        let decision = parse_memory_write_dedup_decision(
-            r#"{"action":"reuse_existing","candidate_id":"note_123"}"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            decision,
-            MemoryWriteDedupDecision::ReuseExisting {
-                candidate_id: "note_123".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn parses_merge_decision() {
-        let decision = parse_memory_write_dedup_decision(
-            r#"{"action":"merge_into_existing","candidate_id":"note_123","merged_title":"Merged","merged_content":"Combined"}"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            decision,
-            MemoryWriteDedupDecision::MergeIntoExisting {
-                candidate_id: "note_123".to_string(),
-                merged_title: "Merged".to_string(),
-                merged_content: "Combined".to_string(),
-            }
-        );
     }
 }
