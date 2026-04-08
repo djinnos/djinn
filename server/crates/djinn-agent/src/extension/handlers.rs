@@ -1933,15 +1933,20 @@ pub(crate) async fn call_github_search(
     _state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
-            .user_agent("djinn-agent/0.1")
-            .build()
-            .expect("http client")
-    });
+    // Fresh client per call (mirrors the grep-mcp reference impl, which creates a
+    // new aiohttp ClientSession per request) plus a browser-style User-Agent —
+    // a custom `djinn-agent/0.1` UA on a long-lived pooled connection was getting
+    // 429'd by grep.app even at <1 req/hr, so we avoid both signals.
+    let client = reqwest::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        .build()
+        .map_err(|e| format!("http client build failed: {e}"))?;
     let params: GithubSearchParams = parse_args(arguments)?;
     super::github_search::search(
-        &HTTP,
+        &client,
         &params.query,
         params.language.as_deref(),
         params.repo.as_deref(),

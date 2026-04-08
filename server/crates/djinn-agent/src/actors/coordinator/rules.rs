@@ -14,18 +14,19 @@ use djinn_db::EpicRepository;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Default patrol interval (used when the architect has not self-scheduled).
-pub(super) const DEFAULT_ARCHITECT_PATROL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Default patrol interval (used when the planner has not self-scheduled).
+/// Per ADR-051 §1 the Planner owns the board patrol (previously Architect).
+pub(super) const DEFAULT_PLANNER_PATROL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Default patrol interval in minutes (used when the architect has not self-scheduled).
+/// Default patrol interval in minutes (used when the planner has not self-scheduled).
 #[allow(dead_code)]
-pub(crate) const DEFAULT_ARCHITECT_PATROL_MINUTES: u32 = 5;
+pub(crate) const DEFAULT_PLANNER_PATROL_MINUTES: u32 = 5;
 
-/// Minimum patrol interval the architect may request.
-pub(crate) const MIN_ARCHITECT_PATROL_MINUTES: u32 = 5;
+/// Minimum patrol interval the planner may request.
+pub(crate) const MIN_PLANNER_PATROL_MINUTES: u32 = 5;
 
-/// Maximum patrol interval the architect may request.
-pub(crate) const MAX_ARCHITECT_PATROL_MINUTES: u32 = 60;
+/// Maximum patrol interval the planner may request.
+pub(crate) const MAX_PLANNER_PATROL_MINUTES: u32 = 60;
 
 /// Rolling window for throughput tracking.
 pub(super) const THROUGHPUT_WINDOW: Duration = Duration::from_secs(60 * 60);

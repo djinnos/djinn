@@ -23,8 +23,18 @@ expression: section
 - `epic_tasks(id, limit?, offset?)` — List tasks for an epic with pagination.
 - `epic_close(id)` — Close an epic. Use when all work is complete and no further waves are needed.
 - `task_transition(action, id, reason?, replacement_task_ids?)` — Transition a task using a named workflow action.
+- `task_comment_add(body, id)` — Add a comment or strategic observation to a task's activity log.
+- `memory_write(content, title, type, tags?)` — Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.
+- `memory_edit(content, identifier, operation, find_text?, section?, type?)` — Edit an existing note. Operations: "append" (add to end), "prepend" (add after frontmatter), "find_replace" (exact text replacement, requires find_text), "replace_section" (replace content under a markdown heading, requires section).
+- `memory_build_context(limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.
+- `memory_health()` — Returns aggregate health report: total notes, broken link count, orphan note count, stale notes by folder.
+- `memory_broken_links(folder?)` — Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).
+- `memory_orphans(folder?)` — Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).
+- `agent_metrics(role)` — Show execution quality metrics for a role to support prompt tuning and intervention decisions.
+- `agent_create(base_role, name, description?, model_preference?, system_prompt_extensions?)` — Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.
 - `task_delete_branch(id)` — Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.
 - `task_archive_activity(id)` — Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.
 - `task_reset_counters(id)` — Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.
 - `task_kill_session(id)` — Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.
-- `submit_grooming(summary?, tasks_reviewed?)` — Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.
+- `agent_amend_prompt(agent_id, amendment, metrics_snapshot?, project?)` — Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.
+- `submit_grooming(next_patrol_minutes?, summary?, tasks_reviewed?)` — Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.

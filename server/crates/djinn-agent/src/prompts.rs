@@ -682,60 +682,72 @@ mod tests {
         );
     }
 
+    /// Per ADR-051 §1 the memory-health review moved from Architect to Planner
+    /// (patrol mode). This test now asserts the content lives on the Planner
+    /// prompt side.
     #[test]
-    fn architect_prompt_contains_memory_health_review() {
+    fn planner_patrol_prompt_contains_memory_health_review() {
         let task = make_task();
         let ctx = make_ctx();
-        let prompt = render_prompt(AgentType::Architect, &task, &ctx);
+        let prompt = render_prompt(AgentType::Planner, &task, &ctx);
 
         assert!(
             prompt.contains("Memory Health Review"),
-            "architect prompt should include memory health review section"
+            "planner prompt should include memory health review section (patrol mode)"
         );
         assert!(
             prompt.contains("memory_health()"),
-            "architect prompt should reference memory_health tool"
+            "planner prompt should reference memory_health tool"
         );
         assert!(
             prompt.contains("memory_broken_links()"),
-            "architect prompt should reference memory_broken_links tool"
+            "planner prompt should reference memory_broken_links tool"
         );
         assert!(
             prompt.contains("memory_orphans()"),
-            "architect prompt should reference memory_orphans tool"
+            "planner prompt should reference memory_orphans tool"
         );
         assert!(
-            prompt.contains("create a planning task"),
-            "architect prompt should direct follow-up through planning tasks rather than direct note edits"
+            prompt.contains("planning task"),
+            "planner prompt should direct memory-health follow-ups through planning tasks"
         );
     }
 
+    /// Per ADR-051 §1 the contradiction review moved from Architect to Planner
+    /// (patrol mode). The architect prompt still asks for spike-note task
+    /// traceability, which this test also asserts below.
     #[test]
-    fn architect_prompt_contains_contradiction_review() {
+    fn planner_patrol_prompt_contains_contradiction_review() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Planner, &task, &ctx);
+
+        assert!(
+            prompt.contains("Contradiction and Low-Confidence Review"),
+            "planner prompt should include contradiction review section"
+        );
+        assert!(
+            prompt.contains("contradicts supersedes stale"),
+            "planner prompt should instruct searching for contradictions"
+        );
+        assert!(
+            prompt.contains("canonical"),
+            "planner prompt should mention canonicalization of conflicting notes"
+        );
+        assert!(
+            prompt.contains("planning task to deprecate the outdated note"),
+            "planner prompt should prescribe planning-task routing for contradiction resolution"
+        );
+    }
+
+    /// Architect spike notes must still carry task traceability (per ADR-051
+    /// Contract 2 / §9 "Spike and Research Findings — Memory Writes").
+    #[test]
+    fn architect_prompt_requires_spike_note_traceability() {
         let task = make_task();
         let ctx = make_ctx();
         let prompt = render_prompt(AgentType::Architect, &task, &ctx);
 
-        assert!(
-            prompt.contains("Contradiction and Low-Confidence Review"),
-            "architect prompt should include contradiction review section"
-        );
-        assert!(
-            prompt.contains("contradicts supersedes stale"),
-            "architect prompt should instruct searching for contradictions"
-        );
-        assert!(
-            prompt.contains("canonical"),
-            "architect prompt should mention canonicalization of conflicting notes"
-        );
-        assert!(
-            prompt.contains("Do NOT edit memory notes directly"),
-            "architect prompt should keep contradiction cleanup aligned with available tools"
-        );
-        assert!(
-            prompt.contains("planning task to either deprecate the outdated note or merge the two into a canonical version"),
-            "architect prompt should prescribe planner-routed contradiction resolution"
-        );
         assert!(
             prompt.contains("Originated from task task-123"),
             "architect prompt should require task traceability in persisted spike notes"
@@ -854,9 +866,17 @@ mod tests {
             architect_prompt.contains("`memory_health("),
             "architect prompt should contain memory_health"
         );
+        // Per ADR-051 §1 `role_amend_prompt` moved from Architect to Planner
+        // (agent-effectiveness review is a patrol action, not a consultant
+        // action). Architect keeps `role_metrics` (read) and `role_create`
+        // (structural proposal) but cannot mutate existing learned_prompts.
         assert!(
-            architect_prompt.contains("`agent_amend_prompt("),
-            "architect prompt should contain agent_amend_prompt"
+            !architect_prompt.contains("`agent_amend_prompt("),
+            "architect prompt should NOT contain agent_amend_prompt — it moved to Planner per ADR-051"
+        );
+        assert!(
+            planner_prompt.contains("`agent_amend_prompt("),
+            "planner prompt should contain agent_amend_prompt — it moved here per ADR-051"
         );
     }
 }

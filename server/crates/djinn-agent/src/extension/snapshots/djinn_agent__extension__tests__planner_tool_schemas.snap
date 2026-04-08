@@ -639,6 +639,215 @@ expression: tool_schemas_planner()
   },
   {
     "concurrent_safe": false,
+    "description": "Add a comment or strategic observation to a task's activity log.",
+    "inputSchema": {
+      "properties": {
+        "body": {
+          "description": "Comment body to add to the activity log",
+          "type": "string"
+        },
+        "id": {
+          "description": "Task UUID or short ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "body"
+      ],
+      "type": "object"
+    },
+    "name": "task_comment_add"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional tags for categorisation",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Note title",
+          "type": "string"
+        },
+        "type": {
+          "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "content",
+        "type"
+      ],
+      "type": "object"
+    },
+    "name": "memory_write"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "New content to insert or replace with",
+          "type": "string"
+        },
+        "find_text": {
+          "description": "Required for find_replace: exact text to search for",
+          "type": "string"
+        },
+        "identifier": {
+          "description": "Note permalink or title",
+          "type": "string"
+        },
+        "operation": {
+          "description": "Edit operation: append, prepend, find_replace, replace_section",
+          "type": "string"
+        },
+        "section": {
+          "description": "Required for replace_section: heading text identifying the section",
+          "type": "string"
+        },
+        "type": {
+          "description": "If provided and different from current type, move the note to the new type's folder",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier",
+        "operation",
+        "content"
+      ],
+      "type": "object"
+    },
+    "name": "memory_edit"
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Maximum notes to include (default 8)",
+          "type": "integer"
+        },
+        "min_confidence": {
+          "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded.",
+          "type": "number"
+        },
+        "query": {
+          "description": "Optional free-text query to bias retrieval",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task ID to gather related memory for; defaults to current session task when omitted",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_build_context"
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Returns aggregate health report: total notes, broken link count, orphan note count, stale notes by folder.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "memory_health"
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).",
+    "inputSchema": {
+      "properties": {
+        "folder": {
+          "description": "Optional folder filter (e.g. \"decisions\")",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_broken_links"
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).",
+    "inputSchema": {
+      "properties": {
+        "folder": {
+          "description": "Optional folder filter (e.g. \"pitfalls\")",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_orphans"
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
+    "inputSchema": {
+      "properties": {
+        "role": {
+          "description": "Role name (worker, reviewer, lead, planner, architect)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role"
+      ],
+      "type": "object"
+    },
+    "name": "agent_metrics"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.",
+    "inputSchema": {
+      "properties": {
+        "base_role": {
+          "description": "Base role to extend: worker or reviewer",
+          "type": "string"
+        },
+        "description": {
+          "description": "Short description of what this agent specialises in",
+          "type": "string"
+        },
+        "model_preference": {
+          "description": "Preferred model ID (falls back to project default)",
+          "type": "string"
+        },
+        "name": {
+          "description": "Unique agent name within the project",
+          "type": "string"
+        },
+        "system_prompt_extensions": {
+          "description": "Additional system prompt content appended to the base role prompt",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "base_role"
+      ],
+      "type": "object"
+    },
+    "name": "agent_create"
+  },
+  {
+    "concurrent_safe": false,
     "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
     "inputSchema": {
       "properties": {
@@ -707,9 +916,45 @@ expression: tool_schemas_planner()
   },
   {
     "concurrent_safe": false,
+    "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "description": "Agent UUID or name to amend",
+          "type": "string"
+        },
+        "amendment": {
+          "description": "Amendment text to append to learned_prompt",
+          "type": "string"
+        },
+        "metrics_snapshot": {
+          "description": "JSON string of current metrics for the history record",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "amendment"
+      ],
+      "type": "object"
+    },
+    "name": "agent_amend_prompt"
+  },
+  {
+    "concurrent_safe": false,
     "description": "Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.",
     "inputSchema": {
       "properties": {
+        "next_patrol_minutes": {
+          "description": "Planner patrol only (per ADR-051 §1): minutes until the next board-health patrol should run (5-60). Set when the current task is a review-type patrol (`issue_type=\"review\"`, title contains \"patrol\"). Omit for decomposition or intervention sessions.",
+          "maximum": 60,
+          "minimum": 5,
+          "type": "integer"
+        },
         "summary": {
           "description": "Optional overall summary of the grooming session",
           "type": "string"

@@ -1084,36 +1084,6 @@ expression: tool_schemas_architect()
   },
   {
     "concurrent_safe": false,
-    "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.",
-    "inputSchema": {
-      "properties": {
-        "agent_id": {
-          "description": "Agent UUID or name to amend",
-          "type": "string"
-        },
-        "amendment": {
-          "description": "Amendment text to append to learned_prompt",
-          "type": "string"
-        },
-        "metrics_snapshot": {
-          "description": "JSON string of current metrics for the history record",
-          "type": "string"
-        },
-        "project": {
-          "description": "Absolute project path",
-          "type": "string"
-        }
-      },
-      "required": [
-        "agent_id",
-        "amendment"
-      ],
-      "type": "object"
-    },
-    "name": "agent_amend_prompt"
-  },
-  {
-    "concurrent_safe": false,
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
     "inputSchema": {
       "properties": {
@@ -1128,10 +1098,6 @@ expression: tool_schemas_architect()
             "type": "string"
           },
           "type": "array"
-        },
-        "next_patrol_minutes": {
-          "description": "Architect only: minutes until the next patrol should run (5-60). Omit for non-architect roles.",
-          "type": "integer"
         },
         "remaining_concerns": {
           "description": "Any outstanding concerns or caveats for the reviewer",

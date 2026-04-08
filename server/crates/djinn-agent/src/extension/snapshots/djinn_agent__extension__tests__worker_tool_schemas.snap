@@ -542,10 +542,6 @@ expression: tool_schemas_worker()
           },
           "type": "array"
         },
-        "next_patrol_minutes": {
-          "description": "Architect only: minutes until the next patrol should run (5-60). Omit for non-architect roles.",
-          "type": "integer"
-        },
         "remaining_concerns": {
           "description": "Any outstanding concerns or caveats for the reviewer",
           "items": {

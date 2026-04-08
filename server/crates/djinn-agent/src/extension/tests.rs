@@ -1618,7 +1618,19 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(planner.iter().any(|n| n == "task_create"));
     assert!(planner.iter().any(|n| n == "task_transition"));
     assert!(planner.iter().any(|n| n == "submit_grooming"));
-    assert!(!planner.iter().any(|n| n == "task_comment_add"));
+    assert!(planner.iter().any(|n| n == "memory_write"));
+    assert!(planner.iter().any(|n| n == "memory_edit"));
+    // Per ADR-051 §1 the Planner now runs patrol mode, which needs to leave
+    // diagnostic comments on stuck tasks and mutate learned_prompts for
+    // specialist agents during the effectiveness review.
+    assert!(planner.iter().any(|n| n == "task_comment_add"));
+    assert!(planner.iter().any(|n| n == "memory_health"));
+    assert!(planner.iter().any(|n| n == "memory_broken_links"));
+    assert!(planner.iter().any(|n| n == "memory_orphans"));
+    assert!(planner.iter().any(|n| n == "memory_build_context"));
+    assert!(planner.iter().any(|n| n == "agent_metrics"));
+    assert!(planner.iter().any(|n| n == "agent_create"));
+    assert!(planner.iter().any(|n| n == "agent_amend_prompt"));
 
     let architect = schema_names(tool_schemas_architect());
     assert!(architect.iter().any(|n| n == "shell"));
@@ -1634,6 +1646,9 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(!architect.iter().any(|n| n == "write"));
     assert!(!architect.iter().any(|n| n == "edit"));
     assert!(!architect.iter().any(|n| n == "apply_patch"));
+    // Per ADR-051 §1 `agent_amend_prompt` moved from Architect to Planner
+    // (agent-effectiveness review is a patrol action, not a consultant action).
+    assert!(!architect.iter().any(|n| n == "agent_amend_prompt"));
 }
 
 #[test]

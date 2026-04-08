@@ -1,3 +1,4 @@
+use crate::actors::coordinator::rules;
 use crate::context::AgentContext;
 use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
@@ -22,18 +23,65 @@ impl AgentRole for PlannerRole {
     fn on_complete<'a>(
         &'a self,
         task_id: &'a str,
-        _output: &'a ParsedAgentOutput,
+        output: &'a ParsedAgentOutput,
         app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
         Box::pin(async move {
-            // Planning tasks route through the approved → PR pipeline so that
-            // any file changes (ADRs, briefs, roadmaps) get a PR.  If the
-            // branch has no unique commits, process_approved_tasks will close
-            // the task directly.
             let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            if let Ok(Some(task)) = repo.get(task_id).await
-                && matches!(task.issue_type.as_str(), "planning" | "decomposition")
+            let task = match repo.get(task_id).await {
+                Ok(Some(t)) => t,
+                _ => return None,
+            };
+
+            // Per ADR-051 §1: when the Planner finishes a review-type patrol task
+            // and reports `next_patrol_minutes` in its submit_grooming payload,
+            // log a `patrol_schedule` activity so the coordinator can update
+            // `next_patrol_interval` on its next tick. (Moved from architect.rs
+            // as part of the patrol ownership migration.)
+            if task.issue_type == "review"
+                && task.title.contains("patrol")
+                && let Some(minutes) = output
+                    .finalize_payload
+                    .as_ref()
+                    .and_then(|p| p.get("next_patrol_minutes"))
+                    .and_then(|v| v.as_u64())
             {
+                let minutes = (minutes as u32).clamp(
+                    rules::MIN_PLANNER_PATROL_MINUTES,
+                    rules::MAX_PLANNER_PATROL_MINUTES,
+                );
+                let payload_json =
+                    serde_json::json!({ "next_patrol_minutes": minutes }).to_string();
+                if let Err(e) = repo
+                    .log_activity(
+                        Some(task_id),
+                        "planner",
+                        "planner",
+                        "patrol_schedule",
+                        &payload_json,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        task_id,
+                        "Planner: failed to log patrol_schedule activity"
+                    );
+                } else {
+                    tracing::info!(
+                        task_id,
+                        next_patrol_minutes = minutes,
+                        "Planner: patrol self-scheduled next run"
+                    );
+                }
+            }
+
+            // Planning tasks route through the approved → PR pipeline so that
+            // any file changes (ADRs, briefs, roadmaps) get a PR. If the
+            // branch has no unique commits, process_approved_tasks will close
+            // the task directly. Review-type patrol tasks don't produce a PR;
+            // they just close.
+            if matches!(task.issue_type.as_str(), "planning" | "decomposition") {
                 return Some((TransitionAction::SubmitForMerge, None));
             }
             None

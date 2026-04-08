@@ -212,10 +212,11 @@ impl CoordinatorHandle {
         }
     }
 
-    /// Trigger an immediate Architect patrol dispatch (for testing).
+    /// Trigger an immediate Planner patrol dispatch (for testing).
+    /// Per ADR-051 §1 the Planner owns the board patrol.
     #[cfg(test)]
-    pub async fn trigger_architect_patrol(&self) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::TriggerArchitectPatrol).await
+    pub async fn trigger_planner_patrol(&self) -> Result<(), CoordinatorError> {
+        self.send(CoordinatorMessage::TriggerPlannerPatrol).await
     }
 
     /// Dispatch a Planner escalation for a task.

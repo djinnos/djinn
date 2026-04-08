@@ -1,10 +1,8 @@
-use crate::actors::coordinator::rules;
 use crate::context::AgentContext;
 use crate::extension;
 use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
 use djinn_core::models::{Task, TransitionAction};
-use djinn_db::TaskRepository;
 use futures::future::BoxFuture;
 
 use super::{AgentRole, RoleConfig};
@@ -22,52 +20,15 @@ impl AgentRole for ArchitectRole {
 
     fn on_complete<'a>(
         &'a self,
-        task_id: &'a str,
-        output: &'a ParsedAgentOutput,
-        app_state: &'a AgentContext,
+        _task_id: &'a str,
+        _output: &'a ParsedAgentOutput,
+        _app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>> {
-        Box::pin(async move {
-            // Extract next_patrol_minutes from the finalize payload if present.
-            if let Some(minutes) = output
-                .finalize_payload
-                .as_ref()
-                .and_then(|p| p.get("next_patrol_minutes"))
-                .and_then(|v| v.as_u64())
-            {
-                let minutes = (minutes as u32).clamp(
-                    rules::MIN_ARCHITECT_PATROL_MINUTES,
-                    rules::MAX_ARCHITECT_PATROL_MINUTES,
-                );
-                let task_repo =
-                    TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                let payload_json =
-                    serde_json::json!({ "next_patrol_minutes": minutes }).to_string();
-                if let Err(e) = task_repo
-                    .log_activity(
-                        Some(task_id),
-                        "architect",
-                        "architect",
-                        "patrol_schedule",
-                        &payload_json,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        task_id,
-                        "Architect: failed to log patrol_schedule activity"
-                    );
-                } else {
-                    tracing::info!(
-                        task_id,
-                        next_patrol_minutes = minutes,
-                        "Architect: patrol self-scheduled next run"
-                    );
-                }
-            }
-
-            Some((TransitionAction::SubmitForMerge, None))
-        })
+        // Per ADR-051 §1/§2 the Architect no longer runs patrols — its dispatch
+        // is spike-only (Planner-dispatched or user "Ask architect"). The
+        // `next_patrol_minutes` field that used to live on `submit_work` and be
+        // logged here has moved to the Planner (see `roles::planner::on_complete`).
+        Box::pin(async move { Some((TransitionAction::SubmitForMerge, None)) })
     }
 }
 

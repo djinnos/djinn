@@ -338,7 +338,7 @@ mod tests {
             last_auto_dispatch_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
-            next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,
+            next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
@@ -416,7 +416,7 @@ mod tests {
             last_auto_dispatch_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
-            next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,
+            next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
@@ -1241,12 +1241,13 @@ mod tests {
         );
     }
 
-    // ── Architect patrol dispatch ─────────────────────────────────────────────
+    // ── Planner patrol dispatch (per ADR-051 §1) ──────────────────────────────
 
     // ── Wave-based Planner decomposition (task watx) ──────────────────────────
 
-    /// Spawn a coordinator that includes "architect" and "planner" model slots,
-    /// used by both patrol tests and wave decomposition tests.
+    /// Spawn a coordinator that includes "planner" and "architect" model slots,
+    /// used by both patrol tests (planner-owned per ADR-051 §1) and wave
+    /// decomposition tests.
     fn spawn_coordinator_with_planner(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
@@ -1285,21 +1286,14 @@ mod tests {
         ))
     }
 
-    fn spawn_coordinator_with_architect(
-        db: &Database,
-        tx: &broadcast::Sender<DjinnEventEnvelope>,
-    ) -> CoordinatorHandle {
-        spawn_coordinator_with_planner(db, tx)
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn patrol_skips_when_no_open_epics() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
 
         // No epics at all — patrol should skip without creating any tasks.
-        let handle = spawn_coordinator_with_architect(&db, &tx);
-        handle.trigger_architect_patrol().await.unwrap();
+        let handle = spawn_coordinator_with_planner(&db, &tx);
+        handle.trigger_planner_patrol().await.unwrap();
         // Give actor time to process.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -1396,7 +1390,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn patrol_skips_when_architect_already_running() {
+    async fn patrol_skips_when_planner_already_running() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
 
@@ -1418,11 +1412,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Insert a fake running Architect session into the DB to simulate one already running.
+        // Insert a fake running Planner session into the DB to simulate one already running.
+        // Per ADR-051 §1 the Planner owns patrol; any active Planner session suppresses a
+        // new patrol dispatch.
         let session_id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, started_at)
-             VALUES (?1, ?2, NULL, 'test/mock', 'architect', 'running', strftime('%s','now'))",
+             VALUES (?1, ?2, NULL, 'test/mock', 'planner', 'running', strftime('%s','now'))",
         )
         .bind(&session_id)
         .bind(&project.id)
@@ -1430,15 +1426,15 @@ mod tests {
         .await
         .unwrap();
 
-        let handle = spawn_coordinator_with_architect(&db, &tx);
-        handle.trigger_architect_patrol().await.unwrap();
+        let handle = spawn_coordinator_with_planner(&db, &tx);
+        handle.trigger_planner_patrol().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Dispatch counter should remain 0 — patrol was skipped.
         assert_eq!(
             handle.get_status().unwrap().tasks_dispatched,
             0,
-            "patrol should skip when an Architect session is already running"
+            "patrol should skip when a Planner session is already running"
         );
     }
 
@@ -1689,8 +1685,8 @@ mod tests {
             .await
             .unwrap();
 
-        let handle = spawn_coordinator_with_architect(&db, &tx);
-        handle.trigger_architect_patrol().await.unwrap();
+        let handle = spawn_coordinator_with_planner(&db, &tx);
+        handle.trigger_planner_patrol().await.unwrap();
         // Give the actor time to process.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 

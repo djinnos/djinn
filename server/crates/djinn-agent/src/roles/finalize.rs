@@ -33,8 +33,6 @@ pub struct SubmitWork {
     pub files_changed: Vec<String>,
     #[serde(default)]
     pub remaining_concerns: Vec<String>,
-    /// Optional: minutes until the next patrol should run (architect self-scheduling).
-    pub next_patrol_minutes: Option<u32>,
 }
 
 /// Payload for a reviewer submitting their review outcome.
@@ -70,6 +68,10 @@ pub struct SubmitGrooming {
     pub tasks_reviewed: Vec<TaskGroomingEntry>,
     /// Optional overall summary of the grooming session.
     pub summary: Option<String>,
+    /// Per ADR-051 §1: Planner self-schedules the next patrol interval when
+    /// finishing a review-type patrol task. Minutes between 5 and 60 inclusive;
+    /// ignored for non-patrol Planner dispatches.
+    pub next_patrol_minutes: Option<u32>,
 }
 
 /// MCP tool descriptor for the Worker finalize tool.
@@ -93,10 +95,6 @@ pub fn tool_submit_work() -> RmcpTool {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Any outstanding concerns or caveats for the reviewer"
-                },
-                "next_patrol_minutes": {
-                    "type": "integer",
-                    "description": "Architect only: minutes until the next patrol should run (5-60). Omit for non-architect roles."
                 }
             }
         }),
@@ -187,7 +185,13 @@ pub fn tool_submit_grooming() -> RmcpTool {
                         }
                     }
                 },
-                "summary": {"type": "string", "description": "Optional overall summary of the grooming session"}
+                "summary": {"type": "string", "description": "Optional overall summary of the grooming session"},
+                "next_patrol_minutes": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 60,
+                    "description": "Planner patrol only (per ADR-051 §1): minutes until the next board-health patrol should run (5-60). Set when the current task is a review-type patrol (`issue_type=\"review\"`, title contains \"patrol\"). Omit for decomposition or intervention sessions."
+                }
             }
         }),
     )

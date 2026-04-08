@@ -40,9 +40,10 @@ pub(super) enum CoordinatorMessage {
         healthy: bool,
         error: Option<String>,
     },
-    /// Trigger an immediate Architect patrol dispatch (for testing).
+    /// Trigger an immediate Planner patrol dispatch (for testing).
+    /// Per ADR-051 §1 the Planner owns the board patrol.
     #[cfg(test)]
-    TriggerArchitectPatrol,
+    TriggerPlannerPatrol,
     /// Lead requests Planner escalation for a task.
     /// Creates a review task and dispatches Planner to it.
     /// Per ADR-051 §8 the Planner is the escalation ceiling above Lead.

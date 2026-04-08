@@ -832,18 +832,19 @@ impl CoordinatorActor {
         }
     }
 
-    /// Dispatch an Architect patrol session at a dynamic interval when:
-    ///   - No Architect session is currently running.
+    /// Dispatch a Planner patrol session at a dynamic interval when:
+    ///   - No Planner session is currently running.
     ///   - At least one project has dispatch enabled (not paused/unhealthy).
     ///   - The board has at least one open or in_progress task (skip empty boards).
     ///   - No open patrol review task already exists for that project.
     ///
-    /// The patrol interval is self-scheduled by the architect via the
-    /// `next_patrol_minutes` field in `submit_work`.  When no schedule exists,
-    /// the default interval (DEFAULT_ARCHITECT_PATROL_INTERVAL) is used.
+    /// Per ADR-051 §1 the Planner owns the board patrol (previously Architect).
+    /// The patrol interval is self-scheduled by the planner via the
+    /// `next_patrol_minutes` field in `submit_grooming`. When no schedule exists,
+    /// the default interval (DEFAULT_PLANNER_PATROL_INTERVAL) is used.
     ///
-    /// Creates a "review" task for visibility, then dispatches the Architect.
-    pub(super) async fn maybe_dispatch_architect_patrol(&mut self) {
+    /// Creates a "review" task for visibility, then dispatches the Planner.
+    pub(super) async fn maybe_dispatch_planner_patrol(&mut self) {
         // Step 0: Check for the most recent patrol_schedule activity to update
         // the dynamic patrol interval.
         {
@@ -861,8 +862,8 @@ impl CoordinatorActor {
                 .and_then(|p| p.get("next_patrol_minutes").and_then(|v| v.as_u64()))
             {
                 let minutes = (minutes as u32).clamp(
-                    rules::MIN_ARCHITECT_PATROL_MINUTES,
-                    rules::MAX_ARCHITECT_PATROL_MINUTES,
+                    rules::MIN_PLANNER_PATROL_MINUTES,
+                    rules::MAX_PLANNER_PATROL_MINUTES,
                 );
                 let new_interval = Duration::from_secs(u64::from(minutes) * 60);
                 if new_interval != self.next_patrol_interval {
@@ -870,14 +871,16 @@ impl CoordinatorActor {
                         old_secs = self.next_patrol_interval.as_secs(),
                         new_secs = new_interval.as_secs(),
                         minutes,
-                        "CoordinatorActor: patrol interval updated by architect"
+                        "CoordinatorActor: patrol interval updated by planner"
                     );
                     self.next_patrol_interval = new_interval;
                 }
             }
         }
 
-        // Check if any Architect session is already running.
+        // Check if any Planner session is already running. Per ADR-051 §1 the
+        // Planner owns patrol; a single active Planner (patrol, decomposition,
+        // or intervention) is enough to suppress a new patrol dispatch.
         let session_repo = SessionRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
@@ -889,18 +892,18 @@ impl CoordinatorActor {
                 return;
             }
         };
-        let architect_running = active_sessions.iter().any(|s| s.agent_type == "architect");
-        if architect_running {
-            tracing::debug!("CoordinatorActor: patrol — Architect already running, skipping");
+        let planner_running = active_sessions.iter().any(|s| s.agent_type == "planner");
+        if planner_running {
+            tracing::debug!("CoordinatorActor: patrol — Planner already running, skipping");
             return;
         }
         tracing::debug!(
             sessions = active_sessions.len(),
-            "CoordinatorActor: patrol — no architect session running"
+            "CoordinatorActor: patrol — no planner session running"
         );
         #[cfg(test)]
         eprintln!(
-            "[patrol] step 1 passed: no architect session. Active sessions: {}",
+            "[patrol] step 1 passed: no planner session. Active sessions: {}",
             active_sessions.len()
         );
 
@@ -1013,13 +1016,13 @@ impl CoordinatorActor {
         #[cfg(test)]
         eprintln!("[patrol] step 3: no existing non-closed patrol task");
 
-        // Resolve models for the "architect" role.
-        let model_ids = self.resolve_dispatch_models_for_role("architect").await;
+        // Resolve models for the "planner" role.
+        let model_ids = self.resolve_dispatch_models_for_role("planner").await;
         tracing::debug!(model_ids = ?model_ids, "CoordinatorActor: patrol — resolved models");
         #[cfg(test)]
         eprintln!("[patrol] step 4: resolved models: {:?}", model_ids);
         if model_ids.is_empty() {
-            tracing::debug!("CoordinatorActor: patrol — no model configured for architect role");
+            tracing::debug!("CoordinatorActor: patrol — no model configured for planner role");
             return;
         }
 
@@ -1028,7 +1031,7 @@ impl CoordinatorActor {
             .create_in_project(
                 &project_id,
                 None,
-                "Architect patrol: board health review",
+                "Planner patrol: board health review",
                 "Automated patrol session to review board health, epic progress, and approach viability.",
                 "Review open epics and tasks for stuck work, missing blockers, and strategic issues.",
                 "review",
@@ -1086,7 +1089,7 @@ impl CoordinatorActor {
                     task_id = %review_task.short_id,
                     task_uuid = %review_task.id,
                     project_id = %project_id,
-                    "CoordinatorActor: Architect patrol dispatched"
+                    "CoordinatorActor: Planner patrol dispatched"
                 );
                 self.last_dispatched
                     .insert(review_task.id.clone(), StdInstant::now());
@@ -1095,7 +1098,7 @@ impl CoordinatorActor {
             }
             DispatchOutcome::AtCapacity => {
                 tracing::debug!(
-                    "CoordinatorActor: patrol — Architect model at capacity, will retry next cycle"
+                    "CoordinatorActor: patrol — Planner model at capacity, will retry next cycle"
                 );
             }
             DispatchOutcome::PoolDead => {
@@ -1103,7 +1106,7 @@ impl CoordinatorActor {
             }
             DispatchOutcome::Failed => {
                 tracing::debug!(
-                    "CoordinatorActor: patrol — no model could accept Architect dispatch"
+                    "CoordinatorActor: patrol — no model could accept Planner dispatch"
                 );
             }
         }

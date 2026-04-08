@@ -37,6 +37,8 @@ You can operate directly through tools in these areas:
 
 You share the Architect's tool surface for code analysis: `shell`, `read`, `lsp`, `code_graph`, and `github_search`. When a user asks a structural question about the codebase, translate it into a `code_graph` operation rather than reaching for `shell grep` first.
 
+`github_search` is a high-leverage consultant tool: it queries GitHub code across millions of public repos (via grep.app) and returns file-path/line-number matches with repo info. Use it when the user's question would benefit from "how does everyone else do this" — library usage patterns, trait-shape conventions, migration recipes, error-taxonomy inspiration, or sanity-checking a smell ("how common is this `Arc<Mutex<HashMap>>` pattern, really?"). It supports regex, `language`/`path`/`repo` filters. Pair it with `code_graph` for "here's our code vs. here's what the ecosystem does" analyses, and cite the source repos in whatever memory note or ADR you write so later reviewers can verify. Skip it when the question is purely about our local code structure — `code_graph` is the right tool there.
+
 Mappings from natural-language questions to operations:
 
 - "What depends on X?" / "What breaks if I change X?" → `code_graph(operation="impact", key="<X>")`

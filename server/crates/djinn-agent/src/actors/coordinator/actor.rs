@@ -70,9 +70,10 @@ pub(super) struct CoordinatorActor {
     /// The next patrol is eligible only after `next_patrol_interval` has elapsed
     /// since this instant.  Reset when a patrol task reaches a terminal state.
     pub(super) last_patrol_completed: StdInstant,
-    /// Dynamic patrol interval, set by the architect's self-scheduling.
-    /// Defaults to `rules::DEFAULT_ARCHITECT_PATROL_INTERVAL`.
+    /// Dynamic patrol interval, set by the planner's self-scheduling.
+    /// Defaults to `rules::DEFAULT_PLANNER_PATROL_INTERVAL`.
     /// Updated when the coordinator reads a `patrol_schedule` activity entry.
+    /// Per ADR-051 §1 the Planner owns the board patrol.
     pub(super) next_patrol_interval: Duration,
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     pub(super) throughput_events: HashMap<String, Vec<StdInstant>>,
@@ -165,7 +166,7 @@ impl CoordinatorActor {
             last_auto_dispatch_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
-            next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,
+            next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
@@ -310,11 +311,11 @@ impl CoordinatorActor {
                             self.evaluate_prompt_amendments().await;
                         }
                     }
-                    // Architect patrol: completion-time-based scheduling.
+                    // Planner patrol (per ADR-051 §1): completion-time-based scheduling.
                     // Only attempt dispatch once `next_patrol_interval` has
                     // elapsed since the last patrol completed (or actor start).
                     if self.last_patrol_completed.elapsed() >= self.next_patrol_interval {
-                        self.maybe_dispatch_architect_patrol().await;
+                        self.maybe_dispatch_planner_patrol().await;
                     }
 
                     // ADR-048 §3A: idle-time memory consolidation.
@@ -496,8 +497,8 @@ impl CoordinatorActor {
                 }
             }
             #[cfg(test)]
-            CoordinatorMessage::TriggerArchitectPatrol => {
-                self.maybe_dispatch_architect_patrol().await;
+            CoordinatorMessage::TriggerPlannerPatrol => {
+                self.maybe_dispatch_planner_patrol().await;
             }
             CoordinatorMessage::DispatchPlannerEscalation {
                 source_task_id,

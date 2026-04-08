@@ -525,8 +525,15 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for Planner: base + task/epic management tools + submit_grooming finalize tool.
-/// task_comment_add is excluded — submit_grooming captures session output.
+/// Tool schemas for Planner: base + task/epic management tools + memory/role
+/// management tools (needed by patrol mode per ADR-051 §1) + submit_grooming
+/// finalize tool.
+///
+/// The Planner now runs in two modes: (a) per-epic decomposition (the legacy
+/// mode) and (b) board-health patrol (migrated from Architect). The tool
+/// surface is the union of both needs. `code_graph` remains Architect-only
+/// (per ADR-050) because deep structural analysis is an Architect spike, not
+/// a patrol responsibility.
 pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     for value in shared_schemas::shared_lead_tool_schemas() {
@@ -536,11 +543,38 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         shared_schemas::tool_task_transition(),
         false,
     ));
+    // task_comment_add was previously excluded for planners (submit_grooming
+    // captured output), but patrol mode needs to leave diagnostic comments on
+    // stuck tasks.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_comment_add(),
+        false,
+    ));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
+    // Memory-health and knowledge-graph tools used by the patrol workflow
+    // (sections "Memory Health Review" and "Contradiction and Low-Confidence
+    // Review" in the patrol prompt).
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        true,
+    ));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_health(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_broken_links(),
+        true,
+    ));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_orphans(), true));
+    // Agent effectiveness review tools (migrated from Architect §10 per ADR-051
+    // patrol ownership migration).
+    tool_values.push(serialize_tool(shared_schemas::tool_role_metrics(), true));
+    tool_values.push(serialize_tool(shared_schemas::tool_role_create(), false));
     for value in [
         serialize_tool(tool_task_delete_branch(), false),
         serialize_tool(tool_task_archive_activity(), false),
         serialize_tool(tool_task_reset_counters(), false),
         serialize_tool(tool_task_kill_session(), false),
+        serialize_tool(tool_role_amend_prompt(), false),
         serialize_tool(crate::roles::finalize::tool_submit_grooming(), false),
     ] {
         tool_values.push(value);
@@ -594,7 +628,10 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_archive_activity(), false),
         serialize_tool(tool_task_reset_counters(), false),
         serialize_tool(tool_task_kill_session(), false),
-        serialize_tool(tool_role_amend_prompt(), false),
+        // Per ADR-051 §1, `role_amend_prompt` has moved to the Planner —
+        // agent-effectiveness amendment is a patrol action, not a consultant
+        // action. Architect keeps `role_metrics` (read) and `role_create`
+        // (structural proposal) but cannot mutate existing learned_prompts.
         serialize_tool(crate::roles::finalize::tool_submit_work(), false),
     ] {
         tool_values.push(value);

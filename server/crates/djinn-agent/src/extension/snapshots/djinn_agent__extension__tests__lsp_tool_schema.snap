@@ -1,6 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension/mod.rs
-expression: "serde_json::to_value(&tool_lsp()).unwrap()"
+source: crates/djinn-agent/src/extension/tests.rs
+expression: "serde_json::to_value(tool_lsp()).unwrap()"
 ---
 {
   "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
