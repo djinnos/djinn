@@ -25,6 +25,50 @@ use super::*;
 use crate::AgentType;
 use crate::task_merge::interrupt_paused_worker_session;
 
+fn is_database_locked(error: &djinn_db::Error) -> bool {
+    match error {
+        djinn_db::Error::Sqlx(sqlx_err) => sqlx_err
+            .as_database_error()
+            .and_then(|db_err| db_err.code())
+            .map(|code| matches!(code.as_ref(), "5" | "6" | "517"))
+            .unwrap_or_else(|| {
+                let msg = sqlx_err.to_string().to_ascii_lowercase();
+                msg.contains("database is locked") || msg.contains("database table is locked")
+            }),
+        other => {
+            let msg = other.to_string().to_ascii_lowercase();
+            msg.contains("database is locked") || msg.contains("database table is locked")
+        }
+    }
+}
+
+async fn retry_task_transition_on_locked<F, Fut, T>(mut op: F) -> Result<T, djinn_db::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, djinn_db::Error>>,
+{
+    const MAX_RETRIES: u32 = 5;
+    const BASE_DELAY_MS: u64 = 200;
+
+    let mut attempt = 0;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) if is_database_locked(&err) && attempt < MAX_RETRIES => {
+                attempt += 1;
+                let delay = BASE_DELAY_MS * 2u64.pow(attempt - 1);
+                tracing::debug!(
+                    attempt,
+                    delay_ms = delay,
+                    "Lifecycle: database locked during task transition, retrying after backoff"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Sort tool schemas deterministically for prompt-cache stability (ADR-048
 /// §2C).  Built-in tools (indices `0..builtin_count`) are sorted
 /// alphabetically among themselves, then MCP tools (`builtin_count..`) are
@@ -1890,16 +1934,19 @@ async fn apply_transition_and_dispatch(
                 "Lifecycle: dropping poisoned session due to orphaned tool call; next dispatch will start a fresh session"
             );
         }
-        if let Err(e) = task_repo
-            .transition(
-                task_id,
-                action.clone(),
-                "agent-supervisor",
-                "system",
-                reason.as_deref(),
-                None,
-            )
-            .await
+        if let Err(e) = retry_task_transition_on_locked(|| async {
+            task_repo
+                .transition(
+                    task_id,
+                    action.clone(),
+                    "agent-supervisor",
+                    "system",
+                    reason.as_deref(),
+                    None,
+                )
+                .await
+        })
+        .await
         {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to transition task after session");
             // If the intended transition failed (e.g. Close blocked by
@@ -1908,16 +1955,19 @@ async fn apply_transition_and_dispatch(
             // coordinator's stuck-task recovery to loop indefinitely.
             if action != TransitionAction::Release {
                 let fallback_reason = format!("Fallback release: {e}");
-                if let Err(e2) = task_repo
-                    .transition(
-                        task_id,
-                        TransitionAction::Release,
-                        "agent-supervisor",
-                        "system",
-                        Some(&fallback_reason),
-                        None,
-                    )
-                    .await
+                if let Err(e2) = retry_task_transition_on_locked(|| async {
+                    task_repo
+                        .transition(
+                            task_id,
+                            TransitionAction::Release,
+                            "agent-supervisor",
+                            "system",
+                            Some(&fallback_reason),
+                            None,
+                        )
+                        .await
+                })
+                .await
                 {
                     // Release is only valid from in_progress.  If the task is
                     // already in open/todo/closed (e.g. a concurrent session or

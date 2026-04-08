@@ -4,6 +4,7 @@ expression: tool_schemas_worker()
 ---
 [
   {
+    "concurrent_safe": true,
     "description": "Show details of a work item including recent activity and blockers.",
     "inputSchema": {
       "properties": {
@@ -20,6 +21,7 @@ expression: tool_schemas_worker()
     "name": "task_show"
   },
   {
+    "concurrent_safe": true,
     "description": "List tasks with optional filters and pagination.",
     "inputSchema": {
       "properties": {
@@ -58,6 +60,7 @@ expression: tool_schemas_worker()
     "name": "task_list"
   },
   {
+    "concurrent_safe": true,
     "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
     "inputSchema": {
       "properties": {
@@ -86,6 +89,7 @@ expression: tool_schemas_worker()
     "name": "task_activity_list"
   },
   {
+    "concurrent_safe": true,
     "description": "Read a note by permalink or title.",
     "inputSchema": {
       "properties": {
@@ -102,6 +106,7 @@ expression: tool_schemas_worker()
     "name": "memory_read"
   },
   {
+    "concurrent_safe": true,
     "description": "Search notes in project memory.",
     "inputSchema": {
       "properties": {
@@ -130,6 +135,7 @@ expression: tool_schemas_worker()
     "name": "memory_search"
   },
   {
+    "concurrent_safe": true,
     "description": "List notes in project memory. Returns compact summaries without full content.",
     "inputSchema": {
       "properties": {
@@ -151,6 +157,7 @@ expression: tool_schemas_worker()
     "name": "memory_list"
   },
   {
+    "concurrent_safe": false,
     "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
     "inputSchema": {
       "properties": {
@@ -171,6 +178,7 @@ expression: tool_schemas_worker()
     "name": "shell"
   },
   {
+    "concurrent_safe": true,
     "description": "Read a file with line numbers and pagination. Rejects binary files.",
     "inputSchema": {
       "properties": {
@@ -194,6 +202,7 @@ expression: tool_schemas_worker()
     "name": "read"
   },
   {
+    "concurrent_safe": true,
     "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
     "inputSchema": {
       "properties": {
@@ -248,6 +257,7 @@ expression: tool_schemas_worker()
     "name": "lsp"
   },
   {
+    "concurrent_safe": true,
     "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
     "inputSchema": {
       "properties": {
@@ -268,6 +278,7 @@ expression: tool_schemas_worker()
     "name": "ci_job_log"
   },
   {
+    "concurrent_safe": true,
     "description": "Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.",
     "inputSchema": {
       "properties": {
@@ -296,6 +307,7 @@ expression: tool_schemas_worker()
     "name": "github_search"
   },
   {
+    "concurrent_safe": true,
     "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
     "inputSchema": {
       "properties": {
@@ -322,6 +334,7 @@ expression: tool_schemas_worker()
     "name": "output_view"
   },
   {
+    "concurrent_safe": true,
     "description": "Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.",
     "inputSchema": {
       "properties": {
@@ -348,6 +361,7 @@ expression: tool_schemas_worker()
     "name": "output_grep"
   },
   {
+    "concurrent_safe": false,
     "description": "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.",
     "inputSchema": {
       "properties": {
@@ -369,6 +383,7 @@ expression: tool_schemas_worker()
     "name": "write"
   },
   {
+    "concurrent_safe": false,
     "description": "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).",
     "inputSchema": {
       "properties": {
@@ -395,6 +410,7 @@ expression: tool_schemas_worker()
     "name": "edit"
   },
   {
+    "concurrent_safe": false,
     "description": "Apply a patch to one or more files using a custom LLM-friendly format. Uses content-based context matching (not line numbers). Format:\n\n*** Begin Patch\n*** Update File: path/to/file.rs\n@@ context_line_from_file\n context line (unchanged)\n-old line to remove\n+new line to add\n context line (unchanged)\n\n*** Add File: path/to/new_file.rs\n+line 1\n+line 2\n\n*** Delete File: path/to/old_file.rs\n*** End Patch\n\nRules: ' ' prefix = context (must match file), '-' = delete, '+' = add. The @@ line text is searched in the file to locate each chunk. Multiple @@ chunks per file are allowed. Files being updated or deleted must be read first.",
     "inputSchema": {
       "properties": {
@@ -411,6 +427,7 @@ expression: tool_schemas_worker()
     "name": "apply_patch"
   },
   {
+    "concurrent_safe": false,
     "description": "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.",
     "inputSchema": {
       "properties": {
@@ -444,6 +461,7 @@ expression: tool_schemas_worker()
     "name": "memory_write"
   },
   {
+    "concurrent_safe": false,
     "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
     "inputSchema": {
       "properties": {
@@ -482,6 +500,7 @@ expression: tool_schemas_worker()
     "name": "memory_edit"
   },
   {
+    "concurrent_safe": false,
     "description": "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.",
     "inputSchema": {
       "properties": {
@@ -507,6 +526,7 @@ expression: tool_schemas_worker()
     "name": "request_lead"
   },
   {
+    "concurrent_safe": false,
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
     "inputSchema": {
       "properties": {

@@ -4,6 +4,7 @@ expression: tool_schemas_architect()
 ---
 [
   {
+    "concurrent_safe": true,
     "description": "Show details of a work item including recent activity and blockers.",
     "inputSchema": {
       "properties": {
@@ -20,6 +21,7 @@ expression: tool_schemas_architect()
     "name": "task_show"
   },
   {
+    "concurrent_safe": true,
     "description": "List tasks with optional filters and pagination.",
     "inputSchema": {
       "properties": {
@@ -58,6 +60,7 @@ expression: tool_schemas_architect()
     "name": "task_list"
   },
   {
+    "concurrent_safe": true,
     "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
     "inputSchema": {
       "properties": {
@@ -86,6 +89,7 @@ expression: tool_schemas_architect()
     "name": "task_activity_list"
   },
   {
+    "concurrent_safe": true,
     "description": "Read a note by permalink or title.",
     "inputSchema": {
       "properties": {
@@ -102,6 +106,7 @@ expression: tool_schemas_architect()
     "name": "memory_read"
   },
   {
+    "concurrent_safe": true,
     "description": "Search notes in project memory.",
     "inputSchema": {
       "properties": {
@@ -130,6 +135,7 @@ expression: tool_schemas_architect()
     "name": "memory_search"
   },
   {
+    "concurrent_safe": true,
     "description": "List notes in project memory. Returns compact summaries without full content.",
     "inputSchema": {
       "properties": {
@@ -151,6 +157,7 @@ expression: tool_schemas_architect()
     "name": "memory_list"
   },
   {
+    "concurrent_safe": false,
     "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
     "inputSchema": {
       "properties": {
@@ -171,6 +178,7 @@ expression: tool_schemas_architect()
     "name": "shell"
   },
   {
+    "concurrent_safe": true,
     "description": "Read a file with line numbers and pagination. Rejects binary files.",
     "inputSchema": {
       "properties": {
@@ -194,6 +202,7 @@ expression: tool_schemas_architect()
     "name": "read"
   },
   {
+    "concurrent_safe": true,
     "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
     "inputSchema": {
       "properties": {
@@ -248,6 +257,7 @@ expression: tool_schemas_architect()
     "name": "lsp"
   },
   {
+    "concurrent_safe": true,
     "description": "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node; group_by=file for per-file rollup), ranked (top nodes by PageRank or degree; sort_by pagerank|in_degree|out_degree|total_degree), impact (transitive dependents; group_by=file for per-file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup via query substring), cycles (strongly-connected components of size >= min_size), orphans (zero-incoming-reference nodes filtered by visibility public|private|any), path (shortest dependency path from→to), edges (enumerate edges matching from_glob→to_glob), diff (what changed since the previous canonical graph — only since=previous supported), describe (symbol signature/documentation without an LSP round trip).",
     "inputSchema": {
       "properties": {
@@ -371,6 +381,7 @@ expression: tool_schemas_architect()
     "name": "code_graph"
   },
   {
+    "concurrent_safe": true,
     "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
     "inputSchema": {
       "properties": {
@@ -391,6 +402,7 @@ expression: tool_schemas_architect()
     "name": "ci_job_log"
   },
   {
+    "concurrent_safe": true,
     "description": "Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.",
     "inputSchema": {
       "properties": {
@@ -419,6 +431,7 @@ expression: tool_schemas_architect()
     "name": "github_search"
   },
   {
+    "concurrent_safe": true,
     "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
     "inputSchema": {
       "properties": {
@@ -445,6 +458,7 @@ expression: tool_schemas_architect()
     "name": "output_view"
   },
   {
+    "concurrent_safe": true,
     "description": "Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.",
     "inputSchema": {
       "properties": {
@@ -471,6 +485,7 @@ expression: tool_schemas_architect()
     "name": "output_grep"
   },
   {
+    "concurrent_safe": false,
     "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
     "inputSchema": {
       "properties": {
@@ -533,6 +548,7 @@ expression: tool_schemas_architect()
     "name": "task_create"
   },
   {
+    "concurrent_safe": false,
     "description": "Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.",
     "inputSchema": {
       "properties": {
@@ -601,6 +617,7 @@ expression: tool_schemas_architect()
     "name": "task_update"
   },
   {
+    "concurrent_safe": true,
     "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
     "inputSchema": {
       "properties": {
@@ -617,6 +634,7 @@ expression: tool_schemas_architect()
     "name": "task_blocked_list"
   },
   {
+    "concurrent_safe": true,
     "description": "Show details for an epic by UUID or short ID.",
     "inputSchema": {
       "properties": {
@@ -633,6 +651,7 @@ expression: tool_schemas_architect()
     "name": "epic_show"
   },
   {
+    "concurrent_safe": false,
     "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
     "inputSchema": {
       "properties": {
@@ -670,6 +689,7 @@ expression: tool_schemas_architect()
     "name": "epic_update"
   },
   {
+    "concurrent_safe": true,
     "description": "List tasks for an epic with pagination.",
     "inputSchema": {
       "properties": {
@@ -692,6 +712,7 @@ expression: tool_schemas_architect()
     "name": "epic_tasks"
   },
   {
+    "concurrent_safe": false,
     "description": "Close an epic. Use when all work is complete and no further waves are needed.",
     "inputSchema": {
       "properties": {
@@ -708,6 +729,7 @@ expression: tool_schemas_architect()
     "name": "epic_close"
   },
   {
+    "concurrent_safe": false,
     "description": "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — typically when an Architect health sweep or chat planning session identifies a gap that needs its own delivery container. Returns the created epic.",
     "inputSchema": {
       "properties": {
@@ -751,6 +773,7 @@ expression: tool_schemas_architect()
     "name": "epic_create"
   },
   {
+    "concurrent_safe": false,
     "description": "Transition a task using a named workflow action.",
     "inputSchema": {
       "properties": {
@@ -783,6 +806,7 @@ expression: tool_schemas_architect()
     "name": "task_transition"
   },
   {
+    "concurrent_safe": false,
     "description": "Add a comment or strategic observation to a task's activity log.",
     "inputSchema": {
       "properties": {
@@ -804,6 +828,7 @@ expression: tool_schemas_architect()
     "name": "task_comment_add"
   },
   {
+    "concurrent_safe": true,
     "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
     "inputSchema": {
       "properties": {
@@ -829,6 +854,7 @@ expression: tool_schemas_architect()
     "name": "memory_build_context"
   },
   {
+    "concurrent_safe": true,
     "description": "Returns aggregate health report: total notes, broken link count, orphan note count, stale notes by folder.",
     "inputSchema": {
       "properties": {},
@@ -837,6 +863,7 @@ expression: tool_schemas_architect()
     "name": "memory_health"
   },
   {
+    "concurrent_safe": true,
     "description": "Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).",
     "inputSchema": {
       "properties": {
@@ -850,6 +877,7 @@ expression: tool_schemas_architect()
     "name": "memory_broken_links"
   },
   {
+    "concurrent_safe": true,
     "description": "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).",
     "inputSchema": {
       "properties": {
@@ -863,6 +891,7 @@ expression: tool_schemas_architect()
     "name": "memory_orphans"
   },
   {
+    "concurrent_safe": true,
     "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
     "inputSchema": {
       "properties": {
@@ -879,6 +908,7 @@ expression: tool_schemas_architect()
     "name": "agent_metrics"
   },
   {
+    "concurrent_safe": false,
     "description": "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.",
     "inputSchema": {
       "properties": {
@@ -912,6 +942,7 @@ expression: tool_schemas_architect()
     "name": "agent_create"
   },
   {
+    "concurrent_safe": false,
     "description": "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.",
     "inputSchema": {
       "properties": {
@@ -945,6 +976,7 @@ expression: tool_schemas_architect()
     "name": "memory_write"
   },
   {
+    "concurrent_safe": false,
     "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
     "inputSchema": {
       "properties": {
@@ -983,6 +1015,7 @@ expression: tool_schemas_architect()
     "name": "memory_edit"
   },
   {
+    "concurrent_safe": false,
     "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
     "inputSchema": {
       "properties": {
@@ -999,6 +1032,7 @@ expression: tool_schemas_architect()
     "name": "task_delete_branch"
   },
   {
+    "concurrent_safe": false,
     "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
     "inputSchema": {
       "properties": {
@@ -1015,6 +1049,7 @@ expression: tool_schemas_architect()
     "name": "task_archive_activity"
   },
   {
+    "concurrent_safe": false,
     "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
     "inputSchema": {
       "properties": {
@@ -1031,6 +1066,7 @@ expression: tool_schemas_architect()
     "name": "task_reset_counters"
   },
   {
+    "concurrent_safe": false,
     "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
     "inputSchema": {
       "properties": {
@@ -1047,6 +1083,7 @@ expression: tool_schemas_architect()
     "name": "task_kill_session"
   },
   {
+    "concurrent_safe": false,
     "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.",
     "inputSchema": {
       "properties": {
@@ -1076,6 +1113,7 @@ expression: tool_schemas_architect()
     "name": "agent_amend_prompt"
   },
   {
+    "concurrent_safe": false,
     "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
     "inputSchema": {
       "properties": {

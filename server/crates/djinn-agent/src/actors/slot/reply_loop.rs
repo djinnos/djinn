@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -27,47 +27,29 @@ const MAX_TURNS: u32 = 1000;
 /// a single batch (ADR-048 §1A).
 const MAX_TOOL_CONCURRENCY: usize = 8;
 
-/// Returns `true` if the named tool is read-only and safe to execute
-/// concurrently with other concurrent-safe tools.
-fn is_concurrent_safe(name: &str) -> bool {
-    matches!(
-        name,
-        "memory_read"
-            | "memory_search"
-            | "memory_list"
-            | "memory_build_context"
-            | "memory_associations"
-            | "task_show"
-            | "task_list"
-            | "task_count"
-            | "task_ready"
-            | "task_blocked_list"
-            | "task_blockers_list"
-            | "task_activity_list"
-            | "task_memory_refs"
-            | "task_timeline"
-            | "epic_show"
-            | "epic_list"
-            | "epic_count"
-            | "epic_tasks"
-            | "agent_show"
-            | "agent_list"
-            | "agent_metrics"
-            | "session_show"
-            | "session_list"
-            | "session_messages"
-            | "provider_catalog"
-            | "provider_models"
-            | "provider_connected"
-            | "board_health"
-            | "model_health"
-            | "code_graph"
-            | "output_view"
-            | "output_grep"
-            | "lsp"
-            | "read"
-            | "github_search"
-    )
+fn tool_concurrency_safety(tools: &[serde_json::Value]) -> HashMap<String, bool> {
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool
+                .get("name")
+                .and_then(|value| value.as_str())
+                .or_else(|| {
+                    tool.get("function")
+                        .and_then(|value| value.get("name"))
+                        .and_then(|value| value.as_str())
+                })?;
+            let concurrent_safe = tool
+                .get("concurrent_safe")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            Some((name.to_string(), concurrent_safe))
+        })
+        .collect()
+}
+
+fn is_tool_concurrent_safe(tool_metadata: &HashMap<String, bool>, name: &str) -> bool {
+    tool_metadata.get(name).copied().unwrap_or(false)
 }
 
 fn serialize_message(msg: &Message) -> serde_json::Value {
@@ -437,6 +419,8 @@ pub(super) async fn run_reply_loop(
         mcp_registry,
     } = ctx;
 
+    let tool_metadata = tool_concurrency_safety(tools);
+
     // Register activity tracker — stall detection uses this to kill idle sessions.
     let activity_ts = app_state.register_activity(task_id);
 
@@ -697,7 +681,7 @@ pub(super) async fn run_reply_loop(
                                 // dispatch immediately during streaming.
                                 let idx = turn_tool_calls.len();
                                 let should_dispatch_now = if let ContentBlock::ToolUse { name, .. } = &tool_use {
-                                    is_concurrent_safe(name)
+                                    is_tool_concurrent_safe(&tool_metadata, name)
                                         && streaming_dispatched.len() < MAX_TOOL_CONCURRENCY
                                 } else {
                                     false
@@ -1101,7 +1085,7 @@ pub(super) async fn run_reply_loop(
                         ContentBlock::ToolUse { name, .. } => name.as_str(),
                         _ => unreachable!(),
                     };
-                    if is_concurrent_safe(name) {
+                    if is_tool_concurrent_safe(&tool_metadata, name) {
                         current_parallel.push(idx);
                     } else {
                         // Flush any accumulated parallel batch first.
