@@ -21,6 +21,8 @@ mod reads;
 mod search;
 pub(crate) mod summaries;
 mod write_dedup;
+mod write_dedup_prompt;
+mod write_dedup_runtime;
 pub use summaries::NoteSummaryService;
 mod writes;
 

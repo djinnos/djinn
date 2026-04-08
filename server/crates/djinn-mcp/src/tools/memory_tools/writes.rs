@@ -1,8 +1,7 @@
-use super::*;
 use super::write_dedup::{
-    LlmMemoryWriteDedupDecider, MemoryWriteDedupDecider, PendingWriteDedup,
-    maybe_apply_write_dedup,
+    LlmMemoryWriteDedupDecider, MemoryWriteDedupDecider, PendingWriteDedup, maybe_apply_write_dedup,
 };
+use super::*;
 
 use crate::tools::memory_tools::contradiction::ContradictionAnalysisInput;
 use crate::tools::memory_tools::summaries::NoteSummaryService;
@@ -357,4 +356,3 @@ impl DjinnMcpServer {
         let _ = self.contradiction_analysis_tx.try_send(input);
     }
 }
-
