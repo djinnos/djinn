@@ -42,7 +42,7 @@ The current Go server has accumulated significant complexity:
 - **Language:** Rust (decided — [[Language Selection — Compiler as AI Code Reviewer]])
 - **Database:** libSQL/Turso (decided — [[Embedded Database Survey]])
 - **Stack:** Axum + Tokio + Serde + Clap (decided — [[Rust Agentic Ecosystem Survey]])
-- **Agent harness:** Goose library (in-process async tasks) — see [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
+- **Agent harness:** Goose library (in-process async tasks) — see [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]
 - **Git integration:** Task branches merge directly to main upstream. No stacked branches. Local repo untouched.
 - **Hierarchy:** Epics are separate entities (not tasks). Tasks live under epics. No subepics, no subtasks. Flat.
 - **Observability:** Structured activity in DB for task lifecycle. File-based operational log at `~/.djinn/` for system events/crashes.
@@ -131,8 +131,8 @@ The current Go server has accumulated significant complexity:
 - [[Language Selection — Compiler as AI Code Reviewer]] — ADR driving language choice
 - [[Embedded Database Survey]] — ADR driving database choice
 - [[Rust Agentic Ecosystem Survey]] — stack ecosystem research
-- [[V1 Requirements]] — detailed requirement breakdown
-- [[Roadmap]] — phased delivery plan
+- [[requirements/v1-requirements]] — detailed requirement breakdown
+- [[roadmap]] — phased delivery plan
 - [[Stack Research]] — Rust server stack deep dive
 - [[Features Research]] — feature analysis for task orchestration systems
 - [[Architecture Research]] — system architecture patterns

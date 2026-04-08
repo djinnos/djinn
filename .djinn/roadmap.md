@@ -8,7 +8,7 @@ tags: ["adr-043","repo-map","scip","worktree"]
 
 ## Status: In Progress
 
-Epic [[588q]] remains open. Core repo-map behavior exists, but the decomposition goal is still in progress: the implementation is still split across large cross-cutting modules and requires further seam extraction before this roadmap can claim completion.
+Epic remains open. Core repo-map behavior exists, but the decomposition goal is still in progress: the implementation is still split across large cross-cutting modules and requires further seam extraction before this roadmap can claim completion.
 
 ## Current State
 
@@ -46,5 +46,4 @@ Epic [[588q]] remains open. Core repo-map behavior exists, but the decomposition
 
 ## Relations
 - [[decisions/adr-043-repository-map-scip-powered-structural-context-for-agent-sessions]]
-- [[design/decompose-repository-map-pipeline-and-code-intelligence-seams-wave-2-roadmap]]
 - [[brief]]

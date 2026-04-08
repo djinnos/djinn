@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use djinn_db::{NoteRepository, is_singleton};
+use djinn_db::{NoteRepository, ProjectRepository, is_singleton};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::memory_tools::lifecycle::{
@@ -54,6 +54,19 @@ pub(super) async fn create_note(
     params: &WriteParams,
     tags_json: &str,
 ) -> MemoryNoteResponse {
+    let canonical_project_path = if is_singleton(&params.note_type) {
+        let project_repo =
+            ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
+        project_repo
+            .get_path(project_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| params.project.clone())
+    } else {
+        params.project.clone()
+    };
+
     let scope_paths_json = params
         .scope_paths
         .as_ref()
@@ -73,7 +86,7 @@ pub(super) async fn create_note(
     } else {
         repo.create(
             project_id,
-            Path::new(&params.project),
+            Path::new(&canonical_project_path),
             &params.title,
             &params.content,
             &params.note_type,

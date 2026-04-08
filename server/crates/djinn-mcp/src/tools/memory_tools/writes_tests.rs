@@ -372,7 +372,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn singleton_worktree_writes_refresh_canonical_read_and_broken_links_view() {
         let project_tmp = tempfile::tempdir().unwrap();
-        let worktree_tmp = tempfile::tempdir().unwrap();
+        let worktree_tmp = project_tmp
+            .path()
+            .join(".djinn/worktrees/test-brief-singleton");
+        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, project_tmp.path()).await;
@@ -400,7 +403,7 @@ mod tests {
         .await
         .unwrap();
 
-        let worktree_root = Some(PathBuf::from(worktree_tmp.path()));
+        let worktree_root = Some(PathBuf::from(&worktree_tmp));
         let project_path = project_tmp.path().to_str().unwrap().to_string();
 
         let Json(initial_brief) = server
@@ -535,6 +538,67 @@ mod tests {
         assert!(
             remaining.is_empty(),
             "unexpected broken links: {remaining:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn singleton_brief_write_with_worktree_project_path_keeps_canonical_path() {
+        let project_tmp = tempfile::tempdir().unwrap();
+        let worktree_tmp = project_tmp
+            .path()
+            .join(".djinn/worktrees/test-brief-singleton");
+        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, project_tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        let Json(created) = server
+            .memory_write_with_worktree(
+                Parameters(WriteParams {
+                    project: worktree_tmp.to_string_lossy().to_string(),
+                    title: "Project Brief".to_string(),
+                    content: "Links [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]] and [[roadmap]].".to_string(),
+                    note_type: "brief".to_string(),
+                    tags: None,
+                    scope_paths: None,
+                }),
+                Some(PathBuf::from(&worktree_tmp)),
+            )
+            .await;
+        assert!(created.error.is_none(), "{:?}", created.error);
+        assert_eq!(created.permalink.as_deref(), Some("brief"));
+
+        let note = repo
+            .get_by_permalink(&project.id, "brief")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let canonical_path = project_tmp.path().join(".djinn/brief.md");
+        let worktree_path = worktree_tmp.join(".djinn/brief.md");
+        assert_eq!(
+            std::path::Path::new(&note.file_path),
+            canonical_path.as_path()
+        );
+        assert!(canonical_path.exists());
+        assert!(worktree_path.exists());
+        assert!(
+            repo.get_by_permalink(&project.id, "reference/project-brief")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !project_tmp
+                .path()
+                .join(".djinn/reference/project-brief.md")
+                .exists()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&canonical_path).unwrap(),
+            std::fs::read_to_string(&worktree_path).unwrap()
         );
     }
 }
