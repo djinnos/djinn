@@ -293,7 +293,7 @@ mod tests {
 
         for note_type in mergeable_types {
             assert!(
-                super::super::writes::mergeable_note_type(note_type),
+                super::super::write_dedup::mergeable_note_type(note_type),
                 "{} should be mergeable",
                 note_type
             );
@@ -301,7 +301,7 @@ mod tests {
 
         for note_type in non_mergeable_types {
             assert!(
-                !super::super::writes::mergeable_note_type(note_type),
+                !super::super::write_dedup::mergeable_note_type(note_type),
                 "{} should not be mergeable",
                 note_type
             );

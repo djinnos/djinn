@@ -20,6 +20,7 @@ pub mod ops;
 mod reads;
 mod search;
 pub(crate) mod summaries;
+mod write_dedup;
 pub use summaries::NoteSummaryService;
 mod writes;
 
