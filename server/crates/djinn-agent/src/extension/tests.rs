@@ -1572,6 +1572,110 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 }
 
 #[tokio::test]
+async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_worktree() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    std::fs::create_dir_all(&project.path).expect("create project dir");
+    let worktree = Path::new(&project.path).join(".djinn/worktrees/test-brief-singleton-worktree");
+    std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
+
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+    let created = call_tool(
+        &state,
+        "memory_write",
+        Some(
+            serde_json::json!({
+                "project": worktree.display().to_string(),
+                "title": "Project Brief",
+                "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
+                "type": "brief"
+            })
+            .as_object()
+            .expect("memory_write args object")
+            .clone(),
+        ),
+        &worktree,
+        None,
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_write dispatch should succeed");
+
+    assert_eq!(
+        created.get("permalink").and_then(|v| v.as_str()),
+        Some("brief")
+    );
+
+    let edited = call_tool(
+        &state,
+        "memory_edit",
+        Some(
+            serde_json::json!({
+                "project": worktree.display().to_string(),
+                "identifier": "brief",
+                "operation": "append",
+                "content": "next wave"
+            })
+            .as_object()
+            .expect("memory_edit args object")
+            .clone(),
+        ),
+        &worktree,
+        None,
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_edit dispatch should succeed");
+
+    assert!(
+        edited
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("next wave")
+    );
+
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let note = note_repo
+        .get_by_permalink(&project.id, "brief")
+        .await
+        .expect("load brief")
+        .expect("brief note exists");
+
+    assert_eq!(note.note_type, "brief");
+    assert_eq!(note.permalink, "brief");
+    assert_eq!(
+        Path::new(&note.file_path),
+        Path::new(&project.path).join(".djinn/brief.md")
+    );
+
+    let canonical_contents =
+        std::fs::read_to_string(Path::new(&project.path).join(".djinn/brief.md"))
+            .expect("read canonical brief");
+    let worktree_contents =
+        std::fs::read_to_string(worktree.join(".djinn/brief.md")).expect("read worktree brief");
+    assert!(canonical_contents.contains("adr-008-agent-harness"));
+    assert!(canonical_contents.contains("next wave"));
+    assert_eq!(canonical_contents, worktree_contents);
+
+    assert!(
+        note_repo
+            .get_by_permalink(&project.id, "reference/project-brief")
+            .await
+            .expect("check duplicate brief note")
+            .is_none()
+    );
+    assert!(
+        !Path::new(&project.path)
+            .join(".djinn/reference/project-brief.md")
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn call_tool_dispatches_registered_mcp_tool_success() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
