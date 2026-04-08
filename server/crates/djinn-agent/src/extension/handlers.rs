@@ -961,7 +961,7 @@ pub(super) async fn call_memory_broken_links(
             &server,
             SharedMemoryBrokenLinksParams {
                 project: project_path.to_owned(),
-                folder: p.folder,
+                folder: non_empty(p.folder),
             },
         )
         .await,
@@ -983,7 +983,7 @@ pub(super) async fn call_memory_orphans(
             &server,
             SharedMemoryOrphansParams {
                 project: project_path.to_owned(),
-                folder: p.folder,
+                folder: non_empty(p.folder),
             },
         )
         .await,

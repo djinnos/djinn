@@ -9,6 +9,10 @@ use super::{
     SearchParams, note_to_view,
 };
 
+fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
+    folder.filter(|value| !value.is_empty())
+}
+
 pub async fn resolve_project_id(server: &DjinnMcpServer, project: &str) -> Result<String, String> {
     let repo = ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
     repo.resolve(project)
@@ -256,8 +260,9 @@ pub async fn memory_broken_links(
         }
     };
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let folder = normalize_folder_filter(p.folder);
     let broken_links = repo
-        .broken_links(&project_id, p.folder.as_deref())
+        .broken_links(&project_id, folder.as_deref())
         .await
         .unwrap_or_default();
     MemoryBrokenLinksResponse {
@@ -277,8 +282,9 @@ pub async fn memory_orphans(server: &DjinnMcpServer, p: OrphansParams) -> Memory
         }
     };
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let folder = normalize_folder_filter(p.folder);
     let orphans = repo
-        .orphans(&project_id, p.folder.as_deref())
+        .orphans(&project_id, folder.as_deref())
         .await
         .unwrap_or_default();
     MemoryOrphansResponse {
