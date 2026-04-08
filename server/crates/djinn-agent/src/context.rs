@@ -233,6 +233,9 @@ impl RepoGraphOps for AgentRepoGraphOps {
     async fn describe(&self, _: &str, _: &str) -> Result<Option<SymbolDescription>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
+    async fn status(&self, _: &str) -> Result<bridge::GraphStatus, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
 }
 
 struct AgentGitOps {

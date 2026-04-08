@@ -8,8 +8,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
-    CycleGroup, EdgeEntry, GraphDiff, ImpactResult, NeighborsResult, OrphanEntry, PathResult,
-    RankedNode, SearchHit, SymbolDescription,
+    CycleGroup, EdgeEntry, GraphDiff, GraphStatus, ImpactResult, NeighborsResult, OrphanEntry,
+    PathResult, RankedNode, SearchHit, SymbolDescription,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::{ErrorOr, ErrorResponse};
@@ -20,7 +20,8 @@ use crate::tools::task_tools::{ErrorOr, ErrorResponse};
 pub struct CodeGraphParams {
     /// The operation to perform.
     /// One of: `neighbors`, `ranked`, `impact`, `implementations`,
-    /// `search`, `cycles`, `orphans`, `path`, `edges`, `diff`, `describe`.
+    /// `search`, `cycles`, `orphans`, `path`, `edges`, `diff`, `describe`,
+    /// `status`.
     pub operation: String,
     /// Path to the project root (used to locate the graph).
     pub project_path: String,
@@ -141,6 +142,12 @@ pub struct DescribeResponse {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct StatusResponse {
+    #[serde(flatten)]
+    pub status: GraphStatus,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
     Neighbors(NeighborsResponse),
@@ -154,6 +161,7 @@ pub enum CodeGraphResponse {
     Edges(EdgesResponse),
     Diff(DiffResponse),
     Describe(DescribeResponse),
+    Status(StatusResponse),
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────────
@@ -276,7 +284,7 @@ fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), diff (what changed since the previous canonical graph), describe (symbol signature/documentation without an LSP round trip)."
+        description = "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), diff (what changed since the previous canonical graph), describe (symbol signature/documentation without an LSP round trip), status (peek at the in-memory canonical graph cache; never warms)."
     )]
     pub async fn code_graph(
         &self,
@@ -294,10 +302,11 @@ impl DjinnMcpServer {
             "edges" => self.code_graph_edges(&params).await,
             "diff" => self.code_graph_diff(&params).await,
             "describe" => self.code_graph_describe(&params).await,
+            "status" => self.code_graph_status(&params).await,
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', 'diff', 'describe'"
+                 'search', 'cycles', 'orphans', 'path', 'edges', 'diff', 'describe', 'status'"
             )),
         };
 
@@ -502,6 +511,18 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Describe(DescribeResponse {
             description,
         }))
+    }
+
+    async fn code_graph_status(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let status = self
+            .state
+            .repo_graph()
+            .status(&params.project_path)
+            .await?;
+        Ok(CodeGraphResponse::Status(StatusResponse { status }))
     }
 }
 

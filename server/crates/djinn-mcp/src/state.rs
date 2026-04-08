@@ -353,6 +353,15 @@ pub(crate) mod stubs {
         ) -> Result<Option<crate::bridge::SymbolDescription>, String> {
             Ok(None)
         }
+        async fn status(&self, _: &str) -> Result<crate::bridge::GraphStatus, String> {
+            Ok(crate::bridge::GraphStatus {
+                project_id: String::new(),
+                warmed: false,
+                last_warm_at: None,
+                pinned_commit: None,
+                commits_since_pin: None,
+            })
+        }
     }
 
     /// Build a McpState backed only by an in-memory database (no live actors).

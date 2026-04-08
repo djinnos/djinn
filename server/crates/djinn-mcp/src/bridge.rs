@@ -257,6 +257,17 @@ pub struct GraphDiffEdge {
     pub edge_kind: String,
 }
 
+/// Result of a `status` query — a peek at the in-memory canonical graph cache
+/// for a project.  No warming side effects.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GraphStatus {
+    pub project_id: String,
+    pub warmed: bool,
+    pub last_warm_at: Option<String>,
+    pub pinned_commit: Option<String>,
+    pub commits_since_pin: Option<u64>,
+}
+
 /// Result of a `diff` query — what changed between two graph snapshots.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GraphDiff {
@@ -412,4 +423,10 @@ pub trait RepoGraphOps: Send + Sync {
         project_path: &str,
         key: &str,
     ) -> Result<Option<SymbolDescription>, String>;
+
+    /// Peek at the in-memory canonical graph cache for the given project.
+    /// MUST NOT trigger any warming or SCIP indexing.  When the cache is
+    /// empty for this project, returns `warmed: false` with the timestamp/
+    /// commit fields set to `None`.
+    async fn status(&self, project_path: &str) -> Result<GraphStatus, String>;
 }

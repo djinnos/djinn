@@ -12,10 +12,10 @@ use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::bridge::{
     ChannelStatus, CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry,
-    FileGroupEntry, GitOps, GraphDiff, GraphDiffEdge, GraphDiffNode, GraphNeighbor, ImpactEntry,
-    ImpactResult, LspOps, LspWarning, ModelPoolStatus, NeighborsResult, OrphanEntry, PathHop,
-    PathResult, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit,
-    SlotPoolOps, SymbolDescription, SyncOps, SyncResult,
+    FileGroupEntry, GitOps, GraphDiff, GraphDiffEdge, GraphDiffNode, GraphNeighbor, GraphStatus,
+    ImpactEntry, ImpactResult, LspOps, LspWarning, ModelPoolStatus, NeighborsResult, OrphanEntry,
+    PathHop, PathResult, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo, RuntimeOps,
+    SearchHit, SlotPoolOps, SymbolDescription, SyncOps, SyncResult,
 };
 use petgraph::visit::EdgeRef;
 use tokio::sync::RwLock;
@@ -53,6 +53,7 @@ struct CachedGraph {
     graph: crate::repo_graph::RepoDependencyGraph,
     project_path: PathBuf,
     git_head: String,
+    last_warm_at: time::OffsetDateTime,
 }
 
 static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
@@ -838,6 +839,74 @@ impl RepoGraphOps for RepoGraphBridge {
             file: node.file_path.as_ref().map(|p| p.display().to_string()),
         }))
     }
+
+    async fn status(&self, project_path: &str) -> Result<GraphStatus, String> {
+        use djinn_db::ProjectRepository;
+        use time::format_description::well_known::Rfc3339;
+
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_id = repo
+            .resolve(project_path)
+            .await
+            .map_err(|e| format!("resolve project: {e}"))?
+            .ok_or_else(|| format!("no project registered for path '{project_path}'"))?;
+
+        let project_root = PathBuf::from(project_path);
+        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+
+        let snapshot = {
+            let cache = GRAPH_CACHE.read().await;
+            cache.as_ref().and_then(|cached| {
+                if cached.project_path == index_tree_path {
+                    Some((cached.git_head.clone(), cached.last_warm_at))
+                } else {
+                    None
+                }
+            })
+        };
+
+        let Some((pinned_commit, last_warm_at)) = snapshot else {
+            return Ok(GraphStatus {
+                project_id,
+                warmed: false,
+                last_warm_at: None,
+                pinned_commit: None,
+                commits_since_pin: None,
+            });
+        };
+
+        let last_warm_at_str = last_warm_at
+            .format(&Rfc3339)
+            .map_err(|e| format!("format last_warm_at: {e}"))?;
+
+        let commits_since_pin = count_commits_since(&project_root, &pinned_commit).await;
+
+        Ok(GraphStatus {
+            project_id,
+            warmed: true,
+            last_warm_at: Some(last_warm_at_str),
+            pinned_commit: Some(pinned_commit),
+            commits_since_pin,
+        })
+    }
+}
+
+async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option<u64> {
+    let output = tokio::process::Command::new("git")
+        .current_dir(project_root)
+        .args([
+            "rev-list",
+            "--count",
+            &format!("{pinned_commit}..origin/main"),
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    raw.trim().parse::<u64>().ok()
 }
 
 fn group_neighbors_by_file(
@@ -1420,6 +1489,7 @@ async fn install_as_canonical(
         graph,
         project_path,
         git_head,
+        last_warm_at: time::OffsetDateTime::now_utc(),
     });
 }
 
@@ -1458,6 +1528,7 @@ async fn install_test_graphs(
             graph,
             project_path: project_path.to_path_buf(),
             git_head: "previous".into(),
+            last_warm_at: time::OffsetDateTime::now_utc(),
         });
     }
     {
@@ -1466,6 +1537,7 @@ async fn install_test_graphs(
             graph: current,
             project_path: project_path.to_path_buf(),
             git_head: "current".into(),
+            last_warm_at: time::OffsetDateTime::now_utc(),
         });
     }
 }
@@ -1833,6 +1905,101 @@ mod graph_bridge_tests {
             diff.removed_nodes.is_empty(),
             "no nodes should be removed in this scenario"
         );
+    }
+
+    /// `RepoGraphBridge::status` returns `warmed: false` with all optional
+    /// fields `None` when `GRAPH_CACHE` has no entry matching the project's
+    /// `_index` worktree path.  No SCIP indexing is triggered.
+    #[tokio::test]
+    async fn status_returns_unwarmed_for_empty_cache() {
+        use crate::test_helpers::create_test_db;
+        use djinn_db::ProjectRepository;
+        use tokio_util::sync::CancellationToken;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Use a unique project_root per test to avoid the global GRAPH_CACHE
+        // colliding with concurrently-running test cases.
+        let project_root = tmp.path().join("status-empty-repo");
+        tokio::fs::create_dir_all(&project_root).await.unwrap();
+
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        let project = proj_repo
+            .create("test-status-empty", project_root.to_string_lossy().as_ref())
+            .await
+            .expect("create project");
+
+        let bridge = RepoGraphBridge::new(state);
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let status = bridge.status(&project_root_str).await.expect("status ok");
+        assert_eq!(status.project_id, project.id);
+        assert!(!status.warmed);
+        assert!(status.last_warm_at.is_none());
+        assert!(status.pinned_commit.is_none());
+        assert!(status.commits_since_pin.is_none());
+    }
+
+    /// `RepoGraphBridge::status` returns `warmed: true` together with
+    /// `pinned_commit` and an RFC3339 `last_warm_at` when the in-memory
+    /// canonical cache slot has an entry whose `project_path` matches the
+    /// project's `_index` worktree path.
+    #[tokio::test]
+    async fn status_returns_warmed_when_cache_populated() {
+        use crate::test_helpers::create_test_db;
+        use djinn_db::ProjectRepository;
+        use tokio_util::sync::CancellationToken;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("status-warm-repo");
+        tokio::fs::create_dir_all(&project_root).await.unwrap();
+
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        let project = proj_repo
+            .create("test-status-warm", project_root.to_string_lossy().as_ref())
+            .await
+            .expect("create project");
+
+        // Plant a CachedGraph entry whose project_path is exactly what
+        // status() recomputes from the project root.
+        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+        let pinned_sha = "deadbeefcafebabe1234567890abcdef00000001".to_string();
+        {
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = Some(CachedGraph {
+                graph: build_test_graph(),
+                project_path: index_tree_path.clone(),
+                git_head: pinned_sha.clone(),
+                last_warm_at: time::OffsetDateTime::now_utc(),
+            });
+        }
+
+        let bridge = RepoGraphBridge::new(state);
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let status = bridge.status(&project_root_str).await.expect("status ok");
+
+        // Drain the cache so we don't poison sibling tests in this process.
+        {
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = None;
+        }
+
+        assert_eq!(status.project_id, project.id);
+        assert!(status.warmed);
+        assert_eq!(status.pinned_commit.as_deref(), Some(pinned_sha.as_str()));
+        let ts = status.last_warm_at.expect("last_warm_at populated");
+        assert!(
+            ts.contains('T') && (ts.ends_with('Z') || ts.contains('+') || ts.contains('-')),
+            "expected RFC3339 timestamp, got {ts}"
+        );
+        // commits_since_pin is best-effort: project_root has no git repo so
+        // the rev-list call fails and we expect None.  This still proves the
+        // status path does not panic when git is unavailable.
+        assert!(status.commits_since_pin.is_none());
     }
 }
 
