@@ -16,6 +16,10 @@ pub use types::*;
 mod associations;
 mod confirm;
 pub(crate) mod contradiction;
+mod delete_ops;
+mod edit_ops;
+mod lifecycle;
+mod move_ops;
 pub mod ops;
 mod reads;
 mod search;
@@ -89,82 +93,6 @@ fn note_to_view(note: &Note) -> MemoryNoteView {
 
 fn parse_task_ref_item(raw: serde_json::Value) -> Option<MemoryTaskRefItem> {
     serde_json::from_value(raw).ok()
-}
-
-/// Apply an edit operation to the current content, returning the new content.
-fn apply_edit_operation(
-    content: &str,
-    operation: &str,
-    new_content: &str,
-    find_text: Option<&str>,
-    section: Option<&str>,
-) -> Result<String, String> {
-    match operation {
-        "append" => Ok(if content.is_empty() {
-            new_content.to_string()
-        } else {
-            format!("{content}\n\n{new_content}")
-        }),
-        "prepend" => Ok(if content.is_empty() {
-            new_content.to_string()
-        } else {
-            format!("{new_content}\n\n{content}")
-        }),
-        "find_replace" => {
-            let find = find_text.ok_or("find_replace requires find_text")?;
-            if !content.contains(find) {
-                return Err(format!("text not found: '{find}'"));
-            }
-            Ok(content.replacen(find, new_content, 1))
-        }
-        "replace_section" => {
-            let heading = section.ok_or("replace_section requires section")?;
-            replace_section_in_content(content, heading, new_content)
-        }
-        other => Err(format!("unknown operation: '{other}'")),
-    }
-}
-
-/// Replace the body under a markdown heading with `new_body`.
-///
-/// The heading line itself is preserved; content from the line after the heading
-/// to the next heading at the same or higher level (or EOF) is replaced.
-fn replace_section_in_content(
-    content: &str,
-    section: &str,
-    new_body: &str,
-) -> Result<String, String> {
-    let lines: Vec<&str> = content.lines().collect();
-
-    let heading_idx = lines.iter().position(|l| {
-        let stripped = l.trim_start_matches('#');
-        l.starts_with('#') && stripped.trim().eq_ignore_ascii_case(section)
-    });
-
-    let start = heading_idx.ok_or_else(|| format!("section '{section}' not found"))?;
-    let heading_level = lines[start].chars().take_while(|&c| c == '#').count();
-
-    let end = lines[start + 1..]
-        .iter()
-        .position(|l| {
-            let lvl = l.chars().take_while(|&c| c == '#').count();
-            lvl > 0 && lvl <= heading_level
-        })
-        .map(|i| start + 1 + i)
-        .unwrap_or(lines.len());
-
-    let mut result = lines[..=start].join("\n");
-    result.push('\n');
-    result.push_str(new_body);
-    if !new_body.is_empty() && !new_body.ends_with('\n') && end < lines.len() {
-        result.push('\n');
-    }
-    if end < lines.len() {
-        result.push('\n');
-        result.push_str(&lines[end..].join("\n"));
-    }
-
-    Ok(result)
 }
 
 /// Parse a human-readable timeframe string into hours.
