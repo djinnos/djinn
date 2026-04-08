@@ -173,6 +173,22 @@ impl ProposedAdr {
     }
 }
 
+fn nullable_proposed_adr_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "nullable": true,
+        "allOf": [generator.subschema_for::<ProposedAdr>()]
+    })
+}
+
+fn nullable_epic_model_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "nullable": true,
+        "allOf": [generator.subschema_for::<EpicModel>()]
+    })
+}
+
 // ── Param / response structs ─────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -199,7 +215,8 @@ pub struct ProposeAdrShowParams {
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProposeAdrShowResponse {
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "nullable_proposed_adr_schema")]
     pub adr: Option<ProposedAdr>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -224,7 +241,8 @@ pub struct ProposeAdrAcceptParams {
 pub struct ProposeAdrAcceptResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_path: Option<String>,
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "nullable_epic_model_schema")]
     pub epic: Option<EpicModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -363,10 +381,7 @@ impl DjinnMcpServer {
             return Json(ProposeAdrAcceptResponse {
                 accepted_path: None,
                 epic: None,
-                error: Some(format!(
-                    "failed to create {}: {e}",
-                    decisions.display()
-                )),
+                error: Some(format!("failed to create {}: {e}", decisions.display())),
             });
         }
         let dst = decisions.join(format!("{}.md", adr.id));
@@ -394,8 +409,8 @@ impl DjinnMcpServer {
 
         // Architectural ADRs (pure design decisions) never spawn epics.
         // Neither do callers who explicitly opt out via create_epic=false.
-        let create_epic = p.create_epic.unwrap_or(true)
-            && adr.work_shape.as_deref() != Some("architectural");
+        let create_epic =
+            p.create_epic.unwrap_or(true) && adr.work_shape.as_deref() != Some("architectural");
         if !create_epic {
             return Json(ProposeAdrAcceptResponse {
                 accepted_path: Some(dst.display().to_string()),
@@ -411,9 +426,7 @@ impl DjinnMcpServer {
                 return Json(ProposeAdrAcceptResponse {
                     accepted_path: Some(dst.display().to_string()),
                     epic: None,
-                    error: Some(format!(
-                        "file accepted, but epic creation failed: {e}"
-                    )),
+                    error: Some(format!("file accepted, but epic creation failed: {e}")),
                 });
             }
         };
@@ -519,10 +532,7 @@ mod tests {
     fn frontmatter_handles_quoted_values() {
         let text = "---\ntitle: \"Quoted Title\"\n---\nBody\n";
         let (front, _) = parse_frontmatter(text);
-        assert_eq!(
-            front.get("title").map(String::as_str),
-            Some("Quoted Title")
-        );
+        assert_eq!(front.get("title").map(String::as_str), Some("Quoted Title"));
     }
 
     #[test]

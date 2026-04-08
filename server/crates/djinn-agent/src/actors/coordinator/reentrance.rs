@@ -49,10 +49,7 @@ impl<'a> DispatchEvent<'a> {
 
 /// Returns `true` iff all applicable reentrance checks pass and the
 /// coordinator should proceed to create a planning task.
-pub(super) async fn should_auto_dispatch_planner(
-    db: &Database,
-    event: DispatchEvent<'_>,
-) -> bool {
+pub(super) async fn should_auto_dispatch_planner(db: &Database, event: DispatchEvent<'_>) -> bool {
     let epic_id = event.epic_id();
 
     // 1. Close-reason filter (TaskClosed only).
@@ -113,10 +110,7 @@ mod tests {
     use crate::test_helpers;
     use djinn_db::{CreateSessionParams, EpicRepository, SessionRepository, TaskRepository};
 
-    async fn make_epic(
-        db: &djinn_db::Database,
-        project_id: &str,
-    ) -> djinn_core::models::Epic {
+    async fn make_epic(db: &djinn_db::Database, project_id: &str) -> djinn_core::models::Epic {
         EpicRepository::new(db.clone(), EventBus::noop())
             .create_for_project(
                 project_id,
@@ -250,7 +244,10 @@ mod tests {
             },
         )
         .await;
-        assert!(allowed, "natural completion with no active planner must dispatch");
+        assert!(
+            allowed,
+            "natural completion with no active planner must dispatch"
+        );
 
         let allowed_epic = should_auto_dispatch_planner(
             &db,
@@ -260,6 +257,9 @@ mod tests {
             },
         )
         .await;
-        assert!(allowed_epic, "epic created with auto_breakdown=true must dispatch");
+        assert!(
+            allowed_epic,
+            "epic created with auto_breakdown=true must dispatch"
+        );
     }
 }

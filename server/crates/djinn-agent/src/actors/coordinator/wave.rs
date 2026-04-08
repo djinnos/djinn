@@ -14,8 +14,8 @@
 // • Non-worker issue types: planning, spike, review.  All other tasks
 //   (task, research, …) are worker tasks.
 
-use super::*;
 use super::reentrance::{DispatchEvent, should_auto_dispatch_planner};
+use super::*;
 use djinn_core::models::task::PRIORITY_CRITICAL;
 
 impl CoordinatorActor {

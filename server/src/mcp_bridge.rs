@@ -1795,8 +1795,7 @@ fn maybe_kick_background_warm(state: &AppState, project_path: &str) {
         // Resolve the project_id from the path (fuzzy match tolerates
         // `/` vs no trailing slash).  If the project is not registered
         // we cannot warm — log and bail.
-        let project_repo =
-            djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
+        let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
         let project_id = match project_repo
             .resolve_id_by_path_fuzzy(&project_path_owned)
             .await

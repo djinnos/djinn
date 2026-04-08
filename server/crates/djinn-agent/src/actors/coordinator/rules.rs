@@ -6,8 +6,8 @@
 //
 // All rules are deterministic — zero LLM calls.
 
-use super::*;
 use super::reentrance::{DispatchEvent, should_auto_dispatch_planner};
+use super::*;
 use djinn_core::models::IssueType;
 use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_db::EpicRepository;
@@ -827,8 +827,7 @@ mod tests {
             create_task(&db, &epic.id, &project.id, "Planner host", "review", &tx).await;
 
         // Insert a running planner session on `planner_host`.
-        let session_repo =
-            SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         session_repo
             .create(CreateSessionParams {
                 project_id: &project.id,
