@@ -1465,6 +1465,134 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 }
 
 #[tokio::test]
+async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wide() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+    state.task_ops_project_path_override = Some(project.path.clone().into());
+
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    note_repo
+        .create(
+            &project.id,
+            Path::new(&project.path),
+            "Broken Source",
+            "Broken reference to [[Missing Note]].",
+            "research",
+            "[]",
+        )
+        .await
+        .expect("create broken source note");
+    note_repo
+        .create(
+            &project.id,
+            Path::new(&project.path),
+            "Standalone Orphan",
+            "No inbound links here.",
+            "pattern",
+            "[]",
+        )
+        .await
+        .expect("create orphan note");
+
+    let health = note_repo.health(&project.id).await.expect("health report");
+
+    let broken_links_no_arg = call_tool(
+        &state,
+        "memory_broken_links",
+        Some(
+            serde_json::json!({})
+                .as_object()
+                .expect("empty args object")
+                .clone(),
+        ),
+        Path::new(&project.path),
+        Some(&task.id),
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_broken_links dispatch should succeed");
+    assert_eq!(
+        broken_links_no_arg["broken_links"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(health.broken_link_count as usize)
+    );
+
+    let broken_links_empty_folder = call_tool(
+        &state,
+        "memory_broken_links",
+        Some(
+            serde_json::json!({ "folder": "" })
+                .as_object()
+                .expect("broken_links args object")
+                .clone(),
+        ),
+        Path::new(&project.path),
+        Some(&task.id),
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_broken_links empty-folder dispatch should succeed");
+    assert_eq!(
+        broken_links_empty_folder["broken_links"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(health.broken_link_count as usize)
+    );
+
+    let orphans_no_arg = call_tool(
+        &state,
+        "memory_orphans",
+        Some(
+            serde_json::json!({})
+                .as_object()
+                .expect("empty args object")
+                .clone(),
+        ),
+        Path::new(&project.path),
+        Some(&task.id),
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_orphans dispatch should succeed");
+    assert_eq!(
+        orphans_no_arg["orphans"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(health.orphan_note_count as usize)
+    );
+
+    let orphans_empty_folder = call_tool(
+        &state,
+        "memory_orphans",
+        Some(
+            serde_json::json!({ "folder": "" })
+                .as_object()
+                .expect("orphans args object")
+                .clone(),
+        ),
+        Path::new(&project.path),
+        Some(&task.id),
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_orphans empty-folder dispatch should succeed");
+    assert_eq!(
+        orphans_empty_folder["orphans"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(health.orphan_note_count as usize)
+    );
+}
+
+#[tokio::test]
 async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree() {
     let db = create_test_db();
     let project = create_test_project(&db).await;

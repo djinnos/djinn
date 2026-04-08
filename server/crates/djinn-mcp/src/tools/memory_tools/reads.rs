@@ -215,8 +215,9 @@ impl DjinnMcpServer {
             });
         };
         let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let folder = params.folder.filter(|value| !value.is_empty());
         let broken_links = repo
-            .broken_links(&project_id, params.folder.as_deref())
+            .broken_links(&project_id, folder.as_deref())
             .await
             .unwrap_or_default();
         Json(MemoryBrokenLinksResponse {
@@ -241,8 +242,9 @@ impl DjinnMcpServer {
             });
         };
         let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let folder = params.folder.filter(|value| !value.is_empty());
         let orphans = repo
-            .orphans(&project_id, params.folder.as_deref())
+            .orphans(&project_id, folder.as_deref())
             .await
             .unwrap_or_default();
         Json(MemoryOrphansResponse {

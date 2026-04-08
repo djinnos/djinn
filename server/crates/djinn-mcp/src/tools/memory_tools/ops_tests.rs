@@ -15,7 +15,9 @@ mod tests {
         StubSlotPoolOps, StubSyncOps,
     };
     use crate::tools::memory_tools::ops;
-    use crate::tools::memory_tools::{BuildContextParams, ListParams, ReadParams, SearchParams};
+    use crate::tools::memory_tools::{
+        BrokenLinksParams, BuildContextParams, ListParams, OrphansParams, ReadParams, SearchParams,
+    };
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
         let tx = tx.clone();
@@ -344,5 +346,70 @@ mod tests {
             .0;
         assert!(read.error.is_none());
         assert!(read.id.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_detail_ops_treat_empty_folder_as_project_wide_filter() {
+        let setup = setup_server().await;
+        let project_id = ProjectRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        )
+        .resolve(&setup.project)
+        .await
+        .unwrap()
+        .expect("project id");
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+
+        repo.create(
+            &project_id,
+            setup._tmp.path(),
+            "Broken Source",
+            "See [[Missing Memory Target]].",
+            "research",
+            "[]",
+        )
+        .await
+        .unwrap();
+        repo.create(
+            &project_id,
+            setup._tmp.path(),
+            "Standalone Orphan",
+            "no inbound links",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let health = repo.health(&project_id).await.unwrap();
+
+        let broken_links = ops::memory_broken_links(
+            &setup.server,
+            BrokenLinksParams {
+                project: setup.project.clone(),
+                folder: Some(String::new()),
+            },
+        )
+        .await;
+        assert!(broken_links.error.is_none(), "{:?}", broken_links.error);
+        assert_eq!(
+            broken_links.broken_links.len() as i64,
+            health.broken_link_count
+        );
+
+        let orphans = ops::memory_orphans(
+            &setup.server,
+            OrphansParams {
+                project: setup.project.clone(),
+                folder: Some(String::new()),
+            },
+        )
+        .await;
+        assert!(orphans.error.is_none(), "{:?}", orphans.error);
+        assert_eq!(orphans.orphans.len() as i64, health.orphan_note_count);
     }
 }
