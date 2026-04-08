@@ -595,6 +595,7 @@ pub(crate) fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathB
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) async fn install_test_graphs(
     project_path: &Path,
     previous: Option<crate::repo_graph::RepoDependencyGraph>,
