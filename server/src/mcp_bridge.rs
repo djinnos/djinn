@@ -927,6 +927,17 @@ impl RepoGraphOps for RepoGraphBridge {
         };
 
         let Some((pinned_commit, last_warm_at)) = snapshot else {
+            // Cold cache.  ADR-051 §3 "first consumer demand" — Pulse's
+            // very first `code_graph status` call on mount is the signal
+            // we want to key off.  Kick a single-flight background warm
+            // here (non-blocking) so the next status poll a few seconds
+            // later surfaces `warmed: true` and the panels can render.
+            //
+            // Without this, Pulse would get stuck on the empty state
+            // because every other `code_graph` op is gated behind
+            // `status.warmed == true` on the frontend — `build_graph_*`
+            // (which has the sibling kicker) would never be reached.
+            maybe_kick_background_warm(&self.state, project_path);
             return Ok(GraphStatus {
                 project_id,
                 warmed: false,
