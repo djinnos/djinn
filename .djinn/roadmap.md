@@ -1,16 +1,23 @@
 ---
-title: ADR-043 Roadmap — Final Status
+title: ADR-043 Roadmap — Active Decomposition Status
 type: roadmap
 tags: ["adr-043","repo-map","scip","worktree"]
 ---
 
 # ADR-043: Monorepo-aware SCIP indexing, project-add trigger, and worktree reuse
 
-## Status: Complete
+## Status: In Progress
 
-All three original gaps identified in [[ADR-043 Repository Map SCIP-Powered Structural Context for Agent Sessions]] have been addressed.
+Epic [[588q]] remains open. Core repo-map behavior exists, but the decomposition goal is still in progress: the implementation is still split across large cross-cutting modules and requires further seam extraction before this roadmap can claim completion.
 
-## Delivered
+## Current State
+
+- Monorepo workspace discovery/indexer planning still lives primarily in `server/src/repo_map.rs`.
+- Canonical graph build/cache/persist logic remains concentrated in `server/src/mcp_bridge.rs`.
+- Canonical warm/staleness refresh policy remains concentrated in `server/src/server/state/mod.rs`.
+- The epic goal is to extract these responsibilities into dedicated seams so repo-map and code-intelligence behavior are easier to reason about, test, and evolve.
+
+## Completed Work So Far
 
 ### Wave 1 — Core Infrastructure
 - Monorepo workspace discovery and per-workspace SCIP command planning (`server/src/repo_map.rs`)
@@ -18,21 +25,26 @@ All three original gaps identified in [[ADR-043 Repository Map SCIP-Powered Stru
 - Base-cache reuse across worktrees via canonical cache lookup
 - Phase-1 worktree-reuse policy with diff-threshold planning
 
-### Wave 2 — Hardening and Optimization
-- **MCP contract proof** (`b5893416`): Contract test calls the real MCP `project_add` tool path and asserts refresh is scheduled through event-bus coordination. Uses `cfg(test)` observation channel in repo_map watcher.
-- **Startup refresh** (`84530e73`): `startup_needs_refresh` guard checks registered projects for HEAD cache on boot. Schedules refresh on cache miss, skips on cache hit.
-- **Persisted graph artifacts** (`036af280`): `RepoGraphArtifact` type captures per-file/per-symbol graph relationships. New `graph_artifact` column in `repo_map_cache` table. Backward compatible (NULL for old entries).
-- **Small-diff graph patching** (`a31e2c04`): `patch_changed_files()` strips stale file/symbol nodes, re-parses only changed files, reruns ranking/rendering. Falls back to full reindex when artifact missing, diff exceeds threshold (20 files), or errors occur.
+### Wave 2 — Follow-on hardening already landed
+- MCP contract proof for `project_add` scheduling through event-bus coordination
+- Startup refresh scheduling based on cache presence
+- Persisted graph artifacts for repo-map cache entries
+- Small-diff graph patching with fallback to full reindexing
+- Initial repo-map indexing/workspace planning extraction via completed task `2g6z`
 
-## Test Coverage
-- Startup cache-miss scheduling + cache-hit skip
-- MCP contract proof: project_add → event-bus → watcher refresh
-- Graph artifact round-trip (serialize/deserialize/reconstruct)
-- DB backward compat (NULL artifact on old entries)
-- Small-diff patching + fallback paths (missing artifact, large diff, malformed JSON)
+## Remaining Work
 
-## No Remaining Gaps
-All ADR-043 goals are met. Epic is ready for closure.
+1. Extract canonical graph build/cache/persist responsibilities from `mcp_bridge.rs` into a dedicated service used by both repo-map refresh and `code_graph` flows.
+2. Extract canonical warm/staleness refresh policy from `server/src/server/state/mod.rs` into a planner/orchestrator seam with thin state wiring.
+3. Apply [[decisions/adr-028-module-visibility-enforcement-and-deep-module-architecture]] facade cleanup so only intentional repo-map/code-intelligence APIs stay public.
+
+## Active Tasks
+
+- `ekjj` — extract canonical graph build/cache service from `mcp_bridge.rs`
+- `9qpj` — extract canonical graph refresh planner from server state wiring
+- `7wsc` — apply ADR-028 facade cleanup to repo-map and code-intelligence seams
 
 ## Relations
-- [[ADR-043 Repository Map SCIP-Powered Structural Context for Agent Sessions]]
+- [[decisions/adr-043-repository-map-scip-powered-structural-context-for-agent-sessions]]
+- [[design/decompose-repository-map-pipeline-and-code-intelligence-seams-wave-2-roadmap]]
+- [[brief]]
