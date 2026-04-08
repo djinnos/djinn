@@ -9,8 +9,11 @@
 
 # Build / test artifacts
 target/
+target-*/
+.cargo-target/
 tmp/
 .tmp/
+.tmp-test/
 test-tmp/
 
 # Package manager stores

@@ -674,9 +674,11 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     emit_step(&task.id, "preflight_passed", serde_json::json!({}));
 
     // ── Resolve role-level MCP servers ────────────────────────────────────────
-    // Load the project MCP server registry from .djinn/settings.json and resolve
-    // each server name in the role's mcp_servers list.  Unknown names are logged
-    // as warnings and skipped — they never block the session from starting.
+    // Load the project MCP server registry from standard discovery files. Legacy
+    // `.djinn/settings.json` entries are migrated into root `mcp.json` during
+    // registry load, then resolution proceeds from the discovered registry only.
+    // Unknown names are logged as warnings and skipped — they never block the
+    // session from starting.
     //
     // Default roles have empty mcp_servers, so this block is a no-op for them.
     let resolved_mcp_servers = if !mcp_servers.is_empty() {
