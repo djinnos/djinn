@@ -545,6 +545,55 @@ async fn create_update_delete_use_worktree_disk_path_but_keep_canonical_db_path(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn singleton_worktree_updates_keep_canonical_and_worktree_files_in_sync() {
+    let project_tmp = crate::database::test_tempdir().unwrap();
+    let worktree_tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, project_tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx))
+        .with_worktree_root(Some(worktree_tmp.path().to_path_buf()));
+
+    let note = repo
+        .create(
+            &project.id,
+            project_tmp.path(),
+            "Project Brief",
+            "See [[Old Missing Link]].",
+            "brief",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let canonical_path = project_tmp.path().join(".djinn/brief.md");
+    let worktree_path = worktree_tmp.path().join(".djinn/brief.md");
+
+    assert_eq!(std::path::Path::new(&note.file_path), canonical_path.as_path());
+    assert!(canonical_path.exists());
+    assert!(worktree_path.exists());
+    assert!(std::fs::read_to_string(&canonical_path)
+        .unwrap()
+        .contains("[[Old Missing Link]]"));
+
+    let updated = repo
+        .update(&note.id, &note.title, "See [[Resolved Link]].", &note.tags)
+        .await
+        .unwrap();
+
+    assert_eq!(updated.content, "See [[Resolved Link]].");
+    let canonical_file = std::fs::read_to_string(&canonical_path).unwrap();
+    let worktree_file = std::fs::read_to_string(&worktree_path).unwrap();
+    assert!(canonical_file.contains("[[Resolved Link]]"));
+    assert!(worktree_file.contains("[[Resolved Link]]"));
+    assert!(!canonical_file.contains("[[Old Missing Link]]"));
+
+    repo.delete(&note.id).await.unwrap();
+    assert!(!canonical_path.exists());
+    assert!(!worktree_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fts5_search() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();

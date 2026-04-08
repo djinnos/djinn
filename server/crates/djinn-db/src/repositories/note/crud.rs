@@ -220,6 +220,36 @@ impl NoteRepository {
         }
     }
 
+    fn write_note_files(
+        &self,
+        primary_file_path: &Path,
+        mirror_file_path: Option<&Path>,
+        title: &str,
+        note_type: &str,
+        tags: &str,
+        content: &str,
+    ) -> Result<()> {
+        write_note_file(primary_file_path, title, note_type, tags, content)?;
+
+        if let Some(mirror_file_path) = mirror_file_path
+            && mirror_file_path != primary_file_path
+        {
+            write_note_file(mirror_file_path, title, note_type, tags, content)?;
+        }
+
+        Ok(())
+    }
+
+    fn remove_note_files(&self, primary_file_path: &Path, mirror_file_path: Option<&Path>) {
+        let _ = std::fs::remove_file(primary_file_path);
+
+        if let Some(mirror_file_path) = mirror_file_path
+            && mirror_file_path != primary_file_path
+        {
+            let _ = std::fs::remove_file(mirror_file_path);
+        }
+    }
+
     /// Create a new note. Writes the markdown file then inserts the index row.
     ///
     /// `project_path` is the root directory of the project (the `.djinn/`
@@ -289,7 +319,21 @@ impl NoteRepository {
             let file_path = file_path.as_ref().ok_or_else(|| {
                 Error::InvalidData("file-backed notes require a project path".to_string())
             })?;
-            write_note_file(file_path, &title, &note_type, &tags, &content)?;
+            let canonical_file_path = PathBuf::from(&file_path_str);
+            let (primary_file_path, mirror_file_path) =
+                if is_singleton(&note_type) && self.worktree_root.is_some() {
+                    (canonical_file_path.as_path(), Some(file_path.as_path()))
+                } else {
+                    (file_path.as_path(), None)
+                };
+            self.write_note_files(
+                primary_file_path,
+                mirror_file_path,
+                &title,
+                &note_type,
+                &tags,
+                &content,
+            )?;
         }
 
         let content_hash = note_content_hash(&content);
@@ -332,8 +376,16 @@ impl NoteRepository {
         .await;
 
         let note = note_result.inspect_err(|_e| {
-            if let Some(file_path) = file_path.as_ref() {
-                let _ = std::fs::remove_file(file_path);
+            if storage == "file" {
+                let canonical_file_path = PathBuf::from(&file_path_str);
+                let worktree_file_path = file_path.as_deref();
+                let (primary_file_path, mirror_file_path) =
+                    if is_singleton(&note_type) && self.worktree_root.is_some() {
+                        (canonical_file_path.as_path(), worktree_file_path)
+                    } else {
+                        (worktree_file_path.unwrap_or(canonical_file_path.as_path()), None)
+                    };
+                self.remove_note_files(primary_file_path, mirror_file_path);
             }
         })?;
 
@@ -459,8 +511,22 @@ impl NoteRepository {
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
         if current.storage == "file" {
-            let file_path = self.existing_note_file_path(&current);
-            write_note_file(&file_path, title, &current.note_type, tags, content)?;
+            let canonical_file_path = PathBuf::from(&current.file_path);
+            let worktree_file_path = self.existing_note_file_path(&current);
+            let (primary_file_path, mirror_file_path) =
+                if is_singleton(&current.note_type) && self.worktree_root.is_some() {
+                    (canonical_file_path.as_path(), Some(worktree_file_path.as_path()))
+                } else {
+                    (worktree_file_path.as_path(), None)
+                };
+            self.write_note_files(
+                primary_file_path,
+                mirror_file_path,
+                title,
+                &current.note_type,
+                tags,
+                content,
+            )?;
         }
 
         let id = id.to_owned();
@@ -554,8 +620,15 @@ impl NoteRepository {
             .await?;
 
         if current.storage == "file" {
-            let file_path = self.existing_note_file_path(&current);
-            let _ = std::fs::remove_file(file_path);
+            let canonical_file_path = PathBuf::from(&current.file_path);
+            let worktree_file_path = self.existing_note_file_path(&current);
+            let (primary_file_path, mirror_file_path) =
+                if is_singleton(&current.note_type) && self.worktree_root.is_some() {
+                    (canonical_file_path.as_path(), Some(worktree_file_path.as_path()))
+                } else {
+                    (worktree_file_path.as_path(), None)
+                };
+            self.remove_note_files(primary_file_path, mirror_file_path);
         }
 
         self.events
