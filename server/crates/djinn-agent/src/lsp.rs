@@ -2,6 +2,7 @@ pub use diagnostics::{Diagnostic, format_diagnostics_xml};
 
 mod client;
 mod diagnostics;
+mod requests;
 mod server_config;
 mod symbols;
 mod workspace;
@@ -9,18 +10,12 @@ mod workspace;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
-use client::{
-    ClientStdin, LspClient, OpenedFiles, PendingResponses, clone_client_refs,
-    clone_client_request_refs, ensure_did_open, kill_client, send_request, spawn_client,
-    write_lsp_message,
-};
+use client::{LspClient, clone_client_refs, kill_client, spawn_client, write_lsp_message};
 use diagnostics::{clear_uri, collect_for_worktree};
 use serde_json::json;
 use server_config::{language_id_for_path, server_for_path};
 pub use symbols::{SymbolQuery, parse_symbol_kind_filter};
-use symbols::{format_document_symbols, resolve_symbol_position};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 use workspace::find_root;
@@ -334,89 +329,6 @@ impl LspManager {
 }
 
 impl LspManager {
-    async fn fetch_document_symbols(
-        &self,
-        worktree: &Path,
-        path: &Path,
-    ) -> Result<Vec<serde_json::Value>, String> {
-        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path, &opened).await?;
-
-        let result = send_request(
-            &stdin,
-            &pending,
-            &seq,
-            "textDocument/documentSymbol",
-            json!({
-                "textDocument": { "uri": uri },
-            }),
-            REQUEST_TIMEOUT,
-        )
-        .await?;
-
-        if result.is_null() {
-            return Ok(Vec::new());
-        }
-
-        let symbols = result.as_array().cloned().unwrap_or_default();
-        if symbols.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        Ok(symbols)
-    }
-
-    async fn resolve_symbol_to_position(
-        &self,
-        worktree: &Path,
-        path: &Path,
-        symbol_query: &str,
-    ) -> Result<(u32, u32), String> {
-        let symbols = self.fetch_document_symbols(worktree, path).await?;
-        let position = resolve_symbol_position(&symbols, symbol_query)?;
-        Ok((position.line, position.character))
-    }
-
-    /// Get or spawn the LSP client for a file and return refs for making requests.
-    async fn get_request_refs(
-        &self,
-        worktree: &Path,
-        path: &Path,
-    ) -> Result<(ClientStdin, PendingResponses, Arc<AtomicU64>, OpenedFiles), String> {
-        let server = server_for_path(path)
-            .ok_or_else(|| format!("no LSP server configured for {}", path.display()))?;
-        let root = find_root(path, worktree, server.root_markers)
-            .ok_or_else(|| format!("could not find project root for {}", path.display()))?;
-        let key = format!("{}::{}", server.id, root.display());
-
-        {
-            let mut inner = self.inner.lock().await;
-            if inner.broken_servers.contains(&key) {
-                return Err(format!("LSP server {} is broken, skipping", server.id));
-            }
-            if !inner.clients.contains_key(&key) {
-                match spawn_client(&server, &root).await {
-                    Ok(client) => {
-                        inner.clients.insert(key.clone(), client);
-                    }
-                    Err(e) => {
-                        inner.broken_servers.insert(key);
-                        return Err(e);
-                    }
-                }
-            }
-        }
-
-        let inner = self.inner.lock().await;
-        let client = inner
-            .clients
-            .get(&key)
-            .ok_or_else(|| "client disappeared".to_string())?;
-        let (stdin, pending, seq) = clone_client_request_refs(client);
-        Ok((stdin, pending, seq, client.opened.clone()))
-    }
-
-    /// Send textDocument/hover and return the hover contents as text.
     pub async fn hover(
         &self,
         worktree: &Path,
@@ -424,54 +336,9 @@ impl LspManager {
         line: u32,
         character: u32,
     ) -> Result<String, String> {
-        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path, &opened).await?;
-
-        let result = send_request(
-            &stdin,
-            &pending,
-            &seq,
-            "textDocument/hover",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-            }),
-            REQUEST_TIMEOUT,
-        )
-        .await?;
-
-        if result.is_null() {
-            return Ok("No hover information available at this position.".to_string());
-        }
-
-        let contents = result.get("contents").unwrap_or(&result);
-        // contents can be MarkedString, MarkedString[], or MarkupContent
-        let text = if let Some(s) = contents.as_str() {
-            s.to_string()
-        } else if let Some(obj) = contents.as_object() {
-            obj.get("value")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        } else if let Some(arr) = contents.as_array() {
-            arr.iter()
-                .filter_map(|item| {
-                    if let Some(s) = item.as_str() {
-                        Some(s.to_string())
-                    } else {
-                        item.get("value").and_then(|v| v.as_str()).map(String::from)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        } else {
-            format!("{contents}")
-        };
-
-        Ok(text)
+        requests::hover(self, worktree, path, line, character).await
     }
 
-    /// Send textDocument/definition and return location(s).
     pub async fn go_to_definition(
         &self,
         worktree: &Path,
@@ -479,41 +346,9 @@ impl LspManager {
         line: u32,
         character: u32,
     ) -> Result<String, String> {
-        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path, &opened).await?;
-
-        let result = send_request(
-            &stdin,
-            &pending,
-            &seq,
-            "textDocument/definition",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-            }),
-            REQUEST_TIMEOUT,
-        )
-        .await?;
-
-        if result.is_null() {
-            return Ok("No definition found at this position.".to_string());
-        }
-
-        let locations = if result.is_array() {
-            result.as_array().cloned().unwrap_or_default()
-        } else {
-            vec![result]
-        };
-
-        if locations.is_empty() {
-            return Ok("No definition found at this position.".to_string());
-        }
-
-        let formatted: Vec<String> = locations.iter().map(format_location).collect();
-        Ok(formatted.join("\n"))
+        requests::go_to_definition(self, worktree, path, line, character).await
     }
 
-    /// Send textDocument/references and return location(s).
     pub async fn find_references(
         &self,
         worktree: &Path,
@@ -521,55 +356,16 @@ impl LspManager {
         line: u32,
         character: u32,
     ) -> Result<String, String> {
-        let (stdin, pending, seq, opened) = self.get_request_refs(worktree, path).await?;
-        let uri = ensure_did_open(&stdin, path, &opened).await?;
-
-        let result = send_request(
-            &stdin,
-            &pending,
-            &seq,
-            "textDocument/references",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-                "context": { "includeDeclaration": true },
-            }),
-            REQUEST_TIMEOUT,
-        )
-        .await?;
-
-        if result.is_null() {
-            return Ok("No references found at this position.".to_string());
-        }
-
-        let locations = result.as_array().cloned().unwrap_or_default();
-        if locations.is_empty() {
-            return Ok("No references found at this position.".to_string());
-        }
-
-        let mut formatted: Vec<String> = locations.iter().map(format_location).collect();
-        let total = formatted.len();
-        formatted.truncate(50);
-        let mut out = formatted.join("\n");
-        if total > 50 {
-            out.push_str(&format!("\n… and {} more references", total - 50));
-        }
-        Ok(out)
+        requests::find_references(self, worktree, path, line, character).await
     }
 
-    /// Send textDocument/documentSymbol and return formatted symbol list.
     pub async fn document_symbols(
         &self,
         worktree: &Path,
         path: &Path,
         query: SymbolQuery,
     ) -> Result<String, String> {
-        let symbols = self.fetch_document_symbols(worktree, path).await?;
-        if symbols.is_empty() {
-            return Ok("No symbols found in this document.".to_string());
-        }
-
-        Ok(format_document_symbols(&symbols, &query))
+        requests::document_symbols(self, worktree, path, query).await
     }
 
     pub async fn hover_symbol(
@@ -578,10 +374,7 @@ impl LspManager {
         path: &Path,
         symbol_query: &str,
     ) -> Result<String, String> {
-        let (line, character) = self
-            .resolve_symbol_to_position(worktree, path, symbol_query)
-            .await?;
-        self.hover(worktree, path, line, character).await
+        requests::hover_symbol(self, worktree, path, symbol_query).await
     }
 
     pub async fn go_to_definition_symbol(
@@ -590,10 +383,7 @@ impl LspManager {
         path: &Path,
         symbol_query: &str,
     ) -> Result<String, String> {
-        let (line, character) = self
-            .resolve_symbol_to_position(worktree, path, symbol_query)
-            .await?;
-        self.go_to_definition(worktree, path, line, character).await
+        requests::go_to_definition_symbol(self, worktree, path, symbol_query).await
     }
 
     pub async fn find_references_symbol(
@@ -602,37 +392,16 @@ impl LspManager {
         path: &Path,
         symbol_query: &str,
     ) -> Result<String, String> {
-        let (line, character) = self
-            .resolve_symbol_to_position(worktree, path, symbol_query)
-            .await?;
-        self.find_references(worktree, path, line, character).await
+        requests::find_references_symbol(self, worktree, path, symbol_query).await
     }
-}
-
-fn format_location(loc: &serde_json::Value) -> String {
-    let uri = loc
-        .get("uri")
-        .or_else(|| loc.get("targetUri"))
-        .and_then(|u| u.as_str())
-        .unwrap_or("?");
-    let range = loc.get("range").or_else(|| loc.get("targetSelectionRange"));
-    let (line, character) = match range {
-        Some(r) => {
-            let start = r.get("start").unwrap_or(r);
-            let l = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
-            let c = start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
-            (l, c)
-        }
-        None => (1, 1),
-    };
-    let file = uri.strip_prefix("file://").unwrap_or(uri);
-    format!("{file}:{line}:{character}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lsp::client::OpenedFiles;
     use crate::lsp::diagnostics::DiagnosticsMap;
+    use std::sync::atomic::AtomicU64;
 
     fn make_diag(file: &str, line: u32, character: u32, severity: u32, msg: &str) -> Diagnostic {
         Diagnostic {
