@@ -18,7 +18,11 @@ interface BlastRadiusPanelProps {
   excludedPaths: string[];
 }
 
-const DEPTH_LABELS = ["Direct", "Near", "Reach", "Distant", "Full"];
+// The slider controls max traversal depth passed to `code_graph impact`.
+// Earlier we used flavor labels (Direct/Near/Reach/Distant/Full) but "Full"
+// was misleading — it's still capped at 5 hops, not true transitive closure.
+// Be honest: show the hop count.
+const DEPTH_LABELS = ["1 hop", "≤2 hops", "≤3 hops", "≤4 hops", "≤5 hops"];
 
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -157,7 +161,7 @@ export function BlastRadiusPanel({ projectPath, excludedPaths }: BlastRadiusPane
                 className="h-1 w-24 cursor-pointer appearance-none rounded-full bg-muted accent-emerald-400"
                 aria-label="Impact depth"
               />
-              <span className="w-12 text-xs tabular-nums text-muted-foreground">
+              <span className="w-16 text-xs tabular-nums text-muted-foreground">
                 {DEPTH_LABELS[depth - 1]}
               </span>
             </div>
