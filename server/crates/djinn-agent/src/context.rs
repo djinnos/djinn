@@ -78,6 +78,16 @@ pub struct AgentContext {
     /// canonical-main repo-map note via the standard note pipeline.  When
     /// `None` (tests, off-server contexts) the warming call is skipped.
     pub canonical_graph_warmer: Option<Arc<dyn CanonicalGraphWarmer>>,
+    /// Real `RepoGraphOps` implementation injected at the server boundary
+    /// (typically `RepoGraphBridge` wrapping `AppState`).  When `Some`, the
+    /// agent bridge routes `code_graph` tool calls through it — the same path
+    /// the external MCP server uses.  When `None` (tests, off-server
+    /// contexts) the bridge falls back to a stub that returns errors from
+    /// every method.
+    ///
+    /// `djinn-agent` cannot depend on the server crate (per ADR-047), so the
+    /// concrete `RepoGraphBridge` is wired in `server::AppState::agent_context()`.
+    pub repo_graph_ops: Option<Arc<dyn RepoGraphOps>>,
 }
 
 impl AgentContext {
@@ -153,10 +163,15 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
     async fn purge_worktrees(&self) {}
 }
 
-struct AgentRepoGraphOps;
+/// Fallback `RepoGraphOps` implementation used when `AgentContext` is built
+/// without an injected real bridge (tests and off-server contexts).  Every
+/// method returns an error so callers see a clear "not available" signal
+/// instead of a silent empty result.  Production builds always inject the
+/// real `RepoGraphBridge` via `server::AppState::agent_context()`.
+struct StubRepoGraphOps;
 
 #[async_trait]
-impl RepoGraphOps for AgentRepoGraphOps {
+impl RepoGraphOps for StubRepoGraphOps {
     async fn neighbors(
         &self,
         _: &str,
@@ -289,7 +304,9 @@ impl AgentContext {
             Arc::new(AgentGitOps {
                 git_actors: self.git_actors.clone(),
             }),
-            Arc::new(AgentRepoGraphOps),
+            self.repo_graph_ops
+                .clone()
+                .unwrap_or_else(|| Arc::new(StubRepoGraphOps) as Arc<dyn RepoGraphOps>),
         )
     }
 
