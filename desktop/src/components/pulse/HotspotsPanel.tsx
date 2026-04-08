@@ -21,8 +21,9 @@ interface HotspotsPanelProps {
   excludedPaths: string[];
 }
 
-function formatScore(n: number): string {
-  return n.toFixed(2);
+function formatScore(n: number, max: number): string {
+  if (max <= 0) return "—";
+  return `${Math.round((n / max) * 100)}%`;
 }
 
 function NeighborsDrilldown({
@@ -146,7 +147,7 @@ function HotspotRow({
               {truncatePathLeft(label)}
             </span>
             <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
-              {formatScore(node.page_rank)}
+              {formatScore(node.page_rank, maxRank)}
             </span>
           </div>
           <div className="mt-1 h-1 w-full overflow-hidden rounded bg-muted">
