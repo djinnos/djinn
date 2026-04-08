@@ -18,103 +18,15 @@ use djinn_mcp::bridge::{
     SearchHit, SlotPoolOps, SymbolDescription, SyncOps, SyncResult,
 };
 use petgraph::visit::EdgeRef;
-use tokio::sync::RwLock;
 
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 
-use crate::sync::SyncManager;
-
-// ── Graph cache ────────────────────────────────────────────────────────────────
-
-/// Output bundle of the CPU-bound `ensure_canonical_graph` build pipeline,
-/// produced on a `spawn_blocking` thread and consumed by the async tail that
-/// writes DB caches and installs the in-memory canonical slot.
-///
-/// Tuple layout (kept as a type alias rather than a struct so the blocking
-/// closure stays terse):
-/// `(graph, rendered, serialized_blob, pagerank, sccs, parse_ms, build_ms,
-///   derive_ms, render_ms, serial_ms, node_count, edge_count)`
-type CanonicalGraphBuildOutput = (
-    crate::repo_graph::RepoDependencyGraph,
-    crate::repo_map::RenderedRepoMap,
-    Vec<u8>,
-    Arc<crate::repo_graph::RepoGraphRanking>,
-    Arc<CachedSccs>,
-    u64,
-    u64,
-    u64,
-    u64,
-    u64,
-    usize,
-    usize,
-);
-
-/// Pre-computed strongly-connected components, one set per `kind_filter`
-/// variant the `cycles` op exposes (`None` / `File` / `Symbol`).  Each set is
-/// computed at the minimum sensible `min_size = 2`; the read path applies any
-/// stricter `min_size` filter at lookup time.  Caching all three variants
-/// (rather than only the unfiltered one) is required because `kind_filter`
-/// changes the *input* of `tarjan_scc`: it filters the graph before the SCC
-/// search, so mixed file+symbol cycles would mask the kind-specific cycles
-/// the caller is asking about.  See `RepoDependencyGraph::strongly_connected_components`.
-struct CachedSccs {
-    full: Vec<Vec<petgraph::graph::NodeIndex>>,
-    file: Vec<Vec<petgraph::graph::NodeIndex>>,
-    symbol: Vec<Vec<petgraph::graph::NodeIndex>>,
-}
-
-/// Compute the derived caches that warm pays for once and read ops consume
-/// many times.  Pure CPU; intended to run inside the existing `spawn_blocking`
-/// boundary in `ensure_canonical_graph` (build path) or in a fresh
-/// `spawn_blocking` when restoring from the persistent `repo_graph_cache`
-/// row.  Without this, every `code_graph ranked` call would re-run a full
-/// PageRank pass and every `code_graph cycles` call would re-run
-/// `tarjan_scc` over the entire graph — measured at 30+ seconds per call on
-/// a real-world repository even with the in-memory cache reporting `warmed`.
-fn derive_graph_caches(
-    graph: &crate::repo_graph::RepoDependencyGraph,
-) -> (Arc<crate::repo_graph::RepoGraphRanking>, Arc<CachedSccs>) {
-    use crate::repo_graph::RepoGraphNodeKind;
-    let pagerank = Arc::new(graph.rank());
-    let sccs = Arc::new(CachedSccs {
-        full: graph.strongly_connected_components(None, 2),
-        file: graph.strongly_connected_components(Some(RepoGraphNodeKind::File), 2),
-        symbol: graph.strongly_connected_components(Some(RepoGraphNodeKind::Symbol), 2),
-    });
-    (pagerank, sccs)
-}
-
-struct CachedGraph {
-    graph: crate::repo_graph::RepoDependencyGraph,
-    project_path: PathBuf,
-    git_head: String,
-    last_warm_at: time::OffsetDateTime,
-    /// Pre-computed PageRank ranking, populated during warm so `code_graph
-    /// ranked` reads are O(filter+sort+slice) instead of recomputing the full
-    /// PageRank pass per call.  Wrapped in `Arc` so reader handles share the
-    /// computed `Vec<RankedRepoGraphNode>` without cloning it.
-    pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
-    /// Pre-computed strongly-connected components for each `kind_filter`
-    /// variant the `cycles` op exposes.  See `CachedSccs` for the caching
-    /// rationale.
-    sccs: Arc<CachedSccs>,
-}
-
-static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
-    std::sync::LazyLock::new(|| RwLock::new(None));
-
-/// Previous canonical graph, kept around so `code_graph(operation="diff")`
-/// can compare the current graph against the most recent prior version. The
-/// slot is replaced (not accumulated) on every rebuild — only one historical
-/// step is retained, in-memory only.
-static PREVIOUS_GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
-    std::sync::LazyLock::new(|| RwLock::new(None));
-
 #[cfg(test)]
-static GRAPH_CACHE_TEST_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+use crate::canonical_graph::GRAPH_CACHE_TEST_GUARD;
+use crate::canonical_graph::{CachedGraph, CachedSccs, GRAPH_CACHE, PREVIOUS_GRAPH_CACHE};
+use crate::sync::SyncManager;
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
 
@@ -420,7 +332,8 @@ impl RepoGraphOps for RepoGraphBridge {
         group_by: Option<&str>,
     ) -> Result<NeighborsResult, String> {
         use petgraph::Direction;
-        let graph = build_graph_for_project(&self.state, project_path).await?;
+        let graph =
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
         let node_index = resolve_node(&graph, key)?;
         let directions: Vec<Direction> = match direction {
             Some("incoming") => vec![Direction::Incoming],
@@ -481,7 +394,8 @@ impl RepoGraphOps for RepoGraphBridge {
         // PageRank pass and hung for 30+ s on real-world graphs even when
         // `code_graph status` reported `warmed: true`.
         let (graph, ranking, _sccs) =
-            build_graph_with_caches_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::build_graph_with_caches_for_project(&self.state, project_path)
+                .await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -541,7 +455,8 @@ impl RepoGraphOps for RepoGraphBridge {
         symbol: &str,
     ) -> Result<Vec<String>, String> {
         use crate::repo_graph::RepoGraphEdgeKind;
-        let graph = build_graph_for_project(&self.state, project_path).await?;
+        let graph =
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
         let node_index = graph
             .symbol_node(symbol)
             .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
@@ -567,7 +482,8 @@ impl RepoGraphOps for RepoGraphBridge {
         max_depth: usize,
         group_by: Option<&str>,
     ) -> Result<ImpactResult, String> {
-        let graph = build_graph_for_project(&self.state, project_path).await?;
+        let graph =
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
         let start = resolve_node(&graph, key)?;
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
@@ -621,7 +537,8 @@ impl RepoGraphOps for RepoGraphBridge {
         limit: usize,
     ) -> Result<Vec<SearchHit>, String> {
         use crate::repo_graph::RepoGraphNodeKind;
-        let graph = build_graph_for_project(&self.state, project_path).await?;
+        let graph =
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -659,7 +576,8 @@ impl RepoGraphOps for RepoGraphBridge {
         // kind-specific results.  `min_size` is applied at read time against
         // the cached set (which is materialised at `min_size = 2`).
         let (graph, _ranking, sccs) =
-            build_graph_with_caches_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::build_graph_with_caches_for_project(&self.state, project_path)
+                .await?;
         let cached: &Vec<Vec<petgraph::graph::NodeIndex>> = match kind_filter {
             Some("file") => &sccs.file,
             Some("symbol") => &sccs.symbol,
@@ -698,7 +616,8 @@ impl RepoGraphOps for RepoGraphBridge {
     ) -> Result<Vec<OrphanEntry>, String> {
         use crate::repo_graph::RepoGraphNodeKind;
         use crate::scip_parser::ScipVisibility;
-        let graph = build_graph_for_project(&self.state, project_path).await?;
+        let graph =
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -740,7 +659,8 @@ impl RepoGraphOps for RepoGraphBridge {
         to: &str,
         max_depth: Option<usize>,
     ) -> Result<Option<PathResult>, String> {
-        let graph = build_graph_for_project(&self.state, project_path).await?;
+        let graph =
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
         let from_idx = resolve_node(&graph, from)?;
         let to_idx = resolve_node(&graph, to)?;
         let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
@@ -779,7 +699,8 @@ impl RepoGraphOps for RepoGraphBridge {
         limit: usize,
     ) -> Result<Vec<EdgeEntry>, String> {
         use globset::Glob;
-        let graph = build_graph_for_project(&self.state, project_path).await?;
+        let graph =
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
         let from_matcher = Glob::new(from_glob)
             .map_err(|e| format!("invalid from_glob '{from_glob}': {e}"))?
             .compile_matcher();
@@ -882,7 +803,8 @@ impl RepoGraphOps for RepoGraphBridge {
         project_path: &str,
         key: &str,
     ) -> Result<Option<SymbolDescription>, String> {
-        let graph = build_graph_for_project(&self.state, project_path).await?;
+        let graph =
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
         let node_index = match resolve_node(&graph, key) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
@@ -907,7 +829,8 @@ impl RepoGraphOps for RepoGraphBridge {
         use djinn_db::ProjectRepository;
         use time::format_description::well_known::Rfc3339;
 
-        let (project_root, index_tree_path) = normalize_graph_query_paths(project_path);
+        let (project_root, index_tree_path) =
+            crate::canonical_graph::normalize_graph_query_paths(project_path);
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = repo
             .resolve(project_root.to_string_lossy().as_ref())
@@ -937,7 +860,9 @@ impl RepoGraphOps for RepoGraphBridge {
             // because every other `code_graph` op is gated behind
             // `status.warmed == true` on the frontend — `build_graph_*`
             // (which has the sibling kicker) would never be reached.
-            maybe_kick_background_warm(&self.state, project_path);
+            crate::canonical_graph::build_graph_for_project(&self.state, project_path)
+                .await
+                .err();
             return Ok(GraphStatus {
                 project_id,
                 warmed: false,
@@ -951,7 +876,11 @@ impl RepoGraphOps for RepoGraphBridge {
             .format(&Rfc3339)
             .map_err(|e| format!("format last_warm_at: {e}"))?;
 
-        let commits_since_pin = count_commits_since(&project_root, &pinned_commit).await;
+        let commits_since_pin = crate::canonical_graph::canonical_graph_count_commits_since(
+            &project_root,
+            &pinned_commit,
+        )
+        .await;
 
         Ok(GraphStatus {
             project_id,
@@ -963,6 +892,7 @@ impl RepoGraphOps for RepoGraphBridge {
     }
 }
 
+#[allow(dead_code)]
 async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option<u64> {
     let output = tokio::process::Command::new("git")
         .current_dir(project_root)
@@ -988,28 +918,9 @@ async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option
 /// `.djinn/worktrees/_index/` tree, so `code_graph` reaches the server bridge
 /// with that path rather than the project root. Accept both forms here so the
 /// same warmed canonical cache entry backs architect/chat and external MCP use.
+#[allow(dead_code)]
 fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathBuf) {
-    let requested = PathBuf::from(project_path);
-    let is_index_tree = requested.file_name() == Some(std::ffi::OsStr::new("_index"))
-        && requested.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("worktrees"))
-        && requested
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::file_name)
-            == Some(std::ffi::OsStr::new(".djinn"));
-
-    if is_index_tree
-        && let Some(project_root) = requested
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-    {
-        return (project_root.to_path_buf(), requested);
-    }
-
-    let project_root = requested;
-    let index_tree_path = djinn_core::index_tree::index_tree_path(&project_root);
-    (project_root, index_tree_path)
+    crate::canonical_graph::normalize_graph_query_paths(project_path)
 }
 
 fn group_neighbors_by_file(
@@ -1233,6 +1144,16 @@ fn resolve_node(
     Err(format!("node '{key}' not found in graph"))
 }
 
+#[allow(dead_code)]
+fn derive_graph_caches(
+    graph: &crate::repo_graph::RepoDependencyGraph,
+) -> (
+    Arc<crate::repo_graph::RepoGraphRanking>,
+    Arc<crate::canonical_graph::CachedSccs>,
+) {
+    crate::canonical_graph::derive_graph_caches(graph)
+}
+
 /// ADR-050 §3 Chunk C canonical-main graph entrypoint.
 ///
 /// Idempotently makes the SCIP graph for `origin/main` of the supplied
@@ -1268,248 +1189,7 @@ pub async fn ensure_canonical_graph(
     ),
     String,
 > {
-    use djinn_db::{RepoGraphCacheInsert, RepoGraphCacheRepository};
-
-    let mut handle = crate::index_tree::IndexTree::ensure(project_id, project_root)
-        .await
-        .map_err(|e| format!("ensure index tree: {e}"))?;
-    // Best-effort: a missing remote is fine for tests / fresh repos.
-    let _ = handle
-        .fetch_if_stale(crate::index_tree::DEFAULT_FETCH_COOLDOWN)
-        .await;
-    // Best-effort reset; if origin/main is unavailable we keep whatever
-    // commit the index tree was created on.
-    let _ = handle.reset_to_origin_main().await;
-
-    let commit_sha = handle.commit_sha().to_string();
-    let cache_repo = RepoGraphCacheRepository::new(state.db().clone());
-
-    // ── In-memory fast path ─────────────────────────────────────────────
-    {
-        let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache.as_ref()
-            && cached.project_path == handle.path()
-            && cached.git_head == commit_sha
-        {
-            return Ok((handle, cached.graph.clone()));
-        }
-    }
-
-    // ── Persistent cache path ───────────────────────────────────────────
-    if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
-        match load_cached_artifact(row.graph_blob).await {
-            Ok((graph, pagerank, sccs)) => {
-                install_as_canonical(
-                    handle.path().to_path_buf(),
-                    commit_sha.clone(),
-                    graph.clone(),
-                    pagerank,
-                    sccs,
-                )
-                .await;
-                return Ok((handle, graph));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    project_id = %project_id,
-                    commit_sha = %commit_sha,
-                    error = %e,
-                    "ensure_canonical_graph: stale or unreadable graph_blob; re-indexing"
-                );
-                // Fall through to the cache-miss path.
-            }
-        }
-    }
-
-    // ── Cache miss: single-flight indexer run ───────────────────────────
-    let lock = state.indexer_lock();
-    let _permit = lock.lock().await;
-
-    // Re-check both caches under the lock; another task may have populated
-    // them while we were queued.
-    {
-        let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache.as_ref()
-            && cached.project_path == handle.path()
-            && cached.git_head == commit_sha
-        {
-            return Ok((handle, cached.graph.clone()));
-        }
-    }
-    if let Ok(Some(row)) = cache_repo.get(project_id, &commit_sha).await {
-        match load_cached_artifact(row.graph_blob).await {
-            Ok((graph, pagerank, sccs)) => {
-                install_as_canonical(
-                    handle.path().to_path_buf(),
-                    commit_sha.clone(),
-                    graph.clone(),
-                    pagerank,
-                    sccs,
-                )
-                .await;
-                return Ok((handle, graph));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    project_id = %project_id,
-                    commit_sha = %commit_sha,
-                    error = %e,
-                    "ensure_canonical_graph: stale or unreadable graph_blob; re-indexing"
-                );
-                // Fall through to the indexer-run path below.
-            }
-        }
-    }
-
-    // Wrap the SCIP scratch dir in a `TempDir` so its destructor removes the
-    // directory even when the build pipeline panics, the spawn_blocking task
-    // is cancelled, or the lifecycle timeout fires before we reach the
-    // explicit `remove_dir_all` below.  Without this, every aborted run
-    // leaked ~150 MB of SCIP artifacts under `/tmp` (which is tmpfs on
-    // many Linux setups), eventually filling RAM.
-    let output_temp = tempfile::Builder::new()
-        .prefix("djinn-canonical-graph-")
-        .tempdir()
-        .map_err(|e| format!("create canonical-graph tempdir: {e}"))?;
-    let output_dir = output_temp.path().to_path_buf();
-    let target_dir = handle.target_dir().to_path_buf();
-    // The server-wide IndexerLock is already held above (`_permit`); use the
-    // `_already_locked` entrypoint instead of re-acquiring it via a dummy
-    // mutex.  ADR-050 Chunk C cleanup.
-    let t_indexers = std::time::Instant::now();
-    let run =
-        crate::repo_map::run_indexers_already_locked(handle.path(), &output_dir, Some(&target_dir))
-            .await
-            .map_err(|e| format!("run_indexers: {e}"))?;
-    let indexers_ms = t_indexers.elapsed().as_millis() as u64;
-
-    // ── CPU-bound section on a blocking thread ─────────────────────────────
-    // Parsing a 20 MB SCIP artifact, building the DiGraph, computing
-    // PageRank, and rendering the skeleton are all synchronous CPU work.
-    // Running them on a tokio worker starves the runtime for tens of
-    // minutes on cold cache — observed 2026-04-07: a single warm pinned
-    // one `tokio-rt-worker` at ~90% CPU for 30+ min and blocked every
-    // other session lifecycle serialized behind `indexer_lock`.
-    //
-    // Moving the entire post-SCIP pipeline into `spawn_blocking` keeps
-    // the runtime healthy: other tokio tasks progress while a blocking
-    // thread churns through the graph.  Each sub-step is timed so the
-    // next recurrence names its slow step in the logs instead of
-    // forcing another offline investigation.
-    let output_dir_for_blocking = output_dir.clone();
-    let artifacts = run.artifacts;
-    const SKELETON_TOKEN_BUDGET: usize = 1200;
-    let blocking =
-        tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
-            let t_parse = std::time::Instant::now();
-            let parsed = crate::scip_parser::parse_scip_artifacts(&artifacts)
-                .map_err(|e| format!("parse_scip_artifacts: {e}"))?;
-            let parse_ms = t_parse.elapsed().as_millis() as u64;
-            let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
-
-            let t_build = std::time::Instant::now();
-            let graph = crate::repo_graph::RepoDependencyGraph::build(&parsed);
-            let build_ms = t_build.elapsed().as_millis() as u64;
-            let node_count = graph.node_count();
-            let edge_count = graph.edge_count();
-
-            // Compute PageRank and per-kind SCC sets in one pass.  The
-            // PageRank result feeds both the skeleton render below and the
-            // `code_graph ranked` read path; the SCC sets feed the
-            // `code_graph cycles` read path.  Both are stashed in the
-            // in-memory `CachedGraph` so reads never recompute them.
-            let t_derive = std::time::Instant::now();
-            let (pagerank, sccs) = derive_graph_caches(&graph);
-            let derive_ms = t_derive.elapsed().as_millis() as u64;
-
-            let t_render = std::time::Instant::now();
-            let rendered = crate::repo_map::render_repo_map(
-                &graph,
-                pagerank.as_ref(),
-                &crate::repo_map::RepoMapRenderOptions::new(SKELETON_TOKEN_BUDGET),
-            )
-            .map_err(|e| format!("render_repo_map: {e:?}"))?;
-            let render_ms = t_render.elapsed().as_millis() as u64;
-
-            let t_serial = std::time::Instant::now();
-            let serialized = bincode::serialize(&graph.to_artifact())
-                .map_err(|e| format!("bincode serialize graph: {e}"))?;
-            let serial_ms = t_serial.elapsed().as_millis() as u64;
-
-            Ok((
-                graph, rendered, serialized, pagerank, sccs, parse_ms, build_ms, derive_ms,
-                render_ms, serial_ms, node_count, edge_count,
-            ))
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking join: {e}"))?;
-    let (
-        graph,
-        rendered,
-        serialized_blob,
-        pagerank,
-        sccs,
-        parse_ms,
-        build_ms,
-        derive_ms,
-        render_ms,
-        serial_ms,
-        node_count,
-        edge_count,
-    ) = blocking?;
-
-    tracing::info!(
-        project_id = %project_id,
-        commit_sha = %commit_sha,
-        indexers_ms,
-        parse_ms,
-        build_ms,
-        derive_ms,
-        render_ms,
-        serial_ms,
-        node_count,
-        edge_count,
-        "ensure_canonical_graph: build pipeline complete"
-    );
-
-    // ── ADR-050 Chunk C C10: persist canonical skeleton as a
-    // `repo_map_cache` row + `repo_map` note so workers (which consume
-    // the rendered skeleton through the existing note pipeline) and the
-    // chat (which reads `RepoMapCacheRepository` directly) see the new
-    // graph.  Best effort: failures are logged but do not abort the
-    // graph hand-off.  CPU-bound rank/render already ran inside the
-    // `spawn_blocking` above; this helper now only does async DB writes.
-    persist_canonical_skeleton(
-        state,
-        project_id,
-        project_root,
-        &commit_sha,
-        &graph,
-        &rendered,
-    )
-    .await;
-
-    // Persist bincode blob (best-effort — failure is logged but does not abort).
-    if let Err(e) = cache_repo
-        .upsert(RepoGraphCacheInsert {
-            project_id,
-            commit_sha: &commit_sha,
-            graph_blob: &serialized_blob,
-        })
-        .await
-    {
-        tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
-    }
-
-    install_as_canonical(
-        handle.path().to_path_buf(),
-        commit_sha.clone(),
-        graph.clone(),
-        pagerank,
-        sccs,
-    )
-    .await;
-    Ok((handle, graph))
+    crate::canonical_graph::ensure_canonical_graph(state, project_id, project_root).await
 }
 
 /// ADR-050 Chunk C C10: persist a pre-rendered canonical-main repo-map
@@ -1518,6 +1198,7 @@ pub async fn ensure_canonical_graph(
 /// standard note path) see the canonical view.  The caller is responsible
 /// for producing `rendered` on a blocking thread — this function is purely
 /// async DB work.  Failures are logged and do not propagate.
+#[allow(dead_code)]
 async fn persist_canonical_skeleton(
     state: &AppState,
     project_id: &str,
@@ -1580,10 +1261,7 @@ async fn persist_canonical_skeleton(
 /// advanced.  A cold cache (no entry at all) returns `false`, causing the
 /// warmer to spawn the background task.
 pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
-    let cache = GRAPH_CACHE.read().await;
-    cache
-        .as_ref()
-        .is_some_and(|cached| cached.project_path == index_tree_path)
+    crate::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
 }
 
 /// Lookup the cached `git_head` (pinned `origin/main` commit at warm time)
@@ -1597,26 +1275,24 @@ pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool
 /// `origin/main` without exposing the full `CachedGraph` struct across the
 /// module seam.
 pub async fn canonical_graph_cache_pinned_commit_for(index_tree_path: &Path) -> Option<String> {
-    let cache = GRAPH_CACHE.read().await;
-    cache
-        .as_ref()
-        .filter(|cached| cached.project_path == index_tree_path)
-        .map(|cached| cached.git_head.clone())
+    crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
 }
 
 /// Crate-visible wrapper around the private `count_commits_since` helper so
 /// the production `CanonicalGraphWarmer` impl in `server::state` can perform
 /// the staleness comparison without re-implementing the `git rev-list`
 /// shell-out.
+#[allow(dead_code)]
 pub(crate) async fn canonical_graph_count_commits_since(
     project_root: &Path,
     pinned_commit: &str,
 ) -> Option<u64> {
-    count_commits_since(project_root, pinned_commit).await
+    crate::canonical_graph::canonical_graph_count_commits_since(project_root, pinned_commit).await
 }
 
 /// Replace the in-memory canonical graph slot, moving the previous canonical
 /// into the diff predecessor slot per ADR-050 §3.
+#[allow(dead_code)]
 async fn install_as_canonical(
     project_path: PathBuf,
     git_head: String,
@@ -1645,6 +1321,7 @@ async fn install_as_canonical(
 /// Wrapped in `spawn_blocking` because both the bincode deserialize and the
 /// post-load PageRank/SCC derivation are CPU-bound and would otherwise block
 /// the async runtime.
+#[allow(dead_code)]
 async fn load_cached_artifact(
     blob: Vec<u8>,
 ) -> Result<
@@ -1670,6 +1347,7 @@ async fn load_cached_artifact(
 /// entry exists.  Callers — Pulse panels, chat `code_graph` tool invocations,
 /// worker reads — surface this verbatim to the UI so operators can disambiguate
 /// "not warmed" from a genuine tool failure.
+#[allow(dead_code)]
 const GRAPH_NOT_WARMED_ERR: &str =
     "canonical graph not warmed yet — will populate on the next Planner patrol or Architect spike";
 
@@ -1693,27 +1371,18 @@ const GRAPH_NOT_WARMED_ERR: &str =
 /// On a cold cache this returns [`GRAPH_NOT_WARMED_ERR`]; Pulse renders that
 /// as its "no data" state and the freshness strip already surfaces the
 /// `warmed: false` status via the read-only `status` op.
+#[allow(dead_code)]
 async fn read_cached_canonical_graph(
     project_path: &str,
 ) -> Result<
     (
         crate::repo_graph::RepoDependencyGraph,
         Arc<crate::repo_graph::RepoGraphRanking>,
-        Arc<CachedSccs>,
+        Arc<crate::canonical_graph::CachedSccs>,
     ),
     String,
 > {
-    let (_project_root, index_tree_path) = normalize_graph_query_paths(project_path);
-    let cache = GRAPH_CACHE.read().await;
-    let cached = cache
-        .as_ref()
-        .filter(|c| c.project_path == index_tree_path)
-        .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?;
-    Ok((
-        cached.graph.clone(),
-        cached.pagerank.clone(),
-        cached.sccs.clone(),
-    ))
+    crate::canonical_graph::read_cached_canonical_graph(project_path).await
 }
 
 /// `RepoGraphOps` shim used by every read operation that only needs the
@@ -1731,21 +1400,14 @@ async fn build_graph_for_project(
     state: &AppState,
     project_path: &str,
 ) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
-    match read_cached_canonical_graph(project_path).await {
-        Ok((graph, _pagerank, _sccs)) => Ok(graph),
-        Err(e) => {
-            if e == GRAPH_NOT_WARMED_ERR {
-                maybe_kick_background_warm(state, project_path);
-            }
-            Err(e)
-        }
-    }
+    crate::canonical_graph::build_graph_for_project(state, project_path).await
 }
 
 /// Sibling of `build_graph_for_project` for read ops that need the derived
 /// caches (`code_graph ranked` → `pagerank`; `code_graph cycles` → `sccs`).
 /// Cache-only with the same cold-cache background-warm kick as
 /// [`build_graph_for_project`].
+#[allow(dead_code)]
 async fn build_graph_with_caches_for_project(
     state: &AppState,
     project_path: &str,
@@ -1753,19 +1415,11 @@ async fn build_graph_with_caches_for_project(
     (
         crate::repo_graph::RepoDependencyGraph,
         Arc<crate::repo_graph::RepoGraphRanking>,
-        Arc<CachedSccs>,
+        Arc<crate::canonical_graph::CachedSccs>,
     ),
     String,
 > {
-    match read_cached_canonical_graph(project_path).await {
-        Ok(triple) => Ok(triple),
-        Err(e) => {
-            if e == GRAPH_NOT_WARMED_ERR {
-                maybe_kick_background_warm(state, project_path);
-            }
-            Err(e)
-        }
-    }
+    crate::canonical_graph::build_graph_with_caches_for_project(state, project_path).await
 }
 
 /// ADR-051 §3: "canonical graph warming is infrastructure, not agent
@@ -1787,6 +1441,7 @@ async fn build_graph_with_caches_for_project(
 ///   45 s SCIP pipeline.
 /// - **Non-fatal** — errors during the detached warm are logged and
 ///   discarded; the next cold read will retry.
+#[allow(dead_code)]
 fn maybe_kick_background_warm(state: &AppState, project_path: &str) {
     let (project_root, _index_tree_path) = normalize_graph_query_paths(project_path);
     let state = state.clone();
@@ -1930,7 +1585,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod graph_bridge_tests {
+pub(crate) mod graph_bridge_tests {
     use super::*;
     use crate::repo_graph::{RepoDependencyGraph, RepoNodeKey};
     use crate::scip_parser::{
@@ -2044,7 +1699,7 @@ mod graph_bridge_tests {
         }
     }
 
-    pub(super) fn build_test_graph() -> RepoDependencyGraph {
+    pub(crate) fn build_test_graph() -> RepoDependencyGraph {
         RepoDependencyGraph::build(&[fixture_index()])
     }
 

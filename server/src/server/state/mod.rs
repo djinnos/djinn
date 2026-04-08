@@ -574,7 +574,7 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
         // current origin/main) will refresh on the next dispatch that
         // claims the inflight slot.
         let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
-        if crate::mcp_bridge::canonical_graph_cache_has_entry_for(&index_tree_path).await {
+        if crate::canonical_graph::canonical_graph_cache_has_entry_for(&index_tree_path).await {
             tracing::debug!(
                 project_id = %project_id,
                 "AppStateCanonicalGraphWarmer: cache already hot, skipping warm"
@@ -606,7 +606,7 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
         );
         tokio::spawn(async move {
             let started = std::time::Instant::now();
-            let result = crate::mcp_bridge::ensure_canonical_graph(
+            let result = crate::canonical_graph::ensure_canonical_graph(
                 &state,
                 &project_id_owned,
                 &project_root_owned,
@@ -664,7 +664,7 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
     ) -> Result<(), String> {
         let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
 
-        if !crate::mcp_bridge::canonical_graph_cache_has_entry_for(&index_tree_path).await {
+        if !crate::canonical_graph::canonical_graph_cache_has_entry_for(&index_tree_path).await {
             tracing::debug!(
                 project_id = %project_id,
                 "AppStateCanonicalGraphWarmer: cache cold, skipping proactive refresh (cold path is owned by maybe_kick_background_warm)"
@@ -673,7 +673,7 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
         }
 
         let Some(pinned_commit) =
-            crate::mcp_bridge::canonical_graph_cache_pinned_commit_for(&index_tree_path).await
+            crate::canonical_graph::canonical_graph_cache_pinned_commit_for(&index_tree_path).await
         else {
             tracing::debug!(
                 project_id = %project_id,
@@ -682,9 +682,11 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
             return Ok(());
         };
 
-        let commits_since =
-            crate::mcp_bridge::canonical_graph_count_commits_since(project_root, &pinned_commit)
-                .await;
+        let commits_since = crate::canonical_graph::canonical_graph_count_commits_since(
+            project_root,
+            &pinned_commit,
+        )
+        .await;
 
         match commits_since {
             Some(0) => {
