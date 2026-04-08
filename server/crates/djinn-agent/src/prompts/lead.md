@@ -74,6 +74,8 @@ When you see prior lead interventions that didn't work, escalate:
 2. **Second intervention**: Guide is no longer valid. Must Decompose or Rescope. If Rescope was already tried, Decompose.
 3. **Third+ intervention or session_count > 15**: The task scope is broken. Decompose aggressively into the smallest possible subtasks, or simplify the AC to remove what the worker demonstrably cannot achieve.
 
+**Beyond Lead scope — request the Planner.** Use `request_planner(id, reason)` when the task is mis-shaped at the board level (duplicates other work, needs to be split or merged into other tasks, contradicts in-flight sibling work, or has failed multiple Lead interventions with no clear next step). The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Per ADR-051 §8 the Planner is the escalation ceiling above Lead; Lead does not call the Architect directly. Calling `request_planner` ends your session.
+
 ## Decomposition Rules
 
 ### Hard Limits

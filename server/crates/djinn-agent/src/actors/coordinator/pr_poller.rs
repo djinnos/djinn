@@ -763,13 +763,16 @@ impl CoordinatorActor {
                 );
             }
 
-            // Look up the task's project_id and escalate to Architect.
+            // Look up the task's project_id and escalate to Planner.
+            // Per ADR-051 §8 the Planner is the escalation ceiling above Lead;
+            // it can dispatch an Architect spike if the PR loop is structurally
+            // wrong, or reshape the task itself.
             if let Ok(Some(task)) = self.task_repo().get(task_id).await {
                 let reason = format!(
                     "PR review loop exceeded {PR_REVIEW_ROUND_THRESHOLD} rounds without approval. PR: {}",
                     feedback.pr_url
                 );
-                self.dispatch_architect_escalation(task_id, &reason, &task.project_id)
+                self.dispatch_planner_escalation(task_id, &reason, &task.project_id)
                     .await;
             }
         }

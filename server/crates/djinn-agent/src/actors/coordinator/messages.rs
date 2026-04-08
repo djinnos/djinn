@@ -43,9 +43,10 @@ pub(super) enum CoordinatorMessage {
     /// Trigger an immediate Architect patrol dispatch (for testing).
     #[cfg(test)]
     TriggerArchitectPatrol,
-    /// Lead requests Architect escalation for a task.
-    /// Creates a review task and dispatches Architect to it.
-    DispatchArchitectEscalation {
+    /// Lead requests Planner escalation for a task.
+    /// Creates a review task and dispatches Planner to it.
+    /// Per ADR-051 §8 the Planner is the escalation ceiling above Lead.
+    DispatchPlannerEscalation {
         source_task_id: String,
         reason: String,
         project_id: String,

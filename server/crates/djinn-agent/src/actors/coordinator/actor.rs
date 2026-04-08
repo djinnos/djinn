@@ -492,12 +492,12 @@ impl CoordinatorActor {
             CoordinatorMessage::TriggerArchitectPatrol => {
                 self.maybe_dispatch_architect_patrol().await;
             }
-            CoordinatorMessage::DispatchArchitectEscalation {
+            CoordinatorMessage::DispatchPlannerEscalation {
                 source_task_id,
                 reason,
                 project_id,
             } => {
-                self.dispatch_architect_escalation(&source_task_id, &reason, &project_id)
+                self.dispatch_planner_escalation(&source_task_id, &reason, &project_id)
                     .await;
             }
             CoordinatorMessage::IncrementEscalationCount { task_id, reply } => {

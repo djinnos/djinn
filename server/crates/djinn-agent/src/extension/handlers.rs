@@ -86,7 +86,7 @@ where
                 .await
         }
         "request_lead" => call_request_lead(state, &call.arguments).await,
-        "request_architect" => call_request_architect(state, &call.arguments).await,
+        "request_planner" => call_request_planner(state, &call.arguments).await,
         "task_transition" => {
             call_task_transition(state, &call.arguments, &worktree_project_path).await
         }
@@ -616,7 +616,8 @@ pub(super) async fn call_request_lead(
     .map_err(|e| e.to_string())?;
 
     // Check escalation count via coordinator.
-    // On the 2nd+ escalation for the same task, auto-route to Architect.
+    // On the 2nd+ escalation for the same task, auto-route to Planner
+    // (per ADR-051 §8 — Planner is now the escalation ceiling above Lead).
     let coordinator = state.coordinator().await;
     let escalation_count = if let Some(ref coord) = coordinator {
         coord
@@ -628,13 +629,13 @@ pub(super) async fn call_request_lead(
     };
 
     if escalation_count >= 2 {
-        let architect_reason = format!(
-            "Auto-escalated to Architect after {} Lead escalations. Latest reason: {}",
+        let planner_reason = format!(
+            "Auto-escalated to Planner after {} Lead escalations. Latest reason: {}",
             escalation_count, p.reason
         );
         if let Some(ref coord) = coordinator {
             let _ = coord
-                .dispatch_architect_escalation(&task.id, &architect_reason, &task.project_id)
+                .dispatch_planner_escalation(&task.id, &planner_reason, &task.project_id)
                 .await;
         }
     }
@@ -654,11 +655,11 @@ pub(super) async fn call_request_lead(
 
     if escalation_count >= 2 {
         Ok(serde_json::json!({
-            "status": "architect_escalated",
+            "status": "planner_escalated",
             "task_id": updated.id,
             "new_status": updated.status,
             "escalation_count": escalation_count,
-            "message": "Task has been escalated multiple times. Routing to Architect for review. Your session should end now."
+            "message": "Task has been escalated multiple times. Routing to Planner for board-level review. Your session should end now."
         }))
     } else {
         Ok(serde_json::json!({
@@ -671,17 +672,17 @@ pub(super) async fn call_request_lead(
     }
 }
 
-pub(super) async fn call_request_architect(
+pub(super) async fn call_request_planner(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     #[derive(serde::Deserialize)]
-    struct RequestArchitectParams {
+    struct RequestPlannerParams {
         id: String,
         reason: String,
     }
 
-    let p: RequestArchitectParams = parse_args(arguments)?;
+    let p: RequestPlannerParams = parse_args(arguments)?;
     let repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
 
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
@@ -689,7 +690,7 @@ pub(super) async fn call_request_architect(
     };
 
     let body = format!(
-        "[ARCHITECT_REQUEST] Lead escalating to Architect. {}",
+        "[PLANNER_REQUEST] Lead escalating to Planner. {}",
         p.reason
     );
     let payload = serde_json::json!({ "body": body }).to_string();
@@ -699,18 +700,18 @@ pub(super) async fn call_request_architect(
 
     let Some(coordinator) = state.coordinator().await else {
         return Ok(serde_json::json!({
-            "error": "coordinator not available — cannot dispatch Architect"
+            "error": "coordinator not available — cannot dispatch Planner"
         }));
     };
 
     let _ = coordinator
-        .dispatch_architect_escalation(&task.id, &p.reason, &task.project_id)
+        .dispatch_planner_escalation(&task.id, &p.reason, &task.project_id)
         .await;
 
     Ok(serde_json::json!({
-        "status": "architect_dispatched",
+        "status": "planner_dispatched",
         "task_id": task.id,
-        "message": "Architect has been dispatched to review this task. Your session should end now."
+        "message": "Planner has been dispatched to review this task. Your session should end now."
     }))
 }
 

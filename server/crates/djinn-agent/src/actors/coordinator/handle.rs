@@ -218,17 +218,18 @@ impl CoordinatorHandle {
         self.send(CoordinatorMessage::TriggerArchitectPatrol).await
     }
 
-    /// Dispatch an Architect escalation for a task.
+    /// Dispatch a Planner escalation for a task.
     ///
-    /// Creates a review task and dispatches the Architect to it.
-    /// Called when Lead uses `request_architect` or auto-escalation fires on 2nd `request_lead`.
-    pub async fn dispatch_architect_escalation(
+    /// Creates a review task and dispatches the Planner to it.
+    /// Called when Lead uses `request_planner` or auto-escalation fires on 2nd `request_lead`.
+    /// Per ADR-051 §8 the Planner is the escalation ceiling above Lead.
+    pub async fn dispatch_planner_escalation(
         &self,
         source_task_id: &str,
         reason: &str,
         project_id: &str,
     ) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::DispatchArchitectEscalation {
+        self.send(CoordinatorMessage::DispatchPlannerEscalation {
             source_task_id: source_task_id.to_owned(),
             reason: reason.to_owned(),
             project_id: project_id.to_owned(),
@@ -238,7 +239,8 @@ impl CoordinatorHandle {
 
     /// Increment the Lead escalation count for a task and return the new count.
     ///
-    /// When the count reaches ≥ 2, the caller should route to Architect instead of Lead.
+    /// When the count reaches ≥ 2, the caller should route to Planner instead of Lead
+    /// (per ADR-051 §8).
     pub async fn increment_escalation_count(&self, task_id: &str) -> Result<u32, CoordinatorError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.sender

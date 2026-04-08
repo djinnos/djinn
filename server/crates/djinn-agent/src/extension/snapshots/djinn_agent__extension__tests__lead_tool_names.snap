@@ -27,6 +27,6 @@ expression: names
   "task_archive_activity",
   "task_reset_counters",
   "task_kill_session",
-  "request_architect",
+  "request_planner",
   "submit_decision"
 ]

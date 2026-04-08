@@ -674,7 +674,7 @@ expression: tool_schemas_lead()
   },
   {
     "concurrent_safe": false,
-    "description": "Escalate to the Architect when the task requires strategic technical review that is beyond Lead intervention scope. Use when the problem is architectural, requires codebase-wide analysis, or has failed multiple Lead interventions. Adds a comment and dispatches the Architect. Your session should end after this call.",
+    "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call.",
     "inputSchema": {
       "properties": {
         "id": {
@@ -682,7 +682,7 @@ expression: tool_schemas_lead()
           "type": "string"
         },
         "reason": {
-          "description": "Why Architect escalation is needed (e.g. architectural ambiguity, repeated Lead failures, codebase-wide impact)",
+          "description": "Why Planner escalation is needed (e.g. task mis-shaped, duplicates other work, needs splitting, repeated Lead failures with no clear next step)",
           "type": "string"
         }
       },
@@ -692,7 +692,7 @@ expression: tool_schemas_lead()
       ],
       "type": "object"
     },
-    "name": "request_architect"
+    "name": "request_planner"
   },
   {
     "concurrent_safe": false,

@@ -705,22 +705,25 @@ impl CoordinatorActor {
         }
     }
 
-    /// Dispatch an Architect escalation: create a review task, add a comment linking it
-    /// to the source task, then dispatch the Architect to it.
+    /// Dispatch a Planner escalation: create a review task, add a comment linking it
+    /// to the source task, then dispatch the Planner to it.
     ///
-    /// Called when Lead calls `request_architect` or when auto-escalation fires on the
-    /// 2nd `request_lead` for the same task.
-    pub(super) async fn dispatch_architect_escalation(
+    /// Called when Lead calls `request_planner` or when auto-escalation fires on the
+    /// 2nd `request_lead` for the same task.  Per ADR-051 §8 the Planner is now the
+    /// escalation ceiling above Lead — it owns the board and decides whether to
+    /// reshape, dedupe, or (if the issue requires deeper code-structural reasoning)
+    /// dispatch an Architect spike.
+    pub(super) async fn dispatch_planner_escalation(
         &mut self,
         source_task_id: &str,
         reason: &str,
         project_id: &str,
     ) {
-        let model_ids = self.resolve_dispatch_models_for_role("architect").await;
+        let model_ids = self.resolve_dispatch_models_for_role("planner").await;
         if model_ids.is_empty() {
             tracing::warn!(
                 source_task_id = %source_task_id,
-                "CoordinatorActor: architect escalation — no model configured for architect role"
+                "CoordinatorActor: planner escalation — no model configured for planner role"
             );
             return;
         }
@@ -729,7 +732,7 @@ impl CoordinatorActor {
             tracing::warn!(
                 project_id = %project_id,
                 source_task_id = %source_task_id,
-                "CoordinatorActor: architect escalation — project path not found"
+                "CoordinatorActor: planner escalation — project path not found"
             );
             return;
         };
@@ -738,9 +741,9 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        let title = format!("Architect escalation: {}", &reason[..reason.len().min(80)]);
+        let title = format!("Planner escalation: {}", &reason[..reason.len().min(80)]);
         let description = format!(
-            "Escalated from task {source_task_id}. Lead could not resolve — Architect review required.\n\nReason: {reason}"
+            "Escalated from task {source_task_id}. Lead could not resolve — Planner review required.\n\nReason: {reason}"
         );
         let review_task = match task_repo
             .create_in_project(
@@ -748,7 +751,7 @@ impl CoordinatorActor {
                 None,
                 &title,
                 &description,
-                "Review the escalated task and either resolve it or leave a 'Requires human review' comment.",
+                "Review the escalated task and either resolve it, reshape the work, or leave a 'Requires human review' comment.",
                 "review",
                 0,
                 "system",
@@ -763,16 +766,16 @@ impl CoordinatorActor {
                     error = %e,
                     project_id = %project_id,
                     source_task_id = %source_task_id,
-                    "CoordinatorActor: architect escalation — failed to create review task"
+                    "CoordinatorActor: planner escalation — failed to create review task"
                 );
                 return;
             }
         };
 
-        // Log a comment on the source task linking to the architect review task.
+        // Log a comment on the source task linking to the planner review task.
         let comment_payload = serde_json::json!({
             "body": format!(
-                "[ARCHITECT_ESCALATION] Escalated to Architect review task {}. Reason: {}",
+                "[PLANNER_ESCALATION] Escalated to Planner review task {}. Reason: {}",
                 review_task.short_id, reason
             )
         })
@@ -806,7 +809,7 @@ impl CoordinatorActor {
                     review_task_uuid = %review_task.id,
                     source_task_id = %source_task_id,
                     project_id = %project_id,
-                    "CoordinatorActor: Architect escalation dispatched"
+                    "CoordinatorActor: Planner escalation dispatched"
                 );
                 self.last_dispatched
                     .insert(review_task.id.clone(), StdInstant::now());
@@ -815,15 +818,15 @@ impl CoordinatorActor {
             }
             DispatchOutcome::AtCapacity => {
                 tracing::debug!(
-                    "CoordinatorActor: architect escalation — Architect model at capacity, will retry next cycle"
+                    "CoordinatorActor: planner escalation — Planner model at capacity, will retry next cycle"
                 );
             }
             DispatchOutcome::PoolDead => {
-                tracing::error!("CoordinatorActor: architect escalation — slot pool actor dead");
+                tracing::error!("CoordinatorActor: planner escalation — slot pool actor dead");
             }
             DispatchOutcome::Failed => {
                 tracing::debug!(
-                    "CoordinatorActor: architect escalation — no model could accept Architect dispatch"
+                    "CoordinatorActor: planner escalation — no model could accept Planner dispatch"
                 );
             }
         }

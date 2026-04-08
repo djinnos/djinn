@@ -24,17 +24,17 @@ pub(super) fn tool_request_lead() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_request_architect() -> RmcpTool {
+pub(super) fn tool_request_planner() -> RmcpTool {
     RmcpTool::new(
-        "request_architect".to_string(),
-        "Escalate to the Architect when the task requires strategic technical review that is beyond Lead intervention scope. Use when the problem is architectural, requires codebase-wide analysis, or has failed multiple Lead interventions. Adds a comment and dispatches the Architect. Your session should end after this call."
+        "request_planner".to_string(),
+        "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call."
             .to_string(),
         object!({
             "type": "object",
             "required": ["id", "reason"],
             "properties": {
                 "id": {"type": "string", "description": "Task UUID or short_id"},
-                "reason": {"type": "string", "description": "Why Architect escalation is needed (e.g. architectural ambiguity, repeated Lead failures, codebase-wide impact)"}
+                "reason": {"type": "string", "description": "Why Planner escalation is needed (e.g. task mis-shaped, duplicates other work, needs splitting, repeated Lead failures with no clear next step)"}
             }
         }),
     )
@@ -517,7 +517,7 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_archive_activity(), false),
         serialize_tool(tool_task_reset_counters(), false),
         serialize_tool(tool_task_kill_session(), false),
-        serialize_tool(tool_request_architect(), false),
+        serialize_tool(tool_request_planner(), false),
         serialize_tool(crate::roles::finalize::tool_submit_decision(), false),
     ] {
         tool_values.push(value);
