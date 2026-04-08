@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type ActiveView = 'kanban' | 'roadmap' | 'chat' | 'settings' | 'agents' | 'metrics' | 'memory';
+export type ActiveView = 'kanban' | 'roadmap' | 'chat' | 'settings' | 'agents' | 'metrics' | 'memory' | 'pulse';
 
 export interface SidebarState {
   activeSection: ActiveView;

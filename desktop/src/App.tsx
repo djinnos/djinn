@@ -9,6 +9,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
 import { MemoryPage } from "@/pages/MemoryPage";
+import { PulsePage } from "@/pages/PulsePage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { ServerUpdateBanner } from "@/components/ServerUpdateBanner";
@@ -41,6 +42,7 @@ function MainLayout() {
             <Route path="/chat/:sessionId" element={<ChatPage />} />
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/memory" element={<MemoryPage />} />
+            <Route path="/pulse" element={<PulsePage />} />
             <Route path="/metrics" element={<Navigate to="/agents" replace />} />
 
             {/* Project-scoped views */}
@@ -50,6 +52,7 @@ function MainLayout() {
             <Route path="/projects/:projectId/chat/:sessionId" element={<ChatPage />} />
             <Route path="/projects/:projectId/agents" element={<AgentsPage />} />
             <Route path="/projects/:projectId/memory" element={<MemoryPage />} />
+            <Route path="/projects/:projectId/pulse" element={<PulsePage />} />
             <Route path="/projects/:projectId/metrics" element={<Navigate to="../agents" replace />} />
 
             {/* Task session (global) */}

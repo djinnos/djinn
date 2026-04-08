@@ -17,6 +17,7 @@ import {
   Settings01Icon,
   WorkflowSquare06Icon,
   Brain01Icon,
+  Pulse01Icon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
@@ -402,6 +403,8 @@ export function Sidebar() {
       setActiveSection('agents');
     } else if (location.pathname.includes('/memory')) {
       setActiveSection('memory');
+    } else if (location.pathname.includes('/pulse')) {
+      setActiveSection('pulse');
     } else if (location.pathname.startsWith('/settings')) {
       setActiveSection('settings');
     } else {
@@ -446,6 +449,10 @@ export function Sidebar() {
       case 'm':
         e.preventDefault();
         navigateToView('memory');
+        break;
+      case 'p':
+        e.preventDefault();
+        navigateToView('pulse');
         break;
       case 's':
         e.preventDefault();
@@ -513,6 +520,13 @@ export function Sidebar() {
           hotkey="R"
           isActive={activeSection === 'roadmap'}
           onClick={() => navigateToView('roadmap')}
+        />
+        <NavItem
+          icon={<HugeiconsIcon icon={Pulse01Icon} className="h-4 w-4" />}
+          label="Pulse"
+          hotkey="P"
+          isActive={activeSection === 'pulse'}
+          onClick={() => navigateToView('pulse')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={Robot01Icon} className="h-4 w-4" />}
