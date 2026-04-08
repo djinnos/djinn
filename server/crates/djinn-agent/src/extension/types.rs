@@ -266,6 +266,7 @@ pub(super) struct LspParams {
 #[derive(Deserialize)]
 pub(super) struct CodeGraphParams {
     pub operation: String,
+    #[serde(default)]
     pub project_path: String,
     #[serde(default)]
     pub key: Option<String>,
