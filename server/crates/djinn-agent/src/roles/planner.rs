@@ -77,12 +77,26 @@ impl AgentRole for PlannerRole {
             }
 
             // Planning tasks route through the approved → PR pipeline so that
-            // any file changes (ADRs, briefs, roadmaps) get a PR. If the
-            // branch has no unique commits, process_approved_tasks will close
-            // the task directly. Review-type patrol tasks don't produce a PR;
-            // they just close.
+            // any file changes (ADRs, briefs, roadmaps) get a PR.  If the
+            // branch has no unique commits, `process_approved_tasks` will
+            // close the task directly.
             if matches!(task.issue_type.as_str(), "planning" | "decomposition") {
                 return Some((TransitionAction::SubmitForMerge, None));
+            }
+
+            // Review-type patrol and `request_planner` escalation tasks are
+            // synthetic coordinator artifacts — they don't land a PR and
+            // there is no downstream lifecycle to own their closure.  They
+            // MUST close on session completion, otherwise the task stays
+            // `in_progress` forever and `dispatch_ready_tasks` keeps
+            // re-dispatching it (observed on task `yi5q` after ADR-051:
+            // 10 sessions in 20 minutes, a new one every ~2 min on the
+            // same task row — a full respawn loop).
+            if task.issue_type == "review" {
+                return Some((
+                    TransitionAction::Close,
+                    Some(djinn_core::models::task::CLOSE_REASON_COMPLETED.to_string()),
+                ));
             }
             None
         })

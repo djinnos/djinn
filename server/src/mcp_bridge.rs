@@ -1575,6 +1575,35 @@ pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool
         .is_some_and(|cached| cached.project_path == index_tree_path)
 }
 
+/// Lookup the cached `git_head` (pinned `origin/main` commit at warm time)
+/// for the canonical graph entry whose `project_path` matches the supplied
+/// `_index` worktree path.  Returns `None` on a cold cache or when the
+/// cached entry belongs to a different project.
+///
+/// Used by the proactive staleness refresh path
+/// (`AppStateCanonicalGraphWarmer::maybe_refresh_if_stale`) so the
+/// coordinator tick loop can compare the cached pin against the current
+/// `origin/main` without exposing the full `CachedGraph` struct across the
+/// module seam.
+pub async fn canonical_graph_cache_pinned_commit_for(index_tree_path: &Path) -> Option<String> {
+    let cache = GRAPH_CACHE.read().await;
+    cache
+        .as_ref()
+        .filter(|cached| cached.project_path == index_tree_path)
+        .map(|cached| cached.git_head.clone())
+}
+
+/// Crate-visible wrapper around the private `count_commits_since` helper so
+/// the production `CanonicalGraphWarmer` impl in `server::state` can perform
+/// the staleness comparison without re-implementing the `git rev-list`
+/// shell-out.
+pub(crate) async fn canonical_graph_count_commits_since(
+    project_root: &Path,
+    pinned_commit: &str,
+) -> Option<u64> {
+    count_commits_since(project_root, pinned_commit).await
+}
+
 /// Replace the in-memory canonical graph slot, moving the previous canonical
 /// into the diff predecessor slot per ADR-050 §3.
 async fn install_as_canonical(

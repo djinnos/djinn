@@ -4,6 +4,7 @@ use std::time::{Duration, Instant as StdInstant};
 
 use super::consolidation::ConsolidationRunner;
 use crate::actors::slot::SlotPoolHandle;
+use crate::context::CanonicalGraphWarmer;
 use crate::roles::RoleRegistry;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::Database;
@@ -27,6 +28,12 @@ pub struct CoordinatorDeps {
     pub role_registry: Arc<RoleRegistry>,
     pub verification_tracker: VerificationTracker,
     pub lsp: crate::lsp::LspManager,
+    /// Optional ADR-051 §3 canonical-graph warmer.  When `Some`, the
+    /// coordinator tick loop calls `maybe_refresh_if_stale` for every
+    /// dispatch-enabled project on a 10-minute cadence
+    /// (see `GRAPH_REFRESH_INTERVAL`).  Tests and off-server contexts leave
+    /// this `None`, which makes the proactive refresh tick branch a no-op.
+    pub canonical_graph_warmer: Option<Arc<dyn CanonicalGraphWarmer>>,
     pub(super) consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
 }
 
@@ -54,8 +61,20 @@ impl CoordinatorDeps {
             role_registry,
             verification_tracker,
             lsp,
+            canonical_graph_warmer: None,
             consolidation_runner: None,
         }
+    }
+
+    /// Inject the production canonical-graph warmer, enabling the ADR-051 §3
+    /// proactive staleness refresh tick in the coordinator loop.  Tests and
+    /// off-server contexts that omit this leave the tick as a no-op.
+    pub fn with_canonical_graph_warmer(
+        mut self,
+        warmer: Arc<dyn CanonicalGraphWarmer>,
+    ) -> Self {
+        self.canonical_graph_warmer = Some(warmer);
+        self
     }
 
     #[cfg(test)]
@@ -78,6 +97,16 @@ pub(super) const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// ADR-051 §7 — stale auto-dispatch safety net.  Epics that fell through
 /// all event-driven auto-dispatch paths are rechecked at this interval.
 pub(super) const AUTO_DISPATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// ADR-051 §3 proactive canonical-graph refresh cadence.
+///
+/// Every 10 minutes the coordinator asks the canonical-graph warmer to
+/// refresh any project whose cache has fallen behind `origin/main`.  The
+/// warmer is a no-op on cold caches (those are handled by the
+/// first-consumer-demand path in `mcp_bridge::maybe_kick_background_warm`)
+/// and on warm caches with `commits_since_pin == 0`, so this tick is cheap
+/// for projects that are already current.
+pub(super) const GRAPH_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// Minimum cooldown between idle-time memory consolidation sweeps (ADR-048 §3A).
 pub(super) const IDLE_CONSOLIDATION_COOLDOWN: Duration = Duration::from_secs(300);

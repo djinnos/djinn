@@ -329,7 +329,9 @@ impl AppState {
                 self.inner.role_registry.clone(),
                 self.inner.verifying_tasks.clone(),
                 self.inner.lsp.clone(),
-            ));
+            ).with_canonical_graph_warmer(Arc::new(AppStateCanonicalGraphWarmer {
+                state: self.clone(),
+            }) as Arc<dyn djinn_agent::context::CanonicalGraphWarmer>));
 
         *self.inner.pool.lock().await = Some(pool.clone());
         *self.inner.coordinator.lock().await = Some(coordinator.clone());
@@ -632,6 +634,89 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
         });
 
         Ok(())
+    }
+
+    /// ADR-051 §3 proactive staleness refresh, called from the coordinator
+    /// tick loop on a 10-minute cadence (see `GRAPH_REFRESH_INTERVAL`).
+    ///
+    /// Decision tree (always returns `Ok(())`):
+    ///   1. Cold cache → no-op.  The cold path is owned by
+    ///      `mcp_bridge::maybe_kick_background_warm`; kicking from here
+    ///      would thrash on every tick for projects nobody is reading.
+    ///   2. Warm cache but the pinned commit is missing (race window) →
+    ///      no-op.
+    ///   3. `git rev-list pinned..origin/main` returns `0` → cache is
+    ///      already current, no-op.
+    ///   4. `>= 1` commits behind → delegate to [`Self::warm`], which is
+    ///      single-flight via `try_claim_canonical_warm_slot` and detached
+    ///      onto a background task, so this call returns instantly.
+    ///
+    /// Errors at every step are logged at `debug!`/`warn!` and converted to
+    /// `Ok(())` — the caller is fire-and-forget and scheduling churn is not
+    /// worth surfacing transient git/fetch failures.
+    async fn maybe_refresh_if_stale(
+        &self,
+        project_id: &str,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+
+        if !crate::mcp_bridge::canonical_graph_cache_has_entry_for(&index_tree_path).await {
+            tracing::debug!(
+                project_id = %project_id,
+                "AppStateCanonicalGraphWarmer: cache cold, skipping proactive refresh (cold path is owned by maybe_kick_background_warm)"
+            );
+            return Ok(());
+        }
+
+        let Some(pinned_commit) =
+            crate::mcp_bridge::canonical_graph_cache_pinned_commit_for(&index_tree_path).await
+        else {
+            tracing::debug!(
+                project_id = %project_id,
+                "AppStateCanonicalGraphWarmer: cache pinned commit unavailable (race), skipping proactive refresh"
+            );
+            return Ok(());
+        };
+
+        let commits_since =
+            crate::mcp_bridge::canonical_graph_count_commits_since(project_root, &pinned_commit)
+                .await;
+
+        match commits_since {
+            Some(0) => {
+                tracing::debug!(
+                    project_id = %project_id,
+                    pinned_commit = %pinned_commit,
+                    "AppStateCanonicalGraphWarmer: graph cache current, skipping refresh"
+                );
+                Ok(())
+            }
+            Some(behind) => {
+                tracing::info!(
+                    project_id = %project_id,
+                    pinned_commit = %pinned_commit,
+                    commits_behind = behind,
+                    "AppStateCanonicalGraphWarmer: graph cache stale, kicking warm"
+                );
+                if let Err(e) = self.warm(project_id, project_root).await {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        error = %e,
+                        "AppStateCanonicalGraphWarmer: proactive warm dispatch reported error (swallowed)"
+                    );
+                }
+                Ok(())
+            }
+            None => {
+                tracing::debug!(
+                    project_id = %project_id,
+                    pinned_commit = %pinned_commit,
+                    "AppStateCanonicalGraphWarmer: count_commits_since failed (e.g. fetch error), skipping refresh"
+                );
+                Ok(())
+            }
+        }
     }
 }
 
