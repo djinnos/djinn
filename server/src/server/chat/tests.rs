@@ -1,5 +1,7 @@
 #[path = "tests/context.rs"]
 mod context;
+#[path = "tests/defaults.rs"]
+mod defaults;
 #[path = "tests/handler.rs"]
 mod handler;
 #[path = "tests/mcp_dispatch.rs"]

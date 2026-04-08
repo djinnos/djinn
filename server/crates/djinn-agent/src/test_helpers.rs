@@ -221,6 +221,7 @@ impl LlmProvider for FakeProvider {
 pub struct CapturingProvider {
     inner: FakeProvider,
     captured_tools: Arc<StdMutex<Vec<Vec<Value>>>>,
+    captured_conversations: Arc<StdMutex<Vec<Conversation>>>,
 }
 
 impl CapturingProvider {
@@ -228,11 +229,16 @@ impl CapturingProvider {
         Self {
             inner: FakeProvider::tool_call(id, name, input),
             captured_tools: Arc::new(StdMutex::new(Vec::new())),
+            captured_conversations: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
     pub fn captured_tools(&self) -> Vec<Vec<Value>> {
         self.captured_tools.lock().unwrap().clone()
+    }
+
+    pub fn captured_conversations(&self) -> Vec<Conversation> {
+        self.captured_conversations.lock().unwrap().clone()
     }
 }
 
@@ -257,6 +263,10 @@ impl LlmProvider for CapturingProvider {
         >,
     > {
         self.captured_tools.lock().unwrap().push(tools.to_vec());
+        self.captured_conversations
+            .lock()
+            .unwrap()
+            .push(conversation.clone());
         self.inner.stream(conversation, tools, tool_choice)
     }
 }

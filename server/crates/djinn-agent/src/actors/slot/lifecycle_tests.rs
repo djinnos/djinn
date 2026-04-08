@@ -147,6 +147,33 @@ fn tool_names(tools: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
+fn write_settings_file(repo_path: &Path, content: &str) {
+    let djinn_dir = repo_path.join(".djinn");
+    std::fs::create_dir_all(&djinn_dir).unwrap();
+    std::fs::write(djinn_dir.join("settings.json"), content).unwrap();
+}
+
+fn write_skill_file(repo_path: &Path, name: &str, content: &str) {
+    let skills_dir = repo_path.join(".djinn").join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    std::fs::write(skills_dir.join(format!("{name}.md")), content).unwrap();
+}
+
+async fn commit_repo_support_files(repo_path: &Path, message: &str) {
+    Command::new("git")
+        .args(["add", ".djinn"])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .expect("git add .djinn");
+    Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .expect("git commit support files");
+}
+
 /// Collect the first SlotEvent from the channel with a 3-second deadline.
 async fn recv_slot_event(rx: &mut mpsc::Receiver<SlotEvent>) -> SlotEvent {
     tokio::time::timeout(Duration::from_secs(3), rx.recv())
@@ -162,6 +189,9 @@ async fn lifecycle_specialist_appends_discovered_mcp_tools_to_provider_tool_list
     let cancel = CancellationToken::new();
     let app_state = agent_context_from_db(db.clone(), cancel.clone());
 
+    commit_repo_support_files(repo.path(), "add settings defaults").await;
+    commit_repo_support_files(repo.path(), "add opt-out defaults").await;
+    commit_repo_support_files(repo.path(), "add skill defaults").await;
     let project = register_project(&db, repo.path()).await;
     let epic = create_test_epic(&db, &project.id).await;
     create_specialist_worker(&db, &project.id, "knowledge-harvester", r#"["web"]"#).await;
@@ -211,7 +241,7 @@ async fn lifecycle_specialist_appends_discovered_mcp_tools_to_provider_tool_list
         event_tx,
         system_prompt_extensions: String::new(),
         learned_prompt: None,
-        mcp_servers: Vec::new(),
+        mcp_servers: None,
         skills: Vec::new(),
         role_verification_command: None,
         mcp_registry_override: Some(mcp_registry),
@@ -266,7 +296,7 @@ async fn lifecycle_default_session_keeps_builtins_only_without_mcp_servers() {
         event_tx,
         system_prompt_extensions: String::new(),
         learned_prompt: None,
-        mcp_servers: Vec::new(),
+        mcp_servers: None,
         skills: Vec::new(),
         role_verification_command: None,
         mcp_registry_override: None,
@@ -323,7 +353,7 @@ async fn lifecycle_success_path_session_reaches_paused_and_slot_freed() {
         event_tx,
         system_prompt_extensions: String::new(),
         learned_prompt: None,
-        mcp_servers: Vec::new(),
+        mcp_servers: None,
         skills: Vec::new(),
         role_verification_command: None,
         mcp_registry_override: None,
@@ -398,7 +428,7 @@ async fn lifecycle_provider_failure_session_reaches_failed_and_slot_freed() {
         event_tx,
         system_prompt_extensions: String::new(),
         learned_prompt: None,
-        mcp_servers: Vec::new(),
+        mcp_servers: None,
         skills: Vec::new(),
         role_verification_command: None,
         mcp_registry_override: None,
@@ -467,7 +497,7 @@ async fn lifecycle_provider_failure_preserves_worktree_for_retry() {
         event_tx,
         system_prompt_extensions: String::new(),
         learned_prompt: None,
-        mcp_servers: Vec::new(),
+        mcp_servers: None,
         skills: Vec::new(),
         role_verification_command: None,
         mcp_registry_override: None,
@@ -488,6 +518,241 @@ async fn lifecycle_provider_failure_preserves_worktree_for_retry() {
         worktree_path.exists(),
         "worktree directory should be preserved after provider failure for retry, but was removed at {worktree_path:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_applies_wildcard_mcp_defaults_and_skips_unknown_names() {
+    let repo = create_git_repo().await;
+    let db = create_test_db();
+    let cancel = CancellationToken::new();
+    let app_state = agent_context_from_db(db.clone(), cancel.clone());
+
+    write_settings_file(
+        repo.path(),
+        r#"{
+            "agent_mcp_defaults": {
+                "*": ["web", "unknown-default"]
+            }
+        }"#,
+    );
+
+    let project = register_project(&db, repo.path()).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_open_task(&db, &project.id, &epic.id).await;
+
+    let provider = Arc::new(CapturingProvider::tool_call(
+        "finalize-1",
+        "submit_work",
+        serde_json::json!({
+            "task_id": task.short_id,
+            "summary": "defaults applied"
+        }),
+    ));
+    let mcp_registry = crate::mcp_client::McpToolRegistry::with_dispatch(
+        [("web_search".to_string(), "web".to_string())],
+        vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } },
+                    "required": ["query"]
+                }
+            }
+        })],
+        |_tool_name, _arguments| Ok(serde_json::json!({"ok": true})),
+    );
+
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    run_task_lifecycle(TaskLifecycleParams {
+        task_id: task.id.clone(),
+        project_path: project.path.clone(),
+        model_id: "synthetic/test-model".to_string(),
+        role: role_impl_for(AgentType::Worker),
+        app_state: app_state.clone(),
+        cancel: cancel.clone(),
+        pause: CancellationToken::new(),
+        event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: None,
+        skills: Vec::new(),
+        role_verification_command: None,
+        mcp_registry_override: Some(mcp_registry),
+        provider_override: Some(provider.clone()),
+    })
+    .await
+    .expect("lifecycle should succeed");
+
+    recv_slot_event(&mut event_rx).await;
+    let captured = provider.captured_tools();
+    let names = tool_names(&captured[0]);
+    assert!(names.contains(&"web_search".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_explicit_empty_mcp_assignment_opts_out_of_defaults() {
+    let repo = create_git_repo().await;
+    let db = create_test_db();
+    let cancel = CancellationToken::new();
+    let app_state = agent_context_from_db(db.clone(), cancel.clone());
+
+    write_settings_file(
+        repo.path(),
+        r#"{
+            "agent_mcp_defaults": {
+                "*": ["web"]
+            }
+        }"#,
+    );
+
+    let project = register_project(&db, repo.path()).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_open_task(&db, &project.id, &epic.id).await;
+
+    let agent_repo =
+        djinn_db::AgentRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let default_worker = agent_repo
+        .get_default_for_base_role(&project.id, "worker")
+        .await
+        .expect("load default worker")
+        .expect("default worker exists");
+    agent_repo
+        .update(
+            &default_worker.id,
+            djinn_db::AgentUpdateInput {
+                name: &default_worker.name,
+                description: &default_worker.description,
+                system_prompt_extensions: &default_worker.system_prompt_extensions,
+                model_preference: default_worker.model_preference.as_deref(),
+                verification_command: default_worker.verification_command.as_deref(),
+                mcp_servers: "[]",
+                skills: &default_worker.skills,
+                learned_prompt: default_worker.learned_prompt.as_deref(),
+            },
+        )
+        .await
+        .expect("update default worker role");
+
+    let provider = Arc::new(CapturingProvider::tool_call(
+        "finalize-1",
+        "submit_work",
+        serde_json::json!({
+            "task_id": task.short_id,
+            "summary": "opt out applied"
+        }),
+    ));
+
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    run_task_lifecycle(TaskLifecycleParams {
+        task_id: task.id.clone(),
+        project_path: project.path.clone(),
+        model_id: "synthetic/test-model".to_string(),
+        role: role_impl_for(AgentType::Worker),
+        app_state: app_state.clone(),
+        cancel: cancel.clone(),
+        pause: CancellationToken::new(),
+        event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: None,
+        skills: Vec::new(),
+        role_verification_command: None,
+        mcp_registry_override: None,
+        provider_override: Some(provider.clone()),
+    })
+    .await
+    .expect("lifecycle should succeed");
+
+    recv_slot_event(&mut event_rx).await;
+    let captured = provider.captured_tools();
+    let names = tool_names(&captured[0]);
+    assert!(!names.contains(&"web_search".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_adds_global_skills_to_role_skills_without_duplicates() {
+    let repo = create_git_repo().await;
+    let db = create_test_db();
+    let cancel = CancellationToken::new();
+    let app_state = agent_context_from_db(db.clone(), cancel.clone());
+
+    write_settings_file(
+        repo.path(),
+        r#"{
+            "global_skills": ["git", "rust"]
+        }"#,
+    );
+    write_skill_file(
+        repo.path(),
+        "git",
+        "---
+description: Git workflow
+---
+
+Commit cleanly.",
+    );
+    write_skill_file(
+        repo.path(),
+        "rust",
+        "---
+description: Rust skill
+---
+
+Prefer ownership-aware fixes.",
+    );
+    write_skill_file(
+        repo.path(),
+        "testing",
+        "---
+description: Testing skill
+---
+
+Add focused tests.",
+    );
+
+    let project = register_project(&db, repo.path()).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_open_task(&db, &project.id, &epic.id).await;
+
+    let provider = Arc::new(CapturingProvider::tool_call(
+        "finalize-1",
+        "submit_work",
+        serde_json::json!({
+            "task_id": task.short_id,
+            "summary": "skills applied"
+        }),
+    ));
+
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    run_task_lifecycle(TaskLifecycleParams {
+        task_id: task.id.clone(),
+        project_path: project.path.clone(),
+        model_id: "synthetic/test-model".to_string(),
+        role: role_impl_for(AgentType::Worker),
+        app_state: app_state.clone(),
+        cancel: cancel.clone(),
+        pause: CancellationToken::new(),
+        event_tx,
+        system_prompt_extensions: String::new(),
+        learned_prompt: None,
+        mcp_servers: None,
+        skills: vec!["rust".to_string(), "testing".to_string()],
+        role_verification_command: None,
+        mcp_registry_override: None,
+        provider_override: Some(provider.clone()),
+    })
+    .await
+    .expect("lifecycle should succeed");
+
+    recv_slot_event(&mut event_rx).await;
+    let effective = crate::verification::settings::effective_skill_names(
+        &crate::verification::settings::load_settings(repo.path()).expect("load settings"),
+        &["rust".to_string(), "testing".to_string()],
+    );
+    assert_eq!(effective, vec!["git", "rust", "testing"]);
 }
 
 // ─── ADR-050 Chunk C cold-start canonical-graph warming ──────────────────────
@@ -570,7 +835,7 @@ async fn lifecycle_worker_dispatch_does_not_warm_canonical_graph_cache() {
         event_tx,
         system_prompt_extensions: String::new(),
         learned_prompt: None,
-        mcp_servers: Vec::new(),
+        mcp_servers: None,
         skills: Vec::new(),
         role_verification_command: None,
         mcp_registry_override: None,
@@ -633,7 +898,7 @@ async fn lifecycle_worker_ignores_failing_canonical_graph_warmer() {
         event_tx,
         system_prompt_extensions: String::new(),
         learned_prompt: None,
-        mcp_servers: Vec::new(),
+        mcp_servers: None,
         skills: Vec::new(),
         role_verification_command: None,
         mcp_registry_override: None,

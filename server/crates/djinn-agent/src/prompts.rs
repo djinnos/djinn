@@ -288,7 +288,7 @@ pub fn apply_role_extensions(
 ///
 /// Called after `apply_role_extensions`. Appends the formatted "## Available Skills"
 /// section when any skills were resolved. Returns the prompt unchanged when empty.
-pub(crate) fn apply_skills(prompt: &str, skills: &[crate::skills::ResolvedSkill]) -> String {
+pub fn apply_skills(prompt: &str, skills: &[crate::skills::ResolvedSkill]) -> String {
     let section = crate::skills::format_skills_section(skills);
     if section.is_empty() {
         return prompt.to_string();

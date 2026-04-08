@@ -12,7 +12,9 @@ use crate::prompts::TaskContext;
 use crate::provider::LlmProvider;
 use crate::provider::create_provider;
 use crate::roles::AgentRole;
-use crate::verification::settings::load_settings;
+use crate::verification::settings::{
+    effective_mcp_server_names, effective_skill_names, load_settings,
+};
 use djinn_core::models::SessionStatus;
 use djinn_core::models::TransitionAction;
 use djinn_db::SessionRepository;
@@ -133,11 +135,11 @@ pub(crate) struct TaskLifecycleParams {
     /// Auto-improvement amendments from the DB role's learned_prompt.
     /// Appended after system_prompt_extensions. None = not set.
     pub learned_prompt: Option<String>,
-    /// MCP server names from the DB role config (JSON → Vec<String>).
-    /// Passed through for future wiring by task `norv`.
-    pub mcp_servers: Vec<String>,
+    /// MCP server names from the DB role config, when a project role exists.
+    /// `None` means no project role override exists, so settings defaults may apply.
+    /// `Some([])` means the role explicitly opted out of MCP defaults.
+    pub mcp_servers: Option<Vec<String>>,
     /// Skill names from the DB role config (JSON → Vec<String>).
-    /// Passed through for future wiring by task `9trm`.
     pub skills: Vec<String>,
     /// Override for the verification command from the DB role.
     /// When Some, used instead of the project's .djinn/settings.json verification.
@@ -258,7 +260,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             }
             system_prompt_extensions = r.system_prompt_extensions.clone();
             learned_prompt = r.learned_prompt.clone();
-            mcp_servers = djinn_core::models::parse_json_array(&r.mcp_servers);
+            mcp_servers = Some(djinn_core::models::parse_json_array(&r.mcp_servers));
             skills = djinn_core::models::parse_json_array(&r.skills);
             role_verification_command = r.verification_command.clone();
             if let Some(ref preferred) = r.model_preference
@@ -673,6 +675,18 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     }
     emit_step(&task.id, "preflight_passed", serde_json::json!({}));
 
+    let settings = load_settings(&worktree_path).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to load project settings, using defaults");
+        Default::default()
+    });
+
+    let effective_mcp_servers = effective_mcp_server_names(
+        &settings,
+        runtime_role.config().name,
+        mcp_servers.as_deref(),
+    );
+    let effective_skills = effective_skill_names(&settings, &skills);
+
     // ── Resolve role-level MCP servers ────────────────────────────────────────
     // Load the project MCP server registry from standard discovery files. Legacy
     // `.djinn/settings.json` entries are migrated into root `mcp.json` during
@@ -681,18 +695,18 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     // session from starting.
     //
     // Default roles have empty mcp_servers, so this block is a no-op for them.
-    let resolved_mcp_servers = if !mcp_servers.is_empty() {
+    let resolved_mcp_servers = if !effective_mcp_servers.is_empty() {
         let registry = crate::verification::settings::load_mcp_server_registry(&worktree_path);
         let resolved = crate::verification::settings::resolve_mcp_servers(
             &task.short_id,
             runtime_role.config().name,
-            &mcp_servers,
+            &effective_mcp_servers,
             &registry,
         );
         tracing::info!(
             task_id = %task.short_id,
             role = %runtime_role.config().name,
-            requested_count = mcp_servers.len(),
+            requested_count = effective_mcp_servers.len(),
             resolved_count = resolved.len(),
             "Lifecycle: resolved role MCP servers"
         );
@@ -742,12 +756,12 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     // ── Load and resolve skills from worktree .djinn/skills/ ─────────────────
     // Skills are markdown files with YAML frontmatter. Missing skills are logged
     // as warnings and skipped — they never block the session from starting.
-    let resolved_skills = if !skills.is_empty() {
-        let loaded = crate::skills::load_skills(&worktree_path, &skills);
+    let resolved_skills = if !effective_skills.is_empty() {
+        let loaded = crate::skills::load_skills(&worktree_path, &effective_skills);
         tracing::info!(
             task_id = %task.short_id,
             role = %runtime_role.config().name,
-            requested_count = skills.len(),
+            requested_count = effective_skills.len(),
             resolved_count = loaded.len(),
             "Lifecycle: resolved role skills"
         );
@@ -757,10 +771,6 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     };
 
     let (prompt_setup_commands, prompt_verification_commands, prompt_verification_rules) = {
-        let settings = load_settings(&worktree_path).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to load project settings, using defaults");
-            Default::default()
-        });
         let setup_specs = settings.setup;
         let verification_rules = settings.verification_rules;
         let prompt_setup_commands = format_command_details(&setup_specs);
