@@ -23,6 +23,8 @@ pub(crate) mod summaries;
 mod write_dedup;
 mod write_dedup_prompt;
 mod write_dedup_runtime;
+mod write_dedup_types;
+mod write_services;
 pub use summaries::NoteSummaryService;
 mod writes;
 
@@ -34,6 +36,10 @@ mod build_context_tests;
 mod ops_tests;
 #[cfg(test)]
 mod search_tests;
+#[cfg(test)]
+mod write_dedup_prompt_tests;
+#[cfg(test)]
+mod write_dedup_tests;
 #[cfg(test)]
 mod writes_tests;
 

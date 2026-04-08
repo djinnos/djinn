@@ -1,13 +1,17 @@
-use super::write_dedup::{
-    LlmMemoryWriteDedupDecider, MemoryWriteDedupDecider, PendingWriteDedup, maybe_apply_write_dedup,
+use super::write_dedup::{LlmMemoryWriteDedupDecider, maybe_apply_write_dedup};
+use super::write_dedup_types::{MemoryWriteDedupDecider, PendingWriteDedup};
+use super::write_services::{
+    create_note, maybe_update_singleton_note, note_not_found, note_repository,
+    schedule_summary_regeneration,
 };
-use super::*;
+use super::{
+    DeleteParams, EditParams, MemoryDeleteResponse, MemoryNoteResponse, MoveParams, WriteParams,
+    apply_edit_operation, resolve_note_by_identifier,
+};
 
-use crate::tools::memory_tools::contradiction::ContradictionAnalysisInput;
-use crate::tools::memory_tools::summaries::NoteSummaryService;
-use djinn_core::events::DjinnEventEnvelope;
-use djinn_core::models::Note;
-use djinn_db::{folder_for_type, is_singleton};
+use crate::server::DjinnMcpServer;
+use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
+use std::path::{Path, PathBuf};
 
 #[tool_router(router = memory_writes_router, vis = "pub(super)")]
 impl DjinnMcpServer {
@@ -26,7 +30,7 @@ impl DjinnMcpServer {
     pub async fn memory_write_with_worktree(
         &self,
         Parameters(p): Parameters<WriteParams>,
-        worktree_root: Option<std::path::PathBuf>,
+        worktree_root: Option<PathBuf>,
     ) -> Json<MemoryNoteResponse> {
         self.memory_write_with_worktree_and_decider(
             Parameters(p),
@@ -39,7 +43,7 @@ impl DjinnMcpServer {
     pub(crate) async fn memory_write_with_worktree_and_decider(
         &self,
         Parameters(p): Parameters<WriteParams>,
-        worktree_root: Option<std::path::PathBuf>,
+        worktree_root: Option<PathBuf>,
         decider: &dyn MemoryWriteDedupDecider,
     ) -> Json<MemoryNoteResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
@@ -53,29 +57,14 @@ impl DjinnMcpServer {
             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
             .unwrap_or_else(|| "[]".to_string());
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
-            .with_worktree_root(worktree_root);
+        let repo = note_repository(self, worktree_root);
 
-        if is_singleton(&p.note_type)
-            && let Some(existing) = repo
-                .get_by_permalink(&project_id, &p.note_type)
-                .await
-                .ok()
-                .flatten()
+        if let Some(response) =
+            maybe_update_singleton_note(self, &repo, &project_id, &p, &tags_json).await
         {
-            match repo
-                .update(&existing.id, &p.title, &p.content, &tags_json)
-                .await
-            {
-                Ok(note) => {
-                    self.schedule_summary_regeneration(&note.id);
-                    return Json(MemoryNoteResponse::from_note(&note));
-                }
-                Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
-            }
+            return Json(response);
         }
 
-        // Deduplication flow: only for mergeable note types
         if let Some(response) = maybe_apply_write_dedup(
             &repo,
             decider,
@@ -93,48 +82,12 @@ impl DjinnMcpServer {
             if let Some(note_id) = response.id.as_deref()
                 && response.error.is_none()
             {
-                self.schedule_summary_regeneration(note_id);
+                schedule_summary_regeneration(self, note_id);
             }
             return Json(response);
         }
 
-        let scope_paths_json = p
-            .scope_paths
-            .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
-            .unwrap_or_else(|| "[]".to_string());
-
-        let create_result = if p.scope_paths.is_some() {
-            repo.create_db_note_with_scope(
-                &project_id,
-                &p.title,
-                &p.content,
-                &p.note_type,
-                &tags_json,
-                &scope_paths_json,
-            )
-            .await
-        } else {
-            repo.create(
-                &project_id,
-                Path::new(&p.project),
-                &p.title,
-                &p.content,
-                &p.note_type,
-                &tags_json,
-            )
-            .await
-        };
-
-        match create_result {
-            Ok(note) => {
-                self.schedule_summary_regeneration(&note.id);
-                self.detect_emit_and_schedule_contradictions(&repo, &note)
-                    .await;
-                Json(MemoryNoteResponse::from_note(&note))
-            }
-            Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
-        }
+        Json(create_note(self, &repo, &project_id, &p, &tags_json).await)
     }
 
     /// Edit an existing note. Operations: "append" (add to end), "prepend" (add
@@ -157,7 +110,7 @@ impl DjinnMcpServer {
     pub async fn memory_edit_with_worktree(
         &self,
         Parameters(p): Parameters<EditParams>,
-        worktree_root: Option<std::path::PathBuf>,
+        worktree_root: Option<PathBuf>,
     ) -> Json<MemoryNoteResponse> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return Json(MemoryNoteResponse::error(format!(
@@ -166,8 +119,7 @@ impl DjinnMcpServer {
             )));
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
-            .with_worktree_root(worktree_root);
+        let repo = note_repository(self, worktree_root);
 
         let note = match resolve_note_by_identifier(&repo, &project_id, &p.identifier).await {
             Some(n) => n,
@@ -211,7 +163,7 @@ impl DjinnMcpServer {
             .await
         {
             Ok(updated) => {
-                self.schedule_summary_regeneration(&updated.id);
+                schedule_summary_regeneration(self, &updated.id);
                 Json(MemoryNoteResponse::from_note(&updated))
             }
             Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
@@ -230,7 +182,7 @@ impl DjinnMcpServer {
     pub(crate) async fn memory_delete_with_worktree(
         &self,
         Parameters(p): Parameters<DeleteParams>,
-        worktree_root: Option<std::path::PathBuf>,
+        worktree_root: Option<PathBuf>,
     ) -> Json<MemoryDeleteResponse> {
         let Some(project_id) = self.project_id_for_path(&p.project).await else {
             return Json(MemoryDeleteResponse {
@@ -239,14 +191,10 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
-            .with_worktree_root(worktree_root);
+        let repo = note_repository(self, worktree_root);
 
         let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
-            return Json(MemoryDeleteResponse {
-                ok: false,
-                error: Some(format!("note not found: {}", p.identifier)),
-            });
+            return Json(note_not_found(&p.identifier));
         };
 
         match repo.delete(&note.id).await {
@@ -276,7 +224,7 @@ impl DjinnMcpServer {
             )));
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = note_repository(self, None);
 
         let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
             return Json(MemoryNoteResponse::error(format!(
@@ -300,59 +248,5 @@ impl DjinnMcpServer {
             }
             Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
         }
-    }
-}
-
-impl DjinnMcpServer {
-    fn schedule_summary_regeneration(&self, note_id: &str) {
-        let db = self.state.db().clone();
-        let note_id = note_id.to_string();
-        tokio::spawn(async move {
-            let service = NoteSummaryService::new(db.clone());
-            match djinn_provider::resolve_memory_provider(&db).await {
-                Ok(_) => service.generate_for_note_ids(&[note_id]).await,
-                Err(_) => service.apply_fallback_for_note_id(&note_id).await,
-            }
-        });
-    }
-
-    /// Stage 1: detect candidates and emit event. Stage 2: send to analysis worker.
-    ///
-    /// The analysis worker is triggered only when stage 1 finds candidates and emits
-    /// the `contradiction_candidates` event — never on every write.
-    async fn detect_emit_and_schedule_contradictions(&self, repo: &NoteRepository, note: &Note) {
-        let folder = folder_for_type(&note.note_type);
-        let Ok(candidates) = repo
-            .detect_contradiction_candidates(&note.id, &note.note_type, folder, &note.content)
-            .await
-        else {
-            return;
-        };
-
-        if candidates.is_empty() {
-            return;
-        }
-
-        // Stage 1: emit event for SSE / external listeners
-        self.state
-            .event_bus()
-            .send(DjinnEventEnvelope::contradiction_candidates(
-                note,
-                &candidates,
-            ));
-
-        // Stage 2: send to the contradiction analysis worker channel.
-        // The worker is only active when stage 1 emits candidates — satisfying the
-        // requirement that LLM analysis is triggered by the contradiction_candidates event.
-        let input = ContradictionAnalysisInput {
-            note_id: note.id.clone(),
-            note_title: note.title.clone(),
-            note_summary: note
-                .abstract_
-                .clone()
-                .unwrap_or_else(|| note.content.chars().take(500).collect()),
-            candidates,
-        };
-        let _ = self.contradiction_analysis_tx.try_send(input);
     }
 }
