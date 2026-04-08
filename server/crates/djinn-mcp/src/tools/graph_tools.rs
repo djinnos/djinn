@@ -36,8 +36,8 @@ pub struct CodeGraphParams {
     /// Node kind filter for `ranked`/`search`/`cycles`/`orphans`: `file` or `symbol`.
     #[serde(default)]
     pub kind_filter: Option<String>,
-    /// Maximum results for `ranked`/`search`/`orphans`/`edges` (default 20) or
-    /// max traversal depth for `impact` (default 3).
+    /// Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
+    /// (default 20) or max traversal depth for `impact` (default 3).
     #[serde(default)]
     pub limit: Option<i64>,
     /// Substring query for `search`.
@@ -348,9 +348,26 @@ impl DjinnMcpServer {
                 params.group_by.as_deref(),
             )
             .await?;
+        // Bound the wire size — the underlying neighbors() call returns every
+        // edge incident on the node (1k+ for high-centrality files), which
+        // makes the MCP response unusably large. Sort by weight desc and cap
+        // at `limit` (default 20, matching other list operations).
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
         let (neighbors, file_groups) = match result {
-            NeighborsResult::Detailed(v) => (Some(v), None),
-            NeighborsResult::Grouped(v) => (None, Some(v)),
+            NeighborsResult::Detailed(mut v) => {
+                v.sort_by(|a, b| {
+                    b.edge_weight
+                        .partial_cmp(&a.edge_weight)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                v.truncate(limit);
+                (Some(v), None)
+            }
+            NeighborsResult::Grouped(mut v) => {
+                v.sort_by(|a, b| b.occurrence_count.cmp(&a.occurrence_count));
+                v.truncate(limit);
+                (None, Some(v))
+            }
         };
         Ok(CodeGraphResponse::Neighbors(NeighborsResponse {
             key: key.to_string(),
