@@ -25,210 +25,21 @@
 //! response.  If the header is absent the client falls back to exponential
 //! back-off on `429 Too Many Requests`.
 
+mod client_core;
+mod types;
+
 use anyhow::{Result, anyhow};
-use reqwest::{Client, Response, StatusCode};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::oauth::github_app::GitHubAppTokens;
+pub use client_core::GITHUB_API_BASE;
+pub use types::{
+    ActionsJob, ActionsJobStep, CheckAnnotation, CheckRun, CheckRunsResponse, CreatePrParams,
+    GitHubUser, MergeMethod, PrRef, PrReview, PrReviewFeedback, PrState, PullRequest,
+    ReviewComment,
+};
+
 use crate::repos::CredentialRepository;
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-/// GitHub REST API v3 base URL.
-pub const GITHUB_API_BASE: &str = "https://api.github.com";
-
-/// Maximum number of token-refresh retries on 401 responses.
-const MAX_REFRESH_RETRIES: u32 = 1;
-
-/// Initial back-off duration for rate-limit retries (seconds).
-const BACKOFF_INITIAL_SECS: u64 = 1;
-
-/// Maximum back-off duration for rate-limit retries (seconds).
-const BACKOFF_MAX_SECS: u64 = 60;
-
-// ─── PR types ─────────────────────────────────────────────────────────────────
-
-/// Parameters for creating a pull request.
-#[derive(Debug, Clone, Serialize)]
-pub struct CreatePrParams {
-    pub title: String,
-    pub body: String,
-    /// Name of the branch to merge.
-    pub head: String,
-    /// Target branch.
-    pub base: String,
-    /// Whether to allow maintainers to push to the branch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub maintainer_can_modify: Option<bool>,
-    /// Whether the PR should be created as a draft.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub draft: Option<bool>,
-}
-
-/// Merge method for auto-merge.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MergeMethod {
-    #[default]
-    Merge,
-    Squash,
-    Rebase,
-}
-
-/// Pull request state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PrState {
-    Open,
-    Closed,
-}
-
-/// A single CI check run associated with a pull request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckRun {
-    pub id: u64,
-    pub name: String,
-    pub status: String,
-    pub conclusion: Option<String>,
-    pub html_url: String,
-}
-
-/// A GitHub Actions job within a workflow run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionsJob {
-    pub id: u64,
-    pub name: String,
-    pub status: String,
-    pub conclusion: Option<String>,
-    pub html_url: String,
-    /// The workflow file name (e.g. `quality-gate.yml`).
-    #[serde(default)]
-    pub workflow_name: Option<String>,
-    /// Individual steps within the job.
-    #[serde(default)]
-    pub steps: Vec<ActionsJobStep>,
-}
-
-/// A single step within a GitHub Actions job.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionsJobStep {
-    pub name: String,
-    pub status: String,
-    pub conclusion: Option<String>,
-    /// 1-based step number within the job.
-    pub number: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ActionsJobsResponse {
-    jobs: Vec<ActionsJob>,
-}
-
-/// A single annotation attached to a check run (error/warning/notice).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckAnnotation {
-    pub path: String,
-    pub start_line: u64,
-    pub end_line: u64,
-    pub annotation_level: String,
-    pub message: String,
-    pub title: Option<String>,
-}
-
-/// Summary of check runs for a PR head SHA.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckRunsResponse {
-    pub total_count: u32,
-    pub check_runs: Vec<CheckRun>,
-}
-
-/// A pull request returned by the GitHub API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PullRequest {
-    pub number: u64,
-    pub title: String,
-    pub state: PrState,
-    pub merged: Option<bool>,
-    pub html_url: String,
-    pub head: PrRef,
-    pub base: PrRef,
-    pub auto_merge: Option<serde_json::Value>,
-    pub node_id: String,
-    /// Whether the PR can be merged (no conflicts). `None` when GitHub hasn't
-    /// computed mergeability yet.
-    #[serde(default)]
-    pub mergeable: Option<bool>,
-    /// Mergeable state: `"clean"`, `"dirty"`, `"blocked"`, `"behind"`, `"unknown"`, etc.
-    #[serde(default)]
-    pub mergeable_state: Option<String>,
-    /// Whether the PR is a draft.
-    #[serde(default)]
-    pub draft: Option<bool>,
-}
-
-/// A branch/commit reference embedded in a PR.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrRef {
-    #[serde(rename = "ref")]
-    pub ref_name: String,
-    pub sha: String,
-}
-
-/// A top-level PR review (submitted via "Review changes" — distinct from inline comments).
-///
-/// The `state` field is one of `"APPROVED"`, `"CHANGES_REQUESTED"`, `"COMMENTED"`,
-/// `"DISMISSED"`, or `"PENDING"`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrReview {
-    pub id: u64,
-    pub user: Option<GitHubUser>,
-    pub state: String,
-    pub submitted_at: Option<String>,
-    pub html_url: String,
-    /// The general review body (non-line-specific).  May be empty or absent.
-    #[serde(default)]
-    pub body: String,
-}
-
-/// A review comment on a pull request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReviewComment {
-    pub id: u64,
-    pub user: Option<GitHubUser>,
-    pub body: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub html_url: String,
-    pub pull_request_review_id: Option<u64>,
-    pub path: Option<String>,
-    pub line: Option<u32>,
-}
-
-/// Minimal GitHub user object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitHubUser {
-    pub login: String,
-    pub id: u64,
-}
-
-/// Aggregated PR review feedback used to prime worker sessions during the
-/// review-feedback dispatch loop (ADR-037 Phase 4).
-///
-/// Combines top-level review states (CHANGES_REQUESTED) and inline review
-/// comments into a single structured payload that is stored as a
-/// `pr_review_feedback` activity log entry and surfaced in the worker prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrReviewFeedback {
-    /// PR number on GitHub.
-    pub pull_number: u64,
-    /// GitHub PR URL.
-    pub pr_url: String,
-    /// Top-level reviews that have `CHANGES_REQUESTED` state.
-    pub change_request_reviews: Vec<PrReview>,
-    /// Inline code comments from all reviewers.
-    pub inline_comments: Vec<ReviewComment>,
-}
+use client_core::{ActionsJobsResponse, GitHubApiCore, handle_rate_limit};
 
 // ─── Client ───────────────────────────────────────────────────────────────────
 
@@ -238,10 +49,7 @@ pub struct PrReviewFeedback {
 /// OAuth tokens, and an optional override for the API base URL (used in tests).
 #[derive(Clone)]
 pub struct GitHubApiClient {
-    http: Client,
-    cred_repo: Arc<CredentialRepository>,
-    /// Override for the GitHub API base URL (default: `GITHUB_API_BASE`).
-    base_url: String,
+    core: GitHubApiCore,
 }
 
 impl GitHubApiClient {
@@ -252,45 +60,9 @@ impl GitHubApiClient {
 
     /// Create a new client with a custom API base URL (useful for tests).
     pub fn with_base_url(cred_repo: Arc<CredentialRepository>, base_url: String) -> Self {
-        let http = Client::builder()
-            .user_agent("djinn-server/0.1 (+https://github.com/djinnos/server)")
-            .build()
-            .expect("failed to build reqwest client");
         Self {
-            http,
-            cred_repo,
-            base_url,
+            core: GitHubApiCore::new(cred_repo, base_url),
         }
-    }
-
-    // ─── Token management ─────────────────────────────────────────────────────
-
-    /// Load the cached GitHub OAuth App user access token.
-    async fn load_user_token(&self) -> Result<GitHubAppTokens> {
-        GitHubAppTokens::load_from_db(&self.cred_repo)
-            .await
-            .ok_or_else(|| anyhow!("No GitHub App tokens found — please authenticate first"))
-    }
-
-    // ─── Core request helper ──────────────────────────────────────────────────
-
-    /// Execute a request using the user OAuth token directly (per ADR-039).
-    /// Retries once with a refreshed token on 401.
-    async fn send_with_retry<F, Fut>(&self, build_request: F) -> Result<Response>
-    where
-        F: Fn(String) -> Fut,
-        Fut: std::future::Future<Output = Result<Response>>,
-    {
-        let user_tokens = self.load_user_token().await?;
-        let resp = build_request(user_tokens.access_token.clone()).await?;
-
-        if resp.status() == StatusCode::UNAUTHORIZED {
-            return Err(anyhow!(
-                "GitHub API returned 401 — token may have been revoked, please re-authenticate"
-            ));
-        }
-
-        Ok(resp)
     }
 
     // ─── PR operations ────────────────────────────────────────────────────────
@@ -304,14 +76,15 @@ impl GitHubApiClient {
         repo: &str,
         params: CreatePrParams,
     ) -> Result<PullRequest> {
-        let url = format!("{}/repos/{}/{}/pulls", self.base_url, owner, repo);
+        let url = format!("{}/repos/{}/{}/pulls", self.core.base_url(), owner, repo);
         let body = serde_json::to_value(&params)?;
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
                 let body = body.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .post(&url)
@@ -346,13 +119,17 @@ impl GitHubApiClient {
     ) -> Result<Vec<PullRequest>> {
         let url = format!(
             "{}/repos/{}/{}/pulls?state=open&head={}",
-            self.base_url, owner, repo, head
+            self.core.base_url(),
+            owner,
+            repo,
+            head
         );
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -387,13 +164,18 @@ impl GitHubApiClient {
     ) -> Result<Vec<PullRequest>> {
         let url = format!(
             "{}/repos/{}/{}/pulls?state={}&head={}",
-            self.base_url, owner, repo, state, head
+            self.core.base_url(),
+            owner,
+            repo,
+            state,
+            head
         );
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -428,15 +210,19 @@ impl GitHubApiClient {
     ) -> Result<PullRequest> {
         let url = format!(
             "{}/repos/{}/{}/pulls/{}",
-            self.base_url, owner, repo, pull_number
+            self.core.base_url(),
+            owner,
+            repo,
+            pull_number
         );
         let body = serde_json::json!({ "state": "open" });
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
                 let body = body.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .patch(&url)
@@ -500,11 +286,12 @@ impl GitHubApiClient {
             }
         });
 
-        let base_url = self.base_url.clone();
+        let base_url = self.core.base_url().to_owned();
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let body = body.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 let base_url = base_url.clone();
                 async move {
                     // Use base_url for testability; in production base_url is
@@ -549,13 +336,17 @@ impl GitHubApiClient {
         // Fetch PR.
         let pr_url = format!(
             "{}/repos/{}/{}/pulls/{}",
-            self.base_url, owner, repo, pull_number
+            self.core.base_url(),
+            owner,
+            repo,
+            pull_number
         );
 
         let pr_resp = self
+            .core
             .send_with_retry(|token| {
                 let url = pr_url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -579,13 +370,17 @@ impl GitHubApiClient {
         // Fetch check runs for the PR's head SHA.
         let checks_url = format!(
             "{}/repos/{}/{}/commits/{}/check-runs",
-            self.base_url, owner, repo, pr.head.sha
+            self.core.base_url(),
+            owner,
+            repo,
+            pr.head.sha
         );
 
         let checks_resp = self
+            .core
             .send_with_retry(|token| {
                 let url = checks_url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -624,13 +419,17 @@ impl GitHubApiClient {
     ) -> Result<Vec<ReviewComment>> {
         let url = format!(
             "{}/repos/{}/{}/pulls/{}/comments",
-            self.base_url, owner, repo, pull_number
+            self.core.base_url(),
+            owner,
+            repo,
+            pull_number
         );
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -669,13 +468,17 @@ impl GitHubApiClient {
     ) -> Result<Vec<CheckAnnotation>> {
         let url = format!(
             "{}/repos/{}/{}/check-runs/{}/annotations",
-            self.base_url, owner, repo, check_run_id
+            self.core.base_url(),
+            owner,
+            repo,
+            check_run_id
         );
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -713,13 +516,17 @@ impl GitHubApiClient {
     ) -> Result<Vec<PrReview>> {
         let url = format!(
             "{}/repos/{}/{}/pulls/{}/reviews",
-            self.base_url, owner, repo, pull_number
+            self.core.base_url(),
+            owner,
+            repo,
+            pull_number
         );
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -779,12 +586,13 @@ impl GitHubApiClient {
     /// Calls `GET /repos/{owner}/{repo}` and returns `Ok(())` on 200.
     /// Returns a descriptive error on 404/403 or any other failure.
     pub async fn check_repo_access(&self, owner: &str, repo: &str) -> Result<()> {
-        let url = format!("{}/repos/{}/{}", self.base_url, owner, repo);
+        let url = format!("{}/repos/{}/{}", self.core.base_url(), owner, repo);
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -825,15 +633,19 @@ impl GitHubApiClient {
 
         let url = format!(
             "{}/repos/{}/{}/pulls/{}/requested_reviewers",
-            self.base_url, owner, repo, pull_number
+            self.core.base_url(),
+            owner,
+            repo,
+            pull_number
         );
         let body = serde_json::json!({ "reviewers": reviewer_logins });
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
                 let body = body.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .post(&url)
@@ -870,7 +682,10 @@ impl GitHubApiClient {
     ) -> Result<serde_json::Value> {
         let url = format!(
             "{}/repos/{}/{}/pulls/{}/merge",
-            self.base_url, owner, repo, pull_number
+            self.core.base_url(),
+            owner,
+            repo,
+            pull_number
         );
         let merge_method_str = match method {
             MergeMethod::Squash => "squash",
@@ -883,10 +698,11 @@ impl GitHubApiClient {
         });
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
                 let body = body.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .put(&url)
@@ -931,11 +747,12 @@ impl GitHubApiClient {
             "variables": { "pullRequestId": node_id }
         });
 
-        let base_url = self.base_url.clone();
+        let base_url = self.core.base_url().to_owned();
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let body = body.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 let base_url = base_url.clone();
                 async move {
                     let graphql_url = format!("{}/graphql", base_url);
@@ -985,13 +802,17 @@ impl GitHubApiClient {
     ) -> Result<Vec<ActionsJob>> {
         let url = format!(
             "{}/repos/{}/{}/actions/runs/{}/jobs?per_page=100",
-            self.base_url, owner, repo, run_id
+            self.core.base_url(),
+            owner,
+            repo,
+            run_id
         );
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -1022,13 +843,17 @@ impl GitHubApiClient {
     pub async fn get_job_logs(&self, owner: &str, repo: &str, job_id: u64) -> Result<String> {
         let url = format!(
             "{}/repos/{}/{}/actions/jobs/{}/logs",
-            self.base_url, owner, repo, job_id
+            self.core.base_url(),
+            owner,
+            repo,
+            job_id
         );
 
         let resp = self
+            .core
             .send_with_retry(|token| {
                 let url = url.clone();
-                let http = self.http.clone();
+                let http = self.core.http().clone();
                 async move {
                     let resp = http
                         .get(&url)
@@ -1049,72 +874,6 @@ impl GitHubApiClient {
         }
         Ok(resp.text().await?)
     }
-}
-
-// ─── Rate limiting helper ─────────────────────────────────────────────────────
-
-/// Inspect rate-limit headers and sleep if the limit has been exhausted.
-///
-/// - If `X-RateLimit-Remaining` is `0`, sleep until `X-RateLimit-Reset`.
-/// - If status is `429 Too Many Requests` without rate-limit headers,
-///   apply exponential back-off starting at [`BACKOFF_INITIAL_SECS`].
-async fn handle_rate_limit(resp: Response) -> Result<Response> {
-    let status = resp.status();
-    let remaining = resp
-        .headers()
-        .get("X-RateLimit-Remaining")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-    let reset = resp
-        .headers()
-        .get("X-RateLimit-Reset")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-
-    if remaining == Some(0) {
-        let sleep_secs = if let Some(reset_epoch) = reset {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            reset_epoch.saturating_sub(now).max(1)
-        } else {
-            BACKOFF_INITIAL_SECS
-        };
-        tracing::warn!(
-            "GitHubApiClient: rate limit exhausted, sleeping {}s",
-            sleep_secs
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-        return Err(anyhow!(
-            "GitHub rate limit exhausted — retry after {}s",
-            sleep_secs
-        ));
-    }
-
-    if status == StatusCode::TOO_MANY_REQUESTS && remaining.is_none() {
-        // Back-off without reset header.
-        let mut delay = BACKOFF_INITIAL_SECS;
-        let mut attempts = 0u32;
-        loop {
-            tracing::warn!(
-                "GitHubApiClient: 429 without rate-limit header, back-off {}s (attempt {})",
-                delay,
-                attempts + 1
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-            attempts += 1;
-            if attempts >= MAX_REFRESH_RETRIES || delay >= BACKOFF_MAX_SECS {
-                return Err(anyhow!(
-                    "GitHub API returned 429 after {} retries",
-                    attempts
-                ));
-            }
-            delay = (delay * 2).min(BACKOFF_MAX_SECS);
-        }
-    }
-
-    Ok(resp)
 }
 
 /// Minimal ISO-8601 UTC parser: `YYYY-MM-DDTHH:MM:SSZ` → epoch seconds.
