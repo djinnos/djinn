@@ -321,6 +321,44 @@ mod tests {
         assert!(resolved.is_empty());
     }
 
+    #[test]
+    fn resolve_mcp_servers_preserves_http_headers_env_and_args() {
+        let mut registry = HashMap::new();
+        registry.insert(
+            "remote-server".to_string(),
+            McpServerConfig {
+                url: Some("https://example.com/mcp".to_string()),
+                command: Some("ignored-when-http-present".to_string()),
+                args: vec!["--flag".to_string(), "value".to_string()],
+                env: HashMap::from([(
+                    "API_TOKEN".to_string(),
+                    "${DJINN_REMOTE_TOKEN}".to_string(),
+                )]),
+                headers: HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer ${DJINN_REMOTE_TOKEN}".to_string(),
+                )]),
+            },
+        );
+
+        let names = vec!["remote-server".to_string()];
+        let resolved = resolve_mcp_servers("t4", "worker", &names, &registry);
+
+        assert_eq!(resolved.len(), 1);
+        let config = resolved[0].1;
+        assert_eq!(config.url.as_deref(), Some("https://example.com/mcp"));
+        assert_eq!(config.command.as_deref(), Some("ignored-when-http-present"));
+        assert_eq!(config.args, vec!["--flag", "value"]);
+        assert_eq!(
+            config.env.get("API_TOKEN").map(String::as_str),
+            Some("${DJINN_REMOTE_TOKEN}")
+        );
+        assert_eq!(
+            config.headers.get("Authorization").map(String::as_str),
+            Some("Bearer ${DJINN_REMOTE_TOKEN}")
+        );
+    }
+
     // ── verification_rules tests ──────────────────────────────────────────────
 
     #[test]

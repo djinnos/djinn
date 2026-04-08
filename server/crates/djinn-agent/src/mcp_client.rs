@@ -5,13 +5,14 @@
 //! to those servers during the reply loop.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 #[cfg(test)]
 use std::future::Future;
 #[cfg(test)]
 use std::pin::Pin;
 
+use regex::Regex;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
@@ -20,8 +21,13 @@ use rmcp::transport::{
     StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
 };
 
+use crate::context::AgentContext;
 use crate::extension::shared_schemas;
 use crate::verification::settings::McpServerConfig;
+use djinn_provider::repos::CredentialRepository;
+
+static PLACEHOLDER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{([A-Za-z0-9_]+)\}").expect("valid MCP placeholder regex"));
 
 /// Registry of MCP tool names → server connections built at session start.
 ///
@@ -46,6 +52,45 @@ type TestDispatchFuture = Pin<Box<dyn Future<Output = Result<serde_json::Value, 
 type TestDispatchFn = dyn Fn(&str, Option<serde_json::Map<String, serde_json::Value>>) -> TestDispatchFuture
     + Send
     + Sync;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedMcpServerConfig {
+    url: Option<String>,
+    command: Option<String>,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpTransportKind {
+    Http,
+    Stdio,
+    Unsupported,
+}
+
+impl ResolvedMcpServerConfig {
+    fn transport_kind(&self) -> McpTransportKind {
+        if self.url.is_some() {
+            McpTransportKind::Http
+        } else if self.command.is_some() {
+            McpTransportKind::Stdio
+        } else {
+            McpTransportKind::Unsupported
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MissingPlaceholder {
+    field: String,
+    variable: String,
+}
+
+enum PlaceholderLookup {
+    Found(String),
+    Missing,
+}
 
 impl McpToolRegistry {
     /// Returns true if this registry has a tool with the given name.
@@ -132,16 +177,18 @@ fn call_tool_result_to_json(result: CallToolResult) -> Result<serde_json::Value,
 /// Connect to resolved MCP servers and discover their tools.
 ///
 /// For each `(name, config)` pair:
-/// 1. If the config has a `url`, connect via Streamable HTTP transport.
-/// 2. Call `tools/list` on the connected peer.
-/// 3. Convert each MCP tool definition into a provider-compatible JSON schema.
+/// 1. Resolve `${VAR_NAME}` placeholders against environment/credentials.
+/// 2. If the config resolves to HTTP, connect via Streamable HTTP transport.
+/// 3. Call `tools/list` on the connected peer.
+/// 4. Convert each MCP tool definition into a provider-compatible JSON schema.
 ///
-/// Servers that fail to connect or list tools are logged and skipped (non-fatal).
+/// Servers that fail to resolve, connect, or list tools are logged and skipped (non-fatal).
 /// Returns `None` when no tools were discovered.
 pub(crate) async fn connect_and_discover(
     task_short_id: &str,
     role_name: &str,
     servers: &[(String, McpServerConfig)],
+    app_state: &AgentContext,
 ) -> Option<McpToolRegistry> {
     if servers.is_empty() {
         return None;
@@ -152,28 +199,55 @@ pub(crate) async fn connect_and_discover(
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
 
     for (name, config) in servers {
-        let url = match &config.url {
-            Some(url) => url.clone(),
-            None => {
-                // stdio transport not yet supported for agent sessions; skip.
+        let resolved = match resolve_server_config(name, config, app_state).await {
+            Ok(resolved) => resolved,
+            Err(missing) => {
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
                     server = %name,
-                    "MCP server has no URL (stdio not yet supported for agent sessions); skipping"
+                    field = %missing.field,
+                    variable = %missing.variable,
+                    "MCP server config references missing placeholder value; skipping"
+                );
+                continue;
+            }
+        };
+
+        let url = match resolved.transport_kind() {
+            McpTransportKind::Http => resolved.url.clone().expect("HTTP transport requires URL"),
+            McpTransportKind::Stdio => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    role = %role_name,
+                    server = %name,
+                    has_command = true,
+                    arg_count = resolved.args.len(),
+                    env_count = resolved.env.len(),
+                    "MCP server uses stdio transport (not yet supported for agent sessions); skipping"
+                );
+                continue;
+            }
+            McpTransportKind::Unsupported => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    role = %role_name,
+                    server = %name,
+                    "MCP server config has neither URL nor command; skipping unsupported transport"
                 );
                 continue;
             }
         };
 
         // Connect to the MCP server.
-        let peer = match connect_to_server(&url, &config.headers).await {
+        let peer = match connect_to_server(&url, &resolved.headers).await {
             Ok(peer) => {
                 tracing::info!(
                     task_id = %task_short_id,
                     role = %role_name,
                     server = %name,
                     url = %url,
+                    header_count = resolved.headers.len(),
                     "Connected to MCP server"
                 );
                 Arc::new(peer)
@@ -262,6 +336,108 @@ pub(crate) async fn connect_and_discover(
     })
 }
 
+async fn resolve_server_config(
+    server_name: &str,
+    config: &McpServerConfig,
+    app_state: &AgentContext,
+) -> Result<ResolvedMcpServerConfig, MissingPlaceholder> {
+    Ok(ResolvedMcpServerConfig {
+        url: match &config.url {
+            Some(url) => Some(
+                resolve_placeholder_value(app_state, url, &format!("server `{server_name}` url"))
+                    .await?,
+            ),
+            None => None,
+        },
+        command: config.command.clone(),
+        args: config.args.clone(),
+        env: resolve_placeholder_map(
+            app_state,
+            &config.env,
+            &format!("server `{server_name}` env"),
+        )
+        .await?,
+        headers: resolve_placeholder_map(
+            app_state,
+            &config.headers,
+            &format!("server `{server_name}` header"),
+        )
+        .await?,
+    })
+}
+
+async fn resolve_placeholder_map(
+    app_state: &AgentContext,
+    values: &HashMap<String, String>,
+    field_prefix: &str,
+) -> Result<HashMap<String, String>, MissingPlaceholder> {
+    let mut resolved = HashMap::with_capacity(values.len());
+    for (key, value) in values {
+        resolved.insert(
+            key.clone(),
+            resolve_placeholder_value(app_state, value, &format!("{field_prefix} `{key}`")).await?,
+        );
+    }
+    Ok(resolved)
+}
+
+async fn resolve_placeholder_value(
+    app_state: &AgentContext,
+    value: &str,
+    field: &str,
+) -> Result<String, MissingPlaceholder> {
+    let mut resolved = String::with_capacity(value.len());
+    let mut last_end = 0;
+
+    for captures in PLACEHOLDER_RE.captures_iter(value) {
+        let full = captures.get(0).expect("full placeholder match");
+        let variable = captures
+            .get(1)
+            .expect("placeholder variable capture")
+            .as_str();
+
+        resolved.push_str(&value[last_end..full.start()]);
+        match lookup_placeholder_value(app_state, variable).await {
+            PlaceholderLookup::Found(replacement) => resolved.push_str(&replacement),
+            PlaceholderLookup::Missing => {
+                return Err(MissingPlaceholder {
+                    field: field.to_string(),
+                    variable: variable.to_string(),
+                });
+            }
+        }
+        last_end = full.end();
+    }
+
+    if last_end == 0 {
+        return Ok(value.to_string());
+    }
+
+    resolved.push_str(&value[last_end..]);
+    Ok(resolved)
+}
+
+async fn lookup_placeholder_value(app_state: &AgentContext, variable: &str) -> PlaceholderLookup {
+    if let Ok(value) = std::env::var(variable) {
+        return PlaceholderLookup::Found(value);
+    }
+
+    let credential_repo =
+        CredentialRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    match credential_repo.get_decrypted(variable).await {
+        Ok(Some(value)) => PlaceholderLookup::Found(value),
+        Ok(None) => PlaceholderLookup::Missing,
+        Err(error) => {
+            tracing::warn!(
+                variable = variable,
+                error = %error,
+                "Failed to resolve MCP placeholder from credential store"
+            );
+            PlaceholderLookup::Missing
+        }
+    }
+}
+
 /// Establish a connection to an MCP server via Streamable HTTP transport.
 async fn connect_to_server(
     url: &str,
@@ -294,6 +470,16 @@ async fn connect_to_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use djinn_core::events::EventBus;
+    use djinn_provider::repos::CredentialRepository;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
+
+    fn test_context() -> AgentContext {
+        agent_context_from_db(create_test_db(), CancellationToken::new())
+    }
 
     #[test]
     fn call_tool_result_text_content() {
@@ -430,13 +616,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_server_config_substitutes_env_and_credentials() {
+        let app_state = test_context();
+        let cred_repo = CredentialRepository::new(app_state.db.clone(), EventBus::noop());
+        cred_repo
+            .set("test", "TEST_TOKEN", "credential-secret")
+            .await
+            .expect("seed test credential");
+
+        let unique = format!("DJINN_MCP_TEST_{}", uuid::Uuid::now_v7().simple());
+        unsafe { std::env::set_var(&unique, "from-env") };
+
+        let config = McpServerConfig {
+            url: Some(format!("https://example.com/${{{unique}}}/mcp")),
+            command: Some("ignored-command".to_string()),
+            args: vec!["--flag".to_string()],
+            env: HashMap::from([("API_KEY".to_string(), "${TEST_TOKEN}".to_string())]),
+            headers: HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer ${TEST_TOKEN}".to_string(),
+            )]),
+        };
+
+        let resolved = resolve_server_config("example", &config, &app_state)
+            .await
+            .expect("resolve server config");
+
+        assert_eq!(
+            resolved.url.as_deref(),
+            Some("https://example.com/from-env/mcp")
+        );
+        assert_eq!(resolved.command.as_deref(), Some("ignored-command"));
+        assert_eq!(resolved.args, vec!["--flag"]);
+        assert_eq!(
+            resolved.env.get("API_KEY").map(String::as_str),
+            Some("credential-secret")
+        );
+        assert_eq!(
+            resolved.headers.get("Authorization").map(String::as_str),
+            Some("Bearer credential-secret")
+        );
+
+        unsafe { std::env::remove_var(&unique) };
+    }
+
+    #[tokio::test]
+    async fn resolve_server_config_errors_on_missing_placeholder() {
+        let app_state = test_context();
+        let config = McpServerConfig {
+            url: Some("https://example.com/${MISSING_TOKEN}/mcp".to_string()),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::new(),
+        };
+
+        let error = resolve_server_config("example", &config, &app_state)
+            .await
+            .expect_err("missing placeholder should error");
+
+        assert_eq!(error.variable, "MISSING_TOKEN");
+        assert_eq!(error.field, "server `example` url");
+    }
+
+    #[tokio::test]
+    async fn resolve_server_config_reports_missing_header_placeholder() {
+        let app_state = test_context();
+        let config = McpServerConfig {
+            url: Some("https://example.com/mcp".to_string()),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer ${MISSING_HEADER_TOKEN}".to_string(),
+            )]),
+        };
+
+        let error = resolve_server_config("example", &config, &app_state)
+            .await
+            .expect_err("missing header placeholder should error");
+
+        assert_eq!(error.variable, "MISSING_HEADER_TOKEN");
+        assert_eq!(error.field, "server `example` header `Authorization`");
+    }
+
+    #[test]
+    fn resolved_transport_kind_is_explicit() {
+        let http = ResolvedMcpServerConfig {
+            url: Some("https://example.com/mcp".to_string()),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::new(),
+        };
+        let stdio = ResolvedMcpServerConfig {
+            url: None,
+            command: Some("server".to_string()),
+            args: vec!["--stdio".to_string()],
+            env: HashMap::from([("TOKEN".to_string(), "value".to_string())]),
+            headers: HashMap::new(),
+        };
+        let unsupported = ResolvedMcpServerConfig {
+            url: None,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::new(),
+        };
+
+        assert_eq!(http.transport_kind(), McpTransportKind::Http);
+        assert_eq!(stdio.transport_kind(), McpTransportKind::Stdio);
+        assert_eq!(unsupported.transport_kind(), McpTransportKind::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn connect_to_server_sends_resolved_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept connection");
+            let mut buffer = vec![0_u8; 8192];
+            let size = stream.read(&mut buffer).await.expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..size]).to_string();
+            let response = b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n";
+            stream.write_all(response).await.expect("write response");
+            request
+        });
+
+        let result = connect_to_server(
+            &format!("http://{addr}/mcp"),
+            &HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer resolved-secret".to_string(),
+            )]),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let request = server.await.expect("server task result");
+        assert!(request.contains("authorization: Bearer resolved-secret"));
+    }
+
+    #[tokio::test]
     async fn connect_and_discover_empty_servers() {
-        let result = connect_and_discover("test", "worker", &[]).await;
+        let app_state = test_context();
+        let result = connect_and_discover("test", "worker", &[], &app_state).await;
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn connect_and_discover_skips_stdio_only() {
+        let app_state = test_context();
         let servers = vec![(
             "stdio-server".to_string(),
             McpServerConfig {
@@ -447,12 +781,31 @@ mod tests {
                 headers: HashMap::new(),
             },
         )];
-        let result = connect_and_discover("test", "worker", &servers).await;
+        let result = connect_and_discover("test", "worker", &servers, &app_state).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_and_discover_skips_unsupported_transport() {
+        let app_state = test_context();
+        let servers = vec![(
+            "unsupported-server".to_string(),
+            McpServerConfig {
+                url: None,
+                command: None,
+                args: vec!["--unused".to_string()],
+                env: HashMap::from([("TOKEN".to_string(), "value".to_string())]),
+                headers: HashMap::from([("Authorization".to_string(), "Bearer token".to_string())]),
+            },
+        )];
+
+        let result = connect_and_discover("test", "worker", &servers, &app_state).await;
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn connect_and_discover_skips_unreachable() {
+        let app_state = test_context();
         let servers = vec![(
             "bad-server".to_string(),
             McpServerConfig {
@@ -463,7 +816,25 @@ mod tests {
                 headers: HashMap::new(),
             },
         )];
-        let result = connect_and_discover("test", "worker", &servers).await;
+        let result = connect_and_discover("test", "worker", &servers, &app_state).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_and_discover_skips_missing_placeholder_server() {
+        let app_state = test_context();
+        let servers = vec![(
+            "missing-placeholder".to_string(),
+            McpServerConfig {
+                url: Some("https://example.com/${MISSING_VALUE}/mcp".to_string()),
+                command: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                headers: HashMap::new(),
+            },
+        )];
+
+        let result = connect_and_discover("test", "worker", &servers, &app_state).await;
         assert!(result.is_none());
     }
 }
