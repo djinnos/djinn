@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 
 use super::consolidation::ConsolidationRunner;
 use crate::actors::slot::SlotPoolHandle;
@@ -119,6 +119,8 @@ pub struct CoordinatorStatus {
     /// Per-project PR creation errors (project_id → error message).
     /// Populated when GitHub PR creation fails (e.g. org OAuth restrictions).
     pub pr_errors: HashMap<String, String>,
+    /// Shared suppression window propagated from provider rate-limit retries.
+    pub rate_limited_until: Option<StdInstant>,
 }
 
 /// Internal snapshot published via `watch` channel so `get_status()` reads
@@ -134,6 +136,7 @@ pub(super) struct SharedCoordinatorState {
     pub(super) epic_throughput: HashMap<String, usize>,
     /// Per-project PR creation errors (project_id → error message).
     pub(super) pr_errors: HashMap<String, String>,
+    pub(super) rate_limited_until: Option<StdInstant>,
 }
 
 impl SharedCoordinatorState {
@@ -175,6 +178,7 @@ impl SharedCoordinatorState {
             unhealthy_projects,
             epic_throughput: self.epic_throughput.clone(),
             pr_errors,
+            rate_limited_until: self.rate_limited_until,
         }
     }
 }

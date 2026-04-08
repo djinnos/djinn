@@ -21,6 +21,7 @@ use djinn_db::ProjectRepository;
 use djinn_db::{ActivityQuery, ReadyQuery, TaskRepository};
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
+use djinn_provider::rate_limit::suppression_remaining;
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
 
@@ -293,9 +294,13 @@ impl CoordinatorActor {
                     if self.prune_tick_counter >= 120 {
                         self.prune_tick_counter = 0;
                         self.prune_note_associations().await;
-                        super::consolidation::run_note_consolidation(&self.db, &self.consolidation_runner).await;
+                        if !self.should_skip_background_llm_work("hourly_note_consolidation") {
+                            super::consolidation::run_note_consolidation(&self.db, &self.consolidation_runner).await;
+                        }
                         self.evict_throughput_events();
-                        self.evaluate_prompt_amendments().await;
+                        if !self.should_skip_background_llm_work("hourly_prompt_amendment_evaluation") {
+                            self.evaluate_prompt_amendments().await;
+                        }
                     }
                     // Architect patrol: completion-time-based scheduling.
                     // Only attempt dispatch once `next_patrol_interval` has
@@ -334,7 +339,25 @@ impl CoordinatorActor {
             recovered: self.recovered,
             epic_throughput: self.throughput_snapshot(),
             pr_errors: self.pr_errors.clone(),
+            rate_limited_until: self.current_rate_limited_until(),
         });
+    }
+
+    pub(super) fn current_rate_limited_until(&self) -> Option<StdInstant> {
+        suppression_remaining(std::time::Instant::now())
+            .map(|remaining| StdInstant::now() + remaining)
+    }
+
+    pub(super) fn should_skip_background_llm_work(&self, operation: &str) -> bool {
+        if let Some(remaining) = suppression_remaining(std::time::Instant::now()) {
+            tracing::info!(
+                operation,
+                remaining_ms = remaining.as_millis(),
+                "CoordinatorActor: skipping non-critical background LLM work during provider suppression window"
+            );
+            return true;
+        }
+        false
     }
 
     async fn handle_message(&mut self, msg: CoordinatorMessage) {
@@ -854,7 +877,7 @@ impl CoordinatorActor {
     /// Check whether the system is idle (no active slots, no ready tasks) and
     /// enough time has passed since the last consolidation.  If so, spawn a
     /// cancellable background consolidation sweep.
-    async fn maybe_start_idle_consolidation(&mut self) {
+    pub(crate) async fn maybe_start_idle_consolidation(&mut self) {
         // Respect cooldown.
         if let Some(last) = self.last_idle_consolidation
             && last.elapsed() < IDLE_CONSOLIDATION_COOLDOWN
@@ -885,6 +908,11 @@ impl CoordinatorActor {
             Err(_) => return,
         };
         if has_ready {
+            return;
+        }
+
+        if self.should_skip_background_llm_work("idle_note_consolidation") {
+            self.publish_status();
             return;
         }
 

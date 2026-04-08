@@ -592,6 +592,7 @@ mod tests {
             recovered: 0,
             epic_throughput: HashMap::new(),
             pr_errors: HashMap::new(),
+            rate_limited_until: None,
         });
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let mut actor = CoordinatorActor::new(
@@ -656,6 +657,7 @@ mod tests {
             recovered: 0,
             epic_throughput: HashMap::new(),
             pr_errors: HashMap::new(),
+            rate_limited_until: None,
         });
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let mut actor = CoordinatorActor::new(

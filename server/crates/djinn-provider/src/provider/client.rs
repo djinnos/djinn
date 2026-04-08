@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::io::StreamReader;
 
 use super::AuthMethod;
+use crate::rate_limit::{activate_suppression_window, clear_suppression_window};
 
 // ─── Retry configuration ────────────────────────────────────────────────────
 
@@ -92,6 +93,7 @@ impl ApiClient {
                         Ok(resp) => {
                             let status = resp.status();
                             if status.is_success() {
+                                clear_suppression_window();
                                 break 'retry resp;
                             }
 
@@ -99,16 +101,14 @@ impl ApiClient {
 
                             if should_retry(attempt, is_retryable) {
                                 // Check for Retry-After header.
-                                let retry_after_ms = resp
-                                    .headers()
-                                    .get("retry-after")
-                                    .and_then(|v| v.to_str().ok())
-                                    .and_then(|s| s.parse::<u64>().ok())
-                                    .map(|secs| secs * 1000);
+                                let retry_after_ms = retry_after_ms(resp.headers());
 
                                 let body_text = resp.text().await.unwrap_or_default();
                                 attempt += 1;
                                 let delay_ms = retry_after_ms.unwrap_or_else(|| backoff_delay_ms(attempt));
+                                if is_rate_limit_status(status) {
+                                    activate_suppression_window(Duration::from_millis(delay_ms));
+                                }
                                 tracing::warn!(
                                     attempt,
                                     status = %status,
@@ -220,6 +220,7 @@ impl ApiClient {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
+                        clear_suppression_window();
                         return resp
                             .text()
                             .await
@@ -228,16 +229,14 @@ impl ApiClient {
 
                     let is_retryable = is_retryable_status(status);
                     if should_retry(attempt, is_retryable) {
-                        let retry_after_ms = resp
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|s| s.parse::<u64>().ok())
-                            .map(|secs| secs * 1000);
+                        let retry_after_ms = retry_after_ms(resp.headers());
 
                         let body_text = resp.text().await.unwrap_or_default();
                         attempt += 1;
                         let delay_ms = retry_after_ms.unwrap_or_else(|| backoff_delay_ms(attempt));
+                        if is_rate_limit_status(status) {
+                            activate_suppression_window(Duration::from_millis(delay_ms));
+                        }
                         tracing::warn!(attempt, status = %status, delay_ms, "POST request failed; retrying");
                         tracing::debug!(body = %body_text, "retryable error body");
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -278,6 +277,29 @@ fn backoff_delay_ms(attempt: u32) -> u64 {
 
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status.as_u16() == 429 || status.is_server_error()
+}
+
+fn is_rate_limit_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 529)
+}
+
+fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
+    let raw = headers.get("retry-after")?.to_str().ok()?.trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(seconds.saturating_mul(1000));
+    }
+
+    let retry_after =
+        time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc2822)
+            .ok()
+            .or_else(|| {
+                time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+                    .ok()
+            })?;
+    let now = time::OffsetDateTime::now_utc();
+    let delta = retry_after - now;
+    let millis = delta.whole_milliseconds();
+    (millis > 0).then_some(millis as u64)
 }
 
 fn should_retry(attempt: u32, is_retryable: bool) -> bool {
@@ -374,5 +396,30 @@ mod tests {
     #[test]
     fn client_builds_successfully() {
         let _client = ApiClient::new();
+    }
+
+    #[test]
+    fn retry_after_ms_parses_seconds_and_http_dates() {
+        let mut seconds = HeaderMap::new();
+        seconds.insert("retry-after", "7".parse().unwrap());
+        assert_eq!(retry_after_ms(&seconds), Some(7000));
+
+        let mut http_date = HeaderMap::new();
+        let future = (time::OffsetDateTime::now_utc() + time::Duration::seconds(2))
+            .format(&time::format_description::well_known::Rfc2822)
+            .unwrap();
+        http_date.insert("retry-after", future.parse().unwrap());
+        assert!(retry_after_ms(&http_date).is_some_and(|value| value > 0));
+    }
+
+    #[test]
+    fn rate_limit_status_matches_429_and_529_only() {
+        assert!(is_rate_limit_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_rate_limit_status(
+            reqwest::StatusCode::from_u16(529).unwrap()
+        ));
+        assert!(!is_rate_limit_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
     }
 }
