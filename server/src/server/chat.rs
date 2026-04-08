@@ -13,10 +13,7 @@ use crate::server::AppState;
 mod context;
 mod prompt;
 
-use self::context::{
-    RepoMapCompanionContext, build_project_context_block, build_repo_map_context_block,
-    repo_map_companion_context,
-};
+use self::context::build_project_chat_context;
 use self::prompt::build_system_message;
 use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
@@ -229,26 +226,11 @@ pub(super) async fn completions_handler(
     let provider = create_provider(provider_config);
 
     let mut conversation = Conversation::new();
-    let project_context = if let Some(project_ref) = req.project.as_deref() {
-        build_project_context_block(&state, project_ref).await
-    } else {
-        None
-    };
-    let repo_map_context = if let Some(project_ref) = req.project.as_deref() {
-        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-        let companion_context = match project_repo.resolve(project_ref).await {
-            Ok(Some(project_id)) => repo_map_companion_context(&state, &project_id).await,
-            _ => RepoMapCompanionContext::default(),
-        };
-        build_repo_map_context_block(&state, project_ref, &companion_context.companion_note_ids)
-            .await
-    } else {
-        None
-    };
+    let chat_context = build_project_chat_context(&state, req.project.as_deref()).await;
     let system_message = build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
-        project_context.as_deref(),
-        repo_map_context.as_deref(),
+        chat_context.project_context.as_deref(),
+        chat_context.repo_map_context.as_deref(),
         req.system.as_deref(),
         &req.model,
     );

@@ -11,6 +11,12 @@ use crate::server::AppState;
 
 pub(super) const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct ProjectChatContext {
+    pub(super) project_context: Option<String>,
+    pub(super) repo_map_context: Option<String>,
+}
+
 pub(super) fn format_repo_map_block(rendered: &str, permalink: Option<&str>) -> String {
     match permalink {
         Some(permalink) => {
@@ -29,6 +35,30 @@ async fn repo_commit_sha(state: &AppState, repo_path: &Path) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct RepoMapCompanionContext {
     pub(super) companion_note_ids: Vec<String>,
+}
+
+pub(super) async fn build_project_chat_context(
+    state: &AppState,
+    project_ref: Option<&str>,
+) -> ProjectChatContext {
+    let Some(project_ref) = project_ref else {
+        return ProjectChatContext::default();
+    };
+
+    let project_context = build_project_context_block(state, project_ref).await;
+    let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let companion_context = match project_repo.resolve(project_ref).await {
+        Ok(Some(project_id)) => repo_map_companion_context(state, &project_id).await,
+        _ => RepoMapCompanionContext::default(),
+    };
+    let repo_map_context =
+        build_repo_map_context_block(state, project_ref, &companion_context.companion_note_ids)
+            .await;
+
+    ProjectChatContext {
+        project_context,
+        repo_map_context,
+    }
 }
 
 pub(super) fn unique_companion_note_ids<I>(companion_note_ids: I) -> Vec<String>
