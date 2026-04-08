@@ -26,6 +26,9 @@ use crate::tools::project_tools::{
     ProjectAddParams, ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
     ProjectSettingsValidateParams,
 };
+use crate::tools::proposal_tools::{
+    ProposeAdrAcceptParams, ProposeAdrListParams, ProposeAdrRejectParams, ProposeAdrShowParams,
+};
 use crate::tools::provider_tools::{
     ModelHealthInput, ProviderAddCustomInput, ProviderModelLookupInput, ProviderModelsInput,
     ProviderOauthStartInput, ProviderRemoveInput, ProviderValidateInput,
@@ -239,6 +242,30 @@ impl DjinnMcpServer {
                     ProjectSettingsValidateParams,
                 >(name, args)?))
                     .await,
+            ),
+            "propose_adr_list" => map_json(
+                name,
+                self.propose_adr_list(Parameters(decode_args::<ProposeAdrListParams>(name, args)?))
+                    .await,
+            ),
+            "propose_adr_show" => map_json(
+                name,
+                self.propose_adr_show(Parameters(decode_args::<ProposeAdrShowParams>(name, args)?))
+                    .await,
+            ),
+            "propose_adr_accept" => map_json(
+                name,
+                self.propose_adr_accept(Parameters(decode_args::<ProposeAdrAcceptParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "propose_adr_reject" => map_json(
+                name,
+                self.propose_adr_reject(Parameters(decode_args::<ProposeAdrRejectParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "model_health" => map_json(
                 name,
