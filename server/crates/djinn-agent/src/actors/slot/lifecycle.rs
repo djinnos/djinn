@@ -651,6 +651,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     &task.short_id,
                     runtime_role.config().name,
                     &resolved_mcp_servers,
+                    &app_state,
                 )
                 .await
             } else {
@@ -664,6 +665,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                     &task.short_id,
                     runtime_role.config().name,
                     &resolved_mcp_servers,
+                    &app_state,
                 )
                 .await
             } else {
