@@ -7,22 +7,6 @@ use djinn_core::commands::{CommandResult, CommandSpec};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
-/// Compute an isolated `CARGO_TARGET_DIR` path for a given working directory.
-///
-/// Each worktree gets its own cargo target dir so parallel verification runs
-/// don't contend on the workspace-level build cache or each other's `target/`
-/// lock files.  The path shape matches the legacy `.djinn/settings.json` setup
-/// script it replaces so existing cached artifacts stay valid:
-/// `/tmp/djinn-targets/<basename(working_dir)>-server`.
-///
-/// Returns `None` when the working directory has no filename component
-/// (e.g. `/`), in which case the caller should leave `CARGO_TARGET_DIR`
-/// untouched and fall back to cargo's default.
-fn isolated_cargo_target_dir(working_dir: &Path) -> Option<std::path::PathBuf> {
-    let basename = working_dir.file_name()?.to_str()?;
-    Some(std::path::PathBuf::from("/tmp/djinn-targets").join(format!("{basename}-server")))
-}
-
 /// Run a pre-configured `std::process::Command` with process-group isolation
 /// and timeout kill-tree behavior.
 async fn spawn_command(mut cmd: Command, timeout: Duration) -> io::Result<Output> {
@@ -45,17 +29,6 @@ pub async fn run_commands(
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&spec.command).current_dir(working_dir);
-
-        // Inject a per-worktree CARGO_TARGET_DIR so parallel verification
-        // pipelines don't share a single workspace `target/` lock or stomp
-        // on each other's incremental compile state.  Respect an explicit
-        // override from the parent process env, so operators can still
-        // pin the cache location globally.
-        if std::env::var_os("CARGO_TARGET_DIR").is_none()
-            && let Some(target_dir) = isolated_cargo_target_dir(working_dir)
-        {
-            cmd.env("CARGO_TARGET_DIR", &target_dir);
-        }
 
         let output = spawn_command(cmd, duration)
             .await
@@ -146,29 +119,6 @@ mod tests {
         let results = run_commands(&commands, &tmp_dir()).await.unwrap();
         assert!(results[0].stderr.contains("oops"));
         assert_ne!(results[0].exit_code, 0);
-    }
-
-    #[test]
-    fn isolated_cargo_target_dir_uses_basename() {
-        let path = Path::new("/home/dev/.djinn/worktrees/0bhg");
-        assert_eq!(
-            isolated_cargo_target_dir(path),
-            Some(PathBuf::from("/tmp/djinn-targets/0bhg-server"))
-        );
-    }
-
-    #[test]
-    fn isolated_cargo_target_dir_handles_trailing_slash() {
-        let path = Path::new("/home/dev/project/");
-        assert_eq!(
-            isolated_cargo_target_dir(path),
-            Some(PathBuf::from("/tmp/djinn-targets/project-server"))
-        );
-    }
-
-    #[test]
-    fn isolated_cargo_target_dir_returns_none_for_root() {
-        assert_eq!(isolated_cargo_target_dir(Path::new("/")), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

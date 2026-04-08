@@ -71,6 +71,7 @@ opentelemetry-semantic-conventions = "0.31"
 petgraph = "0.8"
 scip = "0.7"
 globset = "0.4"
+tempfile = "3"
 workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -80,7 +81,6 @@ landlock = "0.4"
 insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"
 rstest = "0.24"
-tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 

@@ -1187,8 +1187,17 @@ pub async fn ensure_canonical_graph(
         }
     }
 
-    let output_dir =
-        std::env::temp_dir().join(format!("djinn-canonical-graph-{}", uuid::Uuid::now_v7()));
+    // Wrap the SCIP scratch dir in a `TempDir` so its destructor removes the
+    // directory even when the build pipeline panics, the spawn_blocking task
+    // is cancelled, or the lifecycle timeout fires before we reach the
+    // explicit `remove_dir_all` below.  Without this, every aborted run
+    // leaked ~150 MB of SCIP artifacts under `/tmp` (which is tmpfs on
+    // many Linux setups), eventually filling RAM.
+    let output_temp = tempfile::Builder::new()
+        .prefix("djinn-canonical-graph-")
+        .tempdir()
+        .map_err(|e| format!("create canonical-graph tempdir: {e}"))?;
+    let output_dir = output_temp.path().to_path_buf();
     let target_dir = handle.target_dir().to_path_buf();
     // The server-wide IndexerLock is already held above (`_permit`); use the
     // `_already_locked` entrypoint instead of re-acquiring it via a dummy

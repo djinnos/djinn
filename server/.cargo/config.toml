@@ -1,10 +1,22 @@
 [build]
 rustc-wrapper = "sccache"
-# NOTE: do NOT hardcode `target-dir` here. Per-worktree target directories
-# are injected via the `CARGO_TARGET_DIR` env var by djinn-agent's command
-# runner (see server/crates/djinn-agent/src/commands.rs). Committing a
-# literal `target-dir` here contaminates main whenever a worker worktree
-# picks it up — see fix/worktree-target-dir-isolation for history.
+# NOTE: do NOT hardcode `target-dir` here, and do NOT add a setup script
+# that mutates this file at runtime.  Each git worktree gets its own
+# default `target/` directory (cargo's default behavior).  Cross-worktree
+# dep sharing is handled by `sccache` above, which caches each
+# compilation unit by hash-of-inputs — the rust-cache equivalent of
+# stripping first-party artifacts and reusing dep builds.
+#
+# History: commit 4befbf9b accidentally contaminated main with a literal
+# `target-dir = "/tmp/.../0bhg-server"` because a setup script was
+# rewriting this file in-place per worker.  The follow-up moved isolation
+# into the djinn-agent command runner via an injected CARGO_TARGET_DIR
+# env var pointing at /tmp/djinn-targets/...  That hack (a) leaked tens
+# of GB onto tmpfs, (b) hard-coded a Rust assumption into the otherwise
+# language-agnostic command runner, and (c) didn't achieve dep sharing
+# anyway since each worktree got its own dir.  Both the in-file mutation
+# AND the env injection are gone now; cargo's default + sccache is the
+# whole story.
 
 # Use mold for faster linking
 [target.x86_64-unknown-linux-gnu]
