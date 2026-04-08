@@ -517,11 +517,7 @@ impl DjinnMcpServer {
         &self,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let status = self
-            .state
-            .repo_graph()
-            .status(&params.project_path)
-            .await?;
+        let status = self.state.repo_graph().status(&params.project_path).await?;
         Ok(CodeGraphResponse::Status(StatusResponse { status }))
     }
 }
