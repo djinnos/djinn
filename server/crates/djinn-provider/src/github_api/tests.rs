@@ -7,6 +7,7 @@ use crate::repos::CredentialRepository;
 
 mod checks;
 mod pull_requests;
+mod reviews;
 mod transport;
 
 pub fn make_repo() -> Arc<CredentialRepository> {

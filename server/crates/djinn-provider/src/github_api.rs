@@ -28,6 +28,7 @@
 
 mod checks;
 mod pull_requests;
+mod reviews;
 #[cfg(test)]
 mod tests;
 mod transport;
