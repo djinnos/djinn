@@ -128,6 +128,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await

@@ -89,6 +89,8 @@ async fn make_fixture() -> TestFixture {
                 owner: "test",
                 memory_refs: None,
                 status: None,
+                auto_breakdown: None,
+                originating_adr_id: None,
             },
         )
         .await

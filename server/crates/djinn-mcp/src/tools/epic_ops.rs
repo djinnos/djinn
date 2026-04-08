@@ -34,6 +34,11 @@ pub struct EpicModel {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub memory_refs: Vec<String>,
+    /// ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
+    pub auto_breakdown: bool,
+    /// ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub originating_adr_id: Option<String>,
 }
 
 impl From<&Epic> for EpicModel {
@@ -51,6 +56,8 @@ impl From<&Epic> for EpicModel {
             updated_at: e.updated_at.clone(),
             closed_at: e.closed_at.clone(),
             memory_refs: parse_string_array(&e.memory_refs),
+            auto_breakdown: e.auto_breakdown,
+            originating_adr_id: e.originating_adr_id.clone(),
         }
     }
 }
@@ -360,6 +367,8 @@ pub async fn epic_update(
                 owner: &owner,
                 memory_refs: Some(&memory_refs_str),
                 status: Some(status),
+                auto_breakdown: None,
+                originating_adr_id: None,
             },
         )
         .await

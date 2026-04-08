@@ -106,8 +106,18 @@ pub struct EpicCreateParams {
     pub owner: Option<String>,
     /// Memory reference URLs for this epic (e.g. ADR paths).
     pub memory_refs: Option<Vec<String>>,
-    /// Initial status: "drafting" (default) or "open".
+    /// Initial status: "proposed", "drafting" (default), or "open".
+    /// Proposed epics (ADR-051 Epic C) are architect-drafted shells
+    /// that never trigger auto-dispatch until explicitly accepted.
     pub status: Option<String>,
+    /// ADR-051 Epic C — when `false`, the coordinator will NOT
+    /// auto-dispatch a breakdown Planner when this epic is created.
+    /// Defaults to `true` (preserving the existing behaviour).
+    pub auto_breakdown: Option<bool>,
+    /// ADR-051 Epic C — slug of the accepted ADR that spawned this
+    /// epic.  Threaded into the breakdown Planner's session context
+    /// so downstream task creation inherits the architectural rationale.
+    pub originating_adr_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -285,6 +295,8 @@ impl DjinnMcpServer {
                     owner: &owner,
                     memory_refs: memory_refs_json.as_deref(),
                     status,
+                    auto_breakdown: p.auto_breakdown,
+                    originating_adr_id: p.originating_adr_id.as_deref(),
                 },
             )
             .await

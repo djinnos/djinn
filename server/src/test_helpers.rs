@@ -114,6 +114,8 @@ pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {
             owner: "test-owner",
             memory_refs: None,
             status: None,
+            auto_breakdown: None,
+            originating_adr_id: None,
         },
     )
     .await

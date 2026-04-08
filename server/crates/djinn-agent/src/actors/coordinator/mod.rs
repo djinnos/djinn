@@ -204,6 +204,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -1373,6 +1375,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -1407,6 +1411,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -1459,6 +1465,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -1509,6 +1517,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("drafting"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -1527,6 +1537,102 @@ mod tests {
             planning_count, 0,
             "drafting epic should not trigger planning task creation"
         );
+    }
+
+    /// ADR-051 Epic C — proposed epics (architect-drafted shells) must
+    /// never trigger auto-dispatch until they are explicitly accepted and
+    /// promoted to `open`.  This is the live-coordinator safety rule
+    /// spelled out in the ADR's Epic C section.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposed_epic_creation_does_not_trigger_planning_task() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Proposed Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("proposed"),
+                    auto_breakdown: None,
+                    originating_adr_id: Some("adr-999-test"),
+                },
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
+        let planning_count = tasks
+            .iter()
+            .filter(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition"))
+            .count();
+        assert_eq!(
+            planning_count, 0,
+            "proposed epic must never trigger planning task creation — \
+             live-coordinator safety rule per ADR-051 Epic C"
+        );
+        assert_eq!(epic.status, "proposed");
+        assert_eq!(epic.originating_adr_id.as_deref(), Some("adr-999-test"));
+    }
+
+    /// ADR-051 Epic C — when an epic is created with `auto_breakdown=false`,
+    /// the coordinator must not dispatch a breakdown Planner even if the
+    /// epic is open.  Used by `propose_adr_accept` to create epic shells
+    /// without auto-dispatching.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_epic_with_auto_breakdown_false_skips_dispatch() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "No Auto Breakdown Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("open"),
+                    auto_breakdown: Some(false),
+                    originating_adr_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
+        let planning_count = tasks
+            .iter()
+            .filter(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition"))
+            .count();
+        assert_eq!(
+            planning_count, 0,
+            "epic with auto_breakdown=false must not trigger auto-dispatch"
+        );
+        assert!(!epic.auto_breakdown);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1551,6 +1657,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("drafting"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -1564,7 +1672,7 @@ mod tests {
             .await
             .unwrap();
         let promoted: djinn_core::models::Epic =
-            sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at FROM epics WHERE id = ?1")
+            sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at, auto_breakdown, originating_adr_id FROM epics WHERE id = ?1")
                 .bind(&epic.id)
                 .fetch_one(db.pool())
                 .await
@@ -1602,6 +1710,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("drafting"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -1615,7 +1725,7 @@ mod tests {
             .await
             .unwrap();
         let promoted: djinn_core::models::Epic =
-            sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at FROM epics WHERE id = ?1")
+            sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at, auto_breakdown, originating_adr_id FROM epics WHERE id = ?1")
                 .bind(&epic.id)
                 .fetch_one(db.pool())
                 .await
@@ -1663,6 +1773,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -1726,6 +1838,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await

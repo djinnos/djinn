@@ -17,4 +17,10 @@ pub struct Epic {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub memory_refs: String,
+    /// ADR-051 Epic C — when false, epic creation does not auto-dispatch
+    /// a breakdown Planner.  Default true to preserve existing behaviour.
+    pub auto_breakdown: bool,
+    /// ADR-051 Epic C — slug of the accepted ADR that spawned this epic.
+    /// Threaded into the breakdown Planner's session context.
+    pub originating_adr_id: Option<String>,
 }

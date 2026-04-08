@@ -24,9 +24,17 @@ impl CoordinatorActor {
     pub(super) async fn maybe_create_planning_task(&mut self, epic: &djinn_core::models::Epic) {
         // Only create planning tasks for epics that are fully open.
         // Drafting epics are still being refined by the user; closed epics
-        // are done.  The promotion from drafting→open is handled separately
-        // via the epic_updated event path.
+        // are done.  ADR-051 Epic C adds `proposed` for architect-drafted
+        // epic shells that must NEVER trigger auto-dispatch until they are
+        // explicitly accepted via `propose_adr_accept` (which promotes the
+        // epic to `open`).  The promotion from drafting→open / proposed→open
+        // is handled separately via the epic_updated event path.
         if epic.status != "open" {
+            tracing::debug!(
+                epic_id = %epic.short_id,
+                status = %epic.status,
+                "CoordinatorActor: skipping planning task — epic not open"
+            );
             return;
         }
         let task_repo = self.task_repo();
@@ -54,14 +62,16 @@ impl CoordinatorActor {
             }
         }
 
-        // ADR-051 §7 — reentrance guard.  Epic C will plumb the real
-        // `auto_breakdown` value; Epic B hard-codes `true` so the check
-        // still runs the active-planner guard.
+        // ADR-051 §7 — reentrance guard.  Epic C threads the real
+        // `auto_breakdown` value from the epic row; when `false`, this
+        // creation came from a Planner mid-decomposition (wave 2+) or from
+        // `propose_adr_accept` which wants to create epic shells without
+        // dispatching.
         if !should_auto_dispatch_planner(
             &self.db,
             DispatchEvent::EpicCreated {
                 epic_id: &epic.id,
-                auto_breakdown: true,
+                auto_breakdown: epic.auto_breakdown,
             },
         )
         .await
@@ -93,12 +103,22 @@ impl CoordinatorActor {
              5. Call `submit_grooming` when done.",
             epic.title, epic.short_id, epic.short_id
         );
+        let originating_adr_section = match epic.originating_adr_id.as_deref() {
+            Some(adr) if !adr.is_empty() => format!(
+                "\nOriginating ADR: `{adr}` — this epic was spawned from an \
+                 accepted proposal. Read the ADR for architectural rationale, \
+                 acceptance criteria, and the work shape it sketches before \
+                 creating tasks. Use `memory_read(\"{adr}\")` or look under \
+                 `.djinn/decisions/` for the full document."
+            ),
+            _ => String::new(),
+        };
         let design = format!(
-            "Epic: {} ({})\nEpic memory_refs: {}\n\n\
+            "Epic: {} ({})\nEpic memory_refs: {}{}\n\n\
              Use `epic_show({})` to read full epic context and memory_refs.\n\
              Use `build_context` enriched with session reflections from \
              previously completed tasks under this epic.",
-            epic.title, epic.short_id, epic.memory_refs, epic.short_id
+            epic.title, epic.short_id, epic.memory_refs, originating_adr_section, epic.short_id
         );
 
         let ac = serde_json::json!([

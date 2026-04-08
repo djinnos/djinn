@@ -8,6 +8,7 @@ pub mod json_object;
 pub mod list_response;
 pub mod memory_tools;
 pub mod project_tools;
+pub mod proposal_tools;
 pub mod provider_tools;
 pub mod session_tools;
 pub mod settings_tools;

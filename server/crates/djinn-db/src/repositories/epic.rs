@@ -6,7 +6,8 @@ use crate::database::Database;
 use crate::{Error, Result};
 
 const EPIC_COLS: &str = "id, project_id, short_id, title, description, emoji, color, status, \
-                   owner, created_at, updated_at, closed_at, memory_refs";
+                   owner, created_at, updated_at, closed_at, memory_refs, \
+                   auto_breakdown, originating_adr_id";
 
 // ── Query / result types ─────────────────────────────────────────────────────
 
@@ -65,8 +66,14 @@ pub struct EpicCreateInput<'a> {
     pub color: &'a str,
     pub owner: &'a str,
     pub memory_refs: Option<&'a str>,
-    /// Epic status: "drafting" (default) or "open".
+    /// Epic status: "proposed", "drafting" (default), or "open".
     pub status: Option<&'a str>,
+    /// ADR-051 Epic C — if `None`, defaults to `true` (existing behaviour).
+    /// When `false`, the coordinator skips the epic_created breakdown
+    /// auto-dispatch.
+    pub auto_breakdown: Option<bool>,
+    /// ADR-051 Epic C — slug of the accepted ADR that spawned this epic.
+    pub originating_adr_id: Option<&'a str>,
 }
 
 pub type EpicUpdateInput<'a> = EpicCreateInput<'a>;
@@ -130,6 +137,8 @@ impl EpicRepository {
                 owner,
                 memory_refs,
                 status: None,
+                auto_breakdown: None,
+                originating_adr_id: None,
             },
         )
         .await
@@ -144,9 +153,10 @@ impl EpicRepository {
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
         let status = input.status.unwrap_or("drafting");
+        let auto_breakdown = i64::from(input.auto_breakdown.unwrap_or(true));
         sqlx::query(
-            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, auto_breakdown, originating_adr_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )
         .bind(&id)
         .bind(project_id)
@@ -158,6 +168,8 @@ impl EpicRepository {
         .bind(status)
         .bind(input.owner)
         .bind(input.memory_refs.unwrap_or("[]"))
+        .bind(auto_breakdown)
+        .bind(input.originating_adr_id)
         .execute(self.db.pool())
         .await?;
         let epic: Epic = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?1"))
@@ -611,6 +623,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -830,6 +844,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
@@ -852,6 +868,8 @@ mod tests {
                     owner: "",
                     memory_refs: None,
                     status: Some("drafting"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
                 },
             )
             .await
