@@ -121,6 +121,7 @@ impl Drop for CargoTargetDirGuard {
 /// for the spawned indexer subprocesses. This is used by the canonical
 /// `_index/` worktree to keep its build outputs isolated from worker
 /// worktree caches while still sharing sccache.
+#[allow(dead_code)]
 pub(crate) async fn run_indexers_single_flight(
     lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     project_root: impl AsRef<Path>,

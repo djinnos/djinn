@@ -1178,7 +1178,7 @@ fn derive_graph_caches(
 /// The returned `IndexTreeHandle` is also exposed to callers so they can
 /// reuse its `path()` as the architect/chat `working_root` and so worker
 /// dispatch sites can render the canonical skeleton from the same path.
-pub async fn ensure_canonical_graph(
+pub(crate) async fn ensure_canonical_graph(
     state: &AppState,
     project_id: &str,
     project_root: &Path,

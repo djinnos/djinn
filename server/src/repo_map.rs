@@ -14,9 +14,9 @@ use crate::repo_graph::{
     RankedRepoGraphNode, RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind,
     RepoGraphRanking,
 };
-use crate::repo_map_personalization::{
-    RepoMapNoteHint, RepoMapNoteSearcher, RepoMapPersonalizationInput,
-};
+use crate::repo_map_personalization::RepoMapNoteSearcher;
+#[cfg(test)]
+use crate::repo_map_personalization::{RepoMapNoteHint, RepoMapPersonalizationInput};
 use crate::scip_parser::ScipSymbolKind;
 
 mod indexing;
@@ -171,14 +171,6 @@ impl IndexerAvailability {
     }
 }
 
-pub(crate) fn plan_indexer_commands(
-    project_root: impl AsRef<Path>,
-    output_root: impl AsRef<Path>,
-    available_indexers: &[IndexerAvailability],
-) -> Vec<PlannedIndexerCommand> {
-    indexing::plan_indexer_commands(project_root, output_root, available_indexers)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlannedIndexerCommand {
     pub indexer: SupportedIndexer,
@@ -228,29 +220,6 @@ pub(crate) struct IndexingRun {
     pub artifacts: Vec<ScipArtifact>,
 }
 
-pub(crate) async fn run_indexers(
-    project_root: impl AsRef<Path>,
-    output_root: impl AsRef<Path>,
-) -> Result<IndexingRun> {
-    indexing::run_indexers(project_root, output_root).await
-}
-
-pub(crate) async fn run_indexers_single_flight(
-    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
-    project_root: impl AsRef<Path>,
-    output_root: impl AsRef<Path>,
-    target_dir: Option<&Path>,
-) -> Result<IndexingRun> {
-    indexing::run_indexers_single_flight(lock, project_root, output_root, target_dir).await
-}
-
-pub(crate) fn collect_scip_artifacts(
-    output_root: impl AsRef<Path>,
-    commands: &[ExecutedIndexerCommand],
-) -> Result<Vec<ScipArtifact>> {
-    indexing::collect_scip_artifacts(output_root, commands)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepoMapRenderOptions {
     pub token_budget: usize,
@@ -298,7 +267,7 @@ pub(crate) fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
     }
 }
 
-pub async fn persist_repo_map_note(
+pub(crate) async fn persist_repo_map_note(
     note_repo: &NoteRepository,
     project_id: &str,
     commit_sha: &str,
@@ -342,6 +311,8 @@ struct RepoMapSymbol {
     score_milli: i64,
 }
 
+#[cfg(test)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct RepoMapPersonalizationRequest<'a> {
     pub ranked_nodes: &'a [RankedRepoGraphNode],
@@ -375,6 +346,8 @@ pub(crate) fn render_repo_map(
     render_repo_map_from_entries(&entries, options)
 }
 
+#[cfg(test)]
+#[cfg(test)]
 pub(crate) fn personalized_repo_map_ranking(
     graph: &RepoDependencyGraph,
     request: &RepoMapPersonalizationRequest<'_>,
@@ -546,6 +519,8 @@ fn render_repo_map_from_entries(
     Ok(best)
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn repo_map_entry_boost(
     graph: &RepoDependencyGraph,
     ranked: &RankedRepoGraphNode,
