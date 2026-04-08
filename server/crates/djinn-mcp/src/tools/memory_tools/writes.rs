@@ -1,17 +1,15 @@
 use super::write_dedup::{LlmMemoryWriteDedupDecider, maybe_apply_write_dedup};
 use super::write_dedup_types::{MemoryWriteDedupDecider, PendingWriteDedup};
 use super::write_services::{
-    create_note, maybe_update_singleton_note, note_not_found, note_repository,
-    schedule_summary_regeneration,
+    create_note, maybe_update_singleton_note, note_repository, schedule_summary_regeneration,
 };
 use super::{
     DeleteParams, EditParams, MemoryDeleteResponse, MemoryNoteResponse, MoveParams, WriteParams,
-    apply_edit_operation, resolve_note_by_identifier,
 };
 
 use crate::server::DjinnMcpServer;
 use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[tool_router(router = memory_writes_router, vis = "pub(super)")]
 impl DjinnMcpServer {
@@ -112,62 +110,7 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<EditParams>,
         worktree_root: Option<PathBuf>,
     ) -> Json<MemoryNoteResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryNoteResponse::error(format!(
-                "project not found: {}",
-                p.project
-            )));
-        };
-
-        let repo = note_repository(self, worktree_root);
-
-        let note = match resolve_note_by_identifier(&repo, &project_id, &p.identifier).await {
-            Some(n) => n,
-            None => {
-                return Json(MemoryNoteResponse::error(format!(
-                    "note not found: {}",
-                    p.identifier
-                )));
-            }
-        };
-
-        let note = if let Some(ref new_type) = p.note_type {
-            if new_type != &note.note_type {
-                match repo
-                    .move_note(&note.id, Path::new(&p.project), &note.title, new_type)
-                    .await
-                {
-                    Ok(moved) => moved,
-                    Err(e) => return Json(MemoryNoteResponse::error(e.to_string())),
-                }
-            } else {
-                note
-            }
-        } else {
-            note
-        };
-
-        let new_content = match apply_edit_operation(
-            &note.content,
-            &p.operation,
-            &p.content,
-            p.find_text.as_deref(),
-            p.section.as_deref(),
-        ) {
-            Ok(c) => c,
-            Err(e) => return Json(MemoryNoteResponse::error(e)),
-        };
-
-        match repo
-            .update(&note.id, &note.title, &new_content, &note.tags)
-            .await
-        {
-            Ok(updated) => {
-                schedule_summary_regeneration(self, &updated.id);
-                Json(MemoryNoteResponse::from_note(&updated))
-            }
-            Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
-        }
+        super::edit_ops::memory_edit_with_worktree(self, Parameters(p), worktree_root).await
     }
 
     /// Delete a note. Removes file and index entry.
@@ -184,29 +127,7 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<DeleteParams>,
         worktree_root: Option<PathBuf>,
     ) -> Json<MemoryDeleteResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryDeleteResponse {
-                ok: false,
-                error: Some(format!("project not found: {}", p.project)),
-            });
-        };
-
-        let repo = note_repository(self, worktree_root);
-
-        let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
-            return Json(note_not_found(&p.identifier));
-        };
-
-        match repo.delete(&note.id).await {
-            Ok(()) => Json(MemoryDeleteResponse {
-                ok: true,
-                error: None,
-            }),
-            Err(e) => Json(MemoryDeleteResponse {
-                ok: false,
-                error: Some(e.to_string()),
-            }),
-        }
+        super::delete_ops::memory_delete_with_worktree(self, Parameters(p), worktree_root).await
     }
 
     /// Move a note to a new location. Updates permalink and resolves inbound links.
@@ -217,36 +138,6 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<MoveParams>,
     ) -> Json<MemoryNoteResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryNoteResponse::error(format!(
-                "project not found: {}",
-                p.project
-            )));
-        };
-
-        let repo = note_repository(self, None);
-
-        let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
-            return Json(MemoryNoteResponse::error(format!(
-                "note not found: {}",
-                p.identifier
-            )));
-        };
-
-        let new_title = p.title.as_deref().unwrap_or(&note.title);
-        let moved_title = p.title.as_deref().unwrap_or(&note.title);
-
-        match repo
-            .move_note(&note.id, Path::new(&p.project), moved_title, &p.note_type)
-            .await
-        {
-            Ok(mut moved) => {
-                if p.title.is_some() {
-                    moved.title = new_title.to_string();
-                }
-                Json(MemoryNoteResponse::from_note(&moved))
-            }
-            Err(e) => Json(MemoryNoteResponse::error(e.to_string())),
-        }
+        super::move_ops::memory_move(self, Parameters(p)).await
     }
 }
