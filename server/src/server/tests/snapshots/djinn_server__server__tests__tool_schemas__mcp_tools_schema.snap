@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 175
 expression: signatures
 ---
 [
@@ -751,7 +752,7 @@ expression: signatures
         },
         "limit": {
           "default": null,
-          "description": "Maximum results for `ranked`/`search`/`orphans`/`edges` (default 20) or\nmax traversal depth for `impact` (default 3).",
+          "description": "Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`\n(default 20) or max traversal depth for `impact` (default 3).",
           "format": "int64",
           "nullable": true,
           "type": "integer"
