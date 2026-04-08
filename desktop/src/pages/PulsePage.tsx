@@ -4,7 +4,13 @@ import { Pulse01Icon } from "@hugeicons/core-free-icons";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { callMcpTool } from "@/api/mcpClient";
 import { FreshnessStrip } from "@/components/pulse/FreshnessStrip";
+import { HotspotsPanel } from "@/components/pulse/HotspotsPanel";
+import { DeadCodePanel } from "@/components/pulse/DeadCodePanel";
+import { CyclesPanel } from "@/components/pulse/CyclesPanel";
+import { BlastRadiusPanel } from "@/components/pulse/BlastRadiusPanel";
+import { PulseSettingsSheet } from "@/components/pulse/PulseSettingsSheet";
 import { useArchitectActive } from "@/hooks/useArchitectActive";
+import { usePulseSettings } from "@/hooks/usePulseSettings";
 import { cn } from "@/lib/utils";
 
 interface PulseStatus {
@@ -126,15 +132,52 @@ export function PulsePage() {
   }
 
   return (
+    <ReadyState
+      projectPath={projectPath!}
+      lastWarmAt={data?.last_warm_at ?? null}
+      pinnedCommit={data?.pinned_commit ?? null}
+      commitsSincePin={data?.commits_since_pin ?? null}
+      architectActive={architectActive}
+    />
+  );
+}
+
+function ReadyState({
+  projectPath,
+  lastWarmAt,
+  pinnedCommit,
+  commitsSincePin,
+  architectActive,
+}: {
+  projectPath: string;
+  lastWarmAt: string | null;
+  pinnedCommit: string | null;
+  commitsSincePin: number | null;
+  architectActive: boolean;
+}) {
+  const { settings, addOrphanIgnore } = usePulseSettings(projectPath);
+  return (
     <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-4">
-      <FreshnessStrip
-        lastWarmAt={data?.last_warm_at ?? null}
-        pinnedCommit={data?.pinned_commit ?? null}
-        commitsSincePin={data?.commits_since_pin ?? null}
-        architectActive={architectActive}
+      <div className="flex items-start gap-2">
+        <div className="flex-1">
+          <FreshnessStrip
+            lastWarmAt={lastWarmAt}
+            pinnedCommit={pinnedCommit}
+            commitsSincePin={commitsSincePin}
+            architectActive={architectActive}
+          />
+        </div>
+        <PulseSettingsSheet projectPath={projectPath} />
+      </div>
+      <HotspotsPanel projectPath={projectPath} excludedPaths={settings.excluded_paths} />
+      <DeadCodePanel
+        projectPath={projectPath}
+        excludedPaths={settings.excluded_paths}
+        ignoredFiles={settings.orphan_ignore}
+        onIgnoreFile={addOrphanIgnore}
       />
-      {/* PULSE_PANELS_SLOT — Phase 3 fills this with Hotspots, Dead code, Cycles, Blast radius */}
-      <div className="flex-1" />
+      <CyclesPanel projectPath={projectPath} excludedPaths={settings.excluded_paths} />
+      <BlastRadiusPanel projectPath={projectPath} excludedPaths={settings.excluded_paths} />
     </div>
   );
 }

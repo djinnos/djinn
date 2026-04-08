@@ -1,0 +1,217 @@
+// Shared client-side narrowing for the untyped `code_graph` MCP responses.
+// The server returns `Record<string, unknown>` to the desktop, so each panel
+// validates the shape it cares about with these helpers.
+
+export interface RankedNode {
+  key: string;
+  kind: string;
+  display_name: string;
+  score: number;
+  page_rank: number;
+  structural_weight: number;
+  inbound_edge_weight: number;
+  outbound_edge_weight: number;
+}
+
+export interface OrphanEntry {
+  key: string;
+  kind: string;
+  display_name: string;
+  file: string | null;
+  visibility: string;
+}
+
+export interface CycleMember {
+  key: string;
+  display_name: string;
+  kind: string;
+}
+
+export interface CycleGroup {
+  size: number;
+  members: CycleMember[];
+}
+
+export interface SearchHit {
+  key: string;
+  kind: string;
+  display_name: string;
+  score: number;
+  file: string | null;
+}
+
+export interface FileGroupEntry {
+  file: string;
+  occurrence_count: number;
+  max_depth: number;
+  sample_keys: string[];
+}
+
+export interface GraphNeighbor {
+  key: string;
+  kind: string;
+  display_name: string;
+  edge_kind: string;
+  edge_weight: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object";
+}
+
+export function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+export function parseRanked(value: unknown): RankedNode[] {
+  return asArray(value)
+    .filter(isRecord)
+    .map((r) => ({
+      key: String(r.key ?? ""),
+      kind: String(r.kind ?? ""),
+      display_name: String(r.display_name ?? ""),
+      score: Number(r.score ?? 0),
+      page_rank: Number(r.page_rank ?? 0),
+      structural_weight: Number(r.structural_weight ?? 0),
+      inbound_edge_weight: Number(r.inbound_edge_weight ?? 0),
+      outbound_edge_weight: Number(r.outbound_edge_weight ?? 0),
+    }))
+    .filter((r) => r.key.length > 0);
+}
+
+export function parseOrphans(value: unknown): OrphanEntry[] {
+  return asArray(value)
+    .filter(isRecord)
+    .map((r) => ({
+      key: String(r.key ?? ""),
+      kind: String(r.kind ?? ""),
+      display_name: String(r.display_name ?? ""),
+      file: typeof r.file === "string" ? r.file : null,
+      visibility: String(r.visibility ?? "unknown"),
+    }))
+    .filter((r) => r.key.length > 0);
+}
+
+export function parseCycles(value: unknown): CycleGroup[] {
+  return asArray(value)
+    .filter(isRecord)
+    .map((r) => {
+      const members = asArray(r.members)
+        .filter(isRecord)
+        .map((m) => ({
+          key: String(m.key ?? ""),
+          display_name: String(m.display_name ?? ""),
+          kind: String(m.kind ?? ""),
+        }));
+      return {
+        size: Number(r.size ?? members.length),
+        members,
+      };
+    })
+    .filter((g) => g.members.length > 0);
+}
+
+export function parseSearchHits(value: unknown): SearchHit[] {
+  return asArray(value)
+    .filter(isRecord)
+    .map((r) => ({
+      key: String(r.key ?? ""),
+      kind: String(r.kind ?? ""),
+      display_name: String(r.display_name ?? ""),
+      score: Number(r.score ?? 0),
+      file: typeof r.file === "string" ? r.file : null,
+    }))
+    .filter((r) => r.key.length > 0);
+}
+
+export function parseFileGroups(value: unknown): FileGroupEntry[] {
+  return asArray(value)
+    .filter(isRecord)
+    .map((r) => ({
+      file: String(r.file ?? ""),
+      occurrence_count: Number(r.occurrence_count ?? 0),
+      max_depth: Number(r.max_depth ?? 0),
+      sample_keys: asArray(r.sample_keys).map(String),
+    }))
+    .filter((r) => r.file.length > 0);
+}
+
+export function parseNeighbors(value: unknown): GraphNeighbor[] {
+  return asArray(value)
+    .filter(isRecord)
+    .map((r) => ({
+      key: String(r.key ?? ""),
+      kind: String(r.kind ?? ""),
+      display_name: String(r.display_name ?? ""),
+      edge_kind: String(r.edge_kind ?? ""),
+      edge_weight: Number(r.edge_weight ?? 0),
+    }))
+    .filter((r) => r.key.length > 0);
+}
+
+// ── Path filtering / display helpers ────────────────────────────────────────
+
+/** Truncate a long path from the left: `/a/b/c/d.rs` → `…/c/d.rs`. */
+export function truncatePathLeft(path: string, maxLen = 56): string {
+  if (path.length <= maxLen) return path;
+  const tail = path.slice(path.length - maxLen + 1);
+  const slash = tail.indexOf("/");
+  return "…" + (slash >= 0 ? tail.slice(slash) : tail);
+}
+
+/** Glob-match a path against a single pattern. Supports `*` and `**`. */
+function globToRegex(glob: string): RegExp {
+  // Escape regex special chars except *
+  let re = "";
+  let i = 0;
+  while (i < glob.length) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        re += ".*";
+        i += 2;
+        if (glob[i] === "/") i += 1;
+        continue;
+      }
+      re += "[^/]*";
+      i += 1;
+      continue;
+    }
+    if ("\\^$.|?+()[]{}".includes(c)) re += "\\" + c;
+    else re += c;
+    i += 1;
+  }
+  return new RegExp("^" + re + "$");
+}
+
+const globCache = new Map<string, RegExp>();
+function compile(glob: string): RegExp {
+  let re = globCache.get(glob);
+  if (!re) {
+    re = globToRegex(glob);
+    globCache.set(glob, re);
+  }
+  return re;
+}
+
+export function isPathExcluded(path: string, patterns: string[]): boolean {
+  if (!patterns.length) return false;
+  return patterns.some((p) => {
+    if (!p.trim()) return false;
+    try {
+      return compile(p).test(path);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Heuristic: extract a file path from a node key (file keys are bare paths). */
+export function fileFromKey(key: string, fallbackFile: string | null): string {
+  if (fallbackFile) return fallbackFile;
+  // SCIP symbol keys typically include `\u0020` or `:` and `#`/`/` separators.
+  // For our purposes the safe assumption is: if the key looks like a path
+  // (contains `/` and a recognizable extension), return it; otherwise empty.
+  if (/^[\w./@-]+\.[a-z]+$/i.test(key)) return key;
+  return "";
+}
