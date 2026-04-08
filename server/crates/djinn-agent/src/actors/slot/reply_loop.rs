@@ -52,6 +52,17 @@ fn is_tool_concurrent_safe(tool_metadata: &HashMap<String, bool>, name: &str) ->
     tool_metadata.get(name).copied().unwrap_or(false)
 }
 
+/// ADR-048 side queries are not a separate protocol primitive.
+///
+/// In the reply loop architecture they are modeled as ordinary tool calls whose
+/// schema marks them `concurrent_safe=true`, meaning the lookup is read-only and
+/// can be started opportunistically during streaming without blocking other turn
+/// assembly. Their results still flow back through the normal `tool_result`
+/// message on the next user turn so provider tool-call pairing remains valid.
+fn is_side_query_tool(tool_metadata: &HashMap<String, bool>, name: &str) -> bool {
+    is_tool_concurrent_safe(tool_metadata, name)
+}
+
 fn serialize_message(msg: &Message) -> serde_json::Value {
     serde_json::to_value(msg).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "failed to serialize Message for SessionMessage event");
@@ -605,10 +616,11 @@ pub(super) async fn run_reply_loop(
             let mut saw_round_event = false;
             let mut needs_reactive_compaction = false;
 
-            // ── ADR-048 §1B: Streaming tool dispatch ────────────────────────
-            // Concurrent-safe tools are dispatched as soon as their ToolUse
-            // block arrives during streaming, rather than waiting for the full
-            // response.  Results are collected in a Vec and merged with
+            // ── ADR-048 §1B + side queries: Streaming tool dispatch ─────────
+            // Read-only auxiliary lookups ("side queries") are represented as
+            // concurrent-safe tools. They are dispatched as soon as their
+            // ToolUse block arrives during streaming, rather than waiting for
+            // the full response. Results are collected in a Vec and merged with
             // post-stream dispatch results before assembling the final message.
             type StreamingFut<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ContentBlock)> + Send + 'a>>;
             let mut streaming_inflight: FuturesUnordered<StreamingFut<'_>> = FuturesUnordered::new();
@@ -677,11 +689,11 @@ pub(super) async fn run_reply_loop(
                                 turn_text.push_str(&text);
                             }
                             StreamEvent::Delta(tool_use @ ContentBlock::ToolUse { .. }) => {
-                                // ADR-048 §1B: if the tool is concurrent-safe,
-                                // dispatch immediately during streaming.
+                                // ADR-048 §1B: side-query / concurrent-safe
+                                // tools dispatch immediately during streaming.
                                 let idx = turn_tool_calls.len();
                                 let should_dispatch_now = if let ContentBlock::ToolUse { name, .. } = &tool_use {
-                                    is_tool_concurrent_safe(&tool_metadata, name)
+                                    is_side_query_tool(&tool_metadata, name)
                                         && streaming_dispatched.len() < MAX_TOOL_CONCURRENCY
                                 } else {
                                     false
@@ -1056,10 +1068,11 @@ pub(super) async fn run_reply_loop(
             consecutive_nudge_count = 0;
 
             // ── Dispatch tool calls (ADR-048 §1A + §1B) ────────────────────
-            // §1B streaming dispatch: concurrent-safe tools already dispatched
-            // during streaming have results in `streaming_results`.  Remaining
-            // tools (non-safe, or safe tools that exceeded the streaming
-            // concurrency cap) are dispatched here using the §1A batch logic.
+            // §1B streaming dispatch: side queries / concurrent-safe tools
+            // already dispatched during streaming have results in
+            // `streaming_results`. Remaining tools (mutating tools, or read-only
+            // tools that exceeded the streaming concurrency cap) are dispatched
+            // here using the §1A batch logic.
 
             // Prepare (original_index, tool_call) pairs, filtering non-ToolUse
             // and skipping indices that were already dispatched during streaming.
