@@ -1703,6 +1703,40 @@ fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {
         .collect()
 }
 
+fn tool_schema<'a>(schemas: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
+    schemas
+        .iter()
+        .find(|schema| schema.get("name").and_then(|n| n.as_str()) == Some(name))
+        .expect("tool schema present")
+}
+
+#[test]
+fn tool_schemas_include_concurrency_metadata() {
+    let worker = tool_schemas_worker();
+    assert_eq!(tool_schema(&worker, "task_show")["concurrent_safe"], true);
+    assert_eq!(tool_schema(&worker, "read")["concurrent_safe"], true);
+    assert_eq!(
+        tool_schema(&worker, "github_search")["concurrent_safe"],
+        true
+    );
+    assert_eq!(tool_schema(&worker, "shell")["concurrent_safe"], false);
+    assert_eq!(tool_schema(&worker, "write")["concurrent_safe"], false);
+
+    let architect = tool_schemas_architect();
+    assert_eq!(
+        tool_schema(&architect, "code_graph")["concurrent_safe"],
+        true
+    );
+    assert_eq!(
+        tool_schema(&architect, "memory_build_context")["concurrent_safe"],
+        true
+    );
+    assert_eq!(
+        tool_schema(&architect, "task_comment_add")["concurrent_safe"],
+        false
+    );
+}
+
 #[test]
 fn snapshot_worker_tool_names() {
     let schemas = tool_schemas_worker();

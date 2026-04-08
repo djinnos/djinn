@@ -81,6 +81,7 @@ mod tests {
     use djinn_provider::catalog::health::HealthTracker;
 
     use super::consolidation::{self, ConsolidationRunner, DbConsolidationRunner};
+    use djinn_provider::rate_limit::{activate_suppression_window, clear_suppression_window};
 
     struct RecordingConsolidationRunner {
         calls: Arc<Mutex<Vec<djinn_db::DbNoteGroup>>>,
@@ -320,6 +321,7 @@ mod tests {
                 recovered: 0,
                 epic_throughput: HashMap::new(),
                 pr_errors: HashMap::new(),
+                rate_limited_until: None,
             })
             .0,
             paused_projects: HashSet::new(),
@@ -354,6 +356,87 @@ mod tests {
         assert_eq!(session_groups[0].0.project_id, project.id);
         assert_eq!(session_groups[0].0.note_type, "case");
         assert_eq!(session_groups[0].1, session.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_consolidation_skips_during_rate_limit_and_resumes_after_clear() {
+        clear_suppression_window();
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let runner = Arc::new(RecordingConsolidationRunner::new());
+
+        let mut actor = CoordinatorActor {
+            receiver: tokio::sync::mpsc::channel(1).1,
+            events: tx.subscribe(),
+            cancel: CancellationToken::new(),
+            tick: tokio::time::interval(STUCK_INTERVAL),
+            db: db.clone(),
+            events_tx: tx.clone(),
+            pool: SlotPoolHandle::spawn(
+                test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+                CancellationToken::new(),
+                SlotPoolConfig {
+                    models: vec![ModelSlotConfig {
+                        model_id: DEFAULT_MODEL_ID.to_owned(),
+                        max_slots: 1,
+                        roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+                    }],
+                    role_priorities: HashMap::new(),
+                },
+            ),
+            catalog: CatalogService::new(),
+            health: HealthTracker::new(),
+            role_registry: Arc::new(RoleRegistry::new()),
+            lsp: crate::lsp::LspManager::new(),
+            self_sender: tokio::sync::mpsc::channel(1).0,
+            status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
+                paused_projects: HashSet::new(),
+                unhealthy_project_ids: HashSet::new(),
+                unhealthy_project_errors: HashMap::new(),
+                dispatched: 0,
+                recovered: 0,
+                epic_throughput: HashMap::new(),
+                pr_errors: HashMap::new(),
+                rate_limited_until: None,
+            })
+            .0,
+            paused_projects: HashSet::new(),
+            dispatch_limit: 50,
+            model_priorities: HashMap::new(),
+            unhealthy_projects: HashMap::new(),
+            pr_errors: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
+            verification_tracker: VerificationTracker::default(),
+            consolidation_runner: runner.clone(),
+            last_stale_sweep: StdInstant::now(),
+            prune_tick_counter: 0,
+            last_patrol_completed: StdInstant::now(),
+            next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,
+            throughput_events: HashMap::new(),
+            escalation_counts: HashMap::new(),
+            pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
+            stall_killed: HashSet::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
+            dispatched: 0,
+            recovered: 0,
+        };
+
+        activate_suppression_window(std::time::Duration::from_secs(30));
+        assert!(actor.should_skip_background_llm_work("idle_note_consolidation"));
+        assert!(actor.current_rate_limited_until().is_some());
+        assert!(actor.idle_consolidation_handle.is_none());
+
+        clear_suppression_window();
+        assert!(!actor.should_skip_background_llm_work("idle_note_consolidation"));
+        actor.maybe_start_idle_consolidation().await;
+        assert!(actor.idle_consolidation_handle.is_some());
+        actor.cancel_idle_consolidation();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

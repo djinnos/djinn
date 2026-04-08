@@ -2,7 +2,7 @@ mod fuzzy;
 pub(crate) mod github_search;
 pub(crate) mod handlers;
 mod helpers;
-mod shared_schemas;
+pub(crate) mod shared_schemas;
 pub(crate) mod tool_defs;
 mod types;
 

@@ -22,6 +22,7 @@ use rmcp::transport::{
 };
 
 use crate::context::AgentContext;
+use crate::extension::shared_schemas;
 use crate::verification::settings::McpServerConfig;
 use djinn_provider::repos::CredentialRepository;
 
@@ -273,7 +274,10 @@ pub(crate) async fn connect_and_discover(
 
                     // Convert rmcp Tool to provider-compatible JSON schema.
                     let schema = match serde_json::to_value(&tool) {
-                        Ok(v) => v,
+                        Ok(mut v) => {
+                            shared_schemas::annotate_concurrent_safe(&mut v, false);
+                            v
+                        }
                         Err(e) => {
                             tracing::warn!(
                                 task_id = %task_short_id,
@@ -545,6 +549,29 @@ mod tests {
         assert!(registry.has_tool("web_search"));
         assert!(!registry.has_tool("unknown_tool"));
         assert_eq!(registry.tool_schemas().len(), 1);
+    }
+
+    #[test]
+    fn registry_schemas_default_to_concurrent_unsafe() {
+        let registry = McpToolRegistry {
+            tool_to_server: HashMap::from([(
+                "web_search".to_string(),
+                "search-server".to_string(),
+            )]),
+            peers: HashMap::new(),
+            tool_schemas: vec![serde_json::json!({
+                "name": "web_search",
+                "description": "search",
+                "inputSchema": {"type": "object"},
+                "concurrent_safe": false
+            })],
+            test_dispatch: None,
+        };
+
+        assert_eq!(
+            registry.tool_schemas()[0]["concurrent_safe"],
+            serde_json::Value::Bool(false)
+        );
     }
 
     #[tokio::test]

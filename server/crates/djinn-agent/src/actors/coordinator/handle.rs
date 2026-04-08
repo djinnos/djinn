@@ -29,6 +29,7 @@ impl CoordinatorHandle {
             recovered: 0,
             epic_throughput: HashMap::new(),
             pr_errors: HashMap::new(),
+            rate_limited_until: None,
         };
         let (status_tx, status_rx) = watch::channel(initial_state);
         let deps = CoordinatorDeps {

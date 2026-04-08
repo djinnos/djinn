@@ -530,11 +530,14 @@ impl crate::context::CanonicalGraphWarmer for RecordingWarmer {
     }
 }
 
-/// Worker dispatch must call `CanonicalGraphWarmer::warm` exactly once with
-/// the task's `project_id` and the project root path.  Without this the
-/// cold-start cache stays empty and workers start without a skeleton.
+/// Worker dispatch must NOT call `CanonicalGraphWarmer::warm`.  Warming
+/// happens only on architect dispatch (see `lifecycle_architect_*` tests);
+/// workers, reviewers, planners, and lead tolerate a stale skeleton from
+/// whatever the most recent architect warm left in the cache.  This
+/// avoids wedging the dispatcher behind a cold-cache SCIP rebuild that
+/// can take tens of minutes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lifecycle_worker_dispatch_warms_canonical_graph_cache() {
+async fn lifecycle_worker_dispatch_does_not_warm_canonical_graph_cache() {
     let repo = create_git_repo().await;
     let db = create_test_db();
     let cancel = CancellationToken::new();
@@ -580,11 +583,9 @@ async fn lifecycle_worker_dispatch_warms_canonical_graph_cache() {
     let calls = warmer.calls();
     assert_eq!(
         calls.len(),
-        1,
-        "worker dispatch should warm the canonical graph exactly once, got {calls:?}"
+        0,
+        "worker dispatch must NOT warm the canonical graph (would wedge dispatcher behind SCIP rebuild), got {calls:?}"
     );
-    assert_eq!(calls[0].0, task.project_id);
-    assert_eq!(calls[0].1, std::path::PathBuf::from(&project.path));
 
     // Workers must NOT have their working_root pinned to the index tree —
     // their tools still resolve against the per-task worktree.
@@ -595,12 +596,11 @@ async fn lifecycle_worker_dispatch_warms_canonical_graph_cache() {
     );
 }
 
-/// Warming failure must not abort the lifecycle: the agent runtime should
-/// still start (and the worker session should still complete) even when
-/// `ensure_canonical_graph` returns an error.  Mirrors the existing
-/// best-effort semantics of the architect index-tree pre-flight.
+/// A configured warmer that would fail must not affect worker dispatch
+/// at all: since workers no longer call the warmer, the failing warmer
+/// should never be invoked and the session should still complete.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lifecycle_worker_continues_when_canonical_graph_warming_fails() {
+async fn lifecycle_worker_ignores_failing_canonical_graph_warmer() {
     let repo = create_git_repo().await;
     let db = create_test_db();
     let cancel = CancellationToken::new();
@@ -645,8 +645,8 @@ async fn lifecycle_worker_continues_when_canonical_graph_warming_fails() {
 
     assert_eq!(
         warmer.calls().len(),
-        1,
-        "warmer should still be invoked even on failure"
+        0,
+        "worker dispatch must not invoke the warmer at all, even a failing one"
     );
     // The session must have made it past the warming step and reached the
     // provider — confirm by checking SessionRepository for at least one row.

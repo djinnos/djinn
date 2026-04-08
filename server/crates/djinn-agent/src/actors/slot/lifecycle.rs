@@ -25,6 +25,50 @@ use super::*;
 use crate::AgentType;
 use crate::task_merge::interrupt_paused_worker_session;
 
+fn is_database_locked(error: &djinn_db::Error) -> bool {
+    match error {
+        djinn_db::Error::Sqlx(sqlx_err) => sqlx_err
+            .as_database_error()
+            .and_then(|db_err| db_err.code())
+            .map(|code| matches!(code.as_ref(), "5" | "6" | "517"))
+            .unwrap_or_else(|| {
+                let msg = sqlx_err.to_string().to_ascii_lowercase();
+                msg.contains("database is locked") || msg.contains("database table is locked")
+            }),
+        other => {
+            let msg = other.to_string().to_ascii_lowercase();
+            msg.contains("database is locked") || msg.contains("database table is locked")
+        }
+    }
+}
+
+async fn retry_task_transition_on_locked<F, Fut, T>(mut op: F) -> Result<T, djinn_db::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, djinn_db::Error>>,
+{
+    const MAX_RETRIES: u32 = 5;
+    const BASE_DELAY_MS: u64 = 200;
+
+    let mut attempt = 0;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) if is_database_locked(&err) && attempt < MAX_RETRIES => {
+                attempt += 1;
+                let delay = BASE_DELAY_MS * 2u64.pow(attempt - 1);
+                tracing::debug!(
+                    attempt,
+                    delay_ms = delay,
+                    "Lifecycle: database locked during task transition, retrying after backoff"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Sort tool schemas deterministically for prompt-cache stability (ADR-048
 /// §2C).  Built-in tools (indices `0..builtin_count`) are sorted
 /// alphabetically among themselves, then MCP tools (`builtin_count..`) are
@@ -468,34 +512,53 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         .await;
 
     // ── ADR-050 Chunk C: canonical-graph cache warming ───────────────────────
-    // Every dispatched task — worker, reviewer, planner, lead, AND architect —
-    // proactively warms the canonical-main graph cache before its session
-    // starts.  `ensure_canonical_graph` builds (or fetches from cache) the
-    // graph and persists the rendered skeleton as a `repo_map_cache` row plus
-    // a `repo_map` note, which workers consume through the standard note
-    // pipeline.  Without this, the first cold-start dispatch on a fresh
-    // server saw no skeleton at all until something else (architect dispatch,
-    // chat session) happened to invoke the warmer.
+    // ONLY the architect triggers a warm.  Originally every role warmed so
+    // that workers/reviewers/planners/lead would receive a freshly rendered
+    // `repo_map` note through the standard note pipeline — but that meant
+    // every non-architect dispatch either hit the cache (fine) or serialized
+    // on the server-wide `indexer_lock` behind a full SCIP rebuild, which on
+    // cold cache took tens of minutes and wedged the dispatcher for every
+    // other session.  Workers tolerate a stale skeleton: whatever `repo_map`
+    // note the most recent architect warm left in the DB is picked up by
+    // the normal note-loading machinery.  Only the architect actually
+    // *needs* the graph fresh (for `code_graph` against `origin/main`), and
+    // even there we bound the wait so a slow build can never wedge dispatch.
     //
     // Best-effort: `ensure_canonical_graph` may legitimately fail (network
     // blip on `git fetch`, missing rust-analyzer, compile error on cold
-    // cache).  We log a warning and let the agent runtime start anyway —
-    // the worker degrades to "no skeleton" instead of refusing to run.
-    if let Some(warmer) = app_state.canonical_graph_warmer.clone() {
-        match warmer.warm(&task.project_id, &project_dir).await {
-            Ok(()) => {
+    // cache) or exceed the bounded wait.  We log and let the agent runtime
+    // start anyway — the architect degrades to "no fresh skeleton" instead
+    // of refusing to run.
+    if runtime_role.config().name == "architect"
+        && let Some(warmer) = app_state.canonical_graph_warmer.clone()
+    {
+        const WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+        let warm_started = std::time::Instant::now();
+        match tokio::time::timeout(WARM_TIMEOUT, warmer.warm(&task.project_id, &project_dir)).await
+        {
+            Ok(Ok(())) => {
                 tracing::debug!(
                     task_id = %task_id,
                     project_id = %task.project_id,
+                    elapsed_ms = warm_started.elapsed().as_millis() as u64,
                     "Lifecycle: canonical graph cache warmed"
                 );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     task_id = %task_id,
                     project_id = %task.project_id,
                     error = %e,
-                    "Lifecycle: ensure_canonical_graph warming failed; agent will run without a fresh skeleton"
+                    elapsed_ms = warm_started.elapsed().as_millis() as u64,
+                    "Lifecycle: ensure_canonical_graph warming failed; architect will run without a fresh skeleton"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    project_id = %task.project_id,
+                    timeout_secs = WARM_TIMEOUT.as_secs(),
+                    "Lifecycle: ensure_canonical_graph warming exceeded timeout; architect proceeds without fresh skeleton (background warm may still complete)"
                 );
             }
         }
@@ -1892,16 +1955,19 @@ async fn apply_transition_and_dispatch(
                 "Lifecycle: dropping poisoned session due to orphaned tool call; next dispatch will start a fresh session"
             );
         }
-        if let Err(e) = task_repo
-            .transition(
-                task_id,
-                action.clone(),
-                "agent-supervisor",
-                "system",
-                reason.as_deref(),
-                None,
-            )
-            .await
+        if let Err(e) = retry_task_transition_on_locked(|| async {
+            task_repo
+                .transition(
+                    task_id,
+                    action.clone(),
+                    "agent-supervisor",
+                    "system",
+                    reason.as_deref(),
+                    None,
+                )
+                .await
+        })
+        .await
         {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: failed to transition task after session");
             // If the intended transition failed (e.g. Close blocked by
@@ -1910,16 +1976,19 @@ async fn apply_transition_and_dispatch(
             // coordinator's stuck-task recovery to loop indefinitely.
             if action != TransitionAction::Release {
                 let fallback_reason = format!("Fallback release: {e}");
-                if let Err(e2) = task_repo
-                    .transition(
-                        task_id,
-                        TransitionAction::Release,
-                        "agent-supervisor",
-                        "system",
-                        Some(&fallback_reason),
-                        None,
-                    )
-                    .await
+                if let Err(e2) = retry_task_transition_on_locked(|| async {
+                    task_repo
+                        .transition(
+                            task_id,
+                            TransitionAction::Release,
+                            "agent-supervisor",
+                            "system",
+                            Some(&fallback_reason),
+                            None,
+                        )
+                        .await
+                })
+                .await
                 {
                     // Release is only valid from in_progress.  If the task is
                     // already in open/todo/closed (e.g. a concurrent session or

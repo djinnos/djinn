@@ -5,6 +5,7 @@ pub mod message;
 pub mod oauth;
 pub mod prompts;
 pub mod provider;
+pub mod rate_limit;
 pub mod repos;
 
 pub use completion::{
