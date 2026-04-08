@@ -5,6 +5,7 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, handler::server::wrapper::Parameters};
+    use serde_json::json;
     use tokio::time::sleep;
 
     use crate::{
@@ -207,5 +208,163 @@ mod tests {
         assert!(pair.contains(&note_a.id.as_str()));
         assert!(pair.contains(&note_b.id.as_str()));
         assert!(manager.server_for_session(&session_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_routes_propose_adr_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let proposed_dir = tmp.path().join(".djinn/decisions/proposed");
+        std::fs::create_dir_all(&proposed_dir).unwrap();
+        std::fs::write(
+            proposed_dir.join("adr-999-routing.md"),
+            "---\ntitle: Routed ADR\nwork_shape: epic\noriginating_spike_id: spk1\n---\n\n# Routed ADR\n",
+        )
+        .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "propose_adr_list",
+                json!({ "project": tmp.path().to_str().unwrap() }),
+            )
+            .await
+            .expect("dispatch propose_adr_list");
+
+        assert_eq!(response.get("error"), None);
+        let items = response
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("items array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].get("id").and_then(|value| value.as_str()),
+            Some("adr-999-routing")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_routes_propose_adr_show() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let proposed_dir = tmp.path().join(".djinn/decisions/proposed");
+        std::fs::create_dir_all(&proposed_dir).unwrap();
+        std::fs::write(
+            proposed_dir.join("adr-999-routing.md"),
+            "---\ntitle: Routed ADR\nwork_shape: epic\n---\n\n# Routed ADR\n\nBody text\n",
+        )
+        .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "propose_adr_show",
+                json!({ "project": tmp.path().to_str().unwrap(), "id": "adr-999-routing" }),
+            )
+            .await
+            .expect("dispatch propose_adr_show");
+
+        assert_eq!(response.get("error"), None);
+        let adr = response
+            .get("adr")
+            .and_then(|value| value.as_object())
+            .expect("adr object");
+        assert_eq!(
+            adr.get("id").and_then(|value| value.as_str()),
+            Some("adr-999-routing")
+        );
+        assert!(
+            adr.get("body")
+                .and_then(|value| value.as_str())
+                .is_some_and(|body| body.contains("Body text"))
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_routes_propose_adr_accept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let proposed_dir = tmp.path().join(".djinn/decisions/proposed");
+        std::fs::create_dir_all(&proposed_dir).unwrap();
+        std::fs::write(
+            proposed_dir.join("adr-999-routing.md"),
+            "---\ntitle: Routed ADR\nwork_shape: architectural\n---\n\n# Routed ADR\n",
+        )
+        .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "propose_adr_accept",
+                json!({
+                    "project": tmp.path().to_str().unwrap(),
+                    "id": "adr-999-routing",
+                    "create_epic": false
+                }),
+            )
+            .await
+            .expect("dispatch propose_adr_accept");
+
+        assert_eq!(response.get("error"), None);
+        let accepted_path = response
+            .get("accepted_path")
+            .and_then(|value| value.as_str())
+            .expect("accepted path");
+        assert!(accepted_path.ends_with(".djinn/decisions/adr-999-routing.md"));
+        assert!(
+            tmp.path()
+                .join(".djinn/decisions/adr-999-routing.md")
+                .exists()
+        );
+        assert!(
+            !tmp.path()
+                .join(".djinn/decisions/proposed/adr-999-routing.md")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_routes_propose_adr_reject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let proposed_dir = tmp.path().join(".djinn/decisions/proposed");
+        std::fs::create_dir_all(&proposed_dir).unwrap();
+        std::fs::write(
+            proposed_dir.join("adr-999-routing.md"),
+            "---\ntitle: Routed ADR\n---\n\n# Routed ADR\n",
+        )
+        .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "propose_adr_reject",
+                json!({ "project": tmp.path().to_str().unwrap(), "id": "adr-999-routing" }),
+            )
+            .await
+            .expect("dispatch propose_adr_reject");
+
+        assert_eq!(response.get("error"), None);
+        assert_eq!(
+            response.get("ok").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(
+            !tmp.path()
+                .join(".djinn/decisions/proposed/adr-999-routing.md")
+                .exists()
+        );
     }
 }
