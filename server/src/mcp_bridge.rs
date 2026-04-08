@@ -903,15 +903,13 @@ impl RepoGraphOps for RepoGraphBridge {
         use djinn_db::ProjectRepository;
         use time::format_description::well_known::Rfc3339;
 
+        let (project_root, index_tree_path) = normalize_graph_query_paths(project_path);
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = repo
-            .resolve(project_path)
+            .resolve(project_root.to_string_lossy().as_ref())
             .await
             .map_err(|e| format!("resolve project: {e}"))?
             .ok_or_else(|| format!("no project registered for path '{project_path}'"))?;
-
-        let project_root = PathBuf::from(project_path);
-        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
 
         let snapshot = {
             let cache = GRAPH_CACHE.read().await;
@@ -966,6 +964,37 @@ async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option
     }
     let raw = String::from_utf8(output.stdout).ok()?;
     raw.trim().parse::<u64>().ok()
+}
+
+/// Normalize a graph query path into both the registered project root and its
+/// canonical `_index` worktree path.
+///
+/// Architect and chat tool dispatch pin `working_root` to the canonical
+/// `.djinn/worktrees/_index/` tree, so `code_graph` reaches the server bridge
+/// with that path rather than the project root. Accept both forms here so the
+/// same warmed canonical cache entry backs architect/chat and external MCP use.
+fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathBuf) {
+    let requested = PathBuf::from(project_path);
+    let is_index_tree = requested.file_name() == Some(std::ffi::OsStr::new("_index"))
+        && requested.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("worktrees"))
+        && requested
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            == Some(std::ffi::OsStr::new(".djinn"));
+
+    if is_index_tree
+        && let Some(project_root) = requested
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+    {
+        return (project_root.to_path_buf(), requested);
+    }
+
+    let project_root = requested;
+    let index_tree_path = djinn_core::index_tree::index_tree_path(&project_root);
+    (project_root, index_tree_path)
 }
 
 fn group_neighbors_by_file(
@@ -1630,10 +1659,7 @@ async fn read_cached_canonical_graph(
     ),
     String,
 > {
-    let index_tree_path = std::path::PathBuf::from(project_path)
-        .join(".djinn")
-        .join("worktrees")
-        .join("_index");
+    let (_project_root, index_tree_path) = normalize_graph_query_paths(project_path);
     let cache = GRAPH_CACHE.read().await;
     let cached = cache
         .as_ref()
@@ -1855,6 +1881,22 @@ mod graph_bridge_tests {
         let graph = build_test_graph();
         assert!(resolve_node(&graph, "src/app.rs").is_ok());
         assert!(resolve_node(&graph, "file:src/app.rs").is_ok());
+    }
+
+    #[test]
+    fn normalize_graph_query_paths_accepts_project_root_and_index_tree() {
+        let project_root = PathBuf::from("/tmp/example-project");
+        let canonical_index = djinn_core::index_tree::index_tree_path(&project_root);
+
+        let (root_from_project, index_from_project) =
+            normalize_graph_query_paths(project_root.to_string_lossy().as_ref());
+        assert_eq!(root_from_project, project_root);
+        assert_eq!(index_from_project, canonical_index);
+
+        let (root_from_index, index_from_index) =
+            normalize_graph_query_paths(canonical_index.to_string_lossy().as_ref());
+        assert_eq!(root_from_index, project_root);
+        assert_eq!(index_from_index, canonical_index);
     }
 
     #[test]
@@ -2173,6 +2215,87 @@ mod graph_bridge_tests {
         // the rev-list call fails and we expect None.  This still proves the
         // status path does not panic when git is unavailable.
         assert!(status.commits_since_pin.is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_code_graph_ranked_succeeds_via_agent_bridge_from_index_tree_root() {
+        use crate::test_helpers::create_test_db;
+        use djinn_db::ProjectRepository;
+        use tokio_util::sync::CancellationToken;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("chat-code-graph-repo");
+        tokio::fs::create_dir_all(&project_root).await.unwrap();
+
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        proj_repo
+            .create(
+                "test-chat-code-graph",
+                project_root.to_string_lossy().as_ref(),
+            )
+            .await
+            .expect("create project");
+
+        let index_tree_path = djinn_core::index_tree::index_tree_path(&project_root);
+        let graph = build_test_graph();
+        let (pagerank, sccs) = derive_graph_caches(&graph);
+        {
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = Some(CachedGraph {
+                graph,
+                project_path: index_tree_path.clone(),
+                git_head: "deadbeefcafebabe1234567890abcdef00000001".to_string(),
+                last_warm_at: time::OffsetDateTime::now_utc(),
+                pagerank,
+                sccs,
+            });
+        }
+
+        let mut ctx = state.agent_context();
+        ctx.working_root = Some(index_tree_path);
+        let result = djinn_agent::chat_tools::dispatch_chat_tool(
+            &ctx,
+            "code_graph",
+            serde_json::json!({
+                "operation": "ranked",
+                "kind_filter": "file",
+                "limit": 10,
+            }),
+            &project_root,
+        )
+        .await
+        .expect("chat code_graph ranked should succeed through agent bridge");
+
+        {
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = None;
+        }
+
+        let ranked = result
+            .as_array()
+            .expect("ranked response should be an array");
+        assert!(
+            !ranked.is_empty(),
+            "expected ranked files from fixture graph"
+        );
+        let keys: Vec<&str> = ranked
+            .iter()
+            .filter_map(|entry| entry.get("key").and_then(|value| value.as_str()))
+            .collect();
+        assert!(
+            keys.iter()
+                .any(|key| *key == "file:src/app.rs" || *key == "src/app.rs"),
+            "expected fixture file in ranked output, got {keys:?}"
+        );
+
+        let rendered = result.to_string();
+        assert!(
+            !rendered.contains("code_graph not available in agent bridge"),
+            "bridge should use the real RepoGraphOps implementation, got {rendered}"
+        );
     }
 }
 
