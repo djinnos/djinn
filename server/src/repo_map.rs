@@ -14,9 +14,9 @@ use crate::repo_graph::{
     RankedRepoGraphNode, RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind,
     RepoGraphRanking,
 };
-use crate::repo_map_personalization::{
-    RepoMapNoteHint, RepoMapNoteSearcher, RepoMapPersonalizationInput,
-};
+use crate::repo_map_personalization::RepoMapNoteSearcher;
+#[cfg(test)]
+use crate::repo_map_personalization::{RepoMapNoteHint, RepoMapPersonalizationInput};
 use crate::scip_parser::ScipSymbolKind;
 
 mod indexing;
@@ -41,13 +41,13 @@ fn note_missing_indexer_once(project_root: &Path, indexer: SupportedIndexer) -> 
 const DEFAULT_MAX_FILES: usize = 12;
 const DEFAULT_MAX_SYMBOLS_PER_FILE: usize = 4;
 const DEFAULT_MAX_RELATIONSHIPS_PER_FILE: usize = 3;
-pub const REPO_MAP_NOTE_TYPE: &str = "repo_map";
-pub const REPO_MAP_NOTE_FOLDER: &str = "reference/repo-maps";
-pub const REPO_MAP_NOTE_TAG: &str = "repo-map";
+pub(crate) const REPO_MAP_NOTE_TYPE: &str = "repo_map";
+pub(crate) const REPO_MAP_NOTE_FOLDER: &str = "reference/repo-maps";
+pub(crate) const REPO_MAP_NOTE_TAG: &str = "repo-map";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum SupportedIndexer {
+pub(crate) enum SupportedIndexer {
     RustAnalyzer,
     TypeScript,
     Python,
@@ -59,7 +59,7 @@ pub enum SupportedIndexer {
 }
 
 impl SupportedIndexer {
-    pub const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::RustAnalyzer,
         Self::TypeScript,
         Self::Python,
@@ -70,7 +70,7 @@ impl SupportedIndexer {
         Self::DotNet,
     ];
 
-    pub fn binary_name(self) -> &'static str {
+    pub(crate) fn binary_name(self) -> &'static str {
         match self {
             Self::RustAnalyzer => "rust-analyzer",
             Self::TypeScript => "scip-typescript",
@@ -83,7 +83,7 @@ impl SupportedIndexer {
         }
     }
 
-    pub fn language(self) -> &'static str {
+    pub(crate) fn language(self) -> &'static str {
         match self {
             Self::RustAnalyzer => "rust",
             Self::TypeScript => "typescript",
@@ -152,41 +152,33 @@ impl SupportedIndexer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoveredWorkspace {
-    pub indexer: SupportedIndexer,
-    pub root: PathBuf,
-    pub slug: String,
+pub(crate) struct DiscoveredWorkspace {
+    pub(crate) indexer: SupportedIndexer,
+    pub(crate) root: PathBuf,
+    pub(crate) slug: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndexerAvailability {
-    pub indexer: SupportedIndexer,
-    pub binary: String,
-    pub path: Option<PathBuf>,
+pub(crate) struct IndexerAvailability {
+    pub(crate) indexer: SupportedIndexer,
+    pub(crate) binary: String,
+    pub(crate) path: Option<PathBuf>,
 }
 
 impl IndexerAvailability {
-    pub fn is_available(&self) -> bool {
+    pub(crate) fn is_available(&self) -> bool {
         self.path.is_some()
     }
 }
 
-pub fn plan_indexer_commands(
-    project_root: impl AsRef<Path>,
-    output_root: impl AsRef<Path>,
-    available_indexers: &[IndexerAvailability],
-) -> Vec<PlannedIndexerCommand> {
-    indexing::plan_indexer_commands(project_root, output_root, available_indexers)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedIndexerCommand {
-    pub indexer: SupportedIndexer,
-    pub binary_path: PathBuf,
-    pub args: Vec<String>,
-    pub working_directory: PathBuf,
-    pub workspace_root: PathBuf,
-    pub output_path: PathBuf,
+pub(crate) struct PlannedIndexerCommand {
+    pub(crate) indexer: SupportedIndexer,
+    pub(crate) binary_path: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) working_directory: PathBuf,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) output_path: PathBuf,
 }
 
 impl PlannedIndexerCommand {
@@ -207,60 +199,37 @@ impl PlannedIndexerCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutedIndexerCommand {
-    pub plan: PlannedIndexerCommand,
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
+pub(crate) struct ExecutedIndexerCommand {
+    pub(crate) plan: PlannedIndexerCommand,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScipArtifact {
-    pub path: PathBuf,
-    pub indexer: Option<SupportedIndexer>,
+pub(crate) struct ScipArtifact {
+    pub(crate) path: PathBuf,
+    pub(crate) indexer: Option<SupportedIndexer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndexingRun {
-    pub project_root: PathBuf,
-    pub output_root: PathBuf,
-    pub commands: Vec<ExecutedIndexerCommand>,
-    pub artifacts: Vec<ScipArtifact>,
-}
-
-pub async fn run_indexers(
-    project_root: impl AsRef<Path>,
-    output_root: impl AsRef<Path>,
-) -> Result<IndexingRun> {
-    indexing::run_indexers(project_root, output_root).await
-}
-
-pub async fn run_indexers_single_flight(
-    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
-    project_root: impl AsRef<Path>,
-    output_root: impl AsRef<Path>,
-    target_dir: Option<&Path>,
-) -> Result<IndexingRun> {
-    indexing::run_indexers_single_flight(lock, project_root, output_root, target_dir).await
-}
-
-pub fn collect_scip_artifacts(
-    output_root: impl AsRef<Path>,
-    commands: &[ExecutedIndexerCommand],
-) -> Result<Vec<ScipArtifact>> {
-    indexing::collect_scip_artifacts(output_root, commands)
+pub(crate) struct IndexingRun {
+    pub(crate) project_root: PathBuf,
+    pub(crate) output_root: PathBuf,
+    pub(crate) commands: Vec<ExecutedIndexerCommand>,
+    pub(crate) artifacts: Vec<ScipArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepoMapRenderOptions {
-    pub token_budget: usize,
-    pub max_files: usize,
-    pub max_symbols_per_file: usize,
-    pub max_relationships_per_file: usize,
+pub(crate) struct RepoMapRenderOptions {
+    pub(crate) token_budget: usize,
+    pub(crate) max_files: usize,
+    pub(crate) max_symbols_per_file: usize,
+    pub(crate) max_relationships_per_file: usize,
 }
 
 impl RepoMapRenderOptions {
-    pub fn new(token_budget: usize) -> Self {
+    pub(crate) fn new(token_budget: usize) -> Self {
         Self {
             token_budget,
             max_files: DEFAULT_MAX_FILES,
@@ -271,20 +240,20 @@ impl RepoMapRenderOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderedRepoMap {
-    pub content: String,
-    pub token_estimate: usize,
-    pub included_entries: usize,
+pub(crate) struct RenderedRepoMap {
+    pub(crate) content: String,
+    pub(crate) token_estimate: usize,
+    pub(crate) included_entries: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepoMapNoteSpec {
-    pub title: String,
-    pub permalink: String,
-    pub tags_json: String,
+pub(crate) struct RepoMapNoteSpec {
+    pub(crate) title: String,
+    pub(crate) permalink: String,
+    pub(crate) tags_json: String,
 }
 
-pub fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
+pub(crate) fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
     let short_sha: String = commit_sha.chars().take(12).collect();
     let title = format!("Repository Map {short_sha}");
     let permalink = format!("{REPO_MAP_NOTE_FOLDER}/{short_sha}");
@@ -298,7 +267,7 @@ pub fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
     }
 }
 
-pub async fn persist_repo_map_note(
+pub(crate) async fn persist_repo_map_note(
     note_repo: &NoteRepository,
     project_id: &str,
     commit_sha: &str,
@@ -318,7 +287,7 @@ pub async fn persist_repo_map_note(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RepoMapRenderError {
+pub(crate) enum RepoMapRenderError {
     MinimalRepresentationExceedsBudget {
         budget: usize,
         required_tokens: usize,
@@ -342,14 +311,15 @@ struct RepoMapSymbol {
     score_milli: i64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct RepoMapPersonalizationRequest<'a> {
-    pub ranked_nodes: &'a [RankedRepoGraphNode],
-    pub title: Option<&'a str>,
-    pub description: Option<&'a str>,
-    pub design: Option<&'a str>,
-    pub memory_refs: &'a [String],
-    pub note_hints: &'a [RepoMapNoteHint],
+struct RepoMapPersonalizationRequest<'a> {
+    ranked_nodes: &'a [RankedRepoGraphNode],
+    title: Option<&'a str>,
+    description: Option<&'a str>,
+    design: Option<&'a str>,
+    memory_refs: &'a [String],
+    note_hints: &'a [RepoMapNoteHint],
 }
 
 impl RepoMapNoteSearcher for NoteRepository {
@@ -366,7 +336,7 @@ impl RepoMapNoteSearcher for NoteRepository {
     }
 }
 
-pub fn render_repo_map(
+pub(crate) fn render_repo_map(
     graph: &RepoDependencyGraph,
     ranking: &RepoGraphRanking,
     options: &RepoMapRenderOptions,
@@ -375,7 +345,8 @@ pub fn render_repo_map(
     render_repo_map_from_entries(&entries, options)
 }
 
-pub fn personalized_repo_map_ranking(
+#[cfg(test)]
+fn personalized_repo_map_ranking(
     graph: &RepoDependencyGraph,
     request: &RepoMapPersonalizationRequest<'_>,
 ) -> Vec<RankedRepoGraphNode> {
@@ -546,6 +517,7 @@ fn render_repo_map_from_entries(
     Ok(best)
 }
 
+#[cfg(test)]
 fn repo_map_entry_boost(
     graph: &RepoDependencyGraph,
     ranked: &RankedRepoGraphNode,

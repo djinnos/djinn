@@ -159,7 +159,7 @@ pub enum ScipSymbolKind {
     Unknown(i32),
 }
 
-pub fn parse_scip_artifacts(artifacts: &[ScipArtifact]) -> Result<Vec<ParsedScipIndex>> {
+pub(crate) fn parse_scip_artifacts(artifacts: &[ScipArtifact]) -> Result<Vec<ParsedScipIndex>> {
     artifacts
         .iter()
         .map(|artifact| parse_scip_file(&artifact.path))
