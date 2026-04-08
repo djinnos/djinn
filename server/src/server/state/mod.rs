@@ -265,6 +265,9 @@ impl AppState {
             canonical_graph_warmer: Some(Arc::new(AppStateCanonicalGraphWarmer {
                 state: self.clone(),
             })),
+            repo_graph_ops: Some(Arc::new(crate::mcp_bridge::RepoGraphBridge::new(
+                self.clone(),
+            ))),
         }
     }
 
