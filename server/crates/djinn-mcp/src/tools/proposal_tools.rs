@@ -70,7 +70,7 @@ fn parse_frontmatter(text: &str) -> (BTreeMap<String, String>, String) {
     // Accumulate frontmatter lines until the closing `---`.
     let mut closed = false;
     let mut front_lines: Vec<&str> = Vec::new();
-    while let Some(line) = lines.next() {
+    for line in lines.by_ref() {
         if line.trim_end() == "---" {
             closed = true;
             break;
