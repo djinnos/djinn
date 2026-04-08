@@ -115,16 +115,53 @@ pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
 /// Resolve `Arc<dyn AgentRole>` directly from a task and dispatch context,
 /// without exposing `AgentType` to the caller.
 ///
-/// Checks `issue_type` first so planning/spike/review tasks get the
-/// correct role (Planner/Architect) instead of always defaulting to Worker.
+/// Routing rules:
+/// - `task.agent_type` (when non-empty) always wins — the slot lifecycle
+///   will reload the specialist config from the DB; this function only
+///   chooses the fallback *base* role for that path.
+/// - `planning` / `decomposition` → Planner (wave decomposition).
+/// - `review` → Planner.  Under ADR-051 the Planner owns the board
+///   patrol *and* is the escalation ceiling above Lead, so every review
+///   task (patrol + `request_planner` escalation) dispatches as a
+///   Planner session.  The previous rule routed reviews to Architect
+///   (ADR-034), which no longer matches the role hierarchy.
+/// - `spike` → Architect.  Architect is the on-demand consultant per
+///   ADR-051 §2; spikes are how the Planner asks for deep code
+///   reasoning.
+/// - anything else → whatever `AgentType::for_task_status` decides
+///   (typically Worker for open/in_progress tasks).
 pub(crate) fn role_for_task_dispatch(
     task: &Task,
     _has_conflict_context: bool,
 ) -> Arc<dyn AgentRole> {
+    // If the task already carries an explicit agent_type, honour it.
+    // The slot lifecycle will reload the specialist from the agents
+    // table, but we still need a sensible *base* role in case the
+    // specialist lookup fails (e.g. orphaned agent_type string).
+    if let Some(ref specialist) = task.agent_type
+        && !specialist.is_empty()
+        && let Some(base) = match specialist.as_str() {
+            "worker" => Some(AgentType::Worker),
+            "reviewer" => Some(AgentType::Reviewer),
+            "lead" | "pm" => Some(AgentType::Lead),
+            "planner" => Some(AgentType::Planner),
+            "architect" => Some(AgentType::Architect),
+            _ => None,
+        }
+    {
+        return role_impl_for(base);
+    }
+
     // Issue-type-specific routing takes priority over status-based routing.
     match task.issue_type.as_str() {
         "planning" | "decomposition" => return role_impl_for(AgentType::Planner),
-        "spike" | "review" => return role_impl_for(AgentType::Architect),
+        // ADR-051 §1 + §8: review tasks are Planner-owned (patrol +
+        // lead escalation ceiling).  Previously this routed to Architect
+        // per ADR-034 before the split.
+        "review" => return role_impl_for(AgentType::Planner),
+        // Spikes remain the Architect's territory — they are how the
+        // Planner asks for deep code-structural reasoning (ADR-051 §2).
+        "spike" => return role_impl_for(AgentType::Architect),
         _ => {}
     }
     role_impl_for(AgentType::for_task_status(task.status.as_str(), false))
@@ -160,9 +197,14 @@ impl RoleRegistry {
         ]);
 
         let dispatch_rules = vec![
-            // Architect claims spike/review tasks (open status) first.
+            // ADR-051 §1 + §8: review tasks (patrol + escalation) are
+            // Planner-owned.  This rule must come before the architect
+            // rule so spike tasks still fall through to Architect.
+            planner_review_dispatch_rule(),
+            // Architect claims spike tasks (open status) — the
+            // on-demand consultant loop per ADR-051 §2.
             architect_dispatch_rule(),
-            // Planning tasks go to Planner.
+            // Planning / decomposition tasks go to Planner.
             planning_dispatch_rule(),
             worker_dispatch_rule(),
             reviewer_dispatch_rule(),
@@ -206,17 +248,34 @@ impl RoleRegistry {
     }
 }
 
-/// Returns `true` if the task's `issue_type` uses the simple lifecycle and is
-/// dispatched to the Architect role (spike, review).
+/// Returns `true` if the task is an open/in-progress spike — the
+/// Architect's on-demand consultant loop (ADR-051 §2).  Review tasks
+/// are handled by `planner_review_claims` and must not reach here.
 fn architect_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     matches!(task.status.as_str(), "open" | "in_progress")
-        && matches!(task.issue_type.as_str(), "spike" | "review")
+        && matches!(task.issue_type.as_str(), "spike")
 }
 
 fn architect_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "architect",
         claims: architect_claims,
+    }
+}
+
+/// Returns `true` if the task is an open/in-progress review task.
+/// Under ADR-051 §1 + §8 the Planner owns both the board patrol and
+/// the escalation ceiling above Lead, so every review task dispatches
+/// as a Planner session.
+fn planner_review_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+    matches!(task.status.as_str(), "open" | "in_progress")
+        && task.issue_type.as_str() == "review"
+}
+
+fn planner_review_dispatch_rule() -> DispatchRule {
+    DispatchRule {
+        role_name: "planner",
+        claims: planner_review_claims,
     }
 }
 
@@ -409,26 +468,37 @@ mod tests {
     }
 
     #[test]
-    fn spike_and_review_tasks_dispatch_to_architect() {
+    fn spike_tasks_dispatch_to_architect_review_tasks_dispatch_to_planner() {
+        // ADR-051 §1 + §8: review tasks (patrol + lead escalation)
+        // are Planner-owned; spike tasks remain Architect-owned
+        // (on-demand consultant loop per ADR-051 §2).
         let registry = RoleRegistry::new();
         let ctx = DispatchContext;
 
-        for issue_type in ["spike", "review"] {
-            for status in ["open", "in_progress"] {
-                let task = make_task_with_type(status, issue_type);
-                let role = registry.role_for_task(&task, &ctx);
-                assert_eq!(
-                    role,
-                    Some("architect"),
-                    "{issue_type}/{status} task should dispatch to architect"
-                );
-                let dispatch_role = registry.dispatch_role_for_task(&task, &ctx);
-                assert_eq!(
-                    dispatch_role,
-                    Some("architect"),
-                    "{issue_type}/{status} task should have architect dispatch_role"
-                );
-            }
+        for status in ["open", "in_progress"] {
+            let spike = make_task_with_type(status, "spike");
+            assert_eq!(
+                registry.role_for_task(&spike, &ctx),
+                Some("architect"),
+                "spike/{status} task should dispatch to architect"
+            );
+            assert_eq!(
+                registry.dispatch_role_for_task(&spike, &ctx),
+                Some("architect"),
+                "spike/{status} task should have architect dispatch_role"
+            );
+
+            let review = make_task_with_type(status, "review");
+            assert_eq!(
+                registry.role_for_task(&review, &ctx),
+                Some("planner"),
+                "review/{status} task should dispatch to planner per ADR-051"
+            );
+            assert_eq!(
+                registry.dispatch_role_for_task(&review, &ctx),
+                Some("planner"),
+                "review/{status} task should have planner dispatch_role"
+            );
         }
     }
 
