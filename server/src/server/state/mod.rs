@@ -16,7 +16,12 @@ use djinn_db::{Database, NoteRepository, ProjectRepository, SettingsRepository};
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
+mod canonical_graph_refresh_planner;
 mod settings;
+
+use canonical_graph_refresh_planner::{
+    CanonicalGraphRefreshPlanner, CanonicalGraphRefreshProbe, RefreshPlan, WarmPlan, WarmPlanInputs,
+};
 
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
@@ -538,6 +543,24 @@ struct AppStateCanonicalGraphWarmer {
     state: AppState,
 }
 
+struct AppStateCanonicalGraphRefreshProbe;
+
+#[async_trait::async_trait]
+impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
+    async fn cache_has_entry_for(&self, index_tree_path: &Path) -> bool {
+        crate::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
+    }
+
+    async fn pinned_commit_for(&self, index_tree_path: &Path) -> Option<String> {
+        crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
+    }
+
+    async fn commits_since(&self, project_root: &Path, pinned_commit: &str) -> Option<u64> {
+        crate::canonical_graph::canonical_graph_count_commits_since(project_root, pinned_commit)
+            .await
+    }
+}
+
 #[async_trait::async_trait]
 impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer {
     /// Detached-warm semantics (ADR-050 Chunk C follow-up, 2026-04-07):
@@ -569,28 +592,33 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
     ///      informational anyway and proceeds with whatever skeleton
     ///      currently lives in the DB `repo_map` note pipeline.
     async fn warm(&self, project_id: &str, project_root: &Path) -> Result<(), String> {
-        // Fast path: in-memory cache already populated for this project's
-        // index tree.  The background task (if this is stale for the
-        // current origin/main) will refresh on the next dispatch that
-        // claims the inflight slot.
         let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
-        if crate::canonical_graph::canonical_graph_cache_has_entry_for(&index_tree_path).await {
-            tracing::debug!(
-                project_id = %project_id,
-                "AppStateCanonicalGraphWarmer: cache already hot, skipping warm"
-            );
-            return Ok(());
-        }
+        let planner = CanonicalGraphRefreshPlanner;
+        let warm_plan = planner.plan_warm(WarmPlanInputs {
+            cache_has_entry: crate::canonical_graph::canonical_graph_cache_has_entry_for(
+                &index_tree_path,
+            )
+            .await,
+            warm_slot_claimed: self.state.try_claim_canonical_warm_slot(project_id),
+        });
 
-        // Single-flight: if another warm task is already in flight for
-        // this project, coalesce and return immediately.  The in-flight
-        // task will populate the cache for everybody.
-        if !self.state.try_claim_canonical_warm_slot(project_id) {
-            tracing::info!(
-                project_id = %project_id,
-                "AppStateCanonicalGraphWarmer: warm already in flight, coalescing"
-            );
-            return Ok(());
+        match warm_plan {
+            WarmPlan::SkipHotCache => {
+                self.state.release_canonical_warm_slot(project_id);
+                tracing::debug!(
+                    project_id = %project_id,
+                    "AppStateCanonicalGraphWarmer: cache already hot, skipping warm"
+                );
+                return Ok(());
+            }
+            WarmPlan::CoalesceInflight => {
+                tracing::info!(
+                    project_id = %project_id,
+                    "AppStateCanonicalGraphWarmer: warm already in flight, coalescing"
+                );
+                return Ok(());
+            }
+            WarmPlan::KickDetachedWarm => {}
         }
 
         // Detach the warm onto a background task so the lifecycle's outer
@@ -662,34 +690,25 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
         project_id: &str,
         project_root: &Path,
     ) -> Result<(), String> {
-        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+        let planner = CanonicalGraphRefreshPlanner;
+        let probe = AppStateCanonicalGraphRefreshProbe;
 
-        if !crate::canonical_graph::canonical_graph_cache_has_entry_for(&index_tree_path).await {
-            tracing::debug!(
-                project_id = %project_id,
-                "AppStateCanonicalGraphWarmer: cache cold, skipping proactive refresh (cold path is owned by maybe_kick_background_warm)"
-            );
-            return Ok(());
-        }
-
-        let Some(pinned_commit) =
-            crate::canonical_graph::canonical_graph_cache_pinned_commit_for(&index_tree_path).await
-        else {
-            tracing::debug!(
-                project_id = %project_id,
-                "AppStateCanonicalGraphWarmer: cache pinned commit unavailable (race), skipping proactive refresh"
-            );
-            return Ok(());
-        };
-
-        let commits_since = crate::canonical_graph::canonical_graph_count_commits_since(
-            project_root,
-            &pinned_commit,
-        )
-        .await;
-
-        match commits_since {
-            Some(0) => {
+        match planner.plan_refresh(&probe, project_root).await {
+            RefreshPlan::SkipColdCache => {
+                tracing::debug!(
+                    project_id = %project_id,
+                    "AppStateCanonicalGraphWarmer: cache cold, skipping proactive refresh (cold path is owned by maybe_kick_background_warm)"
+                );
+                Ok(())
+            }
+            RefreshPlan::SkipPinnedCommitUnavailable => {
+                tracing::debug!(
+                    project_id = %project_id,
+                    "AppStateCanonicalGraphWarmer: cache pinned commit unavailable (race), skipping proactive refresh"
+                );
+                Ok(())
+            }
+            RefreshPlan::SkipCurrent { pinned_commit } => {
                 tracing::debug!(
                     project_id = %project_id,
                     pinned_commit = %pinned_commit,
@@ -697,11 +716,14 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
                 );
                 Ok(())
             }
-            Some(behind) => {
+            RefreshPlan::RefreshStale {
+                pinned_commit,
+                commits_behind,
+            } => {
                 tracing::info!(
                     project_id = %project_id,
                     pinned_commit = %pinned_commit,
-                    commits_behind = behind,
+                    commits_behind,
                     "AppStateCanonicalGraphWarmer: graph cache stale, kicking warm"
                 );
                 if let Err(e) = self.warm(project_id, project_root).await {
@@ -713,7 +735,7 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
                 }
                 Ok(())
             }
-            None => {
+            RefreshPlan::SkipCommitCheckFailed { pinned_commit } => {
                 tracing::debug!(
                     project_id = %project_id,
                     pinned_commit = %pinned_commit,
