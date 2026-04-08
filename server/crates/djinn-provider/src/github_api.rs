@@ -72,6 +72,7 @@ impl GitHubApiClient {
             .user_agent("djinn-server/0.1 (+https://github.com/djinnos/server)")
             .build()
             .expect("failed to build reqwest client");
+
         Self {
             http,
             cred_repo,
