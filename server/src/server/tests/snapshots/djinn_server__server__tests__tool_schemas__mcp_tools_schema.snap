@@ -4411,7 +4411,6 @@ expression: signatures
     },
     "name": "propose_adr_accept",
     "output_schema": {
-<<<<<<< HEAD
       "$defs": {
         "EpicModel": {
           "properties": {
@@ -4482,15 +4481,12 @@ expression: signatures
           "type": "object"
         }
       },
-=======
->>>>>>> origin/main
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "accepted_path": {
           "nullable": true,
           "type": "string"
         },
-<<<<<<< HEAD
         "epic": {
           "allOf": [
             {
@@ -4499,70 +4495,15 @@ expression: signatures
           ],
           "nullable": true,
           "type": "object"
-=======
-        "auto_breakdown": {
-          "description": "ADR-051 Epic C — mirrors `Epic::auto_breakdown`.",
-          "type": "boolean"
-        },
-        "closed_at": {
-          "nullable": true,
-          "type": "string"
-        },
-        "color": {
-          "type": "string"
-        },
-        "created_at": {
-          "type": "string"
-        },
-        "description": {
-          "type": "string"
-        },
-        "emoji": {
-          "type": "string"
->>>>>>> origin/main
         },
         "error": {
           "nullable": true,
           "type": "string"
-<<<<<<< HEAD
         }
       },
       "required": [
         "epic"
       ],
-=======
-        },
-        "id": {
-          "type": "string"
-        },
-        "memory_refs": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "originating_adr_id": {
-          "description": "ADR-051 Epic C — mirrors `Epic::originating_adr_id`.",
-          "nullable": true,
-          "type": "string"
-        },
-        "owner": {
-          "type": "string"
-        },
-        "short_id": {
-          "type": "string"
-        },
-        "status": {
-          "type": "string"
-        },
-        "title": {
-          "type": "string"
-        },
-        "updated_at": {
-          "type": "string"
-        }
-      },
->>>>>>> origin/main
       "title": "ProposeAdrAcceptResponse",
       "type": "object"
     }
@@ -4703,7 +4644,6 @@ expression: signatures
     },
     "name": "propose_adr_show",
     "output_schema": {
-<<<<<<< HEAD
       "$defs": {
         "ProposedAdr": {
           "description": "A parsed proposed ADR.  Serialized back to the MCP client.",
@@ -4754,51 +4694,15 @@ expression: signatures
           ],
           "nullable": true,
           "type": "object"
-=======
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "A parsed proposed ADR.  Serialized back to the MCP client.",
-      "properties": {
-        "body": {
-          "description": "Raw markdown body (frontmatter stripped).  Omitted in list\nresponses to keep them small.",
-          "nullable": true,
-          "type": "string"
->>>>>>> origin/main
         },
         "error": {
           "nullable": true,
           "type": "string"
-<<<<<<< HEAD
         }
       },
       "required": [
         "adr"
       ],
-=======
-        },
-        "id": {
-          "description": "File stem, e.g. `\"adr-052-new-pipeline\"`.",
-          "type": "string"
-        },
-        "originating_spike_id": {
-          "description": "Optional short_id of the originating spike task.",
-          "nullable": true,
-          "type": "string"
-        },
-        "path": {
-          "description": "Absolute filesystem path of the source file (under `proposed/`).",
-          "type": "string"
-        },
-        "title": {
-          "description": "Title pulled from frontmatter or the first H1.",
-          "type": "string"
-        },
-        "work_shape": {
-          "description": "Work shape hint (`\"task\"` | `\"epic\"` | `\"architectural\"` | `\"spike\"`).",
-          "nullable": true,
-          "type": "string"
-        }
-      },
->>>>>>> origin/main
       "title": "ProposeAdrShowResponse",
       "type": "object"
     }
