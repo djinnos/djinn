@@ -1631,7 +1631,7 @@ async fn load_cached_artifact(
 /// worker reads — surface this verbatim to the UI so operators can disambiguate
 /// "not warmed" from a genuine tool failure.
 const GRAPH_NOT_WARMED_ERR: &str =
-    "canonical graph not warmed yet — architect will populate it on next dispatch";
+    "canonical graph not warmed yet — will populate on the next Planner patrol or Architect spike";
 
 /// Cache-only reader used by every non-warming `RepoGraphOps` read path.
 ///
@@ -1678,19 +1678,36 @@ async fn read_cached_canonical_graph(
 
 /// `RepoGraphOps` shim used by every read operation that only needs the
 /// graph itself.  Cache-only: see [`read_cached_canonical_graph`].
+///
+/// Cold-cache behaviour (ADR-051 §3 "first consumer demand"): if the
+/// in-memory cache is empty for this project, we return
+/// [`GRAPH_NOT_WARMED_ERR`] *and* kick a single-flight background warm
+/// via [`maybe_kick_background_warm`].  Pulse renders its empty state;
+/// the next read (e.g. when the user re-mounts the panel a few seconds
+/// later) hits the populated cache.  The warmer is non-blocking,
+/// idempotent, and coalesces concurrent cold reads into one indexer
+/// run.
 async fn build_graph_for_project(
-    _state: &AppState,
+    state: &AppState,
     project_path: &str,
 ) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
-    let (graph, _pagerank, _sccs) = read_cached_canonical_graph(project_path).await?;
-    Ok(graph)
+    match read_cached_canonical_graph(project_path).await {
+        Ok((graph, _pagerank, _sccs)) => Ok(graph),
+        Err(e) => {
+            if e == GRAPH_NOT_WARMED_ERR {
+                maybe_kick_background_warm(state, project_path);
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Sibling of `build_graph_for_project` for read ops that need the derived
 /// caches (`code_graph ranked` → `pagerank`; `code_graph cycles` → `sccs`).
-/// Cache-only: see [`read_cached_canonical_graph`].
+/// Cache-only with the same cold-cache background-warm kick as
+/// [`build_graph_for_project`].
 async fn build_graph_with_caches_for_project(
-    _state: &AppState,
+    state: &AppState,
     project_path: &str,
 ) -> Result<
     (
@@ -1700,7 +1717,108 @@ async fn build_graph_with_caches_for_project(
     ),
     String,
 > {
-    read_cached_canonical_graph(project_path).await
+    match read_cached_canonical_graph(project_path).await {
+        Ok(triple) => Ok(triple),
+        Err(e) => {
+            if e == GRAPH_NOT_WARMED_ERR {
+                maybe_kick_background_warm(state, project_path);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// ADR-051 §3: "canonical graph warming is infrastructure, not agent
+/// work … acquired on first consumer demand."
+///
+/// This helper is the server-managed warmer entry point.  It is called
+/// from the cache-only read path whenever the in-memory `GRAPH_CACHE`
+/// is cold for a project: `code_graph` reads (Pulse panels, worker
+/// shims, chat) return `GRAPH_NOT_WARMED_ERR` immediately *and* kick a
+/// detached background `ensure_canonical_graph` so the cache populates
+/// independently of any dispatched session.  Subsequent reads hit the
+/// warmed cache.
+///
+/// Concurrency guarantees:
+/// - **Single-flight** — `AppState::try_claim_canonical_warm_slot`
+///   coalesces concurrent cold reads into one indexer run per project.
+/// - **Detached** — spawned on a fresh tokio task so the calling read
+///   (which is usually inside a request handler) does not block on the
+///   45 s SCIP pipeline.
+/// - **Non-fatal** — errors during the detached warm are logged and
+///   discarded; the next cold read will retry.
+fn maybe_kick_background_warm(state: &AppState, project_path: &str) {
+    let (project_root, _index_tree_path) = normalize_graph_query_paths(project_path);
+    let state = state.clone();
+    let project_path_owned = project_path.to_string();
+    tokio::spawn(async move {
+        // Resolve the project_id from the path (fuzzy match tolerates
+        // `/` vs no trailing slash).  If the project is not registered
+        // we cannot warm — log and bail.
+        let project_repo =
+            djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
+        let project_id = match project_repo
+            .resolve_id_by_path_fuzzy(&project_path_owned)
+            .await
+        {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                tracing::debug!(
+                    project_path = %project_path_owned,
+                    "maybe_kick_background_warm: project not registered, skipping warm"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    project_path = %project_path_owned,
+                    error = %e,
+                    "maybe_kick_background_warm: project lookup failed"
+                );
+                return;
+            }
+        };
+
+        // Single-flight: if another warm is already claimed for this
+        // project, a detached task is already running; bail out.
+        if !state.try_claim_canonical_warm_slot(&project_id) {
+            tracing::debug!(
+                project_id = %project_id,
+                "maybe_kick_background_warm: warm already in flight, coalescing"
+            );
+            return;
+        }
+
+        tracing::info!(
+            project_id = %project_id,
+            project_path = %project_root.display(),
+            "maybe_kick_background_warm: cold-cache trigger, spawning background warm"
+        );
+        let started = std::time::Instant::now();
+        let result = ensure_canonical_graph(&state, &project_id, &project_root).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok((handle, graph)) => {
+                tracing::info!(
+                    project_id = %project_id,
+                    elapsed_ms,
+                    commit_sha = %handle.commit_sha(),
+                    node_count = graph.node_count(),
+                    edge_count = graph.edge_count(),
+                    "maybe_kick_background_warm: background warm complete"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    project_id = %project_id,
+                    elapsed_ms,
+                    error = %e,
+                    "maybe_kick_background_warm: background warm failed"
+                );
+            }
+        }
+        state.release_canonical_warm_slot(&project_id);
+    });
 }
 
 /// Test helper: install a graph as the current canonical graph and the
@@ -2652,6 +2770,58 @@ mod ensure_canonical_graph_tests {
         assert!(
             err.contains("not warmed"),
             "expected GRAPH_NOT_WARMED_ERR shape, got: {err}"
+        );
+    }
+
+    /// ADR-051 §3: "canonical graph warming is infrastructure, not agent
+    /// work … acquired on first consumer demand."  A cold-cache Pulse
+    /// read must NOT block on the warmer — it returns
+    /// `GRAPH_NOT_WARMED_ERR` synchronously and kicks a detached
+    /// background warm via `maybe_kick_background_warm`.  We can't
+    /// observe the detached task's completion deterministically in a
+    /// unit test (its claim-release cycle races against our polling),
+    /// so this test verifies the synchronous contract only:
+    ///
+    /// 1. A cold read against a REGISTERED project returns
+    ///    `GRAPH_NOT_WARMED_ERR` quickly (no SCIP wait).
+    /// 2. The read does not panic or wedge when the project exists in
+    ///    the DB — exercising the `resolve_id_by_path_fuzzy` lookup path
+    ///    inside the detached `maybe_kick_background_warm` task.
+    ///
+    /// Manual integration verification: click Pulse in the running app
+    /// against a cold cache; the panel should show the empty state and
+    /// a subsequent click (a few seconds later) should render the
+    /// warmed graph.
+    #[tokio::test]
+    async fn cold_cache_read_triggers_background_warm_without_blocking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let _project = ProjectRepository::new(db.clone(), state.event_bus())
+            .create(
+                "cold-cache-kicks-background-warm",
+                project_root.to_string_lossy().as_ref(),
+            )
+            .await
+            .expect("create project");
+
+        {
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = None;
+        }
+
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let started = std::time::Instant::now();
+        let err = build_graph_for_project(&state, &project_root_str)
+            .await
+            .expect_err("cold cache must return GRAPH_NOT_WARMED_ERR");
+        let elapsed = started.elapsed();
+        assert!(err.contains("not warmed"));
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "cold-cache read must not block on the warmer; elapsed={elapsed:?}"
         );
     }
 }

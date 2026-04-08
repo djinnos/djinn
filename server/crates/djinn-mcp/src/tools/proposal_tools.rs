@@ -215,8 +215,12 @@ pub struct ProposeAdrShowParams {
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProposeAdrShowResponse {
+<<<<<<< HEAD
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "nullable_proposed_adr_schema")]
+=======
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+>>>>>>> origin/main
     pub adr: Option<ProposedAdr>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -241,8 +245,12 @@ pub struct ProposeAdrAcceptParams {
 pub struct ProposeAdrAcceptResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_path: Option<String>,
+<<<<<<< HEAD
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "nullable_epic_model_schema")]
+=======
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+>>>>>>> origin/main
     pub epic: Option<EpicModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
