@@ -64,6 +64,15 @@ pub(super) struct CoordinatorActor {
     pub(super) last_stale_sweep: StdInstant,
     /// ADR-051 §7 — timestamp of the last auto-dispatch safety-net sweep.
     pub(super) last_auto_dispatch_sweep: StdInstant,
+    /// ADR-051 §3 — timestamp of the last proactive canonical-graph
+    /// staleness refresh sweep (see `GRAPH_REFRESH_INTERVAL`).
+    pub(super) last_graph_refresh: StdInstant,
+    /// ADR-051 §3 — production canonical-graph warmer.  When `Some`, the
+    /// coordinator tick loop calls `maybe_refresh_if_stale` for every
+    /// dispatch-enabled project on a 10-minute cadence.  Tests leave this
+    /// `None`, which makes the proactive refresh tick branch a no-op.
+    pub(super) canonical_graph_warmer:
+        Option<Arc<dyn crate::context::CanonicalGraphWarmer>>,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     pub(super) prune_tick_counter: u32,
     /// Timestamp of the last patrol completion (or actor start as initial baseline).
@@ -133,6 +142,7 @@ impl CoordinatorActor {
             role_registry,
             verification_tracker,
             lsp,
+            canonical_graph_warmer,
             consolidation_runner,
         } = deps;
         let events = events_tx.subscribe();
@@ -164,6 +174,8 @@ impl CoordinatorActor {
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
+            last_graph_refresh: StdInstant::now(),
+            canonical_graph_warmer,
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
             next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
@@ -297,6 +309,10 @@ impl CoordinatorActor {
                     if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
                         self.sweep_stale_auto_dispatches().await;
                         self.last_auto_dispatch_sweep = StdInstant::now();
+                    }
+                    if self.last_graph_refresh.elapsed() >= GRAPH_REFRESH_INTERVAL {
+                        self.refresh_canonical_graphs_if_stale().await;
+                        self.last_graph_refresh = StdInstant::now();
                     }
                     // Run association pruning once per ~hour (120 ticks at 30s intervals)
                     self.prune_tick_counter += 1;
@@ -789,6 +805,64 @@ impl CoordinatorActor {
     pub(super) fn is_project_dispatch_enabled(&self, project_id: &str) -> bool {
         !self.unhealthy_projects.contains_key(project_id)
             && !self.paused_projects.contains(project_id)
+    }
+
+    /// ADR-051 §3 proactive canonical-graph staleness refresh.
+    ///
+    /// Iterates every dispatch-enabled project and asks the injected
+    /// `CanonicalGraphWarmer` to refresh whose cache has fallen behind
+    /// `origin/main`.  The warmer is a no-op on cold caches and on warm
+    /// caches that are already current, so this method is cheap on a board
+    /// where nothing has changed.
+    ///
+    /// Run from the coordinator tick loop on a 10-minute cadence
+    /// (`GRAPH_REFRESH_INTERVAL`).  Serial — the per-project warmer is
+    /// already single-flight + detached at the server boundary.
+    pub(super) async fn refresh_canonical_graphs_if_stale(&mut self) {
+        let Some(warmer) = self.canonical_graph_warmer.clone() else {
+            tracing::debug!(
+                "CoordinatorActor: graph refresh tick — no warmer injected, skipping"
+            );
+            return;
+        };
+
+        let project_repo = ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let projects = match project_repo.list().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CoordinatorActor: graph refresh tick — failed to list projects"
+                );
+                return;
+            }
+        };
+
+        let mut considered = 0usize;
+        for project in projects {
+            if !self.is_project_dispatch_enabled(&project.id) {
+                continue;
+            }
+            considered += 1;
+            let project_root = std::path::PathBuf::from(&project.path);
+            if let Err(e) = warmer
+                .maybe_refresh_if_stale(&project.id, &project_root)
+                .await
+            {
+                tracing::warn!(
+                    project_id = %project.id,
+                    error = %e,
+                    "CoordinatorActor: graph refresh tick — maybe_refresh_if_stale reported error (swallowed)"
+                );
+            }
+        }
+        tracing::debug!(
+            considered,
+            "CoordinatorActor: graph refresh tick complete"
+        );
     }
 
     /// Resolve dispatch models for a given role from configured priorities,

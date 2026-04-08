@@ -42,6 +42,37 @@ pub trait CanonicalGraphWarmer: Send + Sync {
     /// building it if necessary.  Best-effort: callers must treat any error
     /// as non-fatal and let the agent continue without a warm skeleton.
     async fn warm(&self, project_id: &str, project_root: &Path) -> Result<(), String>;
+
+    /// ADR-051 §3 proactive staleness refresh entry point.
+    ///
+    /// Called from the coordinator tick loop on a 10-minute cadence so the
+    /// canonical-main graph cache stays current with `origin/main` even when
+    /// no agent is dispatched and no Pulse panel is open.
+    ///
+    /// Production semantics (see `AppStateCanonicalGraphWarmer`):
+    ///   * Cold cache → no-op.  The cold path is owned by the
+    ///     first-consumer-demand kicker
+    ///     (`mcp_bridge::maybe_kick_background_warm`); kicking from this
+    ///     path would thrash on every tick for projects nobody is reading.
+    ///   * Warm cache with `commits_since_pin == 0` → no-op.  The cache is
+    ///     already current for `origin/main`.
+    ///   * Warm cache with `commits_since_pin >= 1` → delegate to
+    ///     [`Self::warm`] (which is single-flight + detached, so this call
+    ///     returns immediately).
+    ///   * Errors at every step are logged and swallowed — the call is
+    ///     fire-and-forget and scheduling churn is not worth surfacing
+    ///     transient git/fetch failures.
+    ///
+    /// The default body simply delegates to [`Self::warm`] so existing test
+    /// stubs and fakes continue to work without an extra `impl` block.
+    /// Production overrides this with the staleness check.
+    async fn maybe_refresh_if_stale(
+        &self,
+        project_id: &str,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        self.warm(project_id, project_root).await
+    }
 }
 
 /// Subset of application state required by agent lifecycle, coordinator, and
