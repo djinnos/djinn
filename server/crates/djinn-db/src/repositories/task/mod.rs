@@ -729,7 +729,8 @@ pub(super) async fn maybe_reopen_epic(
 
     if let Some(epic) = sqlx::query_as::<_, djinn_core::models::Epic>(
         "SELECT id, project_id, short_id, title, description, emoji, color, status,
-                owner, created_at, updated_at, closed_at, memory_refs
+                owner, created_at, updated_at, closed_at, memory_refs,
+                auto_breakdown, originating_adr_id
          FROM epics WHERE id = ?1",
     )
     .bind(epic_id)

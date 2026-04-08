@@ -5,6 +5,7 @@ expression: epic_list
 {
   "epics": [
     {
+      "auto_breakdown": true,
       "closed_at": null,
       "color": "",
       "created_at": "[TIMESTAMP]",
