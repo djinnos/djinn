@@ -80,6 +80,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         task_ops_project_path_override: None,
         working_root: None,
         canonical_graph_warmer: None,
+        repo_graph_ops: None,
     }
 }
 

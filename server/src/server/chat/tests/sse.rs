@@ -1,6 +1,7 @@
 use serde_json::json;
 
-use super::super::{ToolCallPayload, sse_json_event};
+use super::super::ToolCallPayload;
+use crate::server::chat::handler::sse_json_event;
 
 #[test]
 fn tool_call_sse_payload_includes_id_input_and_name() {

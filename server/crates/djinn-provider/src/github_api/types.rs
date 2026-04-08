@@ -71,6 +71,11 @@ pub struct ActionsJobStep {
     pub number: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct ActionsJobsResponse {
+    pub(super) jobs: Vec<ActionsJob>,
+}
+
 /// A single annotation attached to a check run (error/warning/notice).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckAnnotation {

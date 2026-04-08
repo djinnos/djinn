@@ -1,164 +1,46 @@
 use std::convert::Infallible;
+use std::time::Instant;
 
-use axum::Json;
-use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::{Event, Sse};
-use serde::{Deserialize, Serialize};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use futures::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 
+use super::{
+    ChatCompletionRequest, ChatContent, ChatContentBlock, DJINN_CHAT_SYSTEM_PROMPT, DeltaPayload,
+    ErrorPayload, ToolCallPayload, ToolResultPayload,
+};
 use crate::server::AppState;
-mod context;
-mod handler;
-mod prompt;
-
-<<<<<<< HEAD
-use self::context::build_project_chat_context;
-use self::prompt::system_message::build_system_message;
 use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
-use djinn_agent::mcp_client::{McpToolRegistry, connect_and_discover};
 use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
 use djinn_agent::provider::{StreamEvent, TelemetryMeta, create_provider};
-use djinn_agent::verification::settings::{
-    effective_mcp_server_names, effective_skill_names, load_mcp_server_registry, load_settings,
-    resolve_mcp_servers,
-};
 use djinn_db::ProjectRepository;
 use djinn_mcp::server::DjinnMcpServer;
 
-const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
-=======
-pub(super) const DJINN_CHAT_SYSTEM_PROMPT: &str =
-    include_str!("../../crates/djinn-agent/src/prompts/chat.md");
->>>>>>> origin/main
 
-fn apply_chat_skills(
-    base_message: Message,
-    project_path: Option<&std::path::Path>,
-) -> (Message, ResolvedChatConfig) {
-    let Some(project_path) = project_path else {
-        return (base_message, ResolvedChatConfig::default());
-    };
-
-    let settings = load_settings(project_path).unwrap_or_default();
-    let effective_skills = effective_skill_names(&settings, &[]);
-    let effective_mcp_servers = effective_mcp_server_names(&settings, "chat", None);
-    let resolved_skills = djinn_agent::skills::load_skills(project_path, &effective_skills);
-
-    let text = djinn_agent::prompts::apply_skills(&base_message.text_content(), &resolved_skills);
-    (
-        Message {
-            role: Role::System,
-            content: vec![ContentBlock::text(text)],
-            metadata: base_message.metadata.clone(),
-        },
-        ResolvedChatConfig {
-            mcp_servers: effective_mcp_servers,
-        },
-    )
+pub(super) fn sse_json_event<T: serde::Serialize>(event: &str, payload: &T) -> Event {
+    Event::default()
+        .event(event)
+        .json_data(payload)
+        .unwrap_or_else(|_| {
+            Event::default()
+                .event("error")
+                .data("{\"message\":\"serialization error\"}")
+        })
 }
 
-#[derive(Debug, Clone, Default)]
-struct ResolvedChatConfig {
-    mcp_servers: Vec<String>,
-}
-
-#[cfg(test)]
-fn chat_effective_config(project_path: &std::path::Path) -> ResolvedChatConfig {
-    let settings = load_settings(project_path).unwrap_or_default();
-    ResolvedChatConfig {
-        mcp_servers: effective_mcp_server_names(&settings, "chat", None),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct ChatCompletionRequest {
-    pub model: String,
-    pub messages: Vec<ChatMessage>,
-    #[serde(default)]
-    pub system: Option<String>,
-    #[serde(default)]
-    pub project: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct ChatMessage {
-    pub role: String,
-    #[serde(default)]
-    pub content: ChatContent,
-}
-
-/// Accepts either a plain string or an array of typed content blocks.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub(super) enum ChatContent {
-    Blocks(Vec<ChatContentBlock>),
-    Text(String),
-}
-
-impl Default for ChatContent {
-    fn default() -> Self {
-        ChatContent::Text(String::new())
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum ChatContentBlock {
-    Text {
-        text: String,
-    },
-    Image {
-        media_type: String,
-        data: String,
-    },
-    Document {
-        media_type: String,
-        data: String,
-        #[serde(default)]
-        filename: Option<String>,
-    },
-}
-
-#[derive(Serialize)]
-pub(super) struct ErrorPayload {
-    message: String,
-}
-
-#[derive(Serialize)]
-pub(super) struct DeltaPayload {
-    text: String,
-}
-
-#[derive(Serialize)]
-pub(super) struct ToolCallPayload {
-    name: String,
-    id: String,
-    input: serde_json::Value,
-}
-
-#[derive(Serialize)]
-pub(super) struct ToolResultPayload {
-    id: String,
-    output: String,
-    elapsed_ms: u64,
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-}
-
-pub(super) async fn completions_handler(
-    State(state): State<AppState>,
+pub(super) async fn completions_handler_impl(
+    state: AppState,
     headers: HeaderMap,
-    Json(req): Json<ChatCompletionRequest>,
+    req: ChatCompletionRequest,
 ) -> Result<
     Sse<impl futures::Stream<Item = Result<Event, Infallible>>>,
     (axum::http::StatusCode, String),
 > {
-<<<<<<< HEAD
     if req.model.trim().is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -260,36 +142,18 @@ pub(super) async fn completions_handler(
         }
     };
 
-    // Resolve project path + ID for chat extension tools (shell, read, lsp,
-    // github_search, code_graph).
-    let project_resolution: Option<(std::path::PathBuf, String)> = if let Some(project_ref) =
-        req.project.as_deref()
-    {
-        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-        match project_repo.resolve(project_ref).await {
-            Ok(Some(id)) => match project_repo.get(&id).await {
-                Ok(Some(project)) => Some((std::path::PathBuf::from(&project.path), project.id)),
-                _ => None,
-            },
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let project_path = project_resolution.as_ref().map(|(path, _)| path.clone());
-
     let provider = create_provider(provider_config);
 
     let mut conversation = Conversation::new();
-    let chat_context = build_project_chat_context(&state, req.project.as_deref()).await;
-    let system_message = build_system_message(
+    let chat_context =
+        super::context::build_project_chat_context(&state, req.project.as_deref()).await;
+    let system_message = super::prompt::system_message::build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
         chat_context.project_context.as_deref(),
         chat_context.repo_map_context.as_deref(),
         req.system.as_deref(),
         &req.model,
     );
-    let (system_message, chat_config) = apply_chat_skills(system_message, project_path.as_deref());
     conversation.push(system_message);
 
     for m in req.messages {
@@ -335,35 +199,23 @@ pub(super) async fn completions_handler(
 
     let mcp = DjinnMcpServer::new(state.mcp_state());
     let mut tool_schemas = mcp.all_tool_schemas();
-    let chat_mcp_registry: Option<McpToolRegistry> =
-        if let Some(project_path) = project_path.as_deref() {
-            let registry = load_mcp_server_registry(project_path);
-            let resolved =
-                resolve_mcp_servers(&session_id, "chat", &chat_config.mcp_servers, &registry)
-                    .into_iter()
-                    .map(|(name, cfg)| (name, cfg.clone()))
-                    .collect::<Vec<_>>();
-            if resolved.is_empty() {
-                None
-            } else {
-                connect_and_discover(&session_id, "chat", &resolved, &state.agent_context()).await
-            }
-        } else {
-            None
-        };
-    if let Some(registry) = &chat_mcp_registry {
-        tool_schemas.extend(registry.tool_schemas().iter().cloned());
-    }
 
-    // ── ADR-050 Chunk C: chat session first-use canonical graph hook ──────
-    // On the FIRST chat completion request for a given session, warm up
-    // the canonical-main graph and pin the chat working_root to the index
-    // tree so `read`/`shell`/`lsp`/`code_graph` resolve against
-    // `origin/main`, not the user's working tree.  On every subsequent
-    // request in the same session we reuse the cached working_root and
-    // skip the warming call entirely (avoiding the per-request `git
-    // fetch` probe and worktree-add probe).  Best effort: failures
-    // degrade to the project root with a warning.
+    let project_resolution: Option<(std::path::PathBuf, String)> = if let Some(project_ref) =
+        req.project.as_deref()
+    {
+        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+        match project_repo.resolve(project_ref).await {
+            Ok(Some(id)) => match project_repo.get(&id).await {
+                Ok(Some(project)) => Some((std::path::PathBuf::from(&project.path), project.id)),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let project_path = project_resolution.as_ref().map(|(path, _)| path.clone());
+
     let agent_ctx = if let Some((project_path_buf, project_id)) = project_resolution.as_ref() {
         tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
         let mut ctx = state.agent_context();
@@ -521,18 +373,12 @@ pub(super) async fn completions_handler(
                     serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
                 let started_at = Instant::now();
 
-                // Try chat extension tools first (shell, read, lsp, github_search),
-                // then fall back to MCP tools.
                 let dispatch_result = if djinn_agent::chat_tools::is_chat_extension_tool(&name) {
                     if let (Some(ctx), Some(root)) = (&agent_ctx, &project_path) {
                         djinn_agent::chat_tools::dispatch_chat_tool(ctx, &name, args, root).await
                     } else {
                         Err(format!("tool '{name}' requires a project context"))
                     }
-                } else if let Some(registry) = &chat_mcp_registry
-                    && registry.has_tool(&name)
-                {
-                    registry.call_tool(&name, input.as_object().cloned()).await
                 } else {
                     mcp.dispatch_tool(&name, args).await
                 };
@@ -592,10 +438,4 @@ pub(super) async fn completions_handler(
     });
 
     Ok(Sse::new(ReceiverStream::new(rx).map(Ok)).keep_alive(KeepAlive::default()))
-=======
-    handler::completions_handler_impl(state, headers, req).await
->>>>>>> origin/main
 }
-
-#[cfg(test)]
-mod tests;

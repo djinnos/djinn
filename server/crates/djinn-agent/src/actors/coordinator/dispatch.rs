@@ -1143,6 +1143,7 @@ impl CoordinatorActor {
             task_ops_project_path_override: None,
             working_root: None,
             canonical_graph_warmer: None,
+            repo_graph_ops: None,
         };
 
         // Use Reopen as a sentinel for "leave in approved / retry next tick".
