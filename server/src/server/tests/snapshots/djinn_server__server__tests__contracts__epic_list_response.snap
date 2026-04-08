@@ -1,0 +1,26 @@
+---
+source: src/server/tests/contracts.rs
+expression: epic_list
+---
+{
+  "epics": [
+    {
+      "closed_at": null,
+      "color": "",
+      "created_at": "[TIMESTAMP]",
+      "description": "Epic used for MCP snapshot contract testing",
+      "emoji": "",
+      "id": "[UUID]",
+      "memory_refs": [],
+      "owner": "",
+      "short_id": "[SHORT_ID]",
+      "status": "drafting",
+      "title": "Snapshot Epic",
+      "updated_at": "[TIMESTAMP]"
+    }
+  ],
+  "has_more": false,
+  "limit": 10,
+  "offset": 0,
+  "total_count": 1
+}
