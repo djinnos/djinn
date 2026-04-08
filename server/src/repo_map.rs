@@ -223,15 +223,15 @@ pub(crate) struct IndexingRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RepoMapRenderOptions {
-    pub(crate) token_budget: usize,
-    pub(crate) max_files: usize,
-    pub(crate) max_symbols_per_file: usize,
-    pub(crate) max_relationships_per_file: usize,
+pub struct RepoMapRenderOptions {
+    pub token_budget: usize,
+    pub max_files: usize,
+    pub max_symbols_per_file: usize,
+    pub max_relationships_per_file: usize,
 }
 
 impl RepoMapRenderOptions {
-    pub(crate) fn new(token_budget: usize) -> Self {
+    pub fn new(token_budget: usize) -> Self {
         Self {
             token_budget,
             max_files: DEFAULT_MAX_FILES,
@@ -242,20 +242,20 @@ impl RepoMapRenderOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RenderedRepoMap {
-    pub(crate) content: String,
-    pub(crate) token_estimate: usize,
-    pub(crate) included_entries: usize,
+pub struct RenderedRepoMap {
+    pub content: String,
+    pub token_estimate: usize,
+    pub included_entries: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RepoMapNoteSpec {
-    pub(crate) title: String,
-    pub(crate) permalink: String,
-    pub(crate) tags_json: String,
+pub struct RepoMapNoteSpec {
+    pub title: String,
+    pub permalink: String,
+    pub tags_json: String,
 }
 
-pub(crate) fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
+pub fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
     let short_sha: String = commit_sha.chars().take(12).collect();
     let title = format!("Repository Map {short_sha}");
     let permalink = format!("{REPO_MAP_NOTE_FOLDER}/{short_sha}");
@@ -269,7 +269,7 @@ pub(crate) fn repo_map_note_spec(commit_sha: &str) -> RepoMapNoteSpec {
     }
 }
 
-pub(crate) async fn persist_repo_map_note(
+pub async fn persist_repo_map_note(
     note_repo: &NoteRepository,
     project_id: &str,
     commit_sha: &str,
@@ -289,7 +289,7 @@ pub(crate) async fn persist_repo_map_note(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RepoMapRenderError {
+pub enum RepoMapRenderError {
     MinimalRepresentationExceedsBudget {
         budget: usize,
         required_tokens: usize,
@@ -338,7 +338,8 @@ impl RepoMapNoteSearcher for NoteRepository {
     }
 }
 
-pub(crate) fn render_repo_map(
+#[allow(private_interfaces)]
+pub fn render_repo_map(
     graph: &RepoDependencyGraph,
     ranking: &RepoGraphRanking,
     options: &RepoMapRenderOptions,
