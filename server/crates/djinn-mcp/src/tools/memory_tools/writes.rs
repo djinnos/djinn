@@ -1,8 +1,7 @@
+use super::lifecycle::schedule_summary_regeneration;
 use super::write_dedup::{LlmMemoryWriteDedupDecider, maybe_apply_write_dedup};
 use super::write_dedup_types::{MemoryWriteDedupDecider, PendingWriteDedup};
-use super::write_services::{
-    create_note, maybe_update_singleton_note, note_repository, schedule_summary_regeneration,
-};
+use super::write_services::{create_note, maybe_update_singleton_note, note_repository};
 use super::{
     DeleteParams, EditParams, MemoryDeleteResponse, MemoryNoteResponse, MoveParams, WriteParams,
 };
