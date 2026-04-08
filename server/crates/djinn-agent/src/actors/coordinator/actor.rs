@@ -71,8 +71,7 @@ pub(super) struct CoordinatorActor {
     /// coordinator tick loop calls `maybe_refresh_if_stale` for every
     /// dispatch-enabled project on a 10-minute cadence.  Tests leave this
     /// `None`, which makes the proactive refresh tick branch a no-op.
-    pub(super) canonical_graph_warmer:
-        Option<Arc<dyn crate::context::CanonicalGraphWarmer>>,
+    pub(super) canonical_graph_warmer: Option<Arc<dyn crate::context::CanonicalGraphWarmer>>,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     pub(super) prune_tick_counter: u32,
     /// Timestamp of the last patrol completion (or actor start as initial baseline).
@@ -820,9 +819,7 @@ impl CoordinatorActor {
     /// already single-flight + detached at the server boundary.
     pub(super) async fn refresh_canonical_graphs_if_stale(&mut self) {
         let Some(warmer) = self.canonical_graph_warmer.clone() else {
-            tracing::debug!(
-                "CoordinatorActor: graph refresh tick — no warmer injected, skipping"
-            );
+            tracing::debug!("CoordinatorActor: graph refresh tick — no warmer injected, skipping");
             return;
         };
 
@@ -859,10 +856,7 @@ impl CoordinatorActor {
                 );
             }
         }
-        tracing::debug!(
-            considered,
-            "CoordinatorActor: graph refresh tick complete"
-        );
+        tracing::debug!(considered, "CoordinatorActor: graph refresh tick complete");
     }
 
     /// Resolve dispatch models for a given role from configured priorities,

@@ -569,12 +569,17 @@ async fn singleton_worktree_updates_keep_canonical_and_worktree_files_in_sync() 
     let canonical_path = project_tmp.path().join(".djinn/brief.md");
     let worktree_path = worktree_tmp.path().join(".djinn/brief.md");
 
-    assert_eq!(std::path::Path::new(&note.file_path), canonical_path.as_path());
+    assert_eq!(
+        std::path::Path::new(&note.file_path),
+        canonical_path.as_path()
+    );
     assert!(canonical_path.exists());
     assert!(worktree_path.exists());
-    assert!(std::fs::read_to_string(&canonical_path)
-        .unwrap()
-        .contains("[[Old Missing Link]]"));
+    assert!(
+        std::fs::read_to_string(&canonical_path)
+            .unwrap()
+            .contains("[[Old Missing Link]]")
+    );
 
     let updated = repo
         .update(&note.id, &note.title, "See [[Resolved Link]].", &note.tags)

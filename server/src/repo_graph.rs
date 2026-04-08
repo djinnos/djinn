@@ -81,8 +81,7 @@ fn compute_pagerank_sparse(
     // are handled specially below.
     let mut out_degree = vec![0u32; n];
     for node_idx in graph.node_indices() {
-        out_degree[node_idx.index()] =
-            graph.edges_directed(node_idx, Outgoing).count() as u32;
+        out_degree[node_idx.index()] = graph.edges_directed(node_idx, Outgoing).count() as u32;
     }
 
     let random_jump = (1.0 - damping) / n_f;
@@ -172,11 +171,8 @@ impl RepoDependencyGraph {
     }
 
     pub fn rank(&self) -> RepoGraphRanking {
-        let page_rank_scores = compute_pagerank_sparse(
-            &self.graph,
-            PAGE_RANK_DAMPING_FACTOR,
-            PAGE_RANK_ITERATIONS,
-        );
+        let page_rank_scores =
+            compute_pagerank_sparse(&self.graph, PAGE_RANK_DAMPING_FACTOR, PAGE_RANK_ITERATIONS);
 
         let mut scored_nodes = Vec::with_capacity(self.graph.node_count());
         for node_index in self.graph.node_indices() {
@@ -1117,19 +1113,13 @@ mod tests {
     #[test]
     fn compute_pagerank_sparse_is_mass_preserving_and_finite() {
         let graph = RepoDependencyGraph::build(&[fixture_index()]);
-        let ranks = compute_pagerank_sparse(
-            &graph.graph,
-            PAGE_RANK_DAMPING_FACTOR,
-            PAGE_RANK_ITERATIONS,
-        );
+        let ranks =
+            compute_pagerank_sparse(&graph.graph, PAGE_RANK_DAMPING_FACTOR, PAGE_RANK_ITERATIONS);
 
         assert_eq!(ranks.len(), graph.node_count());
         assert!(ranks.iter().all(|r| r.is_finite() && *r >= 0.0));
         let sum: f64 = ranks.iter().sum();
-        assert!(
-            (sum - 1.0).abs() < 1e-9,
-            "ranks must sum to ~1, got {sum}"
-        );
+        assert!((sum - 1.0).abs() < 1e-9, "ranks must sum to ~1, got {sum}");
     }
 
     #[test]

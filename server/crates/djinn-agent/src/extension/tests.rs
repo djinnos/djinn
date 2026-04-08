@@ -1465,6 +1465,113 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 }
 
 #[tokio::test]
+async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    std::fs::create_dir_all(&project.path).expect("create project dir");
+    let worktree = Path::new(&project.path).join(".djinn/worktrees/test-singleton-worktree");
+    std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
+
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+    let created = call_tool(
+        &state,
+        "memory_write",
+        Some(
+            serde_json::json!({
+                "project": worktree.display().to_string(),
+                "title": "Project Roadmap",
+                "content": "tracks [[ADR-043 Repo Graph]]",
+                "type": "roadmap"
+            })
+            .as_object()
+            .expect("memory_write args object")
+            .clone(),
+        ),
+        &worktree,
+        None,
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_write dispatch should succeed");
+
+    assert_eq!(
+        created.get("permalink").and_then(|v| v.as_str()),
+        Some("roadmap")
+    );
+
+    let edited = call_tool(
+        &state,
+        "memory_edit",
+        Some(
+            serde_json::json!({
+                "project": worktree.display().to_string(),
+                "identifier": "roadmap",
+                "operation": "append",
+                "content": "next wave"
+            })
+            .as_object()
+            .expect("memory_edit args object")
+            .clone(),
+        ),
+        &worktree,
+        None,
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_edit dispatch should succeed");
+
+    assert!(
+        edited
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("next wave")
+    );
+
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let note = note_repo
+        .get_by_permalink(&project.id, "roadmap")
+        .await
+        .expect("load roadmap")
+        .expect("roadmap note exists");
+
+    assert_eq!(note.note_type, "roadmap");
+    assert_eq!(note.permalink, "roadmap");
+    assert_eq!(
+        Path::new(&note.file_path),
+        Path::new(&project.path).join(".djinn/roadmap.md")
+    );
+
+    let canonical_contents =
+        std::fs::read_to_string(Path::new(&project.path).join(".djinn/roadmap.md"))
+            .expect("read canonical roadmap");
+    let worktree_contents =
+        std::fs::read_to_string(worktree.join(".djinn/roadmap.md")).expect("read worktree roadmap");
+    assert!(canonical_contents.contains("ADR-043 Repo Graph"));
+    assert!(canonical_contents.contains("next wave"));
+    assert_eq!(canonical_contents, worktree_contents);
+
+    assert!(
+        note_repo
+            .get_by_permalink(
+                &project.id,
+                "reference/adr-043-roadmap-active-decomposition-status"
+            )
+            .await
+            .expect("check duplicate roadmap note")
+            .is_none()
+    );
+    assert!(
+        !Path::new(&project.path)
+            .join(".djinn/reference/adr-043-roadmap-active-decomposition-status.md")
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn call_tool_dispatches_registered_mcp_tool_success() {
     let db = create_test_db();
     let project = create_test_project(&db).await;

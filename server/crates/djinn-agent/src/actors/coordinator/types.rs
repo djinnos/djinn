@@ -69,10 +69,7 @@ impl CoordinatorDeps {
     /// Inject the production canonical-graph warmer, enabling the ADR-051 §3
     /// proactive staleness refresh tick in the coordinator loop.  Tests and
     /// off-server contexts that omit this leave the tick as a no-op.
-    pub fn with_canonical_graph_warmer(
-        mut self,
-        warmer: Arc<dyn CanonicalGraphWarmer>,
-    ) -> Self {
+    pub fn with_canonical_graph_warmer(mut self, warmer: Arc<dyn CanonicalGraphWarmer>) -> Self {
         self.canonical_graph_warmer = Some(warmer);
         self
     }
