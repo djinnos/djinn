@@ -1583,8 +1583,8 @@ async fn load_cached_artifact(
     String,
 > {
     tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let artifact: crate::repo_graph::RepoGraphArtifact = bincode::deserialize(&blob)
-            .map_err(|e| format!("deserialize graph: {e}"))?;
+        let artifact: crate::repo_graph::RepoGraphArtifact =
+            bincode::deserialize(&blob).map_err(|e| format!("deserialize graph: {e}"))?;
         let graph = crate::repo_graph::RepoDependencyGraph::from_artifact(&artifact);
         let (pagerank, sccs) = derive_graph_caches(&graph);
         Ok((graph, pagerank, sccs))
@@ -1593,33 +1593,34 @@ async fn load_cached_artifact(
     .map_err(|e| format!("spawn_blocking join: {e}"))?
 }
 
-/// `RepoGraphOps` shim used by every operation: resolves the project ID for
-/// the supplied `project_path` and delegates to `ensure_canonical_graph`,
-/// returning the cached graph clone.
-async fn build_graph_for_project(
-    state: &AppState,
-    project_path: &str,
-) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
-    use djinn_db::ProjectRepository;
-    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-    let project_id = repo
-        .resolve(project_path)
-        .await
-        .map_err(|e| format!("resolve project: {e}"))?
-        .ok_or_else(|| format!("no project registered for path '{project_path}'"))?;
-    let project_root = std::path::PathBuf::from(project_path);
-    let (_handle, graph) = ensure_canonical_graph(state, &project_id, &project_root).await?;
-    Ok(graph)
-}
+/// Error string returned by the cache-only graph readers when no warmed
+/// entry exists.  Callers — Pulse panels, chat `code_graph` tool invocations,
+/// worker reads — surface this verbatim to the UI so operators can disambiguate
+/// "not warmed" from a genuine tool failure.
+const GRAPH_NOT_WARMED_ERR: &str =
+    "canonical graph not warmed yet — architect will populate it on next dispatch";
 
-/// Sibling of `build_graph_for_project` for read ops that need the derived
-/// caches (`code_graph ranked` → `pagerank`; `code_graph cycles` → `sccs`).
-/// Calls `ensure_canonical_graph` to guarantee the cache is populated, then
-/// reads the derivations directly from the in-memory `GRAPH_CACHE` slot the
-/// warm pipeline filled.  Returns clones of the cached `Arc`s — cheap, no
-/// recomputation.
-async fn build_graph_with_caches_for_project(
-    state: &AppState,
+/// Cache-only reader used by every non-warming `RepoGraphOps` read path.
+///
+/// Unlike [`ensure_canonical_graph`], this helper never advances the index
+/// tree, never fetches from the remote, and never triggers the SCIP indexer.
+/// It simply looks up the in-memory `GRAPH_CACHE` by the project's canonical
+/// `_index` worktree path and returns whatever the last warmer installed
+/// there, along with the derived PageRank and SCC caches.
+///
+/// Rationale: before this split, every Pulse panel load (and every worker
+/// `code_graph` read) went through `build_graph_for_project` →
+/// `ensure_canonical_graph`, which runs `git fetch` + `reset_to_origin_main`
+/// and then cache-misses whenever local `main` has advanced past the
+/// architect's last warm (common: architect warms at commit X, user makes 5
+/// commits, Pulse calls `ranked`, cache key mismatches, indexer reruns for
+/// 30 minutes, UI hangs on a skeleton loader).  Non-architect reads must
+/// serve stale-but-present rather than synchronously re-warming.
+///
+/// On a cold cache this returns [`GRAPH_NOT_WARMED_ERR`]; Pulse renders that
+/// as its "no data" state and the freshness strip already surfaces the
+/// `warmed: false` status via the read-only `status` op.
+async fn read_cached_canonical_graph(
     project_path: &str,
 ) -> Result<
     (
@@ -1629,27 +1630,47 @@ async fn build_graph_with_caches_for_project(
     ),
     String,
 > {
-    use djinn_db::ProjectRepository;
-    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-    let project_id = repo
-        .resolve(project_path)
-        .await
-        .map_err(|e| format!("resolve project: {e}"))?
-        .ok_or_else(|| format!("no project registered for path '{project_path}'"))?;
-    let project_root = std::path::PathBuf::from(project_path);
-    let (_handle, graph) = ensure_canonical_graph(state, &project_id, &project_root).await?;
-    // After `ensure_canonical_graph` returns Ok, GRAPH_CACHE is guaranteed
-    // to hold an entry for this project.  In a worst-case race a newer warm
-    // could swap in a different graph between the return and our read; the
-    // ranking and SCCs we hand back will then be the newer ones, which is
-    // semantically fine — the graph clone we return matches the snapshot
-    // taken inside `ensure_canonical_graph`, but ranking/SCCs are always
-    // consistent with whatever is currently canonical.
+    let index_tree_path = std::path::PathBuf::from(project_path)
+        .join(".djinn")
+        .join("worktrees")
+        .join("_index");
     let cache = GRAPH_CACHE.read().await;
     let cached = cache
         .as_ref()
-        .ok_or_else(|| "canonical graph cache empty after ensure_canonical_graph".to_string())?;
-    Ok((graph, cached.pagerank.clone(), cached.sccs.clone()))
+        .filter(|c| c.project_path == index_tree_path)
+        .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?;
+    Ok((
+        cached.graph.clone(),
+        cached.pagerank.clone(),
+        cached.sccs.clone(),
+    ))
+}
+
+/// `RepoGraphOps` shim used by every read operation that only needs the
+/// graph itself.  Cache-only: see [`read_cached_canonical_graph`].
+async fn build_graph_for_project(
+    _state: &AppState,
+    project_path: &str,
+) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
+    let (graph, _pagerank, _sccs) = read_cached_canonical_graph(project_path).await?;
+    Ok(graph)
+}
+
+/// Sibling of `build_graph_for_project` for read ops that need the derived
+/// caches (`code_graph ranked` → `pagerank`; `code_graph cycles` → `sccs`).
+/// Cache-only: see [`read_cached_canonical_graph`].
+async fn build_graph_with_caches_for_project(
+    _state: &AppState,
+    project_path: &str,
+) -> Result<
+    (
+        crate::repo_graph::RepoDependencyGraph,
+        Arc<crate::repo_graph::RepoGraphRanking>,
+        Arc<CachedSccs>,
+    ),
+    String,
+> {
+    read_cached_canonical_graph(project_path).await
 }
 
 /// Test helper: install a graph as the current canonical graph and the
@@ -2370,5 +2391,125 @@ mod ensure_canonical_graph_tests {
                 "stale blob bubbled cache-path error instead of falling through: {msg}"
             );
         }
+    }
+
+    /// Regression test for the Pulse "infinite loader" symptom: when local
+    /// `main` has advanced past the architect's last warm, non-architect
+    /// `RepoGraphOps` read ops must serve whatever is currently cached rather
+    /// than re-running `ensure_canonical_graph` (which would `fetch` +
+    /// `reset_to_origin_main` + cache-miss + trigger a full SCIP rebuild).
+    ///
+    /// This test seeds `GRAPH_CACHE` under a deliberately stale `git_head`
+    /// sha that does not match `HEAD`, then calls both
+    /// `build_graph_for_project` and `build_graph_with_caches_for_project`.
+    /// Both must return Ok without ever consulting the index tree or the
+    /// indexer (the test project has no SCIP toolchain, so any indexer
+    /// invocation would fail hard).
+    #[tokio::test]
+    async fn non_warming_readers_serve_cached_graph_regardless_of_commit_sha() {
+        use super::graph_bridge_tests::build_test_graph;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = make_project(tmp.path()).await;
+
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let _ = ProjectRepository::new(db.clone(), state.event_bus())
+            .create(
+                "test-cache-only-readers",
+                project_root.to_string_lossy().as_ref(),
+            )
+            .await
+            .expect("create project");
+
+        // Plant a CachedGraph whose `project_path` matches what the readers
+        // compute from `project_root` but whose `git_head` is a synthetic
+        // sha that will never match the tempdir repo's real HEAD.  If the
+        // readers tried to refresh, they would cache-miss on this sha and
+        // attempt to run the indexer against a repo with no rust-analyzer
+        // available — hard failure, not a quiet stale read.
+        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+        let stale_sha = "0000000000000000000000000000000000000000".to_string();
+        let expected_node_count = {
+            let graph = build_test_graph();
+            let node_count = graph.node_count();
+            let (pagerank, sccs) = derive_graph_caches(&graph);
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = Some(CachedGraph {
+                graph,
+                project_path: index_tree_path.clone(),
+                git_head: stale_sha,
+                last_warm_at: time::OffsetDateTime::now_utc(),
+                pagerank,
+                sccs,
+            });
+            node_count
+        };
+
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let graph_only = build_graph_for_project(&state, &project_root_str)
+            .await
+            .expect("cache-only reader must succeed without warming");
+        let (graph_with_caches, pagerank, _sccs) =
+            build_graph_with_caches_for_project(&state, &project_root_str)
+                .await
+                .expect("cache-only reader (with caches) must succeed without warming");
+
+        // Drain the cache so sibling tests in this process aren't poisoned.
+        {
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = None;
+        }
+
+        assert_eq!(graph_only.node_count(), expected_node_count);
+        assert_eq!(graph_with_caches.node_count(), expected_node_count);
+        // `pagerank` is an Arc; proving it points at the derived ranking is
+        // enough to show `build_graph_with_caches_for_project` handed back
+        // the cache's Arc rather than recomputing.
+        assert_eq!(pagerank.nodes.len(), expected_node_count);
+    }
+
+    /// Cold-cache case: with no `GRAPH_CACHE` entry at all, the non-warming
+    /// readers must fail fast with the documented "not warmed" error.  This
+    /// is how Pulse panels render the empty state instead of spinning.
+    #[tokio::test]
+    async fn non_warming_readers_fail_fast_when_cache_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = make_project(tmp.path()).await;
+
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let _ = ProjectRepository::new(db.clone(), state.event_bus())
+            .create(
+                "test-cache-only-empty",
+                project_root.to_string_lossy().as_ref(),
+            )
+            .await
+            .expect("create project");
+
+        // Defensive: clear any leftover cache from a sibling test.
+        {
+            let mut cache = GRAPH_CACHE.write().await;
+            *cache = None;
+        }
+
+        let project_root_str = project_root.to_string_lossy().into_owned();
+        let err = build_graph_for_project(&state, &project_root_str)
+            .await
+            .expect_err("cold cache must error rather than warm");
+        assert!(
+            err.contains("not warmed"),
+            "expected GRAPH_NOT_WARMED_ERR shape, got: {err}"
+        );
+        let err = match build_graph_with_caches_for_project(&state, &project_root_str).await {
+            Ok(_) => panic!("cold cache must error rather than warm"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("not warmed"),
+            "expected GRAPH_NOT_WARMED_ERR shape, got: {err}"
+        );
     }
 }
