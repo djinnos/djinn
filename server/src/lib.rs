@@ -1,6 +1,6 @@
 #![warn(unreachable_pub)]
 
-pub mod canonical_graph;
+mod canonical_graph;
 pub mod daemon;
 pub mod db;
 pub mod embedded;
@@ -9,10 +9,10 @@ pub mod events;
 pub mod housekeeping;
 pub mod index_tree;
 pub mod logging;
-pub mod mcp_bridge;
+mod mcp_bridge;
 pub mod process;
 pub mod repo_graph;
-pub mod repo_map;
+mod repo_map;
 pub mod repo_map_personalization;
 pub mod scip_parser;
 pub mod server;

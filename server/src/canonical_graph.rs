@@ -355,14 +355,16 @@ async fn persist_canonical_skeleton(
     }
 }
 
-pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
+pub(crate) async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
     let cache = GRAPH_CACHE.read().await;
     cache
         .as_ref()
         .is_some_and(|cached| cached.project_path == index_tree_path)
 }
 
-pub async fn canonical_graph_cache_pinned_commit_for(index_tree_path: &Path) -> Option<String> {
+pub(crate) async fn canonical_graph_cache_pinned_commit_for(
+    index_tree_path: &Path,
+) -> Option<String> {
     let cache = GRAPH_CACHE.read().await;
     cache
         .as_ref()

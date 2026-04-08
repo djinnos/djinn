@@ -30,10 +30,10 @@ use crate::sync::SyncManager;
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
 
-pub struct CoordinatorBridge(pub CoordinatorHandle);
-pub struct SlotPoolBridge(pub SlotPoolHandle);
-pub struct LspBridge(pub LspManager);
-pub struct SyncBridge(pub SyncManager);
+struct CoordinatorBridge(pub CoordinatorHandle);
+struct SlotPoolBridge(pub SlotPoolHandle);
+struct LspBridge(pub LspManager);
+struct SyncBridge(pub SyncManager);
 
 // ── CoordinatorBridge → CoordinatorOps ───────────────────────────────────────
 
@@ -312,12 +312,12 @@ impl GitOps for AppState {
 /// state lets graph queries route through `ensure_canonical_graph`, which
 /// owns the ADR-050 `_index/` worktree, single-flight `IndexerLock`, and
 /// per-commit `repo_graph_cache`.
-pub struct RepoGraphBridge {
+pub(crate) struct RepoGraphBridge {
     state: AppState,
 }
 
 impl RepoGraphBridge {
-    pub fn new(state: AppState) -> Self {
+    pub(crate) fn new(state: AppState) -> Self {
         Self { state }
     }
 }
@@ -1178,7 +1178,7 @@ fn derive_graph_caches(
 /// The returned `IndexTreeHandle` is also exposed to callers so they can
 /// reuse its `path()` as the architect/chat `working_root` and so worker
 /// dispatch sites can render the canonical skeleton from the same path.
-pub async fn ensure_canonical_graph(
+pub(crate) async fn ensure_canonical_graph(
     state: &AppState,
     project_id: &str,
     project_root: &Path,
@@ -1260,7 +1260,7 @@ async fn persist_canonical_skeleton(
 /// commit-accurate check and refetches the graph if `origin/main` has
 /// advanced.  A cold cache (no entry at all) returns `false`, causing the
 /// warmer to spawn the background task.
-pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
+pub(crate) async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
     crate::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
 }
 
@@ -1274,7 +1274,9 @@ pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool
 /// coordinator tick loop can compare the cached pin against the current
 /// `origin/main` without exposing the full `CachedGraph` struct across the
 /// module seam.
-pub async fn canonical_graph_cache_pinned_commit_for(index_tree_path: &Path) -> Option<String> {
+pub(crate) async fn canonical_graph_cache_pinned_commit_for(
+    index_tree_path: &Path,
+) -> Option<String> {
     crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
 }
 
