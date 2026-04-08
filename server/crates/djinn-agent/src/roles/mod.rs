@@ -268,8 +268,7 @@ fn architect_dispatch_rule() -> DispatchRule {
 /// the escalation ceiling above Lead, so every review task dispatches
 /// as a Planner session.
 fn planner_review_claims(task: &Task, _ctx: &DispatchContext) -> bool {
-    matches!(task.status.as_str(), "open" | "in_progress")
-        && task.issue_type.as_str() == "review"
+    matches!(task.status.as_str(), "open" | "in_progress") && task.issue_type.as_str() == "review"
 }
 
 fn planner_review_dispatch_rule() -> DispatchRule {

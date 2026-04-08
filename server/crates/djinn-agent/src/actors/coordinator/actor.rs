@@ -888,10 +888,7 @@ impl CoordinatorActor {
     /// Handle the end of a planner session by re-evaluating the epic its
     /// task was attached to.  Non-planner sessions and task-less sessions
     /// are ignored.
-    async fn handle_planner_session_ended(
-        &mut self,
-        session: &djinn_core::models::SessionRecord,
-    ) {
+    async fn handle_planner_session_ended(&mut self, session: &djinn_core::models::SessionRecord) {
         if session.agent_type != "planner" {
             return;
         }
@@ -915,7 +912,10 @@ impl CoordinatorActor {
     /// suppressed mid-intervention.
     pub(super) async fn recheck_epic_after_planner_end(&mut self, epic_id: &str) {
         let task_repo = self.task_repo();
-        if !self.epic_is_eligible_for_next_wave(&task_repo, epic_id).await {
+        if !self
+            .epic_is_eligible_for_next_wave(&task_repo, epic_id)
+            .await
+        {
             return;
         }
         // Still check the active-planner guard — another planner could be
@@ -958,7 +958,10 @@ impl CoordinatorActor {
             crate::events::event_bus_for(&self.events_tx),
         );
         let epics = match epic_repo.list().await {
-            Ok(e) => e.into_iter().filter(|e| e.status == "open").collect::<Vec<_>>(),
+            Ok(e) => e
+                .into_iter()
+                .filter(|e| e.status == "open")
+                .collect::<Vec<_>>(),
             Err(e) => {
                 tracing::warn!(
                     error = %e,

@@ -673,8 +673,14 @@ mod tests {
         let db = test_db();
         let bus = EventBus::noop();
         let epic_repo = EpicRepository::new(db.clone(), bus.clone());
-        let epic_a = epic_repo.create("Epic A", "", "", "", "", None).await.unwrap();
-        let epic_b = epic_repo.create("Epic B", "", "", "", "", None).await.unwrap();
+        let epic_a = epic_repo
+            .create("Epic A", "", "", "", "", None)
+            .await
+            .unwrap();
+        let epic_b = epic_repo
+            .create("Epic B", "", "", "", "", None)
+            .await
+            .unwrap();
 
         let task_a1 = create_task_under_epic(&db, &epic_a.project_id, &epic_a.id).await;
         let task_a2 = create_task_under_epic(&db, &epic_a.project_id, &epic_a.id).await;
@@ -738,7 +744,11 @@ mod tests {
             .unwrap();
 
         let matches = repo.active_planner_for_epic(&epic_a.id).await.unwrap();
-        assert_eq!(matches.len(), 1, "only the running planner on epic A matches");
+        assert_eq!(
+            matches.len(),
+            1,
+            "only the running planner on epic A matches"
+        );
         assert_eq!(matches[0].id, planner_a.id);
     }
 
@@ -747,7 +757,10 @@ mod tests {
         let db = test_db();
         let bus = EventBus::noop();
         let epic_repo = EpicRepository::new(db.clone(), bus.clone());
-        let epic = epic_repo.create("Epic", "", "", "", "", None).await.unwrap();
+        let epic = epic_repo
+            .create("Epic", "", "", "", "", None)
+            .await
+            .unwrap();
         let repo = SessionRepository::new(db, bus);
         let matches = repo.active_planner_for_epic(&epic.id).await.unwrap();
         assert!(matches.is_empty());

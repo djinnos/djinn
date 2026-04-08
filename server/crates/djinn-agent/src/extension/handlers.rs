@@ -689,10 +689,7 @@ pub(super) async fn call_request_planner(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
 
-    let body = format!(
-        "[PLANNER_REQUEST] Lead escalating to Planner. {}",
-        p.reason
-    );
+    let body = format!("[PLANNER_REQUEST] Lead escalating to Planner. {}", p.reason);
     let payload = serde_json::json!({ "body": body }).to_string();
     repo.log_activity(Some(&task.id), "lead-agent", "lead", "comment", &payload)
         .await
