@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 
 use djinn_core::commands::CommandSpec;
 
-/// Configuration for a single named MCP server, as declared in `.djinn/settings.json`.
+/// Configuration for a single named MCP server, as discovered from `mcp.json`-style files
+/// or migrated from legacy `.djinn/settings.json` entries.
 ///
 /// Either `url` (for HTTP/SSE transports) or `command` (for stdio transports) should be
 /// provided. Both may be present; `url` takes precedence.
@@ -101,7 +102,9 @@ pub fn load_setup_commands(worktree_path: &Path) -> Result<Vec<CommandSpec>, Str
 ///
 /// Discovery order is `mcp.json`, `.cursor/mcp.json`, `.opencode/mcp.json`, with
 /// first-found-wins precedence by server name. Invalid files are logged and skipped.
-/// `.djinn/settings.json` is intentionally ignored for MCP registry resolution.
+/// Legacy `.djinn/settings.json` `mcp_servers` entries are migrated into root `mcp.json`
+/// during registry load, but session resolution no longer reads the settings-based registry
+/// directly.
 pub fn load_mcp_server_registry(worktree_path: &Path) -> HashMap<String, McpServerConfig> {
     crate::verification::mcp_json::load_mcp_server_registry(worktree_path)
 }
@@ -398,6 +401,32 @@ mod tests {
 
         let settings = load_settings(dir.path()).expect("load settings");
         assert!(settings.verification_rules.is_empty());
+    }
+
+    #[test]
+    fn load_settings_preserves_non_mcp_fields_when_legacy_mcp_servers_present() {
+        let dir = tempdir_in_tmp();
+        write_settings(
+            &dir,
+            r#"{
+                "setup": [{"name": "bootstrap", "command": "cargo fetch", "timeout_secs": 120}],
+                "verification_rules": [
+                    {"match": "server/**", "commands": ["cargo test -p djinn-agent"]}
+                ],
+                "verification_timeout_secs": 900,
+                "mcp_servers": {
+                    "legacy": {"url": "https://legacy.example/mcp"}
+                }
+            }"#,
+        );
+
+        let settings = load_settings(dir.path()).expect("load settings");
+
+        assert_eq!(settings.setup.len(), 1);
+        assert_eq!(settings.setup[0].name, "bootstrap");
+        assert_eq!(settings.verification_rules.len(), 1);
+        assert_eq!(settings.verification_rules[0].pattern, "server/**");
+        assert_eq!(settings.verification_timeout_secs, Some(900));
     }
 
     #[test]
