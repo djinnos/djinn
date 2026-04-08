@@ -259,6 +259,28 @@ impl SessionRepository {
         .await?)
     }
 
+    /// Returns any running sessions with `agent_type = 'planner'` whose task
+    /// is attached to the given epic.  Used by ADR-051 §7 reentrance guard
+    /// to suppress auto-dispatch of a new planning wave while a Planner is
+    /// actively reshaping the epic.
+    pub async fn active_planner_for_epic(&self, epic_id: &str) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        let prefixed = SESSION_COLS
+            .split(',')
+            .map(|c| format!("s.{}", c.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
+            "SELECT {prefixed} FROM sessions s \
+             INNER JOIN tasks t ON t.id = s.task_id \
+             WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = ?1 \
+             ORDER BY s.started_at DESC"
+        ))
+        .bind(epic_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn active_for_task(&self, task_id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, SessionRecord>(&format!(
@@ -625,5 +647,109 @@ mod tests {
         let other_after = repo.get(&other_task_running.id).await.unwrap().unwrap();
         assert_eq!(other_after.status, SessionStatus::Running.as_str());
         assert!(other_after.ended_at.is_none());
+    }
+
+    /// Insert a task under a given existing epic.  Returns the task id.
+    async fn create_task_under_epic(db: &Database, project_id: &str, epic_id: &str) -> String {
+        let task_id = uuid::Uuid::now_v7().to_string();
+        let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES (?1, ?2, ?3, ?4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+        )
+        .bind(&task_id)
+        .bind(project_id)
+        .bind(short_id)
+        .bind(epic_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        task_id
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_planner_for_epic_filters_correctly() {
+        let db = test_db();
+        let bus = EventBus::noop();
+        let epic_repo = EpicRepository::new(db.clone(), bus.clone());
+        let epic_a = epic_repo.create("Epic A", "", "", "", "", None).await.unwrap();
+        let epic_b = epic_repo.create("Epic B", "", "", "", "", None).await.unwrap();
+
+        let task_a1 = create_task_under_epic(&db, &epic_a.project_id, &epic_a.id).await;
+        let task_a2 = create_task_under_epic(&db, &epic_a.project_id, &epic_a.id).await;
+        let task_b1 = create_task_under_epic(&db, &epic_b.project_id, &epic_b.id).await;
+
+        let repo = SessionRepository::new(db.clone(), bus);
+
+        // 1. Running planner on epic A → should match.
+        let planner_a = repo
+            .create(CreateSessionParams {
+                project_id: &epic_a.project_id,
+                task_id: Some(&task_a1),
+                model: "openai/gpt-5",
+                agent_type: "planner",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        // 2. Running planner on epic B → should NOT match epic A.
+        let _planner_b = repo
+            .create(CreateSessionParams {
+                project_id: &epic_b.project_id,
+                task_id: Some(&task_b1),
+                model: "openai/gpt-5",
+                agent_type: "planner",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        // 3. Running worker on epic A → wrong agent_type, should NOT match.
+        let _worker_a = repo
+            .create(CreateSessionParams {
+                project_id: &epic_a.project_id,
+                task_id: Some(&task_a2),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        // 4. Completed planner on epic A → not running, should NOT match.
+        let finished_planner = repo
+            .create(CreateSessionParams {
+                project_id: &epic_a.project_id,
+                task_id: Some(&task_a2),
+                model: "openai/gpt-5",
+                agent_type: "planner",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        repo.update(&finished_planner.id, SessionStatus::Completed, 0, 0)
+            .await
+            .unwrap();
+
+        let matches = repo.active_planner_for_epic(&epic_a.id).await.unwrap();
+        assert_eq!(matches.len(), 1, "only the running planner on epic A matches");
+        assert_eq!(matches[0].id, planner_a.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_planner_for_epic_returns_empty_when_none() {
+        let db = test_db();
+        let bus = EventBus::noop();
+        let epic_repo = EpicRepository::new(db.clone(), bus.clone());
+        let epic = epic_repo.create("Epic", "", "", "", "", None).await.unwrap();
+        let repo = SessionRepository::new(db, bus);
+        let matches = repo.active_planner_for_epic(&epic.id).await.unwrap();
+        assert!(matches.is_empty());
     }
 }

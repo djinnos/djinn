@@ -15,6 +15,7 @@
 //   (task, research, …) are worker tasks.
 
 use super::*;
+use super::reentrance::{DispatchEvent, should_auto_dispatch_planner};
 use djinn_core::models::task::PRIORITY_CRITICAL;
 
 impl CoordinatorActor {
@@ -51,6 +52,25 @@ impl CoordinatorActor {
                 );
                 return;
             }
+        }
+
+        // ADR-051 §7 — reentrance guard.  Epic C will plumb the real
+        // `auto_breakdown` value; Epic B hard-codes `true` so the check
+        // still runs the active-planner guard.
+        if !should_auto_dispatch_planner(
+            &self.db,
+            DispatchEvent::EpicCreated {
+                epic_id: &epic.id,
+                auto_breakdown: true,
+            },
+        )
+        .await
+        {
+            tracing::debug!(
+                epic_id = %epic.short_id,
+                "CoordinatorActor: epic-created auto-dispatch suppressed by reentrance guard"
+            );
+            return;
         }
 
         self.create_planning_task(epic).await;

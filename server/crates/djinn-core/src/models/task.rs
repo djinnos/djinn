@@ -67,6 +67,30 @@ impl IssueType {
 /// MCP tools reject -1, so only the coordinator/system can set this.
 pub const PRIORITY_CRITICAL: i64 = -1;
 
+// ── close_reason literals ─────────────────────────────────────────────────────
+//
+// `close_reason` is a free-form `Option<String>` column (no DB enum) so these
+// values are conventions, not a schema constraint.  Centralizing them as
+// constants lets ADR-051 §7 reentrance guards filter by name without string
+// literal drift.
+//
+// The first two are already emitted by the state machine; the last three are
+// reserved for Planner-driven reshape force-closes (see ADR-051 §7).
+
+/// Natural task completion (Close / PrMerge transitions).
+pub const CLOSE_REASON_COMPLETED: &str = "completed";
+/// Force-close (ForceClose / UserOverride → Closed transitions).
+pub const CLOSE_REASON_FORCE_CLOSED: &str = "force_closed";
+/// Planner force-closed this task as part of a board reshape.  Auto-dispatch
+/// of a new planning wave is suppressed on this reason (ADR-051 §7).
+pub const CLOSE_REASON_RESHAPE: &str = "reshape";
+/// Planner force-closed this task because newer work supersedes it.
+/// Auto-dispatch of a new planning wave is suppressed on this reason.
+pub const CLOSE_REASON_SUPERSEDED: &str = "superseded";
+/// Planner force-closed this task as a duplicate of another.
+/// Auto-dispatch of a new planning wave is suppressed on this reason.
+pub const CLOSE_REASON_DUPLICATE: &str = "duplicate";
+
 /// Task board work item, always scoped under an epic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -500,7 +524,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Closed),
                 set_closed_at: true,
-                close_reason: Some("completed"),
+                close_reason: Some(CLOSE_REASON_COMPLETED),
                 clear_merge_conflict_metadata: true,
                 ..Default::default()
             }
@@ -541,7 +565,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Closed),
                 set_closed_at: true,
-                close_reason: Some("force_closed"),
+                close_reason: Some(CLOSE_REASON_FORCE_CLOSED),
                 clear_merge_conflict_metadata: true,
                 ..Default::default()
             }
@@ -557,7 +581,11 @@ pub fn compute_transition(
                 reset_continuation: true,
                 set_closed_at: closing,
                 clear_closed_at: !closing,
-                close_reason: if closing { Some("force_closed") } else { None },
+                close_reason: if closing {
+                    Some(CLOSE_REASON_FORCE_CLOSED)
+                } else {
+                    None
+                },
                 clear_close_reason: !closing,
                 clear_merge_conflict_metadata: true,
                 ..Default::default()
@@ -676,7 +704,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Closed),
                 set_closed_at: true,
-                close_reason: Some("completed"),
+                close_reason: Some(CLOSE_REASON_COMPLETED),
                 ..Default::default()
             }
         }

@@ -62,6 +62,8 @@ pub(super) struct CoordinatorActor {
     pub(super) verification_tracker: VerificationTracker,
     pub(super) consolidation_runner: Arc<dyn ConsolidationRunner>,
     pub(super) last_stale_sweep: StdInstant,
+    /// ADR-051 §7 — timestamp of the last auto-dispatch safety-net sweep.
+    pub(super) last_auto_dispatch_sweep: StdInstant,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     pub(super) prune_tick_counter: u32,
     /// Timestamp of the last patrol completion (or actor start as initial baseline).
@@ -160,6 +162,7 @@ impl CoordinatorActor {
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
             last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
             next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,
@@ -289,6 +292,10 @@ impl CoordinatorActor {
                         };
                         health::sweep_stale_resources(&self.db, &app_state).await;
                         self.last_stale_sweep = StdInstant::now();
+                    }
+                    if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
+                        self.sweep_stale_auto_dispatches().await;
+                        self.last_auto_dispatch_sweep = StdInstant::now();
                     }
                     // Run association pruning once per ~hour (120 ticks at 30s intervals)
                     self.prune_tick_counter += 1;
@@ -565,6 +572,16 @@ impl CoordinatorActor {
                     return;
                 };
                 self.maybe_create_planning_task(&epic).await;
+            }
+            // ADR-051 §7 — exit recheck.  When a planner session ends, look
+            // up the epic its task was attached to and recheck whether an
+            // auto-dispatch should fire (now that the guard no longer skips).
+            ("session", "completed" | "interrupted" | "failed") => {
+                let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
+                else {
+                    return;
+                };
+                self.handle_planner_session_ended(&session).await;
             }
             ("task", "created") | ("task", "updated") => {
                 let Some(task_payload) = envelope
@@ -863,6 +880,119 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         )
+    }
+
+    // ── ADR-051 §7 exit-recheck + stale sweep ────────────────────────────────
+
+    /// Handle the end of a planner session by re-evaluating the epic its
+    /// task was attached to.  Non-planner sessions and task-less sessions
+    /// are ignored.
+    async fn handle_planner_session_ended(
+        &mut self,
+        session: &djinn_core::models::SessionRecord,
+    ) {
+        if session.agent_type != "planner" {
+            return;
+        }
+        let Some(task_id) = session.task_id.as_deref() else {
+            return;
+        };
+        let task_repo = self.task_repo();
+        let task = match task_repo.get(task_id).await {
+            Ok(Some(t)) => t,
+            _ => return,
+        };
+        let Some(epic_id) = task.epic_id.as_deref() else {
+            return;
+        };
+        self.recheck_epic_after_planner_end(epic_id).await;
+    }
+
+    /// Re-run the eligibility check for an epic that was just touched by
+    /// a planner session.  If the epic is eligible and no other planner is
+    /// still active on it, fire the auto-dispatch that may have been
+    /// suppressed mid-intervention.
+    pub(super) async fn recheck_epic_after_planner_end(&mut self, epic_id: &str) {
+        let task_repo = self.task_repo();
+        if !self.epic_is_eligible_for_next_wave(&task_repo, epic_id).await {
+            return;
+        }
+        // Still check the active-planner guard — another planner could be
+        // running on the same epic.
+        if !super::reentrance::should_auto_dispatch_planner(
+            &self.db,
+            super::reentrance::DispatchEvent::TaskClosed {
+                epic_id,
+                close_reason: None,
+            },
+        )
+        .await
+        {
+            return;
+        }
+
+        // Derive the project_id from the epic.
+        let epic_repo = djinn_db::EpicRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let Ok(Some(epic)) = epic_repo.get(epic_id).await else {
+            return;
+        };
+        self.create_planning_task_by_ids(
+            &task_repo,
+            epic_id,
+            &epic.project_id,
+            "post_planner_recheck",
+        )
+        .await;
+    }
+
+    /// ADR-051 §7 — defensive safety-net sweep that rechecks every open
+    /// epic for auto-dispatch eligibility.  Catches epics that fell
+    /// through all event-driven paths.
+    pub(super) async fn sweep_stale_auto_dispatches(&mut self) {
+        let epic_repo = djinn_db::EpicRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let epics = match epic_repo.list().await {
+            Ok(e) => e.into_iter().filter(|e| e.status == "open").collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CoordinatorActor: ADR-051 stale-sweep failed to list epics",
+                );
+                return;
+            }
+        };
+        let task_repo = self.task_repo();
+        for epic in epics {
+            if !self
+                .epic_is_eligible_for_next_wave(&task_repo, &epic.id)
+                .await
+            {
+                continue;
+            }
+            if !super::reentrance::should_auto_dispatch_planner(
+                &self.db,
+                super::reentrance::DispatchEvent::TaskClosed {
+                    epic_id: &epic.id,
+                    close_reason: None,
+                },
+            )
+            .await
+            {
+                continue;
+            }
+            self.create_planning_task_by_ids(
+                &task_repo,
+                &epic.id,
+                &epic.project_id,
+                "stale_auto_dispatch_sweep",
+            )
+            .await;
+        }
     }
 
     pub(super) async fn project_path_for_id(&self, project_id: &str) -> Option<String> {

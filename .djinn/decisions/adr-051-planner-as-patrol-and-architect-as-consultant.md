@@ -29,6 +29,7 @@ This section is a living checklist of what has landed, what is partially landed,
 | **Step 2 (b)** — Pulse no-rebuild | [`a5f38130`](#) (user-authored) | Splits `ensure_canonical_graph` into a refresh path (background warmer + chat first-use only) and a pure-read `read_cached_canonical_graph` path used by `build_graph_for_project` and `build_graph_with_caches_for_project`. Pulse panel reads no longer trigger `fetch_if_stale + reset_to_origin_main` and never fall through to a 30-minute SCIP rebuild when local main has advanced past the architect's last warm. Cold-cache reads return `GRAPH_NOT_WARMED_ERR` so Pulse renders its empty state instead of wedging. New regression tests under `ensure_canonical_graph_tests`. |
 | **Step 5** — `request_architect` → `request_planner` | [`dfdf5b3f`](#) | Lead's toolbelt now exposes `request_planner` (was `request_architect`). The 2nd-escalation auto-route in `call_request_lead` and the PR-poller's "exceeded N rounds without approval" path both call `dispatch_planner_escalation` (was `dispatch_architect_escalation`), which creates a `review` task with `agent_type=planner` instead of `architect`. Per ADR-051 §8 the Planner is now the escalation ceiling above Lead. |
 | **Step 4 partial / Step 6 partial** — architect & chat contracts | [`dfdf5b3f`](#) | Top-of-file "Role transition (ADR-051)" notice added to `prompts/architect.md` and `prompts/chat.md` (parity per ADR-050 §2). Both gain Contract 1 (proposals only — ADR drafts target `decisions/proposed/`, suggested epics + improvement tickets are embedded in the ADR draft, no `epic_create` for new architect-discovered work) and Contract 2 (silent runs prohibited — every spike must return findings or an explicit "no new findings"). `prompts/lead.md` gains a "Beyond Lead scope — request the Planner" paragraph. The patrol body of `architect.md` is unchanged below the new notice; the full content migration is the deferred half of Epic A. |
+| **Epic B — Steps 7–10** — auto-dispatch reentrance guards | _uncommitted_ (2026-04-08, session handoff) | (7) `close_reason` literals extended via new `CLOSE_REASON_*` constants in `server/crates/djinn-core/src/models/task.rs` — adds `RESHAPE`, `SUPERSEDED`, `DUPLICATE` alongside `COMPLETED` / `FORCE_CLOSED`. Existing transition sites (lines 503/544/560/679) now reference the constants. No close site *emits* the new reasons yet — that's a Planner prompt/convention change for later; the active-session guard is the real protection today. (8) New `should_auto_dispatch_planner(db, event)` helper at `server/crates/djinn-agent/src/actors/coordinator/reentrance.rs` with `DispatchEvent::{TaskClosed, EpicCreated}`. Logic ordered: close-reason filter → `auto_breakdown` filter → active-session guard via new `SessionRepository::active_planner_for_epic(epic_id)` on `server/crates/djinn-db/src/repositories/session.rs` (joins `sessions → tasks` for `running` + `agent_type='planner'`). Wired into `on_task_closed` rules 1 & 2 at `coordinator/rules.rs` and into `maybe_create_planning_task` at `coordinator/wave.rs` (hardcoded `auto_breakdown: true` until Epic C plumbs the real flag). (9) Exit-recheck: new `("session", "completed"|"interrupted"|"failed")` event arm in `coordinator/actor.rs` → `handle_planner_session_ended` → `recheck_epic_after_planner_end` fires a `"post_planner_recheck"` dispatch if the epic is now eligible. New `epic_is_eligible_for_next_wave` helper in `rules.rs` shared by recheck + sweep. (10) 15-minute `sweep_stale_auto_dispatches` method wired into the existing tick loop at `actor.rs` next to `last_stale_sweep`, with new `AUTO_DISPATCH_SWEEP_INTERVAL` constant in `coordinator/types.rs` and `last_auto_dispatch_sweep: StdInstant` field on `CoordinatorActor`. **Tests**: 4 unit tests on the helper (one per decision branch), 2 repo tests on `active_planner_for_epic`, 1 integration test `batch_completion_suppressed_when_active_planner_on_epic` in `rules.rs`. `cargo check -p djinn-agent -p djinn-server` clean; `cargo test -p djinn-db session` 17 pass; `cargo test -p djinn-agent coordinator::` 60 pass including the new tests. |
 
 **Commits to look up with `git show <sha>` for context**: `7886bcc4`, `7a6f54c3`, `a5f38130`, `1038fb62` (this ADR initial draft), `dfdf5b3f` (Epic A v1).
 
@@ -44,17 +45,6 @@ The Epic A commit `dfdf5b3f` shipped the routing change and the contract additio
 Why deferred: the routing-and-contracts slice (the part that landed) is high-leverage and self-contained — it changes Lead's escalation routing immediately and tells future architect runs to behave as consultants even though the patrol body is still verbatim. The content migration is bigger and would benefit from a focused session that rewrites both prompts together with a clear before/after comparison.
 
 ### Not started
-
-**Epic B — Auto-dispatch reentrance guards (Migration steps 7–10).**
-
-Three failed subagent dispatches (all 529'd before doing real work). Worktree was set up at `djinn-adr51-guards` and then removed during cleanup. The audit findings in this ADR's "Audit findings (2026-04-08)" section below are still accurate and provide all the file:line anchors needed. Re-launching this work needs:
-
-- Extend `close_reason` (free-form TEXT, no migration) at `server/crates/djinn-core/src/models/task.rs:99` with `"reshape"`, `"superseded"`, `"duplicate"` literals. Apply at the planner-driven force-close sites; lead-driven verification-failure force-closes stay as `"force_closed"`.
-- Implement `should_auto_dispatch_planner(scope, event) -> bool` helper applying close-reason filter + active-session guard (in this order). Wire into `coordinator/rules.rs:42` (`on_task_closed`) and `coordinator/wave.rs:23` (`maybe_create_planning_task`).
-- Add `active_planner_for_epic` repo method on `server/crates/djinn-db/src/repositories/session.rs` joining sessions → tasks via `session.task_id → task.epic_id` filtered by `agent_type = "planner"` + `status = "running"`.
-- Exit-recheck hook on planner session end → call helper for each touched epic → dispatch if appropriate.
-- 15-minute stale safety-net sweep in `coordinator/actor.rs` modeled after existing `sweep_stale_resources`/`enforce_session_stall_timeout`.
-- Unit tests covering the 4 helper paths (reshape skip, active-planner skip, natural completion + idle dispatch, auto_breakdown=false opt-out — last one stubbed until Epic C lands).
 
 **Epic C — Proposal pipeline backend (Migration steps 11–16).**
 
@@ -80,11 +70,18 @@ Subagent dispatched once, died from 529. Worktree set up at `djinn-adr51-proposa
 
 ### Recommended next-session order
 
-1. **Epic B first**, not Epic C. Reasons: (a) Epic C's safety story depends on the active-session guard that Epic B builds, (b) Epic B is mostly mechanical Rust + a clean SQL join + a small periodic check, low ambiguity, (c) Epic B unblocks Epic C's reentrance protection.
-2. **Then Epic A v2** (coordinator patrol timer rename + full content migration architect.md → planner.md). Best done in a focused session because the prompt rewrite is judgment-heavy.
-3. **Then Epic C** (proposal pipeline backend). Largest scope; benefits from Epic B already being green so the auto-dispatch guard is wired and tested.
-4. **Pulse panels** (frontend) come after Epic C. They consume the proposal lanes Epic C creates.
-5. **Memory note update** (`project_canonical_graph_warming_architect_only.md`) and **stale snapshot cleanup** (the duplicate `request_architect` snapshots under `server/crates/djinn-agent/src/snapshots/` that Epic A v1 left untouched) are housekeeping that can ride along with any of the above.
+Epic B (auto-dispatch reentrance guards) landed in this session as uncommitted edits; commit + verify before proceeding. Remaining work:
+
+1. **Epic A v2** (coordinator patrol timer rename + full content migration architect.md → planner.md). Best done in a focused session because the prompt rewrite is judgment-heavy.
+2. **Epic C** (proposal pipeline backend). Largest scope; Epic B's active-session guard is the safety net Epic C depends on (already in place). Live-coordinator safety rule from the Epic C notes still applies — no live `epic_create` calls during implementation.
+3. **Pulse panels** (frontend) come after Epic C. They consume the proposal lanes Epic C creates.
+4. **Memory note update** (`project_canonical_graph_warming_architect_only.md`) and **stale snapshot cleanup** (the duplicate `request_architect` snapshots under `server/crates/djinn-agent/src/snapshots/` that Epic A v1 left untouched) are housekeeping that can ride along with any of the above.
+
+**Known loose ends from Epic B that the next session should track**:
+- Close sites still emit only `"completed"` / `"force_closed"`; the new `CLOSE_REASON_{RESHAPE,SUPERSEDED,DUPLICATE}` constants exist but are not emitted. The Planner prompt update (part of Epic A v2's content migration) should introduce the convention, and any code path that force-closes during a reshape should set `CLOSE_REASON_RESHAPE` etc.
+- `auto_breakdown: true` is hardcoded at the `wave.rs` call site. Epic C must plumb the real value from the epic creation API into `DispatchEvent::EpicCreated`.
+- No end-to-end test for `recheck_epic_after_planner_end` or `sweep_stale_auto_dispatches`; they compile and are wired, but coverage is via the helper's unit tests only. If desired, drive `SessionRepository::update(SessionStatus::Completed)` while a coordinator is spawned — the raw `CoordinatorActor` test seam at the bottom of `coordinator/mod.rs` is the cleanest hook.
+- Epic B's rule-2 path in `on_task_closed` was NOT dedup'd against the new `epic_is_eligible_for_next_wave` helper — a judgment call to minimize churn. If preferred, replace the inlined block.
 
 ## Context
 

@@ -75,6 +75,10 @@ impl CoordinatorDeps {
 pub(super) const STUCK_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
+/// ADR-051 §7 — stale auto-dispatch safety net.  Epics that fell through
+/// all event-driven auto-dispatch paths are rechecked at this interval.
+pub(super) const AUTO_DISPATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
 /// Minimum cooldown between idle-time memory consolidation sweeps (ADR-048 §3A).
 pub(super) const IDLE_CONSOLIDATION_COOLDOWN: Duration = Duration::from_secs(300);
 

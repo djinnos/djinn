@@ -43,6 +43,7 @@ mod health;
 mod messages;
 pub(crate) mod pr_poller;
 mod prompt_eval;
+mod reentrance;
 pub(crate) mod rules;
 mod types;
 mod wave;
@@ -334,6 +335,7 @@ mod tests {
             verification_tracker: VerificationTracker::default(),
             consolidation_runner: runner.clone(),
             last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
             next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,
@@ -411,6 +413,7 @@ mod tests {
             verification_tracker: VerificationTracker::default(),
             consolidation_runner: runner.clone(),
             last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
             next_patrol_interval: rules::DEFAULT_ARCHITECT_PATROL_INTERVAL,

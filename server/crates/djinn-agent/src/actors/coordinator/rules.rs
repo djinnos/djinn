@@ -7,6 +7,7 @@
 // All rules are deterministic — zero LLM calls.
 
 use super::*;
+use super::reentrance::{DispatchEvent, should_auto_dispatch_planner};
 use djinn_core::models::IssueType;
 use djinn_core::models::task::PRIORITY_CRITICAL;
 use djinn_db::EpicRepository;
@@ -79,13 +80,29 @@ impl CoordinatorActor {
                     && t.status != "closed"
             });
             if !has_open_work && !self.open_planning_task_exists(&task_repo, epic_id).await {
-                self.create_planning_task_by_ids(
-                    &task_repo,
-                    epic_id,
-                    &task.project_id,
-                    "spike_research_complete",
+                if should_auto_dispatch_planner(
+                    &self.db,
+                    DispatchEvent::TaskClosed {
+                        epic_id,
+                        close_reason: task.close_reason.as_deref(),
+                    },
                 )
-                .await;
+                .await
+                {
+                    self.create_planning_task_by_ids(
+                        &task_repo,
+                        epic_id,
+                        &task.project_id,
+                        "spike_research_complete",
+                    )
+                    .await;
+                } else {
+                    tracing::debug!(
+                        epic_id,
+                        trigger = "spike_research_complete",
+                        "CoordinatorActor: auto-dispatch suppressed by reentrance guard"
+                    );
+                }
             }
             return; // Rule 1 fires; skip rule 2 for this event.
         }
@@ -146,18 +163,34 @@ impl CoordinatorActor {
             && !any_in_progress
             && !self.open_planning_task_exists(&task_repo, epic_id).await
         {
-            self.create_planning_task_by_ids(
-                &task_repo,
-                epic_id,
-                &task.project_id,
-                "batch_complete",
+            if should_auto_dispatch_planner(
+                &self.db,
+                DispatchEvent::TaskClosed {
+                    epic_id,
+                    close_reason: task.close_reason.as_deref(),
+                },
             )
-            .await;
+            .await
+            {
+                self.create_planning_task_by_ids(
+                    &task_repo,
+                    epic_id,
+                    &task.project_id,
+                    "batch_complete",
+                )
+                .await;
+            } else {
+                tracing::debug!(
+                    epic_id,
+                    trigger = "batch_complete",
+                    "CoordinatorActor: auto-dispatch suppressed by reentrance guard"
+                );
+            }
         }
     }
 
     /// Returns `true` if there is already an open `planning` task under the epic.
-    async fn open_planning_task_exists(
+    pub(super) async fn open_planning_task_exists(
         &self,
         task_repo: &djinn_db::TaskRepository,
         epic_id: &str,
@@ -171,9 +204,81 @@ impl CoordinatorActor {
         }
     }
 
+    /// ADR-051 §7 — shared epic-eligibility check used by exit-recheck and
+    /// the 15-min stale sweep.
+    ///
+    /// An epic is eligible for a new planning wave when:
+    ///   - it still exists and is `open`,
+    ///   - it has at least one non-planning worker task,
+    ///   - all worker tasks are closed,
+    ///   - no tasks are in a mid-flight status,
+    ///   - no open planning/decomposition task exists.
+    ///
+    /// The active-planner guard and close_reason filter are applied by
+    /// `should_auto_dispatch_planner` at the actual dispatch site; this
+    /// helper only checks the board-shape preconditions so callers can
+    /// avoid pointless queries.
+    pub(super) async fn epic_is_eligible_for_next_wave(
+        &self,
+        task_repo: &djinn_db::TaskRepository,
+        epic_id: &str,
+    ) -> bool {
+        let epic_repo = EpicRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let epic = match epic_repo.get(epic_id).await {
+            Ok(Some(e)) => e,
+            _ => return false,
+        };
+        if epic.status != "open" {
+            return false;
+        }
+
+        let all_tasks = match task_repo.list_by_epic(epic_id).await {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+
+        let worker_tasks: Vec<_> = all_tasks
+            .iter()
+            .filter(|t| {
+                !matches!(
+                    t.issue_type.as_str(),
+                    "planning" | "decomposition" | "review"
+                )
+            })
+            .collect();
+
+        if worker_tasks.is_empty() {
+            return false;
+        }
+        if !worker_tasks.iter().all(|t| t.status == "closed") {
+            return false;
+        }
+        let any_in_progress = all_tasks.iter().any(|t| {
+            matches!(
+                t.status.as_str(),
+                "in_progress"
+                    | "in_task_review"
+                    | "in_lead_intervention"
+                    | "needs_task_review"
+                    | "needs_lead_intervention"
+                    | "verifying"
+            )
+        });
+        if any_in_progress {
+            return false;
+        }
+        if self.open_planning_task_exists(task_repo, epic_id).await {
+            return false;
+        }
+        true
+    }
+
     /// Create a planning task for the Planner under the given epic (by ID).
     /// Used by spike/research and batch-completion rules that already hold the IDs.
-    async fn create_planning_task_by_ids(
+    pub(super) async fn create_planning_task_by_ids(
         &self,
         task_repo: &djinn_db::TaskRepository,
         epic_id: &str,
@@ -693,6 +798,58 @@ mod tests {
             snap.get("epic-1"),
             Some(&1),
             "expired events should be evicted"
+        );
+    }
+
+    // ── ADR-051 §7: reentrance guard suppresses auto-dispatch ─────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_completion_suppressed_when_active_planner_on_epic() {
+        use djinn_db::{CreateSessionParams, SessionRepository};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = make_epic(&db, &project.id, &tx).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // One worker task plus a separate "host" task that the planner
+        // session is attached to.  The host is a `review` task (non-worker,
+        // non-planning) so it is excluded from both the worker-task count
+        // and the open-planning-exists check — leaving the reentrance
+        // guard's active-planner check as the ONLY thing that can suppress
+        // dispatch.
+        let t1 = create_task(&db, &epic.id, &project.id, "Task 1", "task", &tx).await;
+        let planner_host =
+            create_task(&db, &epic.id, &project.id, "Planner host", "review", &tx).await;
+
+        // Insert a running planner session on `planner_host`.
+        let session_repo =
+            SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&planner_host.id),
+                model: "openai/gpt-5",
+                agent_type: "planner",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let _handle = spawn_coordinator(&db, &tx);
+
+        // Closing the worker task should normally trigger batch-completion
+        // auto-dispatch — but the active planner guard must suppress it.
+        close_task(&db, &t1.id, &tx).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
+        assert_eq!(
+            planning_count(&tasks),
+            0,
+            "reentrance guard must suppress new planning task while planner is active"
         );
     }
 }
