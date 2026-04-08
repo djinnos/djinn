@@ -679,6 +679,28 @@ mod tests {
         assert_eq!(error.field, "server `example` url");
     }
 
+    #[tokio::test]
+    async fn resolve_server_config_reports_missing_header_placeholder() {
+        let app_state = test_context();
+        let config = McpServerConfig {
+            url: Some("https://example.com/mcp".to_string()),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer ${MISSING_HEADER_TOKEN}".to_string(),
+            )]),
+        };
+
+        let error = resolve_server_config("example", &config, &app_state)
+            .await
+            .expect_err("missing header placeholder should error");
+
+        assert_eq!(error.variable, "MISSING_HEADER_TOKEN");
+        assert_eq!(error.field, "server `example` header `Authorization`");
+    }
+
     #[test]
     fn resolved_transport_kind_is_explicit() {
         let http = ResolvedMcpServerConfig {
@@ -759,6 +781,24 @@ mod tests {
                 headers: HashMap::new(),
             },
         )];
+        let result = connect_and_discover("test", "worker", &servers, &app_state).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_and_discover_skips_unsupported_transport() {
+        let app_state = test_context();
+        let servers = vec![(
+            "unsupported-server".to_string(),
+            McpServerConfig {
+                url: None,
+                command: None,
+                args: vec!["--unused".to_string()],
+                env: HashMap::from([("TOKEN".to_string(), "value".to_string())]),
+                headers: HashMap::from([("Authorization".to_string(), "Bearer token".to_string())]),
+            },
+        )];
+
         let result = connect_and_discover("test", "worker", &servers, &app_state).await;
         assert!(result.is_none());
     }

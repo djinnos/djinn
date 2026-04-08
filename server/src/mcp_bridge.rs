@@ -1374,6 +1374,26 @@ async fn persist_canonical_skeleton(
     }
 }
 
+/// Fast-path lookup against the in-memory `GRAPH_CACHE` used by the
+/// canonical-graph warmer to decide whether a detached background warm task
+/// is required.  Returns `true` iff there is a cached graph whose
+/// `project_path` matches the supplied `_index` worktree path — which, in
+/// this process, is only ever populated by a previous successful
+/// `ensure_canonical_graph` run for this project.  We intentionally do NOT
+/// verify the commit SHA here: resolving the current `origin/main` SHA
+/// requires a `git fetch` and `git rev-parse` round-trip that would
+/// reintroduce the very blocking behavior the detached warmer is designed
+/// to avoid.  Instead, the background task itself does the full
+/// commit-accurate check and refetches the graph if `origin/main` has
+/// advanced.  A cold cache (no entry at all) returns `false`, causing the
+/// warmer to spawn the background task.
+pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
+    let cache = GRAPH_CACHE.read().await;
+    cache
+        .as_ref()
+        .is_some_and(|cached| cached.project_path == index_tree_path)
+}
+
 /// Replace the in-memory canonical graph slot, moving the previous canonical
 /// into the diff predecessor slot per ADR-050 §3.
 async fn install_as_canonical(

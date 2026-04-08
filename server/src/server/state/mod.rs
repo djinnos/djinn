@@ -72,6 +72,13 @@ struct Inner {
     /// per-request `git fetch` probe and worktree-add probe).  ADR-050
     /// Chunk C cleanup.
     pub chat_warmed_sessions: Arc<std::sync::Mutex<HashMap<(String, String), PathBuf>>>,
+    /// Single-flight gate for background canonical-graph warm tasks spawned
+    /// by `AppStateCanonicalGraphWarmer::warm`.  Keyed by `project_id`:
+    /// membership means a detached warm task is already running for that
+    /// project and additional warm requests should be coalesced (return
+    /// immediately without spawning a duplicate task).  The entry is removed
+    /// by the spawned task in its completion branch.
+    pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 impl AppState {
@@ -103,6 +110,7 @@ impl AppState {
                 active_tasks: djinn_agent::context::ActivityTracker::default(),
                 indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
                 chat_warmed_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
             }),
         }
     }
@@ -111,6 +119,32 @@ impl AppState {
     /// invocations (ADR-050 §3).
     pub fn indexer_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
         self.inner.indexer_lock.clone()
+    }
+
+    /// Attempt to claim the background canonical-graph warm slot for
+    /// `project_id`.  Returns `true` if the slot was acquired (caller is
+    /// responsible for releasing it via `release_canonical_warm_slot` once
+    /// the spawned task finishes).  Returns `false` if another warm task is
+    /// already in flight for this project — callers should coalesce and
+    /// skip spawning a duplicate.
+    pub fn try_claim_canonical_warm_slot(&self, project_id: &str) -> bool {
+        self.inner
+            .canonical_warm_inflight
+            .lock()
+            .expect("poisoned")
+            .insert(project_id.to_string())
+    }
+
+    /// Release a previously-claimed canonical-graph warm slot for
+    /// `project_id`.  Must be called by the detached warm task once it has
+    /// finished (success or error) so subsequent dispatches on a new
+    /// `origin/main` commit can retrigger warming.
+    pub fn release_canonical_warm_slot(&self, project_id: &str) {
+        self.inner
+            .canonical_warm_inflight
+            .lock()
+            .expect("poisoned")
+            .remove(project_id);
     }
 
     /// Look up a previously cached canonical working root for a chat
@@ -498,10 +532,103 @@ struct AppStateCanonicalGraphWarmer {
 
 #[async_trait::async_trait]
 impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer {
+    /// Detached-warm semantics (ADR-050 Chunk C follow-up, 2026-04-07):
+    ///
+    /// Previously this impl awaited `ensure_canonical_graph` inline, which
+    /// meant the lifecycle's outer `tokio::time::timeout(45s, warmer.warm(..))`
+    /// would drop the inner future on expiry.  On a cold cache the timeout
+    /// routinely fired while `run_indexers_already_locked` was still running
+    /// rust-analyzer — dropping that future killed the subprocess, the
+    /// post-SCIP `spawn_blocking` CPU pipeline never started, and
+    /// `GRAPH_CACHE` stayed empty forever.  Every architect dispatch then
+    /// rehit the same timeout.
+    ///
+    /// The fix:
+    ///   1. **Fast path**: if the in-memory `GRAPH_CACHE` already has an
+    ///      entry for this project's `_index` worktree path, return
+    ///      `Ok(())` instantly.  (We do not verify commit SHA here; the
+    ///      detached task handles freshness when it does eventually run.)
+    ///   2. **Single-flight**: try to claim a per-`project_id` slot.  If
+    ///      another warm task is already running, coalesce and return
+    ///      `Ok(())` instantly.
+    ///   3. **Spawn detached**: `tokio::spawn` a background task that
+    ///      `.await`s `ensure_canonical_graph` to completion on its own —
+    ///      independent of any lifecycle timeout.  The post-SCIP CPU work
+    ///      still happens in `spawn_blocking` inside `ensure_canonical_graph`;
+    ///      detaching at this layer just prevents the lifecycle's 45s
+    ///      timeout from cancelling the outer future.
+    ///   4. Always return `Ok(())` — the lifecycle treats the result as
+    ///      informational anyway and proceeds with whatever skeleton
+    ///      currently lives in the DB `repo_map` note pipeline.
     async fn warm(&self, project_id: &str, project_root: &Path) -> Result<(), String> {
-        crate::mcp_bridge::ensure_canonical_graph(&self.state, project_id, project_root)
-            .await
-            .map(|_| ())
+        // Fast path: in-memory cache already populated for this project's
+        // index tree.  The background task (if this is stale for the
+        // current origin/main) will refresh on the next dispatch that
+        // claims the inflight slot.
+        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+        if crate::mcp_bridge::canonical_graph_cache_has_entry_for(&index_tree_path).await {
+            tracing::debug!(
+                project_id = %project_id,
+                "AppStateCanonicalGraphWarmer: cache already hot, skipping warm"
+            );
+            return Ok(());
+        }
+
+        // Single-flight: if another warm task is already in flight for
+        // this project, coalesce and return immediately.  The in-flight
+        // task will populate the cache for everybody.
+        if !self.state.try_claim_canonical_warm_slot(project_id) {
+            tracing::info!(
+                project_id = %project_id,
+                "AppStateCanonicalGraphWarmer: warm already in flight, coalescing"
+            );
+            return Ok(());
+        }
+
+        // Detach the warm onto a background task so the lifecycle's outer
+        // `tokio::time::timeout` cannot cancel it mid-flight.  The task
+        // owns its own clones of every resource it needs.
+        let state = self.state.clone();
+        let project_id_owned = project_id.to_string();
+        let project_root_owned = project_root.to_path_buf();
+        tracing::info!(
+            project_id = %project_id,
+            project_root = %project_root_owned.display(),
+            "AppStateCanonicalGraphWarmer: spawning background warm task"
+        );
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let result = crate::mcp_bridge::ensure_canonical_graph(
+                &state,
+                &project_id_owned,
+                &project_root_owned,
+            )
+            .await;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            match result {
+                Ok((handle, graph)) => {
+                    tracing::info!(
+                        project_id = %project_id_owned,
+                        elapsed_ms,
+                        commit_sha = %handle.commit_sha(),
+                        node_count = graph.node_count(),
+                        edge_count = graph.edge_count(),
+                        "AppStateCanonicalGraphWarmer: background warm task complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        project_id = %project_id_owned,
+                        elapsed_ms,
+                        error = %e,
+                        "AppStateCanonicalGraphWarmer: background warm task failed"
+                    );
+                }
+            }
+            state.release_canonical_warm_slot(&project_id_owned);
+        });
+
+        Ok(())
     }
 }
 
