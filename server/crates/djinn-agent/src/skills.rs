@@ -35,18 +35,37 @@ pub(crate) fn load_skills(project_root: &Path, names: &[String]) -> Vec<Resolved
     names
         .iter()
         .filter_map(|name| {
-            let path = skill_path(project_root, name);
+            let path = skill_path(project_root, name)?;
             let content = fs::read_to_string(path).ok()?;
             parse_skill_file(name, &content)
         })
         .collect()
 }
 
-fn skill_path(project_root: &Path, name: &str) -> PathBuf {
-    project_root
-        .join(".djinn")
-        .join("skills")
-        .join(format!("{name}.md"))
+fn skill_path(project_root: &Path, name: &str) -> Option<PathBuf> {
+    let candidates = [
+        project_root
+            .join(".claude")
+            .join("skills")
+            .join(name)
+            .join("SKILL.md"),
+        project_root
+            .join(".opencode")
+            .join("skills")
+            .join(name)
+            .join("SKILL.md"),
+        project_root
+            .join(".djinn")
+            .join("skills")
+            .join(format!("{name}.md")),
+        project_root
+            .join(".djinn")
+            .join("skills")
+            .join(name)
+            .join("SKILL.md"),
+    ];
+
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn parse_skill_file(default_name: &str, content: &str) -> Option<ResolvedSkill> {
@@ -106,14 +125,20 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn make_skill_dir(tmp: &TempDir) -> PathBuf {
-        let dir = tmp.path().join(".djinn").join("skills");
+    fn make_skill_dir(tmp: &TempDir, root: &str) -> PathBuf {
+        let dir = tmp.path().join(root).join("skills");
         fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn write_skill(dir: &Path, name: &str, body: &str) {
+    fn write_flat_skill(dir: &Path, name: &str, body: &str) {
         fs::write(dir.join(format!("{name}.md")), body).unwrap();
+    }
+
+    fn write_directory_skill(dir: &Path, name: &str, body: &str) {
+        let skill_dir = dir.join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     }
 
     #[test]
@@ -150,14 +175,14 @@ mod tests {
     #[test]
     fn load_skills_resolves_existing_files() {
         let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
-        let skills_dir = make_skill_dir(&tmp);
+        let skills_dir = make_skill_dir(&tmp, ".djinn");
 
-        write_skill(
+        write_flat_skill(
             &skills_dir,
             "rust-safety",
             "---\nname: rust-safety\ndescription: Safe Rust\n---\n\nAvoid unsafe.\n",
         );
-        write_skill(
+        write_flat_skill(
             &skills_dir,
             "git-workflow",
             "---\ndescription: Git workflow\n---\n\nCommit often.\n",
@@ -176,9 +201,9 @@ mod tests {
     #[test]
     fn load_skills_missing_skill_is_skipped_not_blocked() {
         let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
-        let skills_dir = make_skill_dir(&tmp);
+        let skills_dir = make_skill_dir(&tmp, ".djinn");
 
-        write_skill(
+        write_flat_skill(
             &skills_dir,
             "exists",
             "---\ndescription: This one exists\n---\n\nContent.\n",
@@ -189,6 +214,102 @@ mod tests {
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].description, "This one exists");
+    }
+
+    #[test]
+    fn load_skills_prefers_claude_then_opencode_then_djinn() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let claude_skills = make_skill_dir(&tmp, ".claude");
+        let opencode_skills = make_skill_dir(&tmp, ".opencode");
+        let djinn_skills = make_skill_dir(&tmp, ".djinn");
+
+        write_directory_skill(
+            &claude_skills,
+            "shared-skill",
+            "---\ndescription: Claude version\n---\n\nFrom claude.\n",
+        );
+        write_directory_skill(
+            &opencode_skills,
+            "shared-skill",
+            "---\ndescription: OpenCode version\n---\n\nFrom opencode.\n",
+        );
+        write_flat_skill(
+            &djinn_skills,
+            "shared-skill",
+            "---\ndescription: Djinn flat version\n---\n\nFrom djinn flat.\n",
+        );
+
+        let resolved = load_skills(tmp.path(), &["shared-skill".to_string()]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "shared-skill");
+        assert_eq!(resolved[0].description, "Claude version");
+        assert_eq!(resolved[0].content, "From claude.");
+    }
+
+    #[test]
+    fn load_skills_falls_back_from_claude_to_opencode_to_djinn() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let opencode_skills = make_skill_dir(&tmp, ".opencode");
+        let djinn_skills = make_skill_dir(&tmp, ".djinn");
+
+        write_directory_skill(
+            &opencode_skills,
+            "shared-skill",
+            "---\ndescription: OpenCode version\n---\n\nFrom opencode.\n",
+        );
+        write_flat_skill(
+            &djinn_skills,
+            "shared-skill",
+            "---\ndescription: Djinn flat version\n---\n\nFrom djinn flat.\n",
+        );
+
+        let resolved = load_skills(tmp.path(), &["shared-skill".to_string()]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].description, "OpenCode version");
+        assert_eq!(resolved[0].content, "From opencode.");
+    }
+
+    #[test]
+    fn load_skills_prefers_djinn_flat_file_over_directory() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let djinn_skills = make_skill_dir(&tmp, ".djinn");
+
+        write_flat_skill(
+            &djinn_skills,
+            "legacy-skill",
+            "---\ndescription: Flat file version\n---\n\nFrom flat file.\n",
+        );
+        write_directory_skill(
+            &djinn_skills,
+            "legacy-skill",
+            "---\ndescription: Directory version\n---\n\nFrom directory.\n",
+        );
+
+        let resolved = load_skills(tmp.path(), &["legacy-skill".to_string()]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].description, "Flat file version");
+        assert_eq!(resolved[0].content, "From flat file.");
+    }
+
+    #[test]
+    fn load_skills_uses_requested_name_when_frontmatter_name_missing_in_directory_skill() {
+        let tmp = crate::test_helpers::test_tempdir("djinn-skills-");
+        let claude_skills = make_skill_dir(&tmp, ".claude");
+
+        write_directory_skill(
+            &claude_skills,
+            "fallback-name",
+            "---\ndescription: Uses fallback name\n---\n\nContent.\n",
+        );
+
+        let resolved = load_skills(tmp.path(), &["fallback-name".to_string()]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "fallback-name");
+        assert_eq!(resolved[0].description, "Uses fallback name");
     }
 
     #[test]
