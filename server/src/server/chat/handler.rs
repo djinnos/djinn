@@ -8,15 +8,17 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
     ChatCompletionRequest, ChatContent, ChatContentBlock, DJINN_CHAT_SYSTEM_PROMPT, DeltaPayload,
-    ErrorPayload, ToolCallPayload, ToolResultPayload,
+    ErrorPayload, ToolCallPayload, ToolResultPayload, apply_chat_skills,
 };
 use crate::server::AppState;
 use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
+use djinn_agent::mcp_client::{McpToolRegistry, connect_and_discover};
 use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
 use djinn_agent::provider::{StreamEvent, TelemetryMeta, create_provider};
+use djinn_agent::verification::settings::{load_mcp_server_registry, resolve_mcp_servers};
 use djinn_db::ProjectRepository;
 use djinn_mcp::server::DjinnMcpServer;
 
@@ -142,6 +144,22 @@ pub(super) async fn completions_handler_impl(
         }
     };
 
+    let project_resolution: Option<(std::path::PathBuf, String)> = if let Some(project_ref) =
+        req.project.as_deref()
+    {
+        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+        match project_repo.resolve(project_ref).await {
+            Ok(Some(id)) => match project_repo.get(&id).await {
+                Ok(Some(project)) => Some((std::path::PathBuf::from(&project.path), project.id)),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let project_path = project_resolution.as_ref().map(|(path, _)| path.clone());
+
     let provider = create_provider(provider_config);
 
     let mut conversation = Conversation::new();
@@ -154,6 +172,7 @@ pub(super) async fn completions_handler_impl(
         req.system.as_deref(),
         &req.model,
     );
+    let (system_message, chat_config) = apply_chat_skills(system_message, project_path.as_deref());
     conversation.push(system_message);
 
     for m in req.messages {
@@ -199,22 +218,25 @@ pub(super) async fn completions_handler_impl(
 
     let mcp = DjinnMcpServer::new(state.mcp_state());
     let mut tool_schemas = mcp.all_tool_schemas();
-
-    let project_resolution: Option<(std::path::PathBuf, String)> = if let Some(project_ref) =
-        req.project.as_deref()
-    {
-        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-        match project_repo.resolve(project_ref).await {
-            Ok(Some(id)) => match project_repo.get(&id).await {
-                Ok(Some(project)) => Some((std::path::PathBuf::from(&project.path), project.id)),
-                _ => None,
-            },
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let project_path = project_resolution.as_ref().map(|(path, _)| path.clone());
+    let chat_mcp_registry: Option<McpToolRegistry> =
+        if let Some(project_path) = project_path.as_deref() {
+            let registry = load_mcp_server_registry(project_path);
+            let resolved =
+                resolve_mcp_servers(&session_id, "chat", &chat_config.mcp_servers, &registry)
+                    .into_iter()
+                    .map(|(name, cfg)| (name, cfg.clone()))
+                    .collect::<Vec<_>>();
+            if resolved.is_empty() {
+                None
+            } else {
+                connect_and_discover(&session_id, "chat", &resolved, &state.agent_context()).await
+            }
+        } else {
+            None
+        };
+    if let Some(registry) = &chat_mcp_registry {
+        tool_schemas.extend(registry.tool_schemas().iter().cloned());
+    }
 
     let agent_ctx = if let Some((project_path_buf, project_id)) = project_resolution.as_ref() {
         tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
@@ -379,6 +401,10 @@ pub(super) async fn completions_handler_impl(
                     } else {
                         Err(format!("tool '{name}' requires a project context"))
                     }
+                } else if let Some(registry) = &chat_mcp_registry
+                    && registry.has_tool(&name)
+                {
+                    registry.call_tool(&name, input.as_object().cloned()).await
                 } else {
                     mcp.dispatch_tool(&name, args).await
                 };
