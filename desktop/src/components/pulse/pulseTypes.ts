@@ -63,8 +63,32 @@ export function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+/**
+ * The Rust `CodeGraphResponse` enum is `#[serde(untagged)]`, so every `code_graph`
+ * operation returns the inner response struct directly on the wire:
+ *
+ *   ranked    → { nodes:     [...] }
+ *   orphans   → { orphans:   [...] }
+ *   cycles    → { cycles:    [...] }
+ *   search    → { hits:      [...] }
+ *   neighbors → { neighbors: [...] }
+ *   impact    → { file_groups: [...] }  (or similar — depends on group_by)
+ *
+ * Every parser below is handed that wrapper.  This helper pulls the named
+ * field, tolerates the already-unwrapped array form (tests, call sites that
+ * slice manually), and falls back to `[]` for anything else.
+ */
+function unwrapList(value: unknown, field: string): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (isRecord(value)) {
+    const inner = (value as Record<string, unknown>)[field];
+    if (Array.isArray(inner)) return inner;
+  }
+  return [];
+}
+
 export function parseRanked(value: unknown): RankedNode[] {
-  return asArray(value)
+  return unwrapList(value, "nodes")
     .filter(isRecord)
     .map((r) => ({
       key: String(r.key ?? ""),
@@ -80,7 +104,7 @@ export function parseRanked(value: unknown): RankedNode[] {
 }
 
 export function parseOrphans(value: unknown): OrphanEntry[] {
-  return asArray(value)
+  return unwrapList(value, "orphans")
     .filter(isRecord)
     .map((r) => ({
       key: String(r.key ?? ""),
@@ -93,7 +117,7 @@ export function parseOrphans(value: unknown): OrphanEntry[] {
 }
 
 export function parseCycles(value: unknown): CycleGroup[] {
-  return asArray(value)
+  return unwrapList(value, "cycles")
     .filter(isRecord)
     .map((r) => {
       const members = asArray(r.members)
@@ -112,7 +136,7 @@ export function parseCycles(value: unknown): CycleGroup[] {
 }
 
 export function parseSearchHits(value: unknown): SearchHit[] {
-  return asArray(value)
+  return unwrapList(value, "hits")
     .filter(isRecord)
     .map((r) => ({
       key: String(r.key ?? ""),
@@ -125,7 +149,7 @@ export function parseSearchHits(value: unknown): SearchHit[] {
 }
 
 export function parseFileGroups(value: unknown): FileGroupEntry[] {
-  return asArray(value)
+  return unwrapList(value, "file_groups")
     .filter(isRecord)
     .map((r) => ({
       file: String(r.file ?? ""),
@@ -137,7 +161,7 @@ export function parseFileGroups(value: unknown): FileGroupEntry[] {
 }
 
 export function parseNeighbors(value: unknown): GraphNeighbor[] {
-  return asArray(value)
+  return unwrapList(value, "neighbors")
     .filter(isRecord)
     .map((r) => ({
       key: String(r.key ?? ""),
