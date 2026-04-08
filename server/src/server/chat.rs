@@ -1,6 +1,4 @@
-use std::collections::BTreeSet;
 use std::convert::Infallible;
-use std::path::Path;
 use std::time::Instant;
 
 use axum::Json;
@@ -12,357 +10,22 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::server::AppState;
+mod context;
+mod prompt;
+
+use self::context::build_project_chat_context;
+use self::prompt::build_system_message;
 use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
-use djinn_agent::message::{
-    CacheBreakpoint, ContentBlock, Conversation, Message, MessageMeta, Role,
-};
+use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
 use djinn_agent::provider::{StreamEvent, TelemetryMeta, create_provider};
-use djinn_db::{
-    EpicCountQuery, EpicRepository, NoteRepository, ProjectRepository, RepoMapCacheKey,
-    RepoMapCacheRepository, TaskRepository,
-};
+use djinn_db::ProjectRepository;
 use djinn_mcp::server::DjinnMcpServer;
-
-use crate::repo_map::persist_repo_map_note;
 
 const DJINN_CHAT_SYSTEM_PROMPT: &str = include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 const MAX_TOOL_ITERATIONS: usize = 20;
-const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
-const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
-const ANTHROPIC_STABLE_PREFIX_KIND: &str = "stable_prefix";
-
-/// Whether a prompt segment's content is stable across consecutive turns.
-///
-/// Stable segments (base prompt, project context, repo map) are placed first
-/// in the system message so they form a cacheable prefix for Anthropic's
-/// prompt cache.  Dynamic segments (client-supplied system instructions) are
-/// appended after the stable prefix and do **not** receive `cache_control`.
-///
-/// See [`compose_system_prompt_segments`] for the full ordering rationale.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PromptSegmentStability {
-    Stable,
-    Dynamic,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromptSegment {
-    text: String,
-    stability: PromptSegmentStability,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SystemPromptLayout {
-    stable_prefix: Vec<PromptSegment>,
-    dynamic_tail: Option<String>,
-}
-
-fn prompt_segment(text: impl Into<String>) -> PromptSegment {
-    PromptSegment {
-        text: text.into(),
-        stability: PromptSegmentStability::Dynamic,
-    }
-}
-
-fn cached_prompt_segment(text: impl Into<String>) -> PromptSegment {
-    PromptSegment {
-        text: text.into(),
-        stability: PromptSegmentStability::Stable,
-    }
-}
-
-/// Assemble the system prompt into ordered segments with cache-stability markers.
-///
-/// # Segment taxonomy and ordering (ADR-043 §8, prompt-cache optimization)
-///
-/// Anthropic prompt caching depends on keeping a stable prefix split into the
-/// same ordered content blocks every turn. The full ADR-043 ordering is:
-///
-/// ```text
-///   1. Base system prompt                    — stable system-message block emitted here
-///   2. Tool definitions                      — stable request-level block emitted by provider assembly
-///   3. Project/repository context owned here — stable system-message blocks emitted here
-///   4. Dynamic task/request context tail     — uncached trailing system-message block emitted here
-/// ```
-///
-/// `chat.rs` owns only the system-message segments in that order: the base
-/// prompt first, then stable project-owned context (`project_context` and
-/// `repo_map_context`), and finally caller-supplied dynamic task/client system
-/// text. Tool definitions are intentionally not emitted from this function;
-/// they are inserted later by provider request assembly as their own stable
-/// Anthropic block.
-///
-/// The Anthropic formatter in
-/// `server/crates/djinn-provider/src/provider/format/anthropic.rs` preserves
-/// these block boundaries and interprets the metadata from
-/// [`system_message_metadata`] as the signal that all but the final emitted
-/// system block belong to the cacheable stable prefix.
-///
-/// Callers: [`build_system_message`] converts these segments into a single
-/// [`Message`] with the appropriate [`MessageMeta`] for Anthropic cache
-/// breakpoints.
-fn compose_system_prompt_segments(
-    base_prompt: &str,
-    project_context: Option<&str>,
-    repo_map_context: Option<&str>,
-    client_system: Option<&str>,
-) -> Vec<PromptSegment> {
-    let mut stable_prefix = vec![cached_prompt_segment(base_prompt.trim())];
-    if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
-        stable_prefix.push(cached_prompt_segment(project_context));
-    }
-    if let Some(repo_map_context) = repo_map_context.filter(|s| !s.trim().is_empty()) {
-        stable_prefix.push(cached_prompt_segment(repo_map_context));
-    }
-
-    let dynamic_tail = client_system
-        .filter(|s| !s.trim().is_empty())
-        .map(prompt_segment);
-
-    stable_prefix.into_iter().chain(dynamic_tail).collect()
-}
-
-fn partition_system_prompt_segments(segments: &[PromptSegment]) -> SystemPromptLayout {
-    let stable_prefix = segments
-        .iter()
-        .filter(|segment| segment.stability == PromptSegmentStability::Stable)
-        .cloned()
-        .collect();
-    let dynamic_tail = segments
-        .iter()
-        .filter(|segment| segment.stability == PromptSegmentStability::Dynamic)
-        .map(|segment| segment.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    SystemPromptLayout {
-        stable_prefix,
-        dynamic_tail: (!dynamic_tail.trim().is_empty()).then_some(dynamic_tail),
-    }
-}
-
-fn system_message_metadata(model: &str, has_stable_prefix: bool) -> Option<MessageMeta> {
-    if model.starts_with("anthropic/") && has_stable_prefix {
-        Some(MessageMeta {
-            input_tokens: None,
-            output_tokens: None,
-            timestamp: None,
-            provider_data: Some(serde_json::json!({
-                ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
-                    kind: Some(ANTHROPIC_STABLE_PREFIX_KIND.to_string()),
-                }
-            })),
-        })
-    } else {
-        None
-    }
-}
-
-#[cfg(test)]
-fn compose_system_prompt(
-    base_prompt: &str,
-    project_context: Option<&str>,
-    repo_map_context: Option<&str>,
-    client_system: Option<&str>,
-) -> String {
-    compose_system_prompt_segments(
-        base_prompt,
-        project_context,
-        repo_map_context,
-        client_system,
-    )
-    .into_iter()
-    .map(|segment| segment.text)
-    .collect::<Vec<_>>()
-    .join("\n\n")
-}
-
-/// Build the system [`Message`] from prompt segments, preserving cache semantics.
-///
-/// # Content-block layout (ADR-043 §8)
-///
-/// The stable Anthropic prefix spans multiple surfaces. `chat.rs` emits the
-/// system-message-owned stable blocks in this order:
-///
-///   base system prompt -> project context -> repo map
-///
-/// Provider request assembly may then insert tool definitions as a separate
-/// stable Anthropic block between the base prompt and later stable context,
-/// yielding the full ADR-043 ordering:
-///
-///   base system prompt -> tool definitions -> project/repository context -> dynamic task/request context
-///
-/// This function therefore emits each stable system-message segment as its own
-/// [`ContentBlock`] and collapses any dynamic caller/task context into a single
-/// trailing block. The metadata from [`system_message_metadata`] explicitly uses
-/// the `anthropic_cache_breakpoint` / `stable_prefix` contract consumed by
-/// `AnthropicProvider::system_blocks`.
-///
-/// `cache_control` must stay limited to the stable prefix. In practice that
-/// means the Anthropic formatter may annotate the stable blocks that represent
-/// the cacheable prefix, but it must never annotate the trailing dynamic task
-/// context block.
-///
-/// Non-Anthropic providers ignore the metadata entirely, receiving the
-/// content blocks as plain text.
-fn build_system_message(
-    base_prompt: &str,
-    project_context: Option<&str>,
-    repo_map_context: Option<&str>,
-    client_system: Option<&str>,
-    model: &str,
-) -> Message {
-    let segments = compose_system_prompt_segments(
-        base_prompt,
-        project_context,
-        repo_map_context,
-        client_system,
-    );
-    let layout = partition_system_prompt_segments(&segments);
-    let metadata = system_message_metadata(model, !layout.stable_prefix.is_empty());
-
-    let mut content: Vec<ContentBlock> = layout
-        .stable_prefix
-        .into_iter()
-        .map(|segment| ContentBlock::text(segment.text))
-        .collect();
-    if let Some(dynamic_tail) = layout.dynamic_tail {
-        content.push(ContentBlock::text(dynamic_tail));
-    }
-
-    Message {
-        role: Role::System,
-        content,
-        metadata,
-    }
-}
-
-fn format_repo_map_block(rendered: &str, permalink: Option<&str>) -> String {
-    match permalink {
-        Some(permalink) => {
-            format!("{REPO_MAP_SYSTEM_HEADER}\nSource note: memory://{permalink}\n{rendered}")
-        }
-        None => format!("{REPO_MAP_SYSTEM_HEADER}\n{rendered}"),
-    }
-}
-
-async fn repo_commit_sha(state: &AppState, repo_path: &Path) -> Option<String> {
-    let git = state.git_actor(repo_path).await.ok()?;
-    let head = git.head_commit().await.ok()?;
-    Some(head.sha)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct RepoMapCompanionContext {
-    companion_note_ids: Vec<String>,
-}
-
-fn unique_companion_note_ids<I>(companion_note_ids: I) -> Vec<String>
-where
-    I: IntoIterator,
-    I::Item: AsRef<str>,
-{
-    companion_note_ids
-        .into_iter()
-        .map(|id| id.as_ref().trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-async fn reinforce_repo_map_companion_notes(
-    note_repo: &NoteRepository,
-    repo_map_note_id: Option<&str>,
-    companion_note_ids: &[String],
-) {
-    let Some(repo_map_note_id) = repo_map_note_id else {
-        return;
-    };
-    if companion_note_ids.is_empty() {
-        return;
-    }
-
-    let _ = note_repo
-        .record_repo_map_co_access(repo_map_note_id, companion_note_ids.iter().cloned())
-        .await;
-}
-
-async fn repo_map_companion_context(state: &AppState, project_id: &str) -> RepoMapCompanionContext {
-    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
-    let companion_note_ids = note_repo
-        .get_by_permalink(project_id, "brief")
-        .await
-        .ok()
-        .flatten()
-        .map(|note| vec![note.id])
-        .unwrap_or_default();
-
-    RepoMapCompanionContext {
-        companion_note_ids: unique_companion_note_ids(companion_note_ids),
-    }
-}
-
-async fn build_repo_map_context_block(
-    state: &AppState,
-    project_ref: &str,
-    companion_note_ids: &[String],
-) -> Option<String> {
-    let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-    let project_id = match project_repo.resolve(project_ref).await {
-        Ok(Some(id)) => id,
-        Ok(None) => return None,
-        Err(_) => return None,
-    };
-
-    let project = match project_repo.get(&project_id).await {
-        Ok(Some(project)) => project,
-        Ok(None) => return None,
-        Err(_) => return None,
-    };
-
-    let commit_sha = repo_commit_sha(state, Path::new(&project.path)).await?;
-    let repo_map_repo = RepoMapCacheRepository::new(state.db().clone());
-    let cached = repo_map_repo
-        .get(RepoMapCacheKey {
-            project_id: &project.id,
-            project_path: &project.path,
-            worktree_path: None,
-            commit_sha: &commit_sha,
-        })
-        .await
-        .ok()
-        .flatten()?;
-
-    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
-    let note = persist_repo_map_note(
-        &note_repo,
-        &project.id,
-        &commit_sha,
-        &crate::repo_map::RenderedRepoMap {
-            content: cached.rendered_map.clone(),
-            token_estimate: cached.token_estimate as usize,
-            included_entries: cached.included_entries as usize,
-        },
-    )
-    .await
-    .ok();
-
-    reinforce_repo_map_companion_notes(
-        &note_repo,
-        note.as_ref().map(|note| note.id.as_str()),
-        companion_note_ids,
-    )
-    .await;
-
-    Some(format_repo_map_block(
-        &cached.rendered_map,
-        note.as_ref().map(|note| note.permalink.as_str()),
-    ))
-}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ChatCompletionRequest {
@@ -440,81 +103,6 @@ struct ToolResultPayload {
     message: Option<String>,
 }
 
-fn normalize_brief_excerpt(content: &str, max_chars: usize) -> String {
-    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-    compact.chars().take(max_chars).collect::<String>()
-}
-
-async fn build_project_context_block(state: &AppState, project_ref: &str) -> Option<String> {
-    let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-    let project_id = match project_repo.resolve(project_ref).await {
-        Ok(Some(id)) => id,
-        Ok(None) => return None,
-        Err(_) => return None,
-    };
-
-    let project = match project_repo.get(&project_id).await {
-        Ok(Some(project)) => project,
-        Ok(None) => return None,
-        Err(_) => return None,
-    };
-
-    let epic_repo = EpicRepository::new(state.db().clone(), state.event_bus());
-    let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
-    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
-
-    let open_epics = epic_repo
-        .count_grouped(EpicCountQuery {
-            project_id: Some(project_id.clone()),
-            status: Some("open".to_string()),
-            group_by: None,
-        })
-        .await
-        .ok()
-        .and_then(|v| {
-            v.get("total_count")
-                .and_then(|n| n.as_i64())
-                .map(|n| n.to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let open_tasks = task_repo
-        .count_grouped(djinn_db::CountQuery {
-            project_id: Some(project_id.clone()),
-            status: Some("open".to_string()),
-            issue_type: None,
-            priority: None,
-            label: None,
-            text: None,
-            parent: None,
-            group_by: None,
-        })
-        .await
-        .ok()
-        .and_then(|v| {
-            v.get("total_count")
-                .and_then(|n| n.as_i64())
-                .map(|n| n.to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let brief = note_repo
-        .get_by_permalink(&project_id, "brief")
-        .await
-        .ok()
-        .flatten()
-        .map(|note| normalize_brief_excerpt(&note.content, 200))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "No brief yet — suggest /init-project".to_string());
-
-    Some(format!(
-        "## Current Project\n**Name**: {}  **Path**: {}\n**Open epics**: {}  **Open tasks**: {}\n**Brief**: {}",
-        project.name, project.path, open_epics, open_tasks, brief
-    ))
-}
 fn sse_json_event<T: Serialize>(event: &str, payload: &T) -> Event {
     Event::default()
         .event(event)
@@ -638,26 +226,11 @@ pub(super) async fn completions_handler(
     let provider = create_provider(provider_config);
 
     let mut conversation = Conversation::new();
-    let project_context = if let Some(project_ref) = req.project.as_deref() {
-        build_project_context_block(&state, project_ref).await
-    } else {
-        None
-    };
-    let repo_map_context = if let Some(project_ref) = req.project.as_deref() {
-        let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-        let companion_context = match project_repo.resolve(project_ref).await {
-            Ok(Some(project_id)) => repo_map_companion_context(&state, &project_id).await,
-            _ => RepoMapCompanionContext::default(),
-        };
-        build_repo_map_context_block(&state, project_ref, &companion_context.companion_note_ids)
-            .await
-    } else {
-        None
-    };
+    let chat_context = build_project_chat_context(&state, req.project.as_deref()).await;
     let system_message = build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
-        project_context.as_deref(),
-        repo_map_context.as_deref(),
+        chat_context.project_context.as_deref(),
+        chat_context.repo_map_context.as_deref(),
         req.system.as_deref(),
         &req.model,
     );
@@ -962,14 +535,16 @@ pub(super) async fn completions_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ANTHROPIC_CACHE_BREAKPOINT_KEY, ANTHROPIC_STABLE_PREFIX_KIND, DJINN_CHAT_SYSTEM_PROMPT,
-        PromptSegmentStability, REPO_MAP_SYSTEM_HEADER, ToolCallPayload, build_system_message,
-        compose_system_prompt, compose_system_prompt_segments, format_repo_map_block,
-        partition_system_prompt_segments, reinforce_repo_map_companion_notes,
-        repo_map_companion_context, sse_json_event, system_message_metadata,
-        unique_companion_note_ids,
+    use super::context::{
+        REPO_MAP_SYSTEM_HEADER, format_repo_map_block, reinforce_repo_map_companion_notes,
+        repo_map_companion_context, unique_companion_note_ids,
     };
+    use super::prompt::{
+        ANTHROPIC_CACHE_BREAKPOINT_KEY, ANTHROPIC_STABLE_PREFIX_KIND, PromptSegmentStability,
+        build_system_message, compose_system_prompt, compose_system_prompt_segments,
+        partition_system_prompt_segments, system_message_metadata,
+    };
+    use super::{DJINN_CHAT_SYSTEM_PROMPT, ToolCallPayload, sse_json_event};
     use crate::server::AppState;
     use crate::test_helpers;
     use djinn_db::NoteRepository;
