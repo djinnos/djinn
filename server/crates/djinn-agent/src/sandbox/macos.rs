@@ -8,14 +8,18 @@ use anyhow::Result;
 
 use super::Sandbox;
 #[cfg(target_os = "macos")]
-use super::git_metadata_dir;
+use super::{djinn_cache_dir, git_metadata_dir};
 
 /// Seatbelt (sandbox-exec) based filesystem sandbox for macOS.
 ///
 /// Generates a per-invocation SBPL policy string, then rewrites the command to
 /// run under `sandbox-exec -p {policy} {original_program} {original_args}`.
-/// Policy grants read everywhere and restricts writes to the task worktree and
-/// `/tmp`.
+/// Policy grants read everywhere and restricts writes to the task worktree,
+/// its git metadata directory, `/var/tmp`, a dedicated djinn agent scratch
+/// dir (`$XDG_CACHE_HOME/djinn` or `$HOME/.cache/djinn`), and the usual
+/// `/dev/{null,zero,urandom}` nodes. `/tmp` is intentionally excluded for
+/// parity with the Linux backend, where it is tmpfs-backed and prone to
+/// RAM leaks from runaway build artifacts.
 #[cfg(target_os = "macos")]
 pub struct SeatbeltSandbox;
 
@@ -42,6 +46,34 @@ impl Sandbox for SeatbeltSandbox {
             .map(|p| format!("(allow file-write* (subpath \"{p}\"))"))
             .unwrap_or_default();
 
+        // Djinn agent scratch dir: $XDG_CACHE_HOME/djinn or $HOME/.cache/djinn.
+        // Lazy-create so the subpath is a real directory when sandbox-exec
+        // evaluates the policy. On create failure (e.g. read-only home), log
+        // and skip the rule rather than aborting the whole sandbox setup.
+        let cache_rule = match djinn_cache_dir() {
+            Some(dir) => match std::fs::create_dir_all(&dir) {
+                Ok(()) => dir
+                    .to_str()
+                    .map(|p| format!("(allow file-write* (subpath \"{p}\"))"))
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            path = %dir.display(),
+                            "sandbox: djinn cache dir contains non-UTF-8; skipping Seatbelt rule"
+                        );
+                        String::new()
+                    }),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %dir.display(),
+                        error = %e,
+                        "sandbox: failed to create djinn cache dir; skipping Seatbelt rule"
+                    );
+                    String::new()
+                }
+            },
+            None => String::new(),
+        };
+
         let policy = format!(
             "(version 1)\
              (allow default)\
@@ -50,7 +82,8 @@ impl Sandbox for SeatbeltSandbox {
              (allow file-write* (subpath \"{worktree}\"))\
              {git_meta_rule}\
              {cargo_build_rule}\
-             (allow file-write* (subpath \"/tmp\"))\
+             {cache_rule}\
+             (allow file-write* (subpath \"/var/tmp\"))\
              (allow file-write* (literal \"/dev/null\"))\
              (allow file-write* (literal \"/dev/zero\"))\
              (allow file-write* (literal \"/dev/urandom\"))"

@@ -56,7 +56,37 @@ impl Sandbox for FallbackSandbox {
 }
 
 fn is_temp_path(path: &Path) -> bool {
-    path.starts_with("/tmp") || path.starts_with("/var/tmp")
+    if path.starts_with("/var/tmp") {
+        return true;
+    }
+    // Accept the djinn agent scratch dir under the user's cache directory.
+    // Resolve env vars at check time since this is a pure path validator
+    // and we have no filesystem state to rely on.
+    if let Some(cache) = djinn_cache_dir()
+        && path.starts_with(&cache)
+    {
+        return true;
+    }
+    false
+}
+
+/// Resolve the djinn agent scratch cache directory.
+///
+/// Returns `$XDG_CACHE_HOME/djinn` if `XDG_CACHE_HOME` is set, else
+/// `$HOME/.cache/djinn` if `HOME` is set, else `None`. This is the standard
+/// place for sandboxed agents to write scratch state (replaces ad-hoc use of
+/// `/tmp`). Both the Linux Landlock backend and the macOS Seatbelt backend
+/// allow writes beneath this path; the fallback heuristic accepts it too.
+pub(crate) fn djinn_cache_dir() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("djinn"));
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(".cache").join("djinn"))
 }
 
 fn is_worktree_path(path: &Path) -> bool {
@@ -164,4 +194,97 @@ fn probe_landlock() -> bool {
         )
     };
     ret > 0
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serialize env-dependent tests: each test fully restores env before returning.
+    /// Because Rust test threads share a process, env mutations race across tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| ((*k).to_string(), std::env::var(*k).ok()))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(val) => unsafe { std::env::set_var(k, val) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, v) in saved {
+            match v {
+                Some(val) => unsafe { std::env::set_var(&k, val) },
+                None => unsafe { std::env::remove_var(&k) },
+            }
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    #[test]
+    fn djinn_cache_dir_prefers_xdg_cache_home() {
+        with_env(
+            &[
+                ("XDG_CACHE_HOME", Some("/xdg-cache")),
+                ("HOME", Some("/home/alice")),
+            ],
+            || {
+                assert_eq!(djinn_cache_dir(), Some(PathBuf::from("/xdg-cache/djinn")));
+            },
+        );
+    }
+
+    #[test]
+    fn djinn_cache_dir_falls_back_to_home_dot_cache() {
+        with_env(
+            &[("XDG_CACHE_HOME", None), ("HOME", Some("/home/bob"))],
+            || {
+                assert_eq!(
+                    djinn_cache_dir(),
+                    Some(PathBuf::from("/home/bob/.cache/djinn"))
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn djinn_cache_dir_none_when_neither_env_set() {
+        with_env(&[("XDG_CACHE_HOME", None), ("HOME", None)], || {
+            assert_eq!(djinn_cache_dir(), None);
+        });
+    }
+
+    #[test]
+    fn is_temp_path_rejects_slash_tmp() {
+        with_env(
+            &[("XDG_CACHE_HOME", None), ("HOME", Some("/home/carol"))],
+            || {
+                assert!(!is_temp_path(Path::new("/tmp")));
+                assert!(!is_temp_path(Path::new("/tmp/foo")));
+            },
+        );
+    }
+
+    #[test]
+    fn is_temp_path_accepts_var_tmp_and_cache_dir() {
+        with_env(
+            &[("XDG_CACHE_HOME", None), ("HOME", Some("/home/dave"))],
+            || {
+                assert!(is_temp_path(Path::new("/var/tmp")));
+                assert!(is_temp_path(Path::new("/var/tmp/scratch")));
+                assert!(is_temp_path(Path::new("/home/dave/.cache/djinn")));
+                assert!(is_temp_path(Path::new("/home/dave/.cache/djinn/x")));
+                assert!(!is_temp_path(Path::new("/home/dave/.cache/other")));
+            },
+        );
+    }
 }
