@@ -43,3 +43,10 @@ Each worker task should:
 - Move tests with the extracted logic when that reduces churn; otherwise keep facade-level integration tests proving the public path is unchanged.
 - For `coordinator/mod.rs`, continue the existing pattern already present in `actor`, `dispatch`, `handle`, `health`, `messages`, `prompt_eval`, `reentrance`, `rules`, `types`, and `wave`.
 - For `compaction.rs`, explicitly verify that downstream imports still come from `crate::compaction` after the split.
+
+
+
+## Wave 2 completion (2026-04-09)
+- `server/src/mcp_bridge.rs` graph-neighbor helpers were split into `server/src/mcp_bridge/graph_neighbors.rs` behind the existing `mcp_bridge` facade, completing the deferred post-`2jaz` work.
+- With `ofqc` closed, all planned hubs for this epic are now complete: `extension/handlers.rs`, `slot/reply_loop.rs`, `compaction.rs`, `slot/lifecycle.rs`, `coordinator/mod.rs`, and `mcp_bridge.rs`.
+- Outcome: the epic goal is met. No further waves are planned for this roadmap.
