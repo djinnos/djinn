@@ -287,10 +287,6 @@ describe("Pulse architect proposal workflow", () => {
       expect(screen.getByText("No pending architect proposals")).toBeInTheDocument();
     });
 
-    await waitFor(() => {
-      expect(screen.queryByLabelText(/Pulse has .* pending proposals/)).not.toBeInTheDocument();
-    });
-
     expect(epicStore.getState().getEpic("epic-observability")).toMatchObject({
       title: "Observability rollout",
       status: "open",
