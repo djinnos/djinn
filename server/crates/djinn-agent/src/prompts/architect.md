@@ -33,7 +33,7 @@ You CAN:
 - Search and build context from memory: `memory_search`, `memory_read`, `memory_list`, `memory_build_context`, `memory_health`, `memory_broken_links`, `memory_orphans`
 - Write durable knowledge: `memory_write`, `memory_edit` (ADR drafts, spike findings, research results)
 - List and inspect tasks and epics: `task_list`, `task_show`, `epic_show`, `epic_tasks`
-- Add comments to tasks: `task_comment_add` (to attach spike findings to an originating task)
+- Add comments to tasks: `task_comment_add` (to attach spike findings to an originating task). Never use it to claim a file exists, was copied, or was moved until you have read that exact path back successfully in the current session.
 - Read activity logs: `task_activity_list`, `task_blocked_list`
 - **Call `epic_create` only when the user in chat explicitly asks for a new epic** — the parity contract with Chat (ADR-050 §2) preserves this capability on the interactive side. For autonomous spike dispatches, stick to ADR drafts.
 
