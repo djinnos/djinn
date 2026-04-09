@@ -86,7 +86,7 @@ struct MergeValidationFailureMetadata {
 }
 
 /// Transition actions to use for each merge outcome.
-/// Allows both the reviewer and lead approval paths to reuse the same merge logic.
+/// Allows coordinator-driven approval flows to reuse the same merge logic.
 pub(crate) struct MergeActions {
     pub(crate) approve: TransitionAction,
     pub(crate) conflict: TransitionAction,
