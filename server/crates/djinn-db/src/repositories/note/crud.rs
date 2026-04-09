@@ -214,28 +214,7 @@ impl<'a> CreateNoteParams<'a> {
         }
     }
 
-    fn file_with_scope(
-        project_id: &'a str,
-        project_path: Option<&'a Path>,
-        title: &'a str,
-        content: &'a str,
-        note_type: &'a str,
-        tags: &'a str,
-        scope_paths: &'a str,
-    ) -> Self {
-        Self {
-            project_id,
-            project_path,
-            title,
-            content,
-            note_type,
-            status: None,
-            tags,
-            storage: "file",
-            scope_paths,
-        }
-    }
-
+    #[allow(clippy::too_many_arguments)]
     fn file_with_status(
         project_id: &'a str,
         project_path: Option<&'a Path>,
@@ -546,6 +525,7 @@ impl NoteRepository {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_with_status(
         &self,
         project_id: &str,

@@ -3831,6 +3831,11 @@ expression: signatures
           "nullable": true,
           "type": "array"
         },
+        "status": {
+          "description": "Optional explicit status for routed note types. For ADRs, `proposed`\nwrites into `.djinn/decisions/proposed/`.",
+          "nullable": true,
+          "type": "string"
+        },
         "tags": {
           "items": {
             "type": "string"

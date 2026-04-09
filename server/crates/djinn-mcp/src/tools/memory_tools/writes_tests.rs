@@ -36,6 +36,7 @@ mod tests {
                 title: "Research Topic".to_string(),
                 content: "This is a research note about async Rust patterns.".to_string(),
                 note_type: "research".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -52,6 +53,7 @@ mod tests {
                 title: "Research Topic Two".to_string(),
                 content: "This is a research note about async Rust patterns.".to_string(),
                 note_type: "research".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -83,6 +85,7 @@ mod tests {
                 content: "Use tokio::spawn for concurrent task execution in Rust async code."
                     .to_string(),
                 note_type: "pattern".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -128,6 +131,7 @@ mod tests {
                 title: "Error Handling Pattern".to_string(),
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
                 note_type: "pattern".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -142,6 +146,7 @@ mod tests {
                 title: "Error Handling ADR".to_string(),
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
                 note_type: "adr".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -204,6 +209,7 @@ mod tests {
                     "This content is completely unique and should not match anything. XYZ123ABC"
                         .to_string(),
                 note_type: "pattern".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -229,6 +235,7 @@ mod tests {
                 title: "Canonical Pattern".to_string(),
                 content: "Alpha\r\nBeta\n".to_string(),
                 note_type: "pattern".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -256,6 +263,7 @@ mod tests {
                 title: "Canonical Pattern Copy".to_string(),
                 content: "  Alpha\nBeta  ".to_string(),
                 note_type: "pattern".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -334,6 +342,7 @@ mod tests {
                 title: "Auth Token Validation Pattern".to_string(),
                 content: shared.to_string(),
                 note_type: "pattern".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -348,6 +357,7 @@ mod tests {
                 title: "JWT Bearer Auth Validation".to_string(),
                 content: shared.to_string(),
                 note_type: "pattern".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -618,6 +628,7 @@ mod tests {
                 title: "ADR-300 Empty Scope".to_string(),
                 content: "body for ADR-300".to_string(),
                 note_type: "adr".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: Some(vec![]),
             }))
@@ -649,6 +660,7 @@ mod tests {
                 title: "ADR-301 Scoped".to_string(),
                 content: "scoped body".to_string(),
                 note_type: "adr".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: Some(vec!["crates/foo".to_string()]),
             }))
@@ -676,6 +688,7 @@ mod tests {
                 title: "ADR-302 Unscoped".to_string(),
                 content: "unscoped body".to_string(),
                 note_type: "adr".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
@@ -700,6 +713,7 @@ mod tests {
                 title: "ADR-303 Editable".to_string(),
                 content: "The quick brown fox".to_string(),
                 note_type: "adr".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: Some(vec!["crates/foo".to_string()]),
             }))
@@ -747,6 +761,7 @@ mod tests {
                 title: "ADR-304 NoopEdit".to_string(),
                 content: "hello world".to_string(),
                 note_type: "adr".to_string(),
+                status: None,
                 tags: None,
                 scope_paths: None,
             }))
