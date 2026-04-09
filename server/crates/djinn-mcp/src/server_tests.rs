@@ -452,7 +452,11 @@ mod tests {
         let response = server
             .dispatch_tool(
                 "propose_adr_reject",
-                json!({ "project": tmp.path().to_str().unwrap(), "id": "adr-999-routing" }),
+                json!({
+                    "project": tmp.path().to_str().unwrap(),
+                    "id": "adr-999-routing",
+                    "reason": "Not aligned with current direction"
+                }),
             )
             .await
             .expect("dispatch propose_adr_reject");
