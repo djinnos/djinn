@@ -36,23 +36,3 @@ fn tool_schema<'a>(schemas: &'a [serde_json::Value], name: &str) -> &'a serde_js
         .find(|schema| schema.get("name").and_then(|n| n.as_str()) == Some(name))
         .expect("tool schema present")
 }
-
-async fn lsp_tool(
-    state: &AgentContext,
-    args: serde_json::Value,
-    worktree: &Path,
-) -> Result<serde_json::Value, String> {
-    call_tool(
-        state,
-        "lsp",
-        args.as_object()
-            .expect("lsp args must be an object")
-            .clone()
-            .into(),
-        worktree,
-        None,
-        None,
-        None,
-    )
-    .await
-}
