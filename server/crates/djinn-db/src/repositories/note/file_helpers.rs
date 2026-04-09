@@ -188,7 +188,8 @@ pub(super) fn infer_note_type(permalink: &str) -> String {
         .map(|(folder, _)| folder)
         .unwrap_or_default()
     {
-        "decisions" | "decisions/proposed" => "adr",
+        "decisions/proposed" => "proposed_adr",
+        "decisions" => "adr",
         "patterns" => "pattern",
         "cases" => "case",
         "pitfalls" => "pitfall",
