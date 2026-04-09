@@ -335,16 +335,34 @@ mod tests {
         );
 
         assert_eq!(rebuilt[0].role, Role::System);
+        assert_eq!(rebuilt[1].text_content(), "kept");
+
+        let summary_message = rebuilt
+            .iter()
+            .find(|message| {
+                message.role == Role::User
+                    && message
+                        .text_content()
+                        .contains("[Partial compaction: the following is a summary of 3 messages")
+            })
+            .expect("partial-compaction summary message should be inserted");
+        assert!(summary_message.text_content().contains("summary"));
+
+        let continuation_message = rebuilt
+            .iter()
+            .find(|message| {
+                message.role == Role::Assistant
+                    && message
+                        .text_content()
+                        .contains("Part of your context was compacted")
+            })
+            .expect("continuation assistant message should be inserted");
         assert!(
-            rebuilt[2]
+            continuation_message
                 .text_content()
-                .contains("[Partial compaction: the following is a summary of 3 messages")
+                .contains("Continue calling tools as necessary to complete the task")
         );
-        assert!(
-            rebuilt[3]
-                .text_content()
-                .contains("Part of your context was compacted")
-        );
+
         assert_eq!(rebuilt.last().unwrap().text_content(), "latest user");
     }
 
