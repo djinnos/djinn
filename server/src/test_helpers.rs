@@ -16,7 +16,7 @@ use djinn_db::{
     SessionRepository, TaskRepository,
 };
 
-fn workspace_tempdir(prefix: &str) -> tempfile::TempDir {
+pub(crate) fn workspace_tempdir(prefix: &str) -> tempfile::TempDir {
     let base = std::env::current_dir()
         .expect("current dir")
         .join("target")

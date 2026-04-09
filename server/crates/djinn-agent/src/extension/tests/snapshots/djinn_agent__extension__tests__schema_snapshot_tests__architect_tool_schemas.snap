@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 244
+assertion_line: 245
 expression: tool_schemas_architect()
 ---
 [
@@ -1018,6 +1018,32 @@ expression: tool_schemas_architect()
       "type": "object"
     },
     "name": "memory_edit"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Move a note to a new location. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into .djinn/decisions/proposed/ without raw shell relocation.",
+    "inputSchema": {
+      "properties": {
+        "identifier": {
+          "description": "Note permalink or title",
+          "type": "string"
+        },
+        "title": {
+          "description": "Optional new title; keep current title if omitted.",
+          "type": "string"
+        },
+        "type": {
+          "description": "New note type. Use proposed_adr to relocate proposal drafts into decisions/proposed/.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier",
+        "type"
+      ],
+      "type": "object"
+    },
+    "name": "memory_move"
   },
   {
     "concurrent_safe": false,

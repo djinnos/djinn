@@ -258,7 +258,11 @@ mod tests {
     const WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
     fn temp_project_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(name)
+        std::env::current_dir()
+            .expect("current dir")
+            .join("target")
+            .join("test-tmp")
+            .join(name)
     }
 
     async fn create_test_project(

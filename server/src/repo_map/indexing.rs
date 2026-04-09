@@ -306,6 +306,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::test_helpers::workspace_tempdir;
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -695,7 +696,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)] // ENV_TEST_LOCK serialises env-mutating tests
     async fn run_indexers_already_locked_callable_without_outer_lock() {
         let _serial = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = workspace_tempdir("repo-map-indexing-");
         let project_root = tmp.path().join("empty-project");
         std::fs::create_dir_all(&project_root).unwrap();
         let output_root = tmp.path().join("scip-out");

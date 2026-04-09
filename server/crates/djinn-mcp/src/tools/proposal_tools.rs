@@ -513,6 +513,16 @@ impl DjinnMcpServer {
 
 #[cfg(test)]
 mod tests {
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
     use super::*;
 
     #[test]
@@ -552,7 +562,7 @@ mod tests {
 
     #[test]
     fn proposed_adr_from_file_reads_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let dir = proposed_dir(tmp.path());
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("adr-999-demo.md");

@@ -241,7 +241,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::events::event_bus_for;
-    use crate::test_helpers::create_test_db;
+    use crate::test_helpers::{create_test_db, workspace_tempdir};
     use djinn_db::ProjectRepository;
 
     use super::*;
@@ -270,11 +270,11 @@ mod tests {
             events_tx,
         };
 
-        let missing = tempfile::tempdir().unwrap();
+        let missing = workspace_tempdir("watchers-kb-");
         add_watch(&mut state, "project-1", missing.path());
         assert!(state.watchers.is_empty());
 
-        let project = tempfile::tempdir().unwrap();
+        let project = workspace_tempdir("watchers-kb-");
         std::fs::create_dir_all(project.path().join(".djinn/research")).unwrap();
 
         add_watch(&mut state, "project-1", project.path());
@@ -291,7 +291,7 @@ mod tests {
         let (events_tx, _rx) = broadcast::channel(64);
         let cancel = CancellationToken::new();
 
-        let initial_project_dir = tempfile::tempdir().unwrap();
+        let initial_project_dir = workspace_tempdir("watchers-kb-");
         std::fs::create_dir_all(initial_project_dir.path().join(".djinn/research")).unwrap();
         let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
         project_repo
@@ -311,7 +311,7 @@ mod tests {
         })
         .await;
 
-        let created_project_dir = tempfile::tempdir().unwrap();
+        let created_project_dir = workspace_tempdir("watchers-kb-");
         std::fs::create_dir_all(created_project_dir.path().join(".djinn/research")).unwrap();
         let created_project = project_repo
             .create(

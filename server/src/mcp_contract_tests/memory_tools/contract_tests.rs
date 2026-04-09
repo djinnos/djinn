@@ -420,7 +420,7 @@ async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
     let project = &proj.path;
-    let worktree = tempfile::tempdir().expect("tempdir");
+    let worktree = workspace_tempdir("mcp-memory-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
     let worktree_header = worktree.path().to_string_lossy().to_string();
@@ -496,7 +496,7 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
     let project = &proj.path;
-    let worktree = tempfile::tempdir().expect("tempdir");
+    let worktree = workspace_tempdir("mcp-memory-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
     let worktree_header = worktree.path().to_string_lossy().to_string();

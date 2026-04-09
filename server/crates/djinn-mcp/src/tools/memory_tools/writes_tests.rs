@@ -1,5 +1,15 @@
 #[cfg(test)]
 mod tests {
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -23,7 +33,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_mergeable_note_type_bypasses_dedup() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -70,7 +80,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mergeable_note_type_runs_dedup_lookup() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -117,7 +127,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dedup_candidates_filters_by_type_and_folder() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
@@ -194,7 +204,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_candidates_proceeds_with_normal_write() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -222,7 +232,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repeat_write_reuses_existing_note_and_backfills_legacy_null_hash() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
@@ -323,7 +333,7 @@ mod tests {
     /// triggers contradiction detection; both notes' confidence must decrease.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn contradicting_notes_both_have_reduced_confidence() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -381,7 +391,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn singleton_worktree_writes_refresh_canonical_read_and_broken_links_view() {
-        let project_tmp = tempfile::tempdir().unwrap();
+        let project_tmp = workspace_tempdir();
         let worktree_tmp = project_tmp
             .path()
             .join(".djinn/worktrees/test-brief-singleton");
@@ -557,7 +567,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn singleton_brief_write_with_worktree_project_path_keeps_canonical_path() {
-        let project_tmp = tempfile::tempdir().unwrap();
+        let project_tmp = workspace_tempdir();
         let worktree_tmp = project_tmp
             .path()
             .join(".djinn/worktrees/test-brief-singleton");
@@ -621,7 +631,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_write_adr_with_empty_scope_paths_writes_file_to_disk() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -653,7 +663,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_write_adr_with_nonempty_scope_paths_writes_file_to_disk() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -681,7 +691,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_write_adr_without_scope_paths_still_writes_file_to_disk() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -706,7 +716,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_edit_find_replace_on_scoped_adr_updates_file_on_disk() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -753,7 +763,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_edit_find_replace_noop_returns_error_and_keeps_updated_at() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;

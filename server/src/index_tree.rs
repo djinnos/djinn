@@ -257,6 +257,7 @@ pub(crate) fn reset_last_fetch_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::workspace_tempdir;
 
     #[test]
     fn reserved_prefix_filter_matches_underscore_entries() {
@@ -294,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_creates_index_tree_on_first_call_and_is_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir("index-tree-");
         let project_root = make_repo(tmp.path()).await;
 
         let handle = IndexTree::ensure("p1", &project_root).await.unwrap();
@@ -310,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_if_stale_honors_cooldown() {
         reset_last_fetch_for_tests();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir("index-tree-");
         let project_root = make_repo(tmp.path()).await;
         // Add a fake `origin` so `fetch` has somewhere to go.  We use a
         // bare clone of the project itself so the fetch succeeds locally

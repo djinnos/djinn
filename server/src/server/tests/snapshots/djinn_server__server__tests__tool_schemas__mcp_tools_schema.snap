@@ -3281,7 +3281,7 @@ expression: signatures
           "type": "string"
         },
         "type": {
-          "description": "New note type to move the note to.",
+          "description": "New note type to move the note to. Use `proposed_adr` to recover a\nmis-routed ADR draft into `.djinn/decisions/proposed/`.",
           "type": "string"
         }
       },

@@ -7,6 +7,16 @@
 
 #[cfg(test)]
 mod tests {
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
     use std::path::Path;
     use std::sync::Arc;
 
@@ -130,7 +140,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_budget_tight_returns_fewer_items() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -199,7 +209,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_seed_never_pruned() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -272,7 +282,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_pruning_removes_lowest_ranked_first() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -373,7 +383,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_default_budget_is_4096() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -427,7 +437,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_task_id_parameter_accepted() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -534,7 +544,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_default_min_confidence_filters_low_confidence_notes() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -584,7 +594,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_min_confidence_zero_includes_all_notes() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -634,7 +644,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_superseded_notes_are_annotated() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;

@@ -57,7 +57,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_write_and_edit_regenerate_summaries_without_blocking_ack() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -122,7 +122,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn first_access_backfills_missing_summaries() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
@@ -167,7 +167,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_session_flushes_reads_from_same_session_server() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = ProjectRepository::new(db.clone(), EventBus::noop())
@@ -313,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_list() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -349,7 +349,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_show() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -389,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_accept() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
@@ -435,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_reject() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let _project = create_project(&db, tmp.path()).await;
