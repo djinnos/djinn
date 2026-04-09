@@ -215,10 +215,6 @@ impl ProjectRepository {
                 "reviewer",
                 "Reviews pull requests and verifies task quality.",
             ),
-            (
-                "resolver",
-                "Resolves merge conflicts and integration failures.",
-            ),
         ];
         for (base_role, description) in DEFAULT_ROLES {
             let role_id = uuid::Uuid::now_v7().to_string();
@@ -534,14 +530,13 @@ mod tests {
             "architect",
             "lead",
             "planner",
-            "resolver",
             "reviewer",
             "worker",
         ];
 
         assert_eq!(
             rows.len(),
-            6,
+            5,
             "expected 6 default roles, got {}",
             rows.len()
         );

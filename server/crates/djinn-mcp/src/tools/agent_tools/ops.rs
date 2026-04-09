@@ -62,7 +62,7 @@ pub struct AgentCreateParams {
     pub project: String,
     /// Unique agent name within the project.
     pub name: String,
-    /// Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.
+    /// Base role to extend. One of: worker, lead, planner, architect, reviewer.
     pub base_role: String,
     pub description: Option<String>,
     /// Additional system prompt content appended to the base role prompt.
@@ -229,7 +229,7 @@ pub async fn create_agent(
 
 fn base_role_to_agent_type(base_role: &str) -> &str {
     match base_role {
-        "worker" | "resolver" => "worker",
+        "worker" => "worker",
         "reviewer" => "reviewer",
         "planner" => "planner",
         "lead" => "lead",

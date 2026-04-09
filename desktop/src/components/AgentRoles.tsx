@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { InlineError } from "@/components/InlineError";
 import { cn } from "@/lib/utils";
+import { getAgentIdentity } from "@/lib/agentIdentity";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Delete02Icon } from "@hugeicons/core-free-icons";
@@ -417,7 +418,7 @@ interface LearnedPromptSectionProps {
   onCleared: () => void;
 }
 
-function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionProps) {
+export function LearnedPromptSection({ role, onCleared }: LearnedPromptSectionProps) {
   const [expanded, setExpanded] = useState(false);
   const [history, setHistory] = useState<LearnedPromptHistory | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -547,30 +548,27 @@ interface AgentCardProps {
   role: Agent;
   onEdit: () => void;
   onDelete: () => void;
-  onRoleCleared: () => void;
   isDeleting: boolean;
 }
 
-function AgentCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: AgentCardProps) {
-  return (
-    <div className="rounded-lg border border-border bg-card p-4 space-y-2">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-medium truncate">{role.name}</span>
-            {role.is_default && (
-              <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                default
-              </span>
-            )}
-          </div>
-          {role.description && (
-            <p className="text-xs text-muted-foreground mt-0.5 truncate">{role.description}</p>
-          )}
-        </div>
+function AgentCard({ role, onEdit, onDelete, isDeleting }: AgentCardProps) {
+  const identity = getAgentIdentity(role.base_role);
+  const mcpCount = role.mcp_servers?.length ?? 0;
+  const skillCount = role.skills?.length ?? 0;
+  const extCount = role.system_prompt_extensions.length;
 
-        <div className="flex items-center gap-2 shrink-0">
-          <Button variant="outline" size="sm" onClick={onEdit}>
+  return (
+    <div className="group relative flex flex-col rounded-xl border border-border bg-card overflow-hidden transition-colors hover:border-border/80">
+      {/* Avatar area */}
+      <div className="relative flex items-end justify-center bg-muted/30 pt-6 h-36">
+        <img
+          src={identity.avatar}
+          alt={role.base_role}
+          className="h-32 w-32 pointer-events-none"
+        />
+        {/* Hover actions */}
+        <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <Button variant="outline" size="sm" className="h-7 px-2 text-xs bg-card" onClick={onEdit}>
             Edit
           </Button>
           {!role.is_default && (
@@ -582,42 +580,55 @@ function AgentCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: AgentC
               size="sm"
               disabled={isDeleting}
             >
-              {isDeleting ? "Deleting..." : "Delete"}
+              <HugeiconsIcon icon={Delete02Icon} size={14} />
             </ConfirmButton>
           )}
         </div>
       </div>
 
-      {role.system_prompt_extensions.length > 0 && (
-        <div className="rounded-md bg-muted px-3 py-2 text-xs font-mono text-muted-foreground space-y-0.5">
-          {role.system_prompt_extensions.map((ext, i) => (
-            <p key={i}>{ext}</p>
-          ))}
-        </div>
-      )}
-
-      {((role.mcp_servers?.length ?? 0) > 0 || (role.skills?.length ?? 0) > 0) && (
-        <div className="flex flex-wrap gap-1.5">
-          {(role.mcp_servers ?? []).map((name) => (
-            <span
-              key={`mcp-${name}`}
-              className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-700 dark:text-blue-300"
-            >
-              {name}
+      {/* Info area */}
+      <div className="flex flex-col flex-1 px-4 py-3 space-y-1.5">
+        <div className="flex items-center gap-2">
+          {!role.is_default && (
+            <span className="font-medium text-sm truncate">{role.name}</span>
+          )}
+          <span className={cn("text-[11px] font-medium", identity.color)}>
+            {identity.label}
+          </span>
+          {role.learned_prompt && (
+            <span className="shrink-0 rounded-full w-2 h-2 bg-blue-500" title="Learned prompt active" />
+          )}
+          {role.is_default && (
+            <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              default
             </span>
-          ))}
-          {(role.skills ?? []).map((name) => (
-            <span
-              key={`skill-${name}`}
-              className="inline-flex items-center rounded-full bg-purple-500/10 px-2 py-0.5 text-xs text-purple-700 dark:text-purple-300"
-            >
-              {name}
-            </span>
-          ))}
+          )}
         </div>
-      )}
+        {role.description && (
+          <p className="text-xs text-muted-foreground line-clamp-2">{role.description}</p>
+        )}
 
-      <LearnedPromptSection role={role} onCleared={onRoleCleared} />
+        {/* Compact counts */}
+        {(extCount > 0 || mcpCount > 0 || skillCount > 0) && (
+          <div className="flex flex-wrap gap-1.5 pt-1">
+            {extCount > 0 && (
+              <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                {extCount} ext{extCount !== 1 ? "s" : ""}
+              </span>
+            )}
+            {mcpCount > 0 && (
+              <span className="rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-700 dark:text-blue-300">
+                {mcpCount} MCP
+              </span>
+            )}
+            {skillCount > 0 && (
+              <span className="rounded-full bg-purple-500/10 px-1.5 py-0.5 text-[10px] text-purple-700 dark:text-purple-300">
+                {skillCount} skill{skillCount !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -730,13 +741,6 @@ export function AgentRoles() {
     }
   };
 
-  // Group roles by base_role
-  const grouped = BASE_ROLES.map((baseRole) => ({
-    baseRole,
-    label: BASE_ROLE_LABELS[baseRole],
-    roles: roles.filter((r) => r.base_role === baseRole),
-  })).filter((g) => g.roles.length > 0);
-
   // Full-page form takeover for create/edit
   const editingRole = editingId ? roles.find((r) => r.id === editingId) : null;
 
@@ -807,25 +811,15 @@ export function AgentRoles() {
           No roles configured yet. Create a specialist to extend a base role.
         </div>
       ) : (
-        <div className="space-y-6">
-          {grouped.map(({ baseRole, label, roles: groupRoles }) => (
-            <div key={baseRole}>
-              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                {label}
-              </h3>
-              <div className="space-y-2">
-                {groupRoles.map((role) => (
-                  <AgentCard
-                    key={role.id}
-                    role={role}
-                    onEdit={() => setEditingId(role.id)}
-                    onDelete={() => void handleDelete(role.id)}
-                    onRoleCleared={() => void loadRoles()}
-                    isDeleting={deletingId === role.id}
-                  />
-                ))}
-              </div>
-            </div>
+        <div className="grid grid-cols-5 gap-3">
+          {roles.map((role) => (
+            <AgentCard
+              key={role.id}
+              role={role}
+              onEdit={() => setEditingId(role.id)}
+              onDelete={() => void handleDelete(role.id)}
+              isDeleting={deletingId === role.id}
+            />
           ))}
         </div>
       )}

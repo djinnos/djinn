@@ -17,7 +17,6 @@ const ALL_ROLES: &[&str] = &[
     "lead",
     "planner",
     "architect",
-    "resolver",
 ];
 
 impl AppState {

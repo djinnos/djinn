@@ -510,7 +510,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for Worker and Resolver: base + file-editing tools.
+/// Tool schemas for Worker: base + file-editing tools.
 pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(tool_write(), false));

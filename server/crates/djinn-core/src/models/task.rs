@@ -254,7 +254,7 @@ pub enum TransitionAction {
     LeadInterventionComplete,
     /// Lead agent approves implementation directly — triggers merge.
     LeadApprove,
-    /// Merge conflict discovered during Lead approval — reopen for conflict resolver.
+    /// Merge conflict discovered during Lead approval — reopen for conflict resolution.
     LeadApproveConflict,
     /// Reviewer/Lead approves, moving task to approved (waiting for PR creation).
     PrCreated,

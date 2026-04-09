@@ -83,7 +83,7 @@ pub struct AgentShowParams {
 pub struct AgentListParams {
     /// Absolute project path.
     pub project: String,
-    /// Filter by base role: worker, lead, planner, architect, reviewer, resolver.
+    /// Filter by base role: worker, lead, planner, architect, reviewer.
     pub base_role: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -114,7 +114,7 @@ pub struct AgentUpdateParams {
 impl DjinnMcpServer {
     /// Create a specialist agent that extends a base role with domain-specific config.
     #[tool(
-        description = "Create a specialist agent extending a base role (worker, lead, planner, architect, reviewer, resolver). Returns the created agent."
+        description = "Create a specialist agent extending a base role (worker, lead, planner, architect, reviewer). Returns the created agent."
     )]
     pub async fn agent_create(
         &self,

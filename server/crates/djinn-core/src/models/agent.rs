@@ -7,7 +7,7 @@ pub struct Agent {
     pub id: String,
     pub project_id: String,
     pub name: String,
-    /// One of: "worker", "lead", "planner", "architect", "reviewer", "resolver"
+    /// One of: "worker", "lead", "planner", "architect", "reviewer"
     pub base_role: String,
     pub description: String,
     pub system_prompt_extensions: String,

@@ -8,7 +8,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "base_role": {
-            "description": "Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.",
+            "description": "Base role to extend. One of: worker, lead, planner, architect, reviewer.",
             "type": "string"
           },
           "description": {
@@ -136,7 +136,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "base_role": {
-            "description": "Filter by base role: worker, lead, planner, architect, reviewer, resolver.",
+            "description": "Filter by base role: worker, lead, planner, architect, reviewer.",
             "nullable": true,
             "type": "string"
           },

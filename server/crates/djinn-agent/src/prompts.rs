@@ -49,7 +49,7 @@ pub struct TaskContext {
     /// HEAD of the task branch (task reviewer).
     pub end_commit: Option<String>,
 
-    // -- Conflict resolver fields --------------------------------------------
+    // -- Merge conflict context (handled by Worker) ----------------------------
     pub conflict_files: Option<String>,
     pub merge_base_branch: Option<String>,
     pub merge_target_branch: Option<String>,

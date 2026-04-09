@@ -459,7 +459,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         }
     }
 
-    // ── Role-specific worktree preparation (e.g. conflict resolver merge) ────
+    // ── Role-specific worktree preparation (e.g. conflict resolution merge) ──
     emit_step(
         &task.id,
         "worktree_created",

@@ -30,7 +30,7 @@ const PROBATION_REGRESSION_TOLERANCE: f64 = 0.02;
 /// Map a `base_role` to the session `agent_type` string used by sessions.
 fn base_role_to_agent_type(base_role: &str) -> &str {
     match base_role {
-        "worker" | "resolver" => "worker",
+        "worker" => "worker",
         "reviewer" => "reviewer",
         "planner" => "planner",
         "lead" => "lead",

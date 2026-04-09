@@ -307,7 +307,7 @@ struct AgentMetricsResponse {
 
 fn base_role_to_agent_type(base_role: &str) -> &str {
     match base_role {
-        "worker" | "resolver" => "worker",
+        "worker" => "worker",
         "reviewer" => "reviewer",
         "planner" => "planner",
         "lead" => "lead",

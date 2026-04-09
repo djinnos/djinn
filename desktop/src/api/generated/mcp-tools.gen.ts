@@ -6,7 +6,7 @@ export namespace AgentCreateInputSchema {
 
   export interface AgentCreateInput {
   /**
-   * Base role to extend. One of: worker, lead, planner, architect, reviewer, resolver.
+   * Base role to extend. One of: worker, lead, planner, architect, reviewer.
    */
   base_role: string
   description?: string
@@ -73,7 +73,7 @@ export type AgentCreateOutput = AgentCreateOutputSchema.AgentCreateOutput;
 export namespace AgentListInputSchema {
   export interface AgentListInput {
   /**
-   * Filter by base role: worker, lead, planner, architect, reviewer, resolver.
+   * Filter by base role: worker, lead, planner, architect, reviewer.
    */
   base_role?: string
   limit?: number
