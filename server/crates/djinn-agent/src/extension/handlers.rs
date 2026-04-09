@@ -51,7 +51,8 @@ pub(crate) use code_intel::{call_code_graph, call_github_search, call_lsp};
 use memory_agent::{
     call_agent_amend_prompt, call_agent_create, call_agent_metrics, call_memory_broken_links,
     call_memory_build_context, call_memory_edit, call_memory_health, call_memory_list,
-    call_memory_orphans, call_memory_read, call_memory_search, call_memory_write,
+    call_memory_move, call_memory_orphans, call_memory_read, call_memory_search,
+    call_memory_write,
 };
 use task_admin::{
     call_task_archive_activity, call_task_blocked_list, call_task_delete_branch,
@@ -169,6 +170,7 @@ where
             )
             .await
         }
+        "memory_move" => call_memory_move(state, &call.arguments, &canonical_project_path).await,
         "memory_health" => {
             call_memory_health(state, &call.arguments, &canonical_project_path).await
         }

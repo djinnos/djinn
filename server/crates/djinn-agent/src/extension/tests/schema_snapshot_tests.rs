@@ -87,6 +87,7 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(architect.iter().any(|n| n == "task_kill_session"));
     assert!(architect.iter().any(|n| n == "memory_write"));
     assert!(architect.iter().any(|n| n == "memory_edit"));
+    assert!(architect.iter().any(|n| n == "memory_move"));
     assert!(architect.iter().any(|n| n == "submit_work"));
     // Architect must NOT have code-writing tools.
     assert!(!architect.iter().any(|n| n == "write"));

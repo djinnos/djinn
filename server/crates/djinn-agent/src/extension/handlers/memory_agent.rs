@@ -184,6 +184,28 @@ pub(super) async fn call_memory_edit(
     ))
 }
 
+pub(super) async fn call_memory_move(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let p: MemoryMoveParams = parse_args(arguments)?;
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let result = server
+        .memory_move(rmcp::handler::server::wrapper::Parameters(
+            djinn_mcp::tools::memory_tools::MoveParams {
+                project: project_path.to_owned(),
+                identifier: p.identifier,
+                note_type: p.note_type,
+                title: p.title,
+            },
+        ))
+        .await;
+    Ok(serde_json::to_value(result.0).unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_move response" }),
+    ))
+}
+
 pub(super) async fn call_memory_broken_links(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,

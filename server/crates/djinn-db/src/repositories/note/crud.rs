@@ -105,6 +105,7 @@ fn infer_note_type_from_relative_path(relative_path: &Path) -> String {
         .map(|(folder, _)| folder)
         .unwrap_or_default()
     {
+        "decisions/proposed" => "proposed_adr",
         "decisions" => "adr",
         "patterns" => "pattern",
         "cases" => "case",

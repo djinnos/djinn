@@ -623,6 +623,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(shared_schemas::tool_role_create(), false));
     tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
     tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_move(), false));
     for value in [
         serialize_tool(tool_task_delete_branch(), false),
         serialize_tool(tool_task_archive_activity(), false),

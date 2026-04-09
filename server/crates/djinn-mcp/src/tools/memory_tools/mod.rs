@@ -260,6 +260,17 @@ mod param_tests {
     }
 
     #[test]
+    fn move_params_accepts_proposed_adr_recovery_type() {
+        let json = serde_json::json!({
+            "project": "/tmp/test",
+            "identifier": "decisions/adr-052",
+            "type": "proposed_adr"
+        });
+        let params: MoveParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.note_type, "proposed_adr");
+    }
+
+    #[test]
     fn schema_exposes_type_not_note_type() {
         fn assert_schema_has_type<T: schemars::JsonSchema>(label: &str) {
             let schema = schema_for!(T);

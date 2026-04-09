@@ -8,6 +8,7 @@ use super::*;
 pub fn folder_for_type(note_type: &str) -> &'static str {
     match note_type {
         "adr" => "decisions",
+        "proposed_adr" => "decisions/proposed",
         "pattern" => "patterns",
         "case" => "cases",
         "pitfall" => "pitfalls",

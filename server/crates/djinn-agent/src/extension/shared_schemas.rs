@@ -7,6 +7,22 @@ pub(crate) fn serialize_tool_schema(tool: RmcpTool, concurrent_safe: bool) -> se
     value
 }
 
+pub(crate) fn tool_memory_move() -> RmcpTool {
+    RmcpTool::new(
+        "memory_move".to_string(),
+        "Move a note to a new location. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into .djinn/decisions/proposed/ without raw shell relocation.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["identifier", "type"],
+            "properties": {
+                "identifier": {"type": "string", "description": "Note permalink or title"},
+                "type": {"type": "string", "description": "New note type. Use proposed_adr to relocate proposal drafts into decisions/proposed/."},
+                "title": {"type": "string", "description": "Optional new title; keep current title if omitted."}
+            }
+        }),
+    )
+}
+
 pub(crate) fn annotate_concurrent_safe(value: &mut serde_json::Value, concurrent_safe: bool) {
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
@@ -267,6 +283,22 @@ pub(crate) fn tool_memory_edit() -> RmcpTool {
                 "find_text": {"type": "string", "description": "Required for find_replace: exact text to search for"},
                 "section": {"type": "string", "description": "Required for replace_section: heading text identifying the section"},
                 "type": {"type": "string", "description": "If provided and different from current type, move the note to the new type's folder"}
+            }
+        }),
+    )
+}
+
+pub(crate) fn tool_memory_move() -> RmcpTool {
+    RmcpTool::new(
+        "memory_move".to_string(),
+        "Move a note to a new location. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into .djinn/decisions/proposed/ without raw shell relocation.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["identifier", "type"],
+            "properties": {
+                "identifier": {"type": "string", "description": "Note permalink or title"},
+                "type": {"type": "string", "description": "New note type. Use proposed_adr to relocate proposal drafts into decisions/proposed/."},
+                "title": {"type": "string", "description": "Optional new title; keep current title if omitted."}
             }
         }),
     )

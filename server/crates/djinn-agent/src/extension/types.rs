@@ -156,6 +156,14 @@ pub(super) struct MemoryWriteParams {
 }
 
 #[derive(Deserialize)]
+pub(super) struct MemoryMoveParams {
+    pub identifier: String,
+    #[serde(rename = "type")]
+    pub note_type: String,
+    pub title: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct MemoryEditParams {
     pub identifier: String,
     pub operation: String,

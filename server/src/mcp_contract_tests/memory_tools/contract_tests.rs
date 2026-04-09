@@ -237,6 +237,56 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
 }
 
 #[tokio::test]
+async fn mcp_memory_move_can_recover_proposed_adr_and_make_it_visible_to_proposal_list() {
+    let db = create_test_db();
+    let (proj, _dir) = create_test_project_with_dir(&db).await;
+    let project = &proj.path;
+    let app = create_test_app_with_db(db.clone());
+    let session_id = initialize_mcp_session(&app).await;
+
+    let created = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Recover Me",
+            "content": "---\nwork_shape: epic\n---\n\n# Recover Me\n",
+            "type": "adr"
+        }),
+    )
+    .await;
+
+    let moved = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_move",
+        json!({
+            "project": project,
+            "identifier": created["permalink"],
+            "type": "proposed_adr"
+        }),
+    )
+    .await;
+
+    assert_eq!(moved["note_type"], "proposed_adr");
+    assert_eq!(moved["folder"], "decisions/proposed");
+    assert!(Path::new(moved["file_path"].as_str().unwrap()).exists());
+
+    let proposals = mcp_call_tool(
+        &app,
+        &session_id,
+        "propose_adr_list",
+        json!({"project": project}),
+    )
+    .await;
+
+    assert!(proposals["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| item["title"] == "Recover Me")
+    }));
+}
+
+#[tokio::test]
 async fn mcp_memory_delete_success_and_missing_note_error() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
