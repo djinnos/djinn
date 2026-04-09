@@ -21,6 +21,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/project/mcp-servers", get(list_mcp_servers).post(create_mcp_server))
         .route("/project/mcp-servers/update", put(update_mcp_server))
         .route("/project/mcp-servers/delete", delete(delete_mcp_server))
+        .route("/project/mcp-defaults", get(get_mcp_defaults).put(set_mcp_defaults))
         .route("/project/skills", get(list_skills).post(create_skill))
         .route("/project/skills/update", put(update_skill))
         .route("/project/skills/delete", delete(delete_skill))
@@ -228,6 +229,95 @@ async fn delete_mcp_server(
     write_mcp_json(&project_path, &config)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── MCP Default Assignments API ──────────────────────────────────────────────
+//
+// Reads/writes the `agent_mcp_defaults` and `global_skills` fields in
+// `.djinn/settings.json`. Other fields in that file are preserved.
+
+fn djinn_settings_path(project_path: &str) -> std::path::PathBuf {
+    Path::new(project_path).join(".djinn").join("settings.json")
+}
+
+fn read_settings_json(project_path: &str) -> serde_json::Value {
+    let path = djinn_settings_path(project_path);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_settings_json(project_path: &str, value: &serde_json::Value) -> Result<(), String> {
+    let path = djinn_settings_path(project_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create .djinn dir: {e}"))?;
+    }
+    let content = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("JSON serialize error: {e}"))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write settings.json: {e}"))
+}
+
+#[derive(Serialize)]
+struct McpDefaultsResponse {
+    /// Per-agent-name defaults, e.g. {"chat": ["Tavilly"], "*": ["web-search"]}
+    agent_mcp_defaults: HashMap<String, Vec<String>>,
+    /// Skills applied to all agents globally
+    global_skills: Vec<String>,
+}
+
+async fn get_mcp_defaults(
+    State(state): State<AppState>,
+    Query(q): Query<ProjectQuery>,
+) -> Result<Json<McpDefaultsResponse>, (StatusCode, String)> {
+    let project_path = resolve_project_path(&state, &q.project_id).await?;
+    let settings = read_settings_json(&project_path);
+    let agent_mcp_defaults: HashMap<String, Vec<String>> = settings
+        .get("agent_mcp_defaults")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let global_skills: Vec<String> = settings
+        .get("global_skills")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    Ok(Json(McpDefaultsResponse {
+        agent_mcp_defaults,
+        global_skills,
+    }))
+}
+
+#[derive(Deserialize)]
+struct SetMcpDefaultsBody {
+    project_id: String,
+    agent_mcp_defaults: HashMap<String, Vec<String>>,
+    global_skills: Vec<String>,
+}
+
+async fn set_mcp_defaults(
+    State(state): State<AppState>,
+    Json(body): Json<SetMcpDefaultsBody>,
+) -> Result<Json<McpDefaultsResponse>, (StatusCode, String)> {
+    let project_path = resolve_project_path(&state, &body.project_id).await?;
+    let mut settings = read_settings_json(&project_path);
+    let obj = settings
+        .as_object_mut()
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "settings.json is not an object".to_string()))?;
+    obj.insert(
+        "agent_mcp_defaults".to_string(),
+        serde_json::to_value(&body.agent_mcp_defaults).unwrap(),
+    );
+    obj.insert(
+        "global_skills".to_string(),
+        serde_json::to_value(&body.global_skills).unwrap(),
+    );
+    write_settings_json(&project_path, &settings)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(McpDefaultsResponse {
+        agent_mcp_defaults: body.agent_mcp_defaults,
+        global_skills: body.global_skills,
+    }))
 }
 
 // ── Skills API ───────────────────────────────────────────────────────────────

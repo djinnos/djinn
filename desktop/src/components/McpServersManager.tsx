@@ -5,9 +5,14 @@ import { Label } from "@/components/ui/label";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { InlineError } from "@/components/InlineError";
 import { useSelectedProject } from "@/stores/useProjectStore";
+import { Delete02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
   type McpServer,
+  type McpDefaults,
   fetchMcpServers,
+  fetchMcpDefaults,
+  saveMcpDefaults,
   createMcpServer,
   updateMcpServer,
   deleteMcpServer,
@@ -219,6 +224,173 @@ function ServerCard({
   );
 }
 
+// ── Default Assignments ──────────────────────────────────────────────────────
+
+const AGENT_TYPES = [
+  { key: "chat", label: "Chat" },
+  { key: "worker", label: "Worker" },
+  { key: "reviewer", label: "Reviewer" },
+  { key: "lead", label: "Lead" },
+  { key: "planner", label: "Planner" },
+  { key: "*", label: "All (fallback)" },
+] as const;
+
+function DefaultAssignments({
+  projectId,
+  serverNames,
+}: {
+  projectId: string;
+  serverNames: string[];
+}) {
+  const [defaults, setDefaults] = useState<McpDefaults>({
+    agent_mcp_defaults: {},
+    global_skills: [],
+  });
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const d = await fetchMcpDefaults(projectId);
+        setDefaults(d);
+        setLoaded(true);
+      } catch {
+        // Non-fatal
+        setLoaded(true);
+      }
+    })();
+  }, [projectId]);
+
+  const updateAgentServers = (agentKey: string, servers: string[]) => {
+    setDefaults((prev) => ({
+      ...prev,
+      agent_mcp_defaults: {
+        ...prev.agent_mcp_defaults,
+        [agentKey]: servers,
+      },
+    }));
+    setDirty(true);
+  };
+
+  const addServerToAgent = (agentKey: string, serverName: string) => {
+    const current = defaults.agent_mcp_defaults[agentKey] ?? [];
+    if (!current.includes(serverName)) {
+      updateAgentServers(agentKey, [...current, serverName]);
+    }
+  };
+
+  const removeServerFromAgent = (agentKey: string, serverName: string) => {
+    const current = defaults.agent_mcp_defaults[agentKey] ?? [];
+    updateAgentServers(
+      agentKey,
+      current.filter((n) => n !== serverName),
+    );
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      // Clean up empty arrays before saving
+      const cleaned: Record<string, string[]> = {};
+      for (const [key, value] of Object.entries(defaults.agent_mcp_defaults)) {
+        if (value.length > 0) cleaned[key] = value;
+      }
+      const saved = await saveMcpDefaults(projectId, {
+        agent_mcp_defaults: cleaned,
+        global_skills: defaults.global_skills,
+      });
+      setDefaults(saved);
+      setDirty(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save defaults");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!loaded) return null;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-xl font-bold">Default Assignments</h3>
+          <p className="text-sm text-muted-foreground">
+            Which MCP servers each agent type gets by default (stored in .djinn/settings.json).
+            Specialist role assignments override these.
+          </p>
+        </div>
+        {dirty && (
+          <Button size="sm" onClick={() => void handleSave()} disabled={saving}>
+            {saving ? "Saving..." : "Save"}
+          </Button>
+        )}
+      </div>
+
+      {error && <InlineError message={error} />}
+
+      <div className="space-y-2">
+        {AGENT_TYPES.map(({ key, label }) => {
+          const assigned = defaults.agent_mcp_defaults[key] ?? [];
+          const unassigned = serverNames.filter((n) => !assigned.includes(n));
+
+          return (
+            <div
+              key={key}
+              className="rounded-lg border border-border bg-card px-4 py-3"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-medium min-w-20">{label}</span>
+                <div className="flex flex-wrap items-center gap-1.5 flex-1">
+                  {assigned.length === 0 ? (
+                    <span className="text-xs text-muted-foreground/60 italic">none</span>
+                  ) : (
+                    assigned.map((name) => (
+                      <span
+                        key={name}
+                        className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-700 dark:text-blue-300"
+                      >
+                        {name}
+                        <button
+                          type="button"
+                          onClick={() => removeServerFromAgent(key, name)}
+                          className="text-blue-500 hover:text-destructive transition-colors"
+                        >
+                          <HugeiconsIcon icon={Delete02Icon} size={12} />
+                        </button>
+                      </span>
+                    ))
+                  )}
+                </div>
+                {unassigned.length > 0 && (
+                  <select
+                    className="text-xs rounded-md border border-border bg-card px-2 py-1 text-foreground shrink-0"
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) addServerToAgent(key, e.target.value);
+                    }}
+                  >
+                    <option value="">Add...</option>
+                    {unassigned.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Component ───────────────────────────────────────────────────────────
 
 export function McpServersManager() {
@@ -324,40 +496,53 @@ export function McpServersManager() {
     );
   }
 
+  const serverNames = servers.map((s) => s.name);
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-xl font-bold">MCP Servers</h3>
-          <p className="text-sm text-muted-foreground">
-            Servers registered in your project's mcp.json. Agents can be assigned these servers as tools.
-          </p>
+    <div className="space-y-6">
+      {/* Server list */}
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-xl font-bold">MCP Servers</h3>
+            <p className="text-sm text-muted-foreground">
+              Servers registered in your project's mcp.json.
+            </p>
+          </div>
+          <Button onClick={() => setIsCreating(true)}>Add Server</Button>
         </div>
-        <Button onClick={() => setIsCreating(true)}>Add Server</Button>
+
+        {error && <InlineError message={error} onRetry={() => void loadServers()} />}
+
+        {loading ? (
+          <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
+            Loading...
+          </div>
+        ) : servers.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+            No MCP servers configured. Add a server to give agents access to external tools.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {servers.map((server) => (
+              <ServerCard
+                key={server.name}
+                server={server}
+                onEdit={() => setEditingName(server.name)}
+                onDelete={() => void handleDelete(server.name)}
+                isDeleting={deletingName === server.name}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
-      {error && <InlineError message={error} onRetry={() => void loadServers()} />}
-
-      {loading ? (
-        <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
-          Loading...
-        </div>
-      ) : servers.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-          No MCP servers configured. Add a server to mcp.json to give agents access to external tools.
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {servers.map((server) => (
-            <ServerCard
-              key={server.name}
-              server={server}
-              onEdit={() => setEditingName(server.name)}
-              onDelete={() => void handleDelete(server.name)}
-              isDeleting={deletingName === server.name}
-            />
-          ))}
-        </div>
+      {/* Default assignments */}
+      {!loading && servers.length > 0 && (
+        <>
+          <div className="border-t border-border" />
+          <DefaultAssignments projectId={project.id} serverNames={serverNames} />
+        </>
       )}
     </div>
   );

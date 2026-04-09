@@ -569,11 +569,11 @@ function AgentCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: AgentC
           )}
         </div>
 
-        {!role.is_default && (
-          <div className="flex items-center gap-2 shrink-0">
-            <Button variant="outline" size="sm" onClick={onEdit}>
-              Edit
-            </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button variant="outline" size="sm" onClick={onEdit}>
+            Edit
+          </Button>
+          {!role.is_default && (
             <ConfirmButton
               title="Delete specialist"
               description={`Delete "${role.name}"? This cannot be undone.`}
@@ -584,8 +584,8 @@ function AgentCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: AgentC
             >
               {isDeleting ? "Deleting..." : "Delete"}
             </ConfirmButton>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {role.system_prompt_extensions.length > 0 && (

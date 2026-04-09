@@ -83,6 +83,39 @@ export async function deleteMcpServer(projectId: string, name: string): Promise<
   }
 }
 
+// ── MCP Default Assignments ──────────────────────────────────────────────────
+
+export interface McpDefaults {
+  agent_mcp_defaults: Record<string, string[]>;
+  global_skills: string[];
+}
+
+export async function fetchMcpDefaults(projectId: string): Promise<McpDefaults> {
+  const baseUrl = await getBaseUrl();
+  const res = await fetch(
+    `${baseUrl}/project/mcp-defaults?project_id=${encodeURIComponent(projectId)}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch MCP defaults: ${res.status}`);
+  return res.json() as Promise<McpDefaults>;
+}
+
+export async function saveMcpDefaults(
+  projectId: string,
+  defaults: McpDefaults,
+): Promise<McpDefaults> {
+  const baseUrl = await getBaseUrl();
+  const res = await fetch(`${baseUrl}/project/mcp-defaults`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId, ...defaults }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to save MCP defaults: ${res.status}`);
+  }
+  return res.json() as Promise<McpDefaults>;
+}
+
 // ── Skills ───────────────────────────────────────────────────────────────────
 
 export interface Skill {
