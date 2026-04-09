@@ -1,5 +1,5 @@
 ---
-source: crates/djinn-agent/src/extension/tests.rs
+source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
 expression: names
 ---
 [
@@ -12,6 +12,7 @@ expression: names
   "shell",
   "read",
   "lsp",
+  "code_graph",
   "ci_job_log",
   "github_search",
   "output_view",
@@ -23,10 +24,20 @@ expression: names
   "epic_update",
   "epic_tasks",
   "epic_close",
+  "epic_create",
+  "task_transition",
+  "task_comment_add",
+  "memory_build_context",
+  "memory_health",
+  "memory_broken_links",
+  "memory_orphans",
+  "agent_metrics",
+  "agent_create",
+  "memory_write",
+  "memory_edit",
   "task_delete_branch",
   "task_archive_activity",
   "task_reset_counters",
   "task_kill_session",
-  "request_planner",
-  "submit_decision"
+  "submit_work"
 ]

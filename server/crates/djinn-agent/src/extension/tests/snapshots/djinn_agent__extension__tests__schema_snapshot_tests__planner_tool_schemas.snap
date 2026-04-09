@@ -1,6 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension/tests.rs
-expression: tool_schemas_architect()
+source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+expression: tool_schemas_planner()
 ---
 [
   {
@@ -255,130 +255,6 @@ expression: tool_schemas_architect()
       "type": "object"
     },
     "name": "lsp"
-  },
-  {
-    "concurrent_safe": true,
-    "description": "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node; group_by=file for per-file rollup), ranked (top nodes by PageRank or degree; sort_by pagerank|in_degree|out_degree|total_degree), impact (transitive dependents; group_by=file for per-file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup via query substring), cycles (strongly-connected components of size >= min_size), orphans (zero-incoming-reference nodes filtered by visibility public|private|any), path (shortest dependency path from→to), edges (enumerate edges matching from_glob→to_glob), diff (what changed since the previous canonical graph — only since=previous supported), describe (symbol signature/documentation without an LSP round trip).",
-    "inputSchema": {
-      "properties": {
-        "direction": {
-          "description": "Edge direction filter for neighbors (omit for both)",
-          "enum": [
-            "incoming",
-            "outgoing"
-          ],
-          "type": "string"
-        },
-        "edge_kind": {
-          "description": "Edge-kind filter for edges",
-          "type": "string"
-        },
-        "from": {
-          "description": "Source node for path",
-          "type": "string"
-        },
-        "from_glob": {
-          "description": "Source path glob for edges",
-          "type": "string"
-        },
-        "group_by": {
-          "description": "Group impact/neighbors results by file",
-          "enum": [
-            "file"
-          ],
-          "type": "string"
-        },
-        "key": {
-          "description": "Node key: file path or SCIP symbol string (required for neighbors, impact, implementations, describe)",
-          "type": "string"
-        },
-        "kind_filter": {
-          "description": "Node kind filter for ranked/search/cycles/orphans",
-          "enum": [
-            "file",
-            "symbol"
-          ],
-          "type": "string"
-        },
-        "limit": {
-          "description": "Max results (ranked/search/orphans/edges) or max traversal depth (impact)",
-          "minimum": 1,
-          "type": "integer"
-        },
-        "max_depth": {
-          "description": "Maximum depth for path",
-          "minimum": 1,
-          "type": "integer"
-        },
-        "min_size": {
-          "description": "Minimum SCC size for cycles (default 2)",
-          "minimum": 2,
-          "type": "integer"
-        },
-        "operation": {
-          "description": "Graph query to perform",
-          "enum": [
-            "neighbors",
-            "ranked",
-            "impact",
-            "implementations",
-            "search",
-            "cycles",
-            "orphans",
-            "path",
-            "edges",
-            "diff",
-            "describe"
-          ],
-          "type": "string"
-        },
-        "project_path": {
-          "description": "Absolute path to project root",
-          "type": "string"
-        },
-        "query": {
-          "description": "Substring query for search",
-          "type": "string"
-        },
-        "since": {
-          "description": "Diff base selector for diff (currently only 'previous')",
-          "type": "string"
-        },
-        "sort_by": {
-          "description": "Sort key for ranked (default pagerank)",
-          "enum": [
-            "pagerank",
-            "in_degree",
-            "out_degree",
-            "total_degree"
-          ],
-          "type": "string"
-        },
-        "to": {
-          "description": "Destination node for path",
-          "type": "string"
-        },
-        "to_glob": {
-          "description": "Destination path glob for edges",
-          "type": "string"
-        },
-        "visibility": {
-          "description": "Visibility filter for orphans (default any)",
-          "enum": [
-            "public",
-            "private",
-            "any"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "operation",
-        "project_path"
-      ],
-      "type": "object"
-    },
-    "name": "code_graph"
   },
   {
     "concurrent_safe": true,
@@ -730,50 +606,6 @@ expression: tool_schemas_architect()
   },
   {
     "concurrent_safe": false,
-    "description": "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — typically when an Architect health sweep or chat planning session identifies a gap that needs its own delivery container. Returns the created epic.",
-    "inputSchema": {
-      "properties": {
-        "color": {
-          "description": "Optional color tag for the epic",
-          "type": "string"
-        },
-        "description": {
-          "description": "Epic description / problem statement",
-          "type": "string"
-        },
-        "emoji": {
-          "description": "Optional emoji for the epic",
-          "type": "string"
-        },
-        "memory_refs": {
-          "description": "Memory reference URLs (e.g. ADR permalinks) to attach to the epic",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "owner": {
-          "description": "Optional owner",
-          "type": "string"
-        },
-        "status": {
-          "description": "Initial status: 'drafting' (default) or 'open'",
-          "type": "string"
-        },
-        "title": {
-          "description": "Epic title",
-          "type": "string"
-        }
-      },
-      "required": [
-        "title"
-      ],
-      "type": "object"
-    },
-    "name": "epic_create"
-  },
-  {
-    "concurrent_safe": false,
     "description": "Transition a task using a named workflow action.",
     "inputSchema": {
       "properties": {
@@ -826,6 +658,79 @@ expression: tool_schemas_architect()
       "type": "object"
     },
     "name": "task_comment_add"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional tags for categorisation",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Note title",
+          "type": "string"
+        },
+        "type": {
+          "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "content",
+        "type"
+      ],
+      "type": "object"
+    },
+    "name": "memory_write"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "New content to insert or replace with",
+          "type": "string"
+        },
+        "find_text": {
+          "description": "Required for find_replace: exact text to search for",
+          "type": "string"
+        },
+        "identifier": {
+          "description": "Note permalink or title",
+          "type": "string"
+        },
+        "operation": {
+          "description": "Edit operation: append, prepend, find_replace, replace_section",
+          "type": "string"
+        },
+        "section": {
+          "description": "Required for replace_section: heading text identifying the section",
+          "type": "string"
+        },
+        "type": {
+          "description": "If provided and different from current type, move the note to the new type's folder",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier",
+        "operation",
+        "content"
+      ],
+      "type": "object"
+    },
+    "name": "memory_edit"
   },
   {
     "concurrent_safe": true,
@@ -943,79 +848,6 @@ expression: tool_schemas_architect()
   },
   {
     "concurrent_safe": false,
-    "description": "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.",
-    "inputSchema": {
-      "properties": {
-        "content": {
-          "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
-          "type": "string"
-        },
-        "tags": {
-          "description": "Optional tags for categorisation",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "title": {
-          "description": "Note title",
-          "type": "string"
-        },
-        "type": {
-          "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)",
-          "type": "string"
-        }
-      },
-      "required": [
-        "title",
-        "content",
-        "type"
-      ],
-      "type": "object"
-    },
-    "name": "memory_write"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
-    "inputSchema": {
-      "properties": {
-        "content": {
-          "description": "New content to insert or replace with",
-          "type": "string"
-        },
-        "find_text": {
-          "description": "Required for find_replace: exact text to search for",
-          "type": "string"
-        },
-        "identifier": {
-          "description": "Note permalink or title",
-          "type": "string"
-        },
-        "operation": {
-          "description": "Edit operation: append, prepend, find_replace, replace_section",
-          "type": "string"
-        },
-        "section": {
-          "description": "Required for replace_section: heading text identifying the section",
-          "type": "string"
-        },
-        "type": {
-          "description": "If provided and different from current type, move the note to the new type's folder",
-          "type": "string"
-        }
-      },
-      "required": [
-        "identifier",
-        "operation",
-        "content"
-      ],
-      "type": "object"
-    },
-    "name": "memory_edit"
-  },
-  {
-    "concurrent_safe": false,
     "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
     "inputSchema": {
       "properties": {
@@ -1084,44 +916,82 @@ expression: tool_schemas_architect()
   },
   {
     "concurrent_safe": false,
-    "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
+    "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.",
     "inputSchema": {
       "properties": {
-        "commit_title": {
-          "description": "Short imperative-mood git commit subject line, max 72 characters. Example: 'add rate limiting to auth middleware'",
-          "maxLength": 72,
+        "agent_id": {
+          "description": "Agent UUID or name to amend",
           "type": "string"
         },
-        "files_changed": {
-          "description": "List of files modified during this session",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "remaining_concerns": {
-          "description": "Any outstanding concerns or caveats for the reviewer",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "summary": {
-          "description": "Longer description of the work completed, used as the commit body",
+        "amendment": {
+          "description": "Amendment text to append to learned_prompt",
           "type": "string"
         },
-        "task_id": {
-          "description": "Task UUID or short_id",
+        "metrics_snapshot": {
+          "description": "JSON string of current metrics for the history record",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path",
           "type": "string"
         }
       },
       "required": [
-        "task_id",
-        "commit_title",
-        "summary"
+        "agent_id",
+        "amendment"
       ],
       "type": "object"
     },
-    "name": "submit_work"
+    "name": "agent_amend_prompt"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.",
+    "inputSchema": {
+      "properties": {
+        "next_patrol_minutes": {
+          "description": "Planner patrol only (per ADR-051 §1): minutes until the next board-health patrol should run (5-60). Set when the current task is a review-type patrol (`issue_type=\"review\"`, title contains \"patrol\"). Omit for decomposition or intervention sessions.",
+          "maximum": 60,
+          "minimum": 5,
+          "type": "integer"
+        },
+        "summary": {
+          "description": "Optional overall summary of the grooming session",
+          "type": "string"
+        },
+        "tasks_reviewed": {
+          "description": "Per-task grooming entries",
+          "items": {
+            "properties": {
+              "action": {
+                "description": "Action taken on this task",
+                "enum": [
+                  "promoted",
+                  "improved",
+                  "skipped"
+                ],
+                "type": "string"
+              },
+              "changes": {
+                "description": "Description of changes made to this task",
+                "type": "string"
+              },
+              "task_id": {
+                "description": "Task UUID or short_id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "name": "submit_grooming"
   }
 ]

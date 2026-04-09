@@ -1,6 +1,6 @@
 ---
-source: crates/djinn-agent/src/extension/tests.rs
-expression: tool_schemas_lead()
+source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+expression: tool_schemas_worker()
 ---
 [
   {
@@ -362,319 +362,146 @@ expression: tool_schemas_lead()
   },
   {
     "concurrent_safe": false,
-    "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
+    "description": "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.",
     "inputSchema": {
       "properties": {
-        "acceptance_criteria": {
-          "description": "Required. Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields. Tasks without acceptance criteria cannot be dispatched.",
-          "items": {},
-          "minItems": 1,
-          "type": "array"
-        },
-        "blocked_by": {
-          "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "description": {
+        "content": {
+          "description": "File content to write",
           "type": "string"
         },
-        "design": {
-          "type": "string"
-        },
-        "epic_id": {
-          "description": "Parent epic UUID or short ID",
-          "type": "string"
-        },
-        "issue_type": {
-          "description": "Task type: 'task' (default for worker-routed code work), 'planning' for epic metadata operations (epic_update, epic_close, memory_refs management, roadmap/AC changes, or other metadata-only maintenance), 'spike' for research, 'review' for code review. Use 'planning' when the work requires epic management tools or primarily updates epic metadata instead of code.",
-          "type": "string"
-        },
-        "labels": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "owner": {
-          "type": "string"
-        },
-        "parent_id": {
-          "type": "string"
-        },
-        "priority": {
-          "type": "integer"
-        },
-        "status": {
-          "type": "string"
-        },
-        "title": {
+        "path": {
+          "description": "Absolute or worktree-relative file path",
           "type": "string"
         }
       },
       "required": [
-        "epic_id",
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "name": "write"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).",
+    "inputSchema": {
+      "properties": {
+        "new_text": {
+          "description": "Replacement text",
+          "type": "string"
+        },
+        "old_text": {
+          "description": "Exact text to find and replace",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ],
+      "type": "object"
+    },
+    "name": "edit"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Apply a patch to one or more files using a custom LLM-friendly format. Uses content-based context matching (not line numbers). Format:\n\n*** Begin Patch\n*** Update File: path/to/file.rs\n@@ context_line_from_file\n context line (unchanged)\n-old line to remove\n+new line to add\n context line (unchanged)\n\n*** Add File: path/to/new_file.rs\n+line 1\n+line 2\n\n*** Delete File: path/to/old_file.rs\n*** End Patch\n\nRules: ' ' prefix = context (must match file), '-' = delete, '+' = add. The @@ line text is searched in the file to locate each chunk. Multiple @@ chunks per file are allowed. Files being updated or deleted must be read first.",
+    "inputSchema": {
+      "properties": {
+        "patch": {
+          "description": "Patch content in the custom format (see tool description)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "patch"
+      ],
+      "type": "object"
+    },
+    "name": "apply_patch"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional tags for categorisation",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Note title",
+          "type": "string"
+        },
+        "type": {
+          "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)",
+          "type": "string"
+        }
+      },
+      "required": [
         "title",
-        "acceptance_criteria"
+        "content",
+        "type"
       ],
       "type": "object"
     },
-    "name": "task_create"
+    "name": "memory_write"
   },
   {
     "concurrent_safe": false,
-    "description": "Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.",
+    "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
     "inputSchema": {
       "properties": {
-        "acceptance_criteria": {
-          "description": "Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields.",
-          "items": {},
-          "type": "array"
-        },
-        "blocked_by_add": {
-          "description": "Task IDs (UUID or short_id) to add as blockers. Task will not be dispatched until all blockers are resolved.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "blocked_by_remove": {
-          "description": "Task IDs (UUID or short_id) to remove as blockers.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "description": {
+        "content": {
+          "description": "New content to insert or replace with",
           "type": "string"
         },
-        "design": {
+        "find_text": {
+          "description": "Required for find_replace: exact text to search for",
           "type": "string"
         },
-        "epic_id": {
+        "identifier": {
+          "description": "Note permalink or title",
           "type": "string"
         },
-        "id": {
-          "description": "Task UUID or short ID",
+        "operation": {
+          "description": "Edit operation: append, prepend, find_replace, replace_section",
           "type": "string"
         },
-        "memory_refs_add": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "memory_refs_remove": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "owner": {
+        "section": {
+          "description": "Required for replace_section: heading text identifying the section",
           "type": "string"
         },
-        "priority": {
-          "type": "integer"
-        },
-        "status": {
-          "type": "string"
-        },
-        "title": {
+        "type": {
+          "description": "If provided and different from current type, move the note to the new type's folder",
           "type": "string"
         }
       },
       "required": [
-        "id"
+        "identifier",
+        "operation",
+        "content"
       ],
       "type": "object"
     },
-    "name": "task_update"
-  },
-  {
-    "concurrent_safe": true,
-    "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_blocked_list"
-  },
-  {
-    "concurrent_safe": true,
-    "description": "Show details for an epic by UUID or short ID.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Epic UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "epic_show"
+    "name": "memory_edit"
   },
   {
     "concurrent_safe": false,
-    "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
-    "inputSchema": {
-      "properties": {
-        "description": {
-          "type": "string"
-        },
-        "id": {
-          "description": "Epic UUID or short ID",
-          "type": "string"
-        },
-        "memory_refs_add": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "memory_refs_remove": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "status": {
-          "type": "string"
-        },
-        "title": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "epic_update"
-  },
-  {
-    "concurrent_safe": true,
-    "description": "List tasks for an epic with pagination.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Epic UUID or short ID",
-          "type": "string"
-        },
-        "limit": {
-          "type": "integer"
-        },
-        "offset": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "epic_tasks"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Close an epic. Use when all work is complete and no further waves are needed.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Epic UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "epic_close"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_delete_branch"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_archive_activity"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_reset_counters"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
-    "inputSchema": {
-      "properties": {
-        "id": {
-          "description": "Task UUID or short ID",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "task_kill_session"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call.",
+    "description": "Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.",
     "inputSchema": {
       "properties": {
         "id": {
@@ -682,7 +509,11 @@ expression: tool_schemas_lead()
           "type": "string"
         },
         "reason": {
-          "description": "Why Planner escalation is needed (e.g. task mis-shaped, duplicates other work, needs splitting, repeated Lead failures with no clear next step)",
+          "description": "Why Lead intervention is needed (e.g. task too large, design ambiguous, blocked on decision)",
+          "type": "string"
+        },
+        "suggested_breakdown": {
+          "description": "Optional suggested split: list of smaller tasks the Lead should create",
           "type": "string"
         }
       },
@@ -692,32 +523,34 @@ expression: tool_schemas_lead()
       ],
       "type": "object"
     },
-    "name": "request_planner"
+    "name": "request_lead"
   },
   {
     "concurrent_safe": false,
-    "description": "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.",
+    "description": "Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.",
     "inputSchema": {
       "properties": {
-        "created_tasks": {
-          "description": "IDs of tasks created during this intervention (for decompose decisions)",
+        "commit_title": {
+          "description": "Short imperative-mood git commit subject line, max 72 characters. Example: 'add rate limiting to auth middleware'",
+          "maxLength": 72,
+          "type": "string"
+        },
+        "files_changed": {
+          "description": "List of files modified during this session",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
-        "decision": {
-          "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to Lead queue)",
-          "enum": [
-            "reopen",
-            "decompose",
-            "force_close",
-            "escalate"
-          ],
-          "type": "string"
+        "remaining_concerns": {
+          "description": "Any outstanding concerns or caveats for the reviewer",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
-        "rationale": {
-          "description": "Explanation for the decision",
+        "summary": {
+          "description": "Longer description of the work completed, used as the commit body",
           "type": "string"
         },
         "task_id": {
@@ -727,10 +560,11 @@ expression: tool_schemas_lead()
       },
       "required": [
         "task_id",
-        "decision"
+        "commit_title",
+        "summary"
       ],
       "type": "object"
     },
-    "name": "submit_decision"
+    "name": "submit_work"
   }
 ]
