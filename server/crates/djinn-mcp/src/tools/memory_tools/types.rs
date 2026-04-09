@@ -93,7 +93,8 @@ pub struct DeleteParams {
 pub struct MoveParams {
     pub project: String,
     pub identifier: String,
-    /// New note type to move the note to.
+    /// New note type to move the note to. Use `proposed_adr` to recover a
+    /// mis-routed ADR draft into `.djinn/decisions/proposed/`.
     #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: String,

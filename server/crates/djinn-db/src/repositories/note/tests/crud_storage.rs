@@ -89,11 +89,16 @@ async fn get_by_permalink() {
 
 #[test]
 fn mergeable_note_types_map_to_expected_folders_and_round_trip() {
+    assert_eq!(folder_for_type("proposed_adr"), "decisions/proposed");
     assert_eq!(folder_for_type("pattern"), "patterns");
     assert_eq!(folder_for_type("case"), "cases");
     assert_eq!(folder_for_type("pitfall"), "pitfalls");
     assert_eq!(folder_for_type("repo_map"), "reference/repo-maps");
 
+    assert_eq!(
+        permalink_for("proposed_adr", "Proposal Draft"),
+        "decisions/proposed/proposal-draft"
+    );
     assert_eq!(
         permalink_for("case", "Task Recovery Example"),
         "cases/task-recovery-example"
@@ -107,6 +112,10 @@ fn mergeable_note_types_map_to_expected_folders_and_round_trip() {
         "reference/repo-maps/repository-map-abc123"
     );
 
+    assert_eq!(
+        file_helpers::infer_note_type("decisions/proposed/proposal-draft"),
+        "proposed_adr"
+    );
     assert_eq!(
         file_helpers::infer_note_type("patterns/reusable-flow"),
         "pattern"
@@ -617,4 +626,67 @@ async fn sync_worktree_notes_to_canonical_promotes_worktree_only_note() {
         .unwrap();
     assert_eq!(canonical.content, "survives close");
     assert_eq!(Path::new(&canonical.file_path), canonical_path.as_path());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_worktree_proposed_adr_survives_close_and_lands_in_proposed_folder() {
+    let project_tmp = crate::database::test_tempdir().unwrap();
+    let worktree_tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, project_tmp.path()).await;
+
+    let worktree_repo = NoteRepository::new(db.clone(), event_bus_for(&tx))
+        .with_worktree_root(Some(worktree_tmp.path().to_path_buf()));
+    let canonical_repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let created = worktree_repo
+        .create(
+            &project.id,
+            project_tmp.path(),
+            "Pipeline Draft",
+            "# Draft survives close\n",
+            "adr",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let moved = worktree_repo
+        .move_note(
+            &created.id,
+            project_tmp.path(),
+            "Pipeline Draft",
+            "proposed_adr",
+        )
+        .await
+        .unwrap();
+
+    let worktree_path = worktree_tmp
+        .path()
+        .join(".djinn/decisions/proposed/pipeline-draft.md");
+    assert_eq!(moved.note_type, "proposed_adr");
+    assert_eq!(moved.folder, "decisions/proposed");
+    assert_eq!(moved.permalink, "decisions/proposed/pipeline-draft");
+    assert!(worktree_path.exists());
+
+    let synced = worktree_repo
+        .sync_worktree_notes_to_canonical(&project.id, project_tmp.path(), worktree_tmp.path())
+        .await
+        .unwrap();
+    assert_eq!(synced, 1);
+
+    let canonical = canonical_repo
+        .get_by_permalink(&project.id, "decisions/proposed/pipeline-draft")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(canonical.note_type, "proposed_adr");
+    assert_eq!(canonical.folder, "decisions/proposed");
+    assert!(
+        canonical
+            .file_path
+            .ends_with(".djinn/decisions/proposed/pipeline-draft.md")
+    );
+    assert!(Path::new(&canonical.file_path).exists());
 }

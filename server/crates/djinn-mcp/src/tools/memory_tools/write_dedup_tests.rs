@@ -1,5 +1,15 @@
 #[cfg(test)]
 mod tests {
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
     use async_trait::async_trait;
     use djinn_core::events::EventBus;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
@@ -54,7 +64,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_hash_match_short_circuits_decider() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let project = create_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
@@ -95,7 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn llm_decider_can_merge_existing_candidate() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let project = create_project(&db, tmp.path()).await;
         let repo = NoteRepository::new(db.clone(), EventBus::noop());

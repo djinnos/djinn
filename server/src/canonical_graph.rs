@@ -187,9 +187,15 @@ pub(crate) async fn ensure_canonical_graph(
         }
     }
 
+    let temp_base = std::env::current_dir()
+        .map_err(|e| format!("resolve current dir for canonical-graph tempdir: {e}"))?
+        .join("target")
+        .join("test-tmp");
+    std::fs::create_dir_all(&temp_base)
+        .map_err(|e| format!("create canonical-graph tempdir base: {e}"))?;
     let output_temp = tempfile::Builder::new()
         .prefix("djinn-canonical-graph-")
-        .tempdir()
+        .tempdir_in(&temp_base)
         .map_err(|e| format!("create canonical-graph tempdir: {e}"))?;
     let output_dir = output_temp.path().to_path_buf();
     let target_dir = handle.target_dir().to_path_buf();
@@ -750,6 +756,7 @@ pub(crate) fn build_test_graph_fixture() -> crate::repo_graph::RepoDependencyGra
 mod tests {
     use super::*;
     use crate::test_helpers::create_test_db;
+    use crate::test_helpers::workspace_tempdir;
     use djinn_db::{
         ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository, RepoMapCacheRepository,
     };
@@ -783,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_canonical_graph_serves_cache_hit_without_running_indexer() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
         let cancel = CancellationToken::new();
@@ -822,7 +829,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_canonical_graph_treats_stale_blob_as_cache_miss() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
         let cancel = CancellationToken::new();
@@ -866,7 +873,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_only_readers_serve_cached_graph_and_caches() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
         let cancel = CancellationToken::new();
@@ -915,7 +922,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_and_persist_paths_share_the_service_seam() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
         let cancel = CancellationToken::new();

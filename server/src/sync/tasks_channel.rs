@@ -434,6 +434,7 @@ pub async fn delete_remote_branch(project: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::events::event_bus_for;
+    use crate::test_helpers::workspace_tempdir;
     use djinn_core::models::TransitionAction;
     use djinn_db::EpicRepository;
     use djinn_db::TaskRepository;
@@ -442,7 +443,7 @@ mod tests {
     /// Create a temp dir with a git repo + bare "origin" remote.
     /// Returns (project_path, _temp_dir_guard).
     async fn setup_git_repo() -> (PathBuf, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().expect("create tempdir");
+        let tmp = workspace_tempdir("tasks-channel-");
         let bare = tmp.path().join("origin.git");
         let repo = tmp.path().join("project");
 

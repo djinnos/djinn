@@ -340,6 +340,16 @@ fn truncate_to_token_limit(content: &str, max_tokens: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use tokio::sync::broadcast;
@@ -424,7 +434,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generate_for_note_ids_persists_summaries_without_bubbling() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
 

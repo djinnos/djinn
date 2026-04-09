@@ -111,6 +111,14 @@ impl DjinnMcpServer {
                 )
                 .await,
             ),
+            "memory_move" => map_json(
+                name,
+                self.memory_move_with_worktree(
+                    Parameters(decode_args::<MoveParams>(name, args)?),
+                    worktree_root,
+                )
+                .await,
+            ),
             _ => self.dispatch_tool(name, args).await,
         }
     }

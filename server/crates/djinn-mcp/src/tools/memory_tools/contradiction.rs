@@ -216,6 +216,16 @@ async fn run_contradiction_analysis_with_provider(
 
 #[cfg(test)]
 mod tests {
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
     use super::*;
     use djinn_core::events::EventBus;
     use djinn_core::message::{ContentBlock, Conversation};
@@ -390,7 +400,7 @@ mod tests {
     /// the CONTRADICTION (0.1) confidence signal and a bilateral association at weight 0.5.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn contradicting_notes_both_get_confidence_reduction_and_bilateral_association() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (id1, id2) = make_project_and_two_notes(&db, &tmp).await;
 
@@ -446,7 +456,7 @@ mod tests {
     /// gets STALE_CITATION; the input note (the superseding one) is unchanged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn supersedes_applies_stale_citation_only_to_superseded_candidate() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (id1, id2) = make_project_and_two_notes(&db, &tmp).await;
 
@@ -494,7 +504,7 @@ mod tests {
     /// Elaborates: only creates an association, no confidence change on either note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn elaborates_creates_association_without_confidence_change() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (id1, id2) = make_project_and_two_notes(&db, &tmp).await;
 
@@ -531,7 +541,7 @@ mod tests {
     /// Compatible: no confidence change, no association.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn compatible_produces_no_changes() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (id1, id2) = make_project_and_two_notes(&db, &tmp).await;
 

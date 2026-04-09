@@ -396,13 +396,23 @@ impl DjinnMcpServer {
 
 #[cfg(test)]
 mod tests {
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
     use super::*;
     use crate::state::stubs::test_mcp_state;
     use djinn_db::ProjectRepository;
     use tempfile::TempDir;
 
     async fn test_server() -> (DjinnMcpServer, TempDir, String) {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = workspace_tempdir();
         let db = djinn_db::Database::open_in_memory().expect("db");
         let project_repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         let project = project_repo

@@ -16,6 +16,18 @@ use djinn_db::{
     SessionRepository, TaskRepository,
 };
 
+pub(crate) fn workspace_tempdir(prefix: &str) -> tempfile::TempDir {
+    let base = std::env::current_dir()
+        .expect("current dir")
+        .join("target")
+        .join("test-tmp");
+    std::fs::create_dir_all(&base).expect("create server test tempdir base");
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(base)
+        .expect("create server test tempdir")
+}
+
 /// Create an in-memory database with all migrations applied.
 pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("failed to create test database")
@@ -34,7 +46,7 @@ pub fn create_test_app() -> axum::Router {
 /// alive for the duration of the test or the temp directory will be deleted.
 pub async fn create_test_app_with_project() -> (axum::Router, String, tempfile::TempDir) {
     let db = create_test_db();
-    let dir = tempfile::tempdir().expect("failed to create temp dir for test project");
+    let dir = workspace_tempdir("server-test-project-");
     let path = dir.path().to_string_lossy().to_string();
     let repo = ProjectRepository::new(db.clone(), test_events());
     repo.create("test-project", &path)
@@ -86,7 +98,7 @@ pub async fn create_test_project(db: &Database) -> Project {
 /// Create a project backed by a real temporary directory on disk.
 /// Returns the project and a `TempDir` guard — the directory is cleaned up when the guard drops.
 pub async fn create_test_project_with_dir(db: &Database) -> (Project, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let dir = workspace_tempdir("server-test-project-");
     let repo = ProjectRepository::new(db.clone(), test_events());
     let path = dir.path().to_string_lossy().to_string();
     let name = dir

@@ -237,6 +237,155 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
 }
 
 #[tokio::test]
+async fn mcp_memory_move_can_recover_proposed_adr_and_make_it_visible_to_proposal_list() {
+    let db = create_test_db();
+    let (proj, _dir) = create_test_project_with_dir(&db).await;
+    let project = &proj.path;
+    let app = create_test_app_with_db(db.clone());
+    let session_id = initialize_mcp_session(&app).await;
+
+    let created = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Recover Me",
+            "content": "---\nwork_shape: epic\n---\n\n# Recover Me\n",
+            "type": "adr"
+        }),
+    )
+    .await;
+
+    let moved = mcp_call_tool(
+        &app,
+        &session_id,
+        "memory_move",
+        json!({
+            "project": project,
+            "identifier": created["permalink"],
+            "type": "proposed_adr"
+        }),
+    )
+    .await;
+
+    assert_eq!(moved["note_type"], "proposed_adr");
+    assert_eq!(moved["folder"], "decisions/proposed");
+    assert!(Path::new(moved["file_path"].as_str().unwrap()).exists());
+
+    let proposals = mcp_call_tool(
+        &app,
+        &session_id,
+        "propose_adr_list",
+        json!({"project": project}),
+    )
+    .await;
+
+    assert!(proposals["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| item["title"] == "Recover Me")
+    }));
+}
+
+#[tokio::test]
+async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_and_lists() {
+    let db = create_test_db();
+    let (proj, _dir) = create_test_project_with_dir(&db).await;
+    let project = &proj.path;
+    let worktree = Path::new(project).join(".djinn/worktrees/proposal-pipeline-regression");
+    std::fs::create_dir_all(worktree.join(".git")).expect("create synthetic .git dir");
+    let app = create_test_app_with_db(db.clone());
+    let worktree_header = worktree.to_string_lossy().to_string();
+    let session_id = initialize_mcp_session_with_headers(
+        &app,
+        &[("x-djinn-worktree-root", &worktree_header)],
+    )
+    .await;
+
+    let created = mcp_call_tool_with_headers(
+        &app,
+        &session_id,
+        "memory_write",
+        json!({
+            "project": project,
+            "title": "Pipeline Regression Draft",
+            "content": "---\nwork_shape: epic\noriginating_spike_id: ih6u-regression\n---\n\n# Pipeline Regression Draft\n\nRecovered draft survives close.\n",
+            "type": "adr"
+        }),
+        &[("x-djinn-worktree-root", &worktree_header)],
+    )
+    .await;
+
+    assert_eq!(created["folder"], "decisions");
+    assert!(
+        worktree
+            .join(".djinn/decisions/pipeline-regression-draft.md")
+            .exists(),
+        "initial draft should exist in the worktree decisions folder"
+    );
+
+    let moved = mcp_call_tool_with_headers(
+        &app,
+        &session_id,
+        "memory_move",
+        json!({
+            "project": project,
+            "identifier": created["permalink"],
+            "type": "proposed_adr"
+        }),
+        &[("x-djinn-worktree-root", &worktree_header)],
+    )
+    .await;
+
+    assert_eq!(moved["note_type"], "proposed_adr");
+    assert_eq!(moved["folder"], "decisions/proposed");
+    assert!(
+        worktree
+            .join(".djinn/decisions/proposed/pipeline-regression-draft.md")
+            .exists(),
+        "recovered draft should exist in worktree proposed folder before close sync"
+    );
+    std::fs::write(
+        worktree.join(".djinn/decisions/proposed/pipeline-regression-draft.md"),
+        "---\ntitle: Pipeline Regression Draft\nwork_shape: epic\noriginating_spike_id: ih6u-regression\n---\n\n# Pipeline Regression Draft\n\nRecovered draft survives close.\n",
+    )
+    .expect("overwrite recovered draft with proposal frontmatter");
+
+    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+    let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+    let worktree_repo = NoteRepository::new(db.clone(), EventBus::noop())
+        .with_worktree_root(Some(worktree.clone()));
+    let synced = worktree_repo
+        .sync_worktree_notes_to_canonical(&project_id, Path::new(project), &worktree)
+        .await
+        .expect("sync worktree notes to canonical memory");
+    assert_eq!(synced, 1);
+
+    let canonical_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let canonical = canonical_repo
+        .get_by_permalink(&project_id, "decisions/proposed/pipeline-regression-draft")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(canonical.note_type, "proposed_adr");
+    assert!(Path::new(&canonical.file_path).exists());
+
+    let proposals = mcp_call_tool(
+        &app,
+        &session_id,
+        "propose_adr_list",
+        json!({"project": project}),
+    )
+    .await;
+
+    assert!(proposals["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["id"] == "pipeline-regression-draft"
+                && item["title"] == "Pipeline Regression Draft"
+        })
+    }));
+}
+
+#[tokio::test]
 async fn mcp_memory_delete_success_and_missing_note_error() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
@@ -271,7 +420,7 @@ async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
     let project = &proj.path;
-    let worktree = tempfile::tempdir().expect("tempdir");
+    let worktree = workspace_tempdir("mcp-memory-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
     let worktree_header = worktree.path().to_string_lossy().to_string();
@@ -347,7 +496,7 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
     let project = &proj.path;
-    let worktree = tempfile::tempdir().expect("tempdir");
+    let worktree = workspace_tempdir("mcp-memory-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
     let worktree_header = worktree.path().to_string_lossy().to_string();

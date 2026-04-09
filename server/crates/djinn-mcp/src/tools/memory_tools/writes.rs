@@ -132,12 +132,20 @@ impl DjinnMcpServer {
 
     /// Move a note to a new location. Updates permalink and resolves inbound links.
     #[tool(
-        description = "Move a note to a new location. Updates permalink and resolves inbound links."
+        description = "Move a note to a new location. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into .djinn/decisions/proposed/ without raw shell mkdir/cp."
     )]
     pub async fn memory_move(
         &self,
         Parameters(p): Parameters<MoveParams>,
     ) -> Json<MemoryNoteResponse> {
         super::move_ops::memory_move(self, Parameters(p)).await
+    }
+
+    pub(crate) async fn memory_move_with_worktree(
+        &self,
+        Parameters(p): Parameters<MoveParams>,
+        worktree_root: Option<PathBuf>,
+    ) -> Json<MemoryNoteResponse> {
+        super::move_ops::memory_move_with_worktree(self, Parameters(p), worktree_root).await
     }
 }

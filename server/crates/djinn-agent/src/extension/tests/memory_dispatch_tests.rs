@@ -168,6 +168,51 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 }
 
 #[tokio::test]
+async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
+    state.task_ops_project_path_override = Some(project.path.clone().into());
+
+    let note_repo = NoteRepository::new(db, EventBus::noop());
+    let note = note_repo
+        .create(
+            &project.id,
+            Path::new(&project.path),
+            "Draft To Recover",
+            "# Draft To Recover",
+            "adr",
+            "[]",
+        )
+        .await
+        .expect("create seed adr");
+
+    let moved = call_tool(
+        &state,
+        "memory_move",
+        Some(
+            serde_json::json!({
+                "identifier": note.permalink,
+                "type": "proposed_adr"
+            })
+            .as_object()
+            .expect("memory_move args object")
+            .clone(),
+        ),
+        Path::new(&project.path),
+        Some(&task.id),
+        Some("architect"),
+        None,
+    )
+    .await
+    .expect("memory_move dispatch should succeed");
+
+    assert_eq!(moved["folder"], "decisions/proposed");
+}
+
+#[tokio::test]
 async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wide() {
     let db = create_test_db();
     let project = create_test_project(&db).await;

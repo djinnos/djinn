@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 240
 expression: names
 ---
 [
@@ -35,6 +36,7 @@ expression: names
   "agent_create",
   "memory_write",
   "memory_edit",
+  "memory_move",
   "task_delete_branch",
   "task_archive_activity",
   "task_reset_counters",

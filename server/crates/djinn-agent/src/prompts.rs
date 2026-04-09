@@ -758,6 +758,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn architect_prompt_requires_read_back_verification_before_file_comments() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Architect, &task, &ctx);
+
+        assert!(
+            prompt.contains("Never use it to claim a file exists, was copied, or was moved until you have read that exact path back successfully in the current session"),
+            "architect prompt should forbid file-existence comments before read-back verification"
+        );
+        assert!(
+            prompt.contains("Never add a task comment claiming a file exists, was copied, or was moved unless you have just verified that exact path by reading it back successfully"),
+            "architect prompt should require read-back verification immediately before file-placement comments"
+        );
+    }
+
     // ── Tools section snapshot tests ─────────────────────────────────────────
 
     #[test]

@@ -1,5 +1,15 @@
 #[cfg(test)]
 mod tests {
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
     use std::sync::Arc;
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
@@ -84,7 +94,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn returns_empty_array_for_note_with_no_associations() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -109,7 +119,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn returns_associations_in_both_directions() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -160,7 +170,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sorted_by_weight_descending() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;
@@ -209,7 +219,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn min_weight_filter_excludes_below_threshold() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel(256);
         let project = make_project(&db, tmp.path()).await;

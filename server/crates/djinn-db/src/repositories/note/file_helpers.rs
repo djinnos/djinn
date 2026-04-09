@@ -8,6 +8,7 @@ use super::*;
 pub fn folder_for_type(note_type: &str) -> &'static str {
     match note_type {
         "adr" => "decisions",
+        "proposed_adr" => "decisions/proposed",
         "pattern" => "patterns",
         "case" => "cases",
         "pitfall" => "pitfalls",
@@ -187,7 +188,8 @@ pub(super) fn infer_note_type(permalink: &str) -> String {
         .map(|(folder, _)| folder)
         .unwrap_or_default()
     {
-        "decisions" | "decisions/proposed" => "adr",
+        "decisions/proposed" => "proposed_adr",
+        "decisions" => "adr",
         "patterns" => "pattern",
         "cases" => "case",
         "pitfalls" => "pitfall",

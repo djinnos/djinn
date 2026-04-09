@@ -1,7 +1,7 @@
+use crate::test_helpers::{
+    create_test_app, initialize_mcp_session, mcp_call_tool, workspace_tempdir,
+};
 use serde_json::json;
-use tempfile::tempdir;
-
-use crate::test_helpers::{create_test_app, initialize_mcp_session, mcp_call_tool};
 
 /// Initialise a temp directory as a git repo with a GitHub origin remote.
 fn init_git_with_github_remote(dir: &std::path::Path) {
@@ -32,7 +32,7 @@ fn init_git_with_github_remote(dir: &std::path::Path) {
 async fn project_add_rejects_dir_without_github_remote() {
     let app = create_test_app();
     let session_id = initialize_mcp_session(&app).await;
-    let dir = tempdir().expect("tempdir");
+    let dir = workspace_tempdir("project-tools-");
     let path = dir.path().to_string_lossy().to_string();
 
     let added = mcp_call_tool(
@@ -57,7 +57,7 @@ async fn project_add_rejects_dir_without_github_remote() {
 async fn project_add_rejects_when_github_not_connected() {
     let app = create_test_app();
     let session_id = initialize_mcp_session(&app).await;
-    let dir = tempdir().expect("tempdir");
+    let dir = workspace_tempdir("project-tools-");
     init_git_with_github_remote(dir.path());
     let path = dir.path().to_string_lossy().to_string();
 
@@ -109,7 +109,7 @@ async fn project_add_duplicate_path_errors() {
     // returns an error (just a different one than before).
     let app = create_test_app();
     let session_id = initialize_mcp_session(&app).await;
-    let dir = tempdir().expect("tempdir");
+    let dir = workspace_tempdir("project-tools-");
     let path = dir.path().to_string_lossy().to_string();
 
     let first = mcp_call_tool(
@@ -349,7 +349,7 @@ async fn project_config_set_verification_rules_empty_commands_returns_error() {
 async fn project_settings_validate_reports_valid_and_invalid() {
     let app = create_test_app();
     let session_id = initialize_mcp_session(&app).await;
-    let dir = tempdir().expect("tempdir");
+    let dir = workspace_tempdir("project-tools-");
     let djinn = dir.path().join(".djinn");
     std::fs::create_dir_all(&djinn).expect("create .djinn");
 

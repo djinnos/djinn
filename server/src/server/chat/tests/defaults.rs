@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::server::chat::prompt::system_message::build_system_message;
 use crate::server::chat::{apply_chat_skills, chat_effective_config};
+use crate::test_helpers::workspace_tempdir;
 
 use super::super::DJINN_CHAT_SYSTEM_PROMPT;
 
@@ -19,7 +20,7 @@ fn write_skill_file(project_path: &Path, name: &str, body: &str) {
 
 #[test]
 fn chat_effective_config_uses_named_chat_defaults() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workspace_tempdir("chat-defaults-");
     write_settings_file(
         dir.path(),
         r#"{
@@ -36,7 +37,7 @@ fn chat_effective_config_uses_named_chat_defaults() {
 
 #[test]
 fn apply_chat_skills_adds_global_skills_to_system_prompt() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workspace_tempdir("chat-defaults-");
     write_settings_file(
         dir.path(),
         r#"{
