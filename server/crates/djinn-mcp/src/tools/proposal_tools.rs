@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::epic_ops::EpicModel;
+use crate::tools::task_tools::ErrorOr;
 use crate::tools::task_tools::ops::{CommentTaskRequest, add_task_comment};
 use djinn_db::EpicRepository;
 
@@ -533,13 +534,13 @@ impl DjinnMcpServer {
         let feedback_target = if let Some(originating_spike_id) =
             adr.originating_spike_id.as_deref()
         {
-            let project_id = match self.require_project_id(&p.project).await {
+            let project_id = match self.require_project_id_public(&p.project).await {
                 Ok(id) => id,
                 Err(e) => {
                     return Json(ProposeAdrRejectResponse {
                         ok: false,
                         feedback_target: None,
-                        error: Some(e.message),
+                        error: Some(e.error),
                     });
                 }
             };
@@ -561,16 +562,14 @@ impl DjinnMcpServer {
             .await
             .0
             {
-                crate::tools::ErrorOr::Ok(_) => {
-                    Some(format!("originating spike {originating_spike_id}"))
-                }
-                crate::tools::ErrorOr::Error(error) => {
+                ErrorOr::Ok(_) => Some(format!("originating spike {originating_spike_id}")),
+                ErrorOr::Error(error) => {
                     return Json(ProposeAdrRejectResponse {
                         ok: false,
                         feedback_target: None,
                         error: Some(format!(
                             "failed to persist rejection feedback to originating spike {originating_spike_id}: {}",
-                            error.message
+                            error.error
                         )),
                     });
                 }
