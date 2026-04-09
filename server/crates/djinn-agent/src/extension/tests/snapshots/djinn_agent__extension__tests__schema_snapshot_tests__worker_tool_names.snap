@@ -1,5 +1,5 @@
 ---
-source: crates/djinn-agent/src/extension/tests.rs
+source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
 expression: names
 ---
 [
@@ -16,5 +16,11 @@ expression: names
   "github_search",
   "output_view",
   "output_grep",
-  "submit_review"
+  "write",
+  "edit",
+  "apply_patch",
+  "memory_write",
+  "memory_edit",
+  "request_lead",
+  "submit_work"
 ]

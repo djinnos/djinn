@@ -157,20 +157,6 @@ fn resolve_path_handles_relative_absolute_and_normalization() {
     assert_eq!(normalized, base.join("Cargo.toml"));
 }
 
-fn tool_names(schemas: &[serde_json::Value]) -> Vec<&str> {
-    schemas
-        .iter()
-        .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
-        .collect()
-}
-
-fn tool_schema<'a>(schemas: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
-    schemas
-        .iter()
-        .find(|schema| schema.get("name").and_then(|n| n.as_str()) == Some(name))
-        .expect("tool schema present")
-}
-
 #[test]
 fn tool_schemas_include_concurrency_metadata() {
     let worker = tool_schemas_worker();

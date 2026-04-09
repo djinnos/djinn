@@ -1,5 +1,5 @@
 ---
-source: crates/djinn-agent/src/extension/tests.rs
+source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
 expression: "serde_json::to_value(tool_code_graph()).unwrap()"
 ---
 {
