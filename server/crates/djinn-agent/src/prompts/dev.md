@@ -8,7 +8,13 @@ Your sole job is to write working code that satisfies the acceptance criteria. I
 
 ## Workspace Rules
 
-- **Outside access escape hatch:** only set `external_dir=true` when intentional; default behavior blocks commands that touch paths outside workspace and `/tmp`.
+- **Outside access escape hatch:** only set `external_dir=true` when intentional; default behavior blocks commands that touch paths outside the workspace.
+- **Writable paths in the sandbox.** Your shell commands can write freely anywhere inside your task worktree (the directory you're already in). Outside the worktree, the sandbox allows writes only to:
+  - `$HOME/.cache/djinn/` (resolves via `$XDG_CACHE_HOME/djinn/` when set) — preferred location for any agent scratch state that should persist briefly across shell calls but does not belong in the task commit.
+  - `/var/tmp/` — disk-backed, acceptable for large intermediate files when the cache dir is the wrong shape.
+  - NOT `/tmp` — `/tmp` has been intentionally removed from the sandbox allow list. Writes there fail with `Permission denied`. Do not retry or work around it; pick one of the two paths above.
+- **Build artifacts stay in the worktree.** Do not set `CARGO_TARGET_DIR`, `npm_config_cache`, `PIP_CACHE_DIR`, or similar env vars to a path outside your worktree. The defaults (`./target/`, `./node_modules/`, etc.) are correct — the worktree is fully writable, so there is no reason to redirect build output elsewhere. Redirecting to a sandbox-blocked path will silently fall back and produce a polluted diff.
+- **Never commit build artifacts.** Before staging, run `git status` (or `git diff --name-only --cached`) and confirm no build output directories slipped in. Common offenders: `target/`, `.target/`, `node_modules/`, `__pycache__/`, `.pytest_cache/`, `dist/`, `build/`, `.cache/`. If any appear in your diff, either add them to `.gitignore` in the same commit or exclude them from staging. Ship a clean diff even if the project's `.gitignore` is incomplete.
 
 {{merge_failure_context}}
 

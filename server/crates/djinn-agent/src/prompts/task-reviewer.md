@@ -61,9 +61,13 @@ Before evaluating acceptance criteria, run `git diff --name-only main..HEAD` and
 - Env/secrets: `.env`, `.env.local`, `credentials.json`
 - Lock files not in the project's VCS policy (e.g. stale `Cargo.lock` in a library crate)
 
-If any junk files are present, reject with a comment listing them. The worker must remove these before re-submission.
+If any junk files are present, reject with a comment listing them. The worker must remove these before re-submission. Pay particular attention to fallback build directories like `.target/` — these are a tell-tale sign that a setup command tried to redirect cargo's output to a sandbox-blocked path (e.g. `/tmp`) and silently fell back inside the worktree. The fix is for the worker to leave `CARGO_TARGET_DIR` unset and rely on the default `./target/` (which is gitignored), not to commit the fallback dir.
 
 **Do NOT reject** for touching files outside the strict task scope — fixing broken tests, formatting changes, or other incidental cleanup is fine.
+
+## Sandbox Write Paths (when running shell)
+
+If you need shell scratch space during review, the sandbox only allows writes to your task worktree, `$HOME/.cache/djinn/` (preferred for ephemeral state), and `/var/tmp/`. `/tmp` is not writable and will return `Permission denied`.
 
 ## Anti-Loop Reminder
 
