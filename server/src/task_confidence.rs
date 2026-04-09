@@ -245,6 +245,7 @@ async fn record_confidence_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use djinn_core::events::DjinnEventEnvelope;
@@ -256,6 +257,20 @@ mod tests {
 
     const WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
+    fn temp_project_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    async fn create_test_project(
+        project_repo: &djinn_db::ProjectRepository,
+        slug: &str,
+        path_name: &str,
+    ) -> djinn_db::Result<djinn_core::models::Project> {
+        let path = temp_project_path(path_name);
+        std::fs::create_dir_all(&path).unwrap();
+        project_repo.create(slug, path.to_str().unwrap()).await
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn applies_task_success_signal_to_referenced_notes() {
         let state = test_helpers::test_app_state_in_memory().await;
@@ -265,13 +280,13 @@ mod tests {
         let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
         let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
 
-        let project = project_repo
-            .create(
-                "task-confidence-project",
-                "/tmp/djinn-task-confidence-project",
-            )
-            .await
-            .unwrap();
+        let project = create_test_project(
+            &project_repo,
+            "task-confidence-project",
+            "djinn-task-confidence-project",
+        )
+        .await
+        .unwrap();
 
         std::fs::create_dir_all(&project.path).unwrap();
 
@@ -356,13 +371,13 @@ mod tests {
         let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
         let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
 
-        let project = project_repo
-            .create(
-                "task-confidence-project-empty",
-                "/tmp/djinn-task-confidence-empty",
-            )
-            .await
-            .unwrap();
+        let project = create_test_project(
+            &project_repo,
+            "task-confidence-project-empty",
+            "djinn-task-confidence-empty",
+        )
+        .await
+        .unwrap();
 
         let task = task_repo
             .create_in_project(
@@ -413,13 +428,13 @@ mod tests {
         let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
         let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
 
-        let project = project_repo
-            .create(
-                "task-confidence-project-missing",
-                "/tmp/djinn-task-confidence-missing",
-            )
-            .await
-            .unwrap();
+        let project = create_test_project(
+            &project_repo,
+            "task-confidence-project-missing",
+            "djinn-task-confidence-missing",
+        )
+        .await
+        .unwrap();
 
         let task = task_repo
             .create_in_project(
@@ -483,13 +498,13 @@ mod tests {
         let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
         let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
 
-        let project = project_repo
-            .create(
-                "task-confidence-project-dupe",
-                "/tmp/djinn-task-confidence-dupe",
-            )
-            .await
-            .unwrap();
+        let project = create_test_project(
+            &project_repo,
+            "task-confidence-project-dupe",
+            "djinn-task-confidence-dupe",
+        )
+        .await
+        .unwrap();
 
         let note = note_repo
             .create(
