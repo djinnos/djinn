@@ -109,10 +109,10 @@ impl Drop for CargoTargetDirGuard {
 }
 
 /// Indexer entrypoint for callers that **already hold** the server-wide
-/// `IndexerLock` (`AppState::indexer_lock`). Skips the lock acquisition
-/// a higher-level facade may perform, but otherwise behaves
-/// identically — including installing the [`CargoTargetDirGuard`] when
-/// `target_dir` is supplied.
+/// `IndexerLock` (`AppState::indexer_lock`). Behaves like the standard
+/// indexer path, including installing the [`CargoTargetDirGuard`] when
+/// `target_dir` is supplied, but assumes the caller has already provided
+/// the required single-flight lock.
 ///
 /// # Lock contract
 ///
@@ -123,8 +123,7 @@ impl Drop for CargoTargetDirGuard {
 ///
 /// Used by `mcp_bridge::ensure_canonical_graph`, which acquires the lock
 /// itself before doing several other operations and then needs to call
-/// the indexer without re-entering the lock. Replaces the previous
-/// "fresh dummy mutex" workaround.
+/// the indexer without re-entering the lock.
 pub(crate) async fn run_indexers_already_locked(
     project_root: impl AsRef<Path>,
     output_root: impl AsRef<Path>,
