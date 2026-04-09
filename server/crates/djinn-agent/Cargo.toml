@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
 async-stream = "0.3"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form", "query"] }
 rmcp = { version = "0.16", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 regex = "1.12.3"

@@ -1,23 +1,19 @@
-//! GitHub code search via grep.app — built-in agent tool.
+//! GitHub code search via the official GitHub Code Search API.
 //!
-//! Wraps the public grep.app API to let agents search across millions of
-//! GitHub repositories for code patterns, usage examples, and implementations.
+//! Uses the user's GitHub OAuth token (from djinn sign-in) to search across
+//! public GitHub repositories for code patterns, usage examples, and
+//! implementations.
 
-use regex::Regex;
-use std::sync::LazyLock;
+use djinn_provider::oauth::github_app::GitHubAppTokens;
+use djinn_provider::repos::CredentialRepository;
 
-const API_URL: &str = "https://grep.app/api/search";
+const API_URL: &str = "https://api.github.com/search/code";
 const MAX_RESULTS: usize = 15;
-const MAX_SNIPPET_CHARS: usize = 600;
 const MAX_SNIPPET_LINES: usize = 12;
 
-static HTML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
-static DATA_LINE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"data-line="(\d+)""#).unwrap());
-
-/// Execute a search against grep.app and return structured JSON.
+/// Execute a code search against the GitHub Code Search API.
 pub(crate) async fn search(
-    client: &reqwest::Client,
+    cred_repo: &CredentialRepository,
     query: &str,
     language: Option<&str>,
     repo: Option<&str>,
@@ -31,12 +27,14 @@ pub(crate) async fn search(
         return Err("query too long (max 1000 chars)".into());
     }
 
-    // Build URL with query parameters.
-    let mut url = format!("{}?q={}", API_URL, urlencoded(query));
+    // Build the GitHub code search query string.
+    // Format: "query language:rust repo:owner/name path:src/"
+    let mut q = query.to_string();
+
     if let Some(l) = language {
         let l = l.trim();
         if !l.is_empty() {
-            url.push_str(&format!("&f.lang={}", urlencoded(l)));
+            q.push_str(&format!(" language:{l}"));
         }
     }
     if let Some(r) = repo {
@@ -45,29 +43,61 @@ pub(crate) async fn search(
             if !r.contains('/') || r.matches('/').count() != 1 {
                 return Err("repo must be in 'owner/repo' format".into());
             }
-            url.push_str(&format!("&f.repo={}", urlencoded(r)));
+            q.push_str(&format!(" repo:{r}"));
         }
     }
     if let Some(p) = path {
         let p = p.trim();
         if !p.is_empty() {
-            url.push_str(&format!("&f.path={}", urlencoded(p)));
+            q.push_str(&format!(" path:{p}"));
         }
     }
 
+    // Load the user's GitHub OAuth token.
+    let tokens = GitHubAppTokens::load_from_db(cred_repo)
+        .await
+        .ok_or("GitHub OAuth tokens not found — please authenticate first")?;
+
+    let client = reqwest::Client::builder()
+        .user_agent("djinn-agent/1.0")
+        .build()
+        .map_err(|e| format!("http client build failed: {e}"))?;
+
     let resp = client
-        .get(&url)
+        .get(API_URL)
+        .query(&[("q", &q), ("per_page", &MAX_RESULTS.to_string())])
+        .bearer_auth(&tokens.access_token)
+        .header("Accept", "application/vnd.github.text-match+json")
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
 
     let status = resp.status();
-    if status.as_u16() == 429 {
-        return Err("rate limited by grep.app — try again shortly".into());
+    if status.as_u16() == 401 {
+        return Err(
+            "GitHub API returned 401 — token may have been revoked, please re-authenticate".into(),
+        );
+    }
+    if status.as_u16() == 403 {
+        // Check for rate limiting.
+        let remaining = resp
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+        if remaining == Some(0) {
+            return Err("GitHub API rate limit exhausted — try again shortly".into());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API returned 403: {body}"));
+    }
+    if status.as_u16() == 422 {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API rejected query (422): {body}"));
     }
     if !status.is_success() {
-        return Err(format!("grep.app returned HTTP {status}"));
+        return Err(format!("GitHub API returned HTTP {status}"));
     }
 
     let body: serde_json::Value = resp
@@ -80,47 +110,36 @@ pub(crate) async fn search(
 
 fn parse_response(query: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
     let total_results = body
-        .pointer("/facets/count")
+        .get("total_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    let hits = body
-        .pointer("/hits/hits")
+    let items = body
+        .get("items")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
 
-    let mut results = Vec::with_capacity(MAX_RESULTS.min(hits.len()));
+    let mut results = Vec::with_capacity(MAX_RESULTS.min(items.len()));
 
-    for hit in hits.iter().take(MAX_RESULTS) {
-        let repository = hit
-            .pointer("/repo/raw")
+    for item in items.iter().take(MAX_RESULTS) {
+        let repository = item
+            .pointer("/repository/full_name")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let file_path = hit
-            .pointer("/path/raw")
+        let file_path = item
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let branch = hit
-            .pointer("/branch/raw")
-            .and_then(|v| v.as_str())
-            .unwrap_or("main");
 
-        let html_snippet = hit
-            .pointer("/content/snippet")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let line_numbers = extract_line_numbers(html_snippet);
-        let clean_text = clean_html(html_snippet);
         let language = language_from_path(file_path);
-        let snippet = truncate_snippet(&clean_text);
+
+        // Extract text-match fragments (requires Accept: application/vnd.github.text-match+json).
+        let snippet = extract_text_matches(item);
 
         results.push(serde_json::json!({
             "repository": repository,
             "file_path": file_path,
-            "branch": branch,
-            "line_numbers": line_numbers,
             "language": language,
             "snippet": snippet,
         }));
@@ -134,59 +153,35 @@ fn parse_response(query: &str, body: &serde_json::Value) -> Result<serde_json::V
     }))
 }
 
-fn clean_html(html: &str) -> String {
-    let text = HTML_TAG_RE.replace_all(html, "");
-    text.replace("&quot;", "\"")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-}
+/// Extract and combine text-match fragments from a GitHub code search result.
+fn extract_text_matches(item: &serde_json::Value) -> String {
+    let text_matches = match item.get("text_matches").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return String::new(),
+    };
 
-fn extract_line_numbers(html: &str) -> Vec<u32> {
-    DATA_LINE_RE
-        .captures_iter(html)
-        .filter_map(|cap| cap[1].parse().ok())
-        .collect()
+    let mut fragments: Vec<String> = Vec::new();
+    for tm in text_matches {
+        if let Some(fragment) = tm.get("fragment").and_then(|v| v.as_str()) {
+            let truncated = truncate_snippet(fragment);
+            if !truncated.is_empty() {
+                fragments.push(truncated);
+            }
+        }
+    }
+    fragments.join("\n---\n")
 }
 
 fn truncate_snippet(text: &str) -> String {
     let mut lines: Vec<&str> = Vec::new();
-    let mut char_count = 0;
-
     for line in text.lines() {
         let trimmed = line.trim_end();
-        if char_count + trimmed.len() > MAX_SNIPPET_CHARS {
-            break;
-        }
         lines.push(trimmed);
-        char_count += trimmed.len() + 1;
         if lines.len() >= MAX_SNIPPET_LINES {
             break;
         }
     }
-
     lines.join("\n")
-}
-
-/// Percent-encode a string for use in URL query parameters.
-fn urlencoded(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push('+'),
-            _ => {
-                out.push('%');
-                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
-                out.push(char::from(b"0123456789ABCDEF"[(b & 0xf) as usize]));
-            }
-        }
-    }
-    out
 }
 
 fn language_from_path(path: &str) -> &'static str {
@@ -233,23 +228,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clean_html_strips_tags() {
-        let html = r#"<span class="hl">fn</span> main() {}"#;
-        assert_eq!(clean_html(html), "fn main() {}");
-    }
-
-    #[test]
-    fn clean_html_decodes_entities() {
-        assert_eq!(clean_html("a &amp; b &lt; c"), "a & b < c");
-    }
-
-    #[test]
-    fn extract_line_numbers_works() {
-        let html = r#"<tr data-line="10"><td>code</td></tr><tr data-line="25"><td>more</td></tr>"#;
-        assert_eq!(extract_line_numbers(html), vec![10, 25]);
-    }
-
-    #[test]
     fn language_detection() {
         assert_eq!(language_from_path("src/main.rs"), "rust");
         assert_eq!(language_from_path("index.tsx"), "typescript");
@@ -258,9 +236,9 @@ mod tests {
 
     #[test]
     fn truncate_respects_limits() {
-        let long = "a".repeat(700);
+        let long = (0..20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
         let result = truncate_snippet(&long);
-        assert!(result.len() <= MAX_SNIPPET_CHARS);
+        assert_eq!(result.lines().count(), MAX_SNIPPET_LINES);
     }
 
     #[test]
@@ -274,27 +252,20 @@ mod tests {
     #[test]
     fn parse_typical_response() {
         let body = serde_json::json!({
-            "facets": { "count": 42 },
-            "hits": {
-                "hits": [{
-                    "repo": { "raw": "tokio-rs/tokio" },
-                    "path": { "raw": "tokio/src/runtime/mod.rs" },
-                    "branch": { "raw": "main" },
-                    "content": {
-                        "snippet": "<tr data-line=\"10\"><td><span class=\"hl\">pub</span> fn new()</td></tr>"
-                    }
+            "total_count": 42,
+            "items": [{
+                "repository": { "full_name": "tokio-rs/tokio" },
+                "path": "tokio/src/runtime/mod.rs",
+                "text_matches": [{
+                    "fragment": "pub fn new() -> Runtime {\n    // create runtime\n}"
                 }]
-            }
+            }]
         });
         let result = parse_response("pub fn new", &body).unwrap();
         assert_eq!(result["total_results"], 42);
         assert_eq!(result["results"].as_array().unwrap().len(), 1);
         assert_eq!(result["results"][0]["repository"], "tokio-rs/tokio");
         assert_eq!(result["results"][0]["language"], "rust");
-        assert_eq!(
-            result["results"][0]["line_numbers"],
-            serde_json::json!([10])
-        );
         assert!(
             result["results"][0]["snippet"]
                 .as_str()
@@ -304,9 +275,22 @@ mod tests {
     }
 
     #[test]
-    fn urlencoded_basic() {
-        assert_eq!(urlencoded("hello world"), "hello+world");
-        assert_eq!(urlencoded("a/b"), "a%2Fb");
-        assert_eq!(urlencoded("foo"), "foo");
+    fn extract_text_matches_empty() {
+        let item = serde_json::json!({});
+        assert_eq!(extract_text_matches(&item), "");
+    }
+
+    #[test]
+    fn extract_text_matches_multiple() {
+        let item = serde_json::json!({
+            "text_matches": [
+                { "fragment": "first match" },
+                { "fragment": "second match" }
+            ]
+        });
+        let result = extract_text_matches(&item);
+        assert!(result.contains("first match"));
+        assert!(result.contains("second match"));
+        assert!(result.contains("---"));
     }
 }
