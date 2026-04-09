@@ -146,11 +146,6 @@ impl RepoDependencyGraph {
         &self.graph[index]
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn edge(&self, edge_index: petgraph::graph::EdgeIndex) -> &RepoGraphEdge {
-        &self.graph[edge_index]
-    }
-
     pub(crate) fn node_count(&self) -> usize {
         self.graph.node_count()
     }
@@ -220,30 +215,6 @@ impl RepoDependencyGraph {
             .edges_directed(node_index, direction)
             .map(|edge| edge.weight().weight)
             .sum()
-    }
-
-    /// Total inbound edge weight at a node (publicly exposed for ops layer).
-    #[allow(dead_code)]
-    pub(crate) fn inbound_edge_weight(&self, node_index: NodeIndex) -> f64 {
-        self.total_edge_weight(node_index, Incoming)
-    }
-
-    /// Total outbound edge weight at a node (publicly exposed for ops layer).
-    #[allow(dead_code)]
-    pub(crate) fn outbound_edge_weight(&self, node_index: NodeIndex) -> f64 {
-        self.total_edge_weight(node_index, Outgoing)
-    }
-
-    /// Total in-degree at a node (count of inbound edges, regardless of weight).
-    #[allow(dead_code)]
-    pub(crate) fn in_degree(&self, node_index: NodeIndex) -> usize {
-        self.graph.edges_directed(node_index, Incoming).count()
-    }
-
-    /// Total out-degree at a node.
-    #[allow(dead_code)]
-    pub(crate) fn out_degree(&self, node_index: NodeIndex) -> usize {
-        self.graph.edges_directed(node_index, Outgoing).count()
     }
 
     /// Search the name index by lowercased display-name. Returns hits ranked
