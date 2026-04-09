@@ -540,19 +540,19 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
                     .content
                     .iter()
                     .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                && i + 1 < rest.len()
+                && !kept_set.contains(&(i + 1))
             {
-                if i + 1 < rest.len() && !kept_set.contains(&(i + 1)) {
-                    let next = &rest[i + 1];
-                    if next.role == Role::User
-                        && next
-                            .content
-                            .iter()
-                            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-                    {
-                        accumulated += estimate_message_chars(next);
-                        kept_set.insert(i + 1);
-                        changed = true;
-                    }
+                let next = &rest[i + 1];
+                if next.role == Role::User
+                    && next
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                {
+                    accumulated += estimate_message_chars(next);
+                    kept_set.insert(i + 1);
+                    changed = true;
                 }
             }
         }

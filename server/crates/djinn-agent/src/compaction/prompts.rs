@@ -1,4 +1,4 @@
-use crate::message::{Conversation, Message, Role};
+use crate::message::{Message, Role};
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
 #[derive(Debug, Clone)]
@@ -266,6 +266,7 @@ pub(super) fn rebuild_partial_compaction_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::Conversation;
 
     #[test]
     fn compaction_prompt_varies_by_context() {
@@ -336,6 +337,11 @@ mod tests {
         assert_eq!(rebuilt[0].role, Role::System);
         assert!(
             rebuilt[2]
+                .text_content()
+                .contains("[Partial compaction: the following is a summary of 3 messages")
+        );
+        assert!(
+            rebuilt[3]
                 .text_content()
                 .contains("Part of your context was compacted")
         );
