@@ -1313,16 +1313,30 @@ mod tests {
 
         // Pausing a project marks it paused in project-scoped status.
         handle.pause_project(project_id).await.unwrap();
-        handle
-            .wait_for_project_status(project_id, |s| s.paused)
-            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if handle.get_project_status(project_id).unwrap().paused {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for paused project status");
         assert!(handle.get_project_status(project_id).unwrap().paused);
 
         // Resuming removes it from the paused set.
         handle.resume_project(project_id).await.unwrap();
-        handle
-            .wait_for_project_status(project_id, |s| !s.paused)
-            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if !handle.get_project_status(project_id).unwrap().paused {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for resumed project status");
         assert!(!handle.get_project_status(project_id).unwrap().paused);
     }
 
