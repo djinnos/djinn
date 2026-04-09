@@ -24,6 +24,18 @@ const epicA: Epic = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
+const draftEpic: Epic = {
+  id: "epic-draft",
+  title: "Epic Draft",
+  description: "",
+  status: "drafting",
+  owner: null,
+  priority: 2,
+  issue_type: "epic",
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+};
+
 const epicB: Epic = {
   id: "epic-b",
   title: "Epic Beta",
@@ -36,7 +48,9 @@ const epicB: Epic = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
-const makeTask = (overrides: Partial<Task> & Pick<Task, "id" | "title" | "status">): Task => ({
+const makeTask = (
+  overrides: Partial<Task> & Pick<Task, "id" | "title" | "status">,
+): Task => ({
   id: overrides.id,
   title: overrides.title,
   status: overrides.status,
@@ -54,50 +68,97 @@ const makeTask = (overrides: Partial<Task> & Pick<Task, "id" | "title" | "status
 describe("KanbanBoard", () => {
   it("renders status columns with tasks in correct columns and header counts", () => {
     const tasks: Task[] = [
-      makeTask({ id: "t-open", title: "Open task", status: "open", epic_id: epicA.id }),
-      makeTask({ id: "t-flight", title: "Flight task", status: "in_progress", epic_id: epicA.id }),
-      makeTask({ id: "t-done", title: "Done task", status: "closed", epic_id: epicA.id }),
+      makeTask({
+        id: "t-open",
+        title: "Open task",
+        status: "open",
+        epic_id: epicA.id,
+      }),
+      makeTask({
+        id: "t-flight",
+        title: "Flight task",
+        status: "in_progress",
+        epic_id: epicA.id,
+      }),
+      makeTask({
+        id: "t-done",
+        title: "Done task",
+        status: "closed",
+        epic_id: epicA.id,
+      }),
     ];
 
     render(
       <KanbanBoard
         tasks={tasks}
-        epics={new Map([
-          [epicA.id, epicA],
-          [epicB.id, epicB],
-        ])}
+        epics={
+          new Map([
+            [epicA.id, epicA],
+            [epicB.id, epicB],
+          ])
+        }
         disableSearchParamSync
-      />
+      />,
     );
 
     const openCol = screen.getByText("Open").closest(".flex.flex-col");
-    const inFlightCol = screen.getByText("In Progress").closest(".flex.flex-col");
+    const inFlightCol = screen
+      .getByText("In Progress")
+      .closest(".flex.flex-col");
     const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
 
     expect(openCol).toHaveTextContent("1");
     expect(inFlightCol).toHaveTextContent("1");
     expect(doneCol).toHaveTextContent("1");
 
-    expect(within(openCol!.parentElement as HTMLElement).getByText("Open task")).toBeInTheDocument();
-    expect(within(inFlightCol!.parentElement as HTMLElement).getByText("Flight task")).toBeInTheDocument();
-    expect(within(doneCol!.parentElement as HTMLElement).getByText("Done task")).toBeInTheDocument();
+    expect(
+      within(openCol!.parentElement as HTMLElement).getByText("Open task"),
+    ).toBeInTheDocument();
+    expect(
+      within(inFlightCol!.parentElement as HTMLElement).getByText(
+        "Flight task",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(doneCol!.parentElement as HTMLElement).getByText("Done task"),
+    ).toBeInTheDocument();
   });
 
   it("filters by epic and text search", async () => {
     const user = userEvent.setup();
     const tasks: Task[] = [
-      makeTask({ id: "t-a-1", title: "Alpha target task", status: "open", epic_id: epicA.id, priority: 1 }),
-      makeTask({ id: "t-a-2", title: "Alpha other", status: "open", epic_id: epicA.id, priority: 1 }),
-      makeTask({ id: "t-b-1", title: "Beta target task", status: "open", epic_id: epicB.id, priority: 2 }),
+      makeTask({
+        id: "t-a-1",
+        title: "Alpha target task",
+        status: "open",
+        epic_id: epicA.id,
+        priority: 1,
+      }),
+      makeTask({
+        id: "t-a-2",
+        title: "Alpha other",
+        status: "open",
+        epic_id: epicA.id,
+        priority: 1,
+      }),
+      makeTask({
+        id: "t-b-1",
+        title: "Beta target task",
+        status: "open",
+        epic_id: epicB.id,
+        priority: 2,
+      }),
     ];
 
     render(
       <KanbanBoard
         tasks={tasks}
-        epics={new Map([
-          [epicA.id, epicA],
-          [epicB.id, epicB],
-        ])}
+        epics={
+          new Map([
+            [epicA.id, epicA],
+            [epicB.id, epicB],
+          ])
+        }
         disableSearchParamSync
       />,
     );
@@ -119,9 +180,27 @@ describe("KanbanBoard", () => {
 
   it("hides review and breakdown tasks from done/merged column", () => {
     const tasks: Task[] = [
-      makeTask({ id: "t-done-task", title: "Regular done", status: "closed", issue_type: "task", epic_id: epicA.id }),
-      makeTask({ id: "t-done-review", title: "Done review", status: "closed", issue_type: "review", epic_id: epicA.id }),
-      makeTask({ id: "t-done-breakdown", title: "Done breakdown", status: "closed", issue_type: "decomposition", epic_id: epicA.id }),
+      makeTask({
+        id: "t-done-task",
+        title: "Regular done",
+        status: "closed",
+        issue_type: "task",
+        epic_id: epicA.id,
+      }),
+      makeTask({
+        id: "t-done-review",
+        title: "Done review",
+        status: "closed",
+        issue_type: "review",
+        epic_id: epicA.id,
+      }),
+      makeTask({
+        id: "t-done-breakdown",
+        title: "Done breakdown",
+        status: "closed",
+        issue_type: "decomposition",
+        epic_id: epicA.id,
+      }),
     ];
 
     render(
@@ -129,7 +208,7 @@ describe("KanbanBoard", () => {
         tasks={tasks}
         epics={new Map([[epicA.id, epicA]])}
         disableSearchParamSync
-      />
+      />,
     );
 
     const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
@@ -143,5 +222,28 @@ describe("KanbanBoard", () => {
     render(<KanbanBoard tasks={[]} epics={new Map()} disableSearchParamSync />);
 
     expect(screen.getAllByText("No tasks")).toHaveLength(4);
+  });
+
+  it("shows drafting epics in the Open column with an empty state when they have no tasks", () => {
+    render(
+      <KanbanBoard
+        tasks={[]}
+        epics={
+          new Map([
+            [epicA.id, epicA],
+            [draftEpic.id, draftEpic],
+          ])
+        }
+        disableSearchParamSync
+      />,
+    );
+
+    const openCol = screen.getByText("Open").closest(".flex.flex-col")
+      ?.parentElement as HTMLElement;
+
+    expect(within(openCol).getByText("Epic Alpha")).toBeInTheDocument();
+    expect(within(openCol).getByText("Epic Draft")).toBeInTheDocument();
+    expect(within(openCol).getByText("Drafting")).toBeInTheDocument();
+    expect(within(openCol).getAllByText("No tasks yet")).toHaveLength(2);
   });
 });
