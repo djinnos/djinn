@@ -498,7 +498,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worktree_has_uncommitted_changes_detects_untracked_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_helpers::test_tempdir("djinn-coordinator-");
         init_git_repo(tmp.path()).await;
 
         // Clean repo: no signal.
@@ -522,7 +522,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worktree_has_uncommitted_changes_detects_modified_tracked_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_helpers::test_tempdir("djinn-coordinator-");
         init_git_repo(tmp.path()).await;
 
         std::fs::write(tmp.path().join("README.md"), "base modified\n").unwrap();
@@ -541,7 +541,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worktree_has_uncommitted_changes_returns_false_for_non_git_dir() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_helpers::test_tempdir("djinn-coordinator-");
         std::fs::write(tmp.path().join("loose-file.md"), "x").unwrap();
         assert!(!CoordinatorActor::worktree_has_uncommitted_changes(
             tmp.path()
