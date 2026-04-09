@@ -39,7 +39,6 @@ pub struct CoordinatorDeps {
 
 impl CoordinatorDeps {
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         events_tx: broadcast::Sender<DjinnEventEnvelope>,
         cancel: CancellationToken,
