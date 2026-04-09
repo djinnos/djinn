@@ -897,6 +897,10 @@ impl RepoGraphOps for RepoGraphBridge {
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "mcp_bridge preserves canonical-graph facade shims during extraction"
+)]
 pub(crate) async fn ensure_canonical_graph(
     state: &AppState,
     project_id: &str,
@@ -911,10 +915,18 @@ pub(crate) async fn ensure_canonical_graph(
     crate::canonical_graph::ensure_canonical_graph(state, project_id, project_root).await
 }
 
+#[expect(
+    dead_code,
+    reason = "mcp_bridge preserves canonical-graph facade shims during extraction"
+)]
 pub(crate) async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
     crate::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
 }
 
+#[expect(
+    dead_code,
+    reason = "mcp_bridge preserves canonical-graph facade shims during extraction"
+)]
 pub(crate) async fn canonical_graph_cache_pinned_commit_for(
     index_tree_path: &Path,
 ) -> Option<String> {
