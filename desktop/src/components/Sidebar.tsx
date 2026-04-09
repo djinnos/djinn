@@ -62,11 +62,17 @@ interface NavItemProps {
 }
 
 function NavItem({ icon, label, hotkey, badgeCount, isActive, onClick }: NavItemProps) {
+  const pendingProposalLabel =
+    typeof badgeCount === 'number' && badgeCount > 0
+      ? `${label} has ${badgeCount} pending proposals`
+      : undefined;
+
   return (
     <Button
       variant={isActive ? 'secondary' : 'ghost'}
       size="default"
       onClick={onClick}
+      aria-label={pendingProposalLabel}
       className={cn(
         'w-full justify-start gap-3 transition-all duration-200',
         'h-9 px-3',
@@ -78,10 +84,7 @@ function NavItem({ icon, label, hotkey, badgeCount, isActive, onClick }: NavItem
       </span>
       <span className="text-sm font-medium truncate flex-1 text-left">{label}</span>
       {typeof badgeCount === 'number' && badgeCount > 0 ? (
-        <span
-          className="inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[11px] font-semibold leading-none text-primary-foreground"
-          aria-label={`${label} has ${badgeCount} pending proposals`}
-        >
+        <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[11px] font-semibold leading-none text-primary-foreground">
           {badgeCount}
         </span>
       ) : null}

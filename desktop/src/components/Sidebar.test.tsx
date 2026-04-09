@@ -26,7 +26,13 @@ describe('Sidebar component', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.mocked(callMcpTool).mockReset();
-    vi.mocked(callMcpTool).mockResolvedValue({ items: [] } as never);
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === 'propose_adr_list') {
+        return { items: [] } as never;
+      }
+
+      return {} as never;
+    });
 
     useSidebarStore.setState({
       activeSection: 'kanban',
@@ -125,14 +131,26 @@ describe('Sidebar component', () => {
   });
 
   it('shows a Pulse badge matching the pending proposal count for the selected project', async () => {
-    vi.mocked(callMcpTool).mockResolvedValue({
-      items: [
-        { id: 'adr-1', title: 'Draft 1', path: '/tmp/adr-1.md' },
-        { id: 'adr-2', title: 'Draft 2', path: '/tmp/adr-2.md' },
-      ],
-    } as never);
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === 'propose_adr_list') {
+        return {
+          items: [
+            { id: 'adr-1', title: 'Draft 1', path: '/tmp/adr-1.md' },
+            { id: 'adr-2', title: 'Draft 2', path: '/tmp/adr-2.md' },
+          ],
+        } as never;
+      }
 
-    render(<Sidebar />);
+      return {} as never;
+    });
+
+    render(<Sidebar />, {
+      wrapperOptions: {
+        routerProps: {
+          initialEntries: ['/projects/project-a/pulse'],
+        },
+      },
+    });
 
     expect(await screen.findByLabelText('Pulse has 2 pending proposals')).toBeInTheDocument();
   });
