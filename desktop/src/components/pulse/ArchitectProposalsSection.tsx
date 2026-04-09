@@ -13,7 +13,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useNavigate } from "react-router-dom";
 import { callMcpTool } from "@/api/mcpClient";
-import type { EpicListOutputSchema, ProposeAdrListOutput, ProposeAdrShowOutput } from "@/api/generated/mcp-tools.gen";
+import type { EpicListOutputSchema, ProposeAdrShowOutput } from "@/api/generated/mcp-tools.gen";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
 import { Badge } from "@/components/ui/badge";
@@ -26,12 +26,11 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { pulseProposalListQueryOptions, type PulseProposalSummary } from "@/lib/pulseProposals";
 import { showToast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
-type ProposalSummary = NonNullable<ProposeAdrListOutput["items"]>[number] & {
-  modifiedAt: string | null;
-};
+type ProposalSummary = PulseProposalSummary;
 
 type ProposalDetail = NonNullable<ProposeAdrShowOutput["adr"]>;
 type EpicShell = EpicListOutputSchema.EpicModel;
@@ -94,13 +93,6 @@ function workShapeBadgeVariant(workShape?: string): "default" | "secondary" | "o
   }
 }
 
-function parseProposalItems(output: ProposeAdrListOutput): ProposalSummary[] {
-  return (output.items ?? []).map((item) => ({
-    ...item,
-    modifiedAt: null,
-  }));
-}
-
 async function callProposalAction(toolName: string, args: Record<string, unknown>): Promise<any> {
   return callMcpTool(toolName as never, args as never);
 }
@@ -110,14 +102,7 @@ export function ArchitectProposalsSection({ projectPath }: { projectPath: string
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
-  const proposalsQuery = useQuery({
-    queryKey: ["pulse", "architect-proposals", projectPath],
-    queryFn: async () => parseProposalItems(await callMcpTool("propose_adr_list", { project: projectPath })),
-    enabled: !!projectPath,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
-    refetchOnWindowFocus: true,
-  });
+  const proposalsQuery = useQuery(pulseProposalListQueryOptions(projectPath));
 
   const proposals = proposalsQuery.data ?? [];
   const filteredProposals = useMemo(
