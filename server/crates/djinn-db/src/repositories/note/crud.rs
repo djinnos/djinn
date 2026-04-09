@@ -1,5 +1,6 @@
 use super::*;
 use crate::note_hash::note_content_hash;
+use std::fs;
 
 struct CreateNoteParams<'a> {
     project_id: &'a str,
@@ -10,6 +11,143 @@ struct CreateNoteParams<'a> {
     tags: &'a str,
     storage: &'a str,
     scope_paths: &'a str,
+}
+
+#[derive(Debug)]
+struct ParsedWorktreeNote {
+    title: String,
+    note_type: String,
+    tags: String,
+    content: String,
+}
+
+fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| Error::InvalidData(format!("read_dir {}: {e}", dir.display())))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| Error::InvalidData(format!("read_dir {}: {e}", dir.display())))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_markdown_files(&path, out)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn parse_worktree_note_file(
+    worktree_root: &Path,
+    file_path: &Path,
+) -> Result<Option<ParsedWorktreeNote>> {
+    let raw = fs::read_to_string(file_path)
+        .map_err(|e| Error::InvalidData(format!("read note file {}: {e}", file_path.display())))?;
+    let notes_root = worktree_root.join(".djinn");
+    let relative = file_path
+        .strip_prefix(&notes_root)
+        .map_err(|e| Error::InvalidData(format!("strip_prefix {}: {e}", file_path.display())))?;
+
+    let (frontmatter, body) = split_frontmatter(&raw);
+    let note_type = frontmatter
+        .and_then(|fm| frontmatter_value(fm, "type"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| infer_note_type_from_relative_path(relative));
+    let permalink = permalink_from_relative_path(relative);
+    let title = frontmatter
+        .and_then(|fm| frontmatter_value(fm, "title"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| title_from_permalink(&permalink));
+    let tags = frontmatter
+        .and_then(|fm| frontmatter_value(fm, "tags"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "[]".to_string());
+
+    if title.is_empty() || note_type.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(ParsedWorktreeNote {
+        title,
+        note_type,
+        tags,
+        content: body.to_string(),
+    }))
+}
+
+fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
+    if let Some(rest) = raw.strip_prefix("---\n")
+        && let Some(end) = rest.find("\n---\n")
+    {
+        let frontmatter = &rest[..end];
+        let body = rest[end + 5..]
+            .strip_prefix('\n')
+            .unwrap_or(&rest[end + 5..]);
+        return (Some(frontmatter), body);
+    }
+
+    (None, raw)
+}
+
+fn frontmatter_value(frontmatter: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}: ");
+    frontmatter.lines().find_map(|line| {
+        line.strip_prefix(&prefix)
+            .map(|value| value.trim().to_string())
+    })
+}
+
+fn infer_note_type_from_relative_path(relative_path: &Path) -> String {
+    let permalink = permalink_from_relative_path(relative_path);
+    match permalink
+        .rsplit_once('/')
+        .map(|(folder, _)| folder)
+        .unwrap_or_default()
+    {
+        "decisions" => "adr",
+        "patterns" => "pattern",
+        "cases" => "case",
+        "pitfalls" => "pitfall",
+        "research" => "research",
+        "research/competitive" => "competitive",
+        "research/technical" => "tech_spike",
+        "requirements" => "requirement",
+        "reference" => "reference",
+        "design" => "design",
+        "design/personas" => "persona",
+        "design/journeys" => "journey",
+        "design/specs" => "design_spec",
+        "reference/repo-maps" => "repo_map",
+        _ if permalink == "brief" => "brief",
+        _ if permalink == "roadmap" => "roadmap",
+        _ => "reference",
+    }
+    .to_string()
+}
+
+fn permalink_from_relative_path(relative_path: &Path) -> String {
+    relative_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches(".md")
+        .to_string()
+}
+
+fn title_from_permalink(permalink: &str) -> String {
+    let slug = permalink.rsplit('/').next().unwrap_or(permalink);
+    slug.split('-')
+        .filter(|part| !part.is_empty())
+        .map(capitalize_first)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 impl<'a> CreateNoteParams<'a> {
@@ -103,6 +241,71 @@ pub(super) fn db_only_consolidation_type(note_type: &str) -> bool {
 }
 
 impl NoteRepository {
+    pub async fn sync_worktree_notes_to_canonical(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+        worktree_root: &Path,
+    ) -> Result<usize> {
+        self.db.ensure_initialized().await?;
+
+        let notes_root = worktree_root.join(".djinn");
+        if !notes_root.exists() {
+            return Ok(0);
+        }
+
+        let mut markdown_files = Vec::new();
+        collect_markdown_files(&notes_root, &mut markdown_files)?;
+
+        let canonical_repo = Self::new(self.db.clone(), self.events.clone());
+        let mut synced = 0usize;
+
+        for file_path in markdown_files {
+            let Some(parsed) = parse_worktree_note_file(worktree_root, &file_path)? else {
+                continue;
+            };
+
+            let permalink = permalink_for(&parsed.note_type, &parsed.title);
+            match canonical_repo
+                .get_by_permalink(project_id, &permalink)
+                .await?
+            {
+                Some(existing) => {
+                    let expected_file_path =
+                        file_path_for(project_path, &parsed.note_type, &parsed.title)
+                            .to_string_lossy()
+                            .to_string();
+                    if existing.title != parsed.title
+                        || existing.content != parsed.content
+                        || existing.tags != parsed.tags
+                        || existing.file_path != expected_file_path
+                        || !Path::new(&existing.file_path).exists()
+                    {
+                        canonical_repo
+                            .update(&existing.id, &parsed.title, &parsed.content, &parsed.tags)
+                            .await?;
+                        synced += 1;
+                    }
+                }
+                None => {
+                    canonical_repo
+                        .create(
+                            project_id,
+                            project_path,
+                            &parsed.title,
+                            &parsed.content,
+                            &parsed.note_type,
+                            &parsed.tags,
+                        )
+                        .await?;
+                    synced += 1;
+                }
+            }
+        }
+
+        Ok(synced)
+    }
+
     pub async fn upsert_db_note_by_permalink(
         &self,
         project_id: &str,

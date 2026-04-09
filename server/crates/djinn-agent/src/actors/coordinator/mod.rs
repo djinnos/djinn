@@ -420,6 +420,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_task_event_syncs_worktree_memory_to_canonical_project_memory() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (task, project_path) =
+            create_simple_task(&db, &tx, "spike", "memory survives close").await;
+
+        let worktree_path = Path::new(&project_path)
+            .join(".djinn")
+            .join("worktrees")
+            .join(&task.short_id);
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "test-model",
+                agent_type: "planner",
+                worktree_path: Some(worktree_path.to_str().unwrap()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let worktree_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .with_worktree_root(Some(worktree_path.clone()));
+        let created = worktree_repo
+            .create(
+                &task.project_id,
+                Path::new(&project_path),
+                "Planner roadmap survives",
+                "canonical after close",
+                "design",
+                "[]",
+            )
+            .await
+            .unwrap();
+        assert!(
+            worktree_path
+                .join(".djinn/design/planner-roadmap-survives.md")
+                .exists()
+        );
+        assert!(!Path::new(&created.file_path).exists());
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let closed = task_repo
+            .set_status_with_reason(&task.id, "closed", Some("completed"))
+            .await
+            .unwrap();
+
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor
+            .handle_event(djinn_core::events::DjinnEventEnvelope::task_updated(
+                &closed, false,
+            ))
+            .await;
+
+        let canonical_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let synced = canonical_repo
+            .get_by_permalink(&task.project_id, &created.permalink)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(synced.content, "canonical after close");
+        assert!(Path::new(&synced.file_path).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn approved_simple_task_with_memory_write_signal_skips_direct_close() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
