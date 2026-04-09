@@ -102,39 +102,6 @@ pub(crate) struct MergeActions {
     pub(crate) pr_created: Option<TransitionAction>,
 }
 
-/// Standard actions used by the task reviewer path.
-#[allow(dead_code)]
-pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
-    approve: TransitionAction::TaskReviewApprove,
-    conflict: TransitionAction::TaskReviewRejectConflict,
-    release: TransitionAction::ReleaseTaskReview,
-    // Pre-merge verification failure should reopen the task for the worker,
-    // not loop back to the reviewer who already approved.
-    verification_fail: Some(TransitionAction::TaskReviewReject),
-    // PR creation failure is an infra/auth issue, not a code issue. Escalate to
-    // lead intervention so a human can fix the credentials rather than looping
-    // the reviewer in an infinite approve → PR fail → re-review cycle.
-    pr_creation_fail: Some(TransitionAction::Escalate),
-    // When a GitHub PR is created, transition to pr_ready instead of closed.
-    // The PR poller will close the task via PrMerge once the PR is merged.
-    pr_created: Some(TransitionAction::PrCreated),
-};
-
-#[allow(dead_code)]
-pub(crate) async fn merge_after_task_review(
-    task_id: &str,
-    app_state: &AgentContext,
-    verification_gate: Option<VerificationGateFn>,
-) -> Option<(TransitionAction, Option<String>)> {
-    merge_and_transition(
-        task_id,
-        app_state,
-        &REVIEWER_MERGE_ACTIONS,
-        verification_gate,
-    )
-    .await
-}
-
 /// Attempt to create a GitHub PR for the task branch.
 ///
 /// Returns `Some(pr_url)` when the PR was created successfully, or `None` when
