@@ -82,6 +82,7 @@ mod tests {
                 title: "Duplicate",
                 content: "  Alpha\nBeta  ",
                 note_type: "research",
+                status: None,
                 tags_json: "[]",
             },
         )
@@ -119,6 +120,7 @@ mod tests {
                 title: "Async Pattern Updated",
                 content: "tokio spawn joinset",
                 note_type: "pattern",
+                status: None,
                 tags_json: "[]",
             },
             MemoryWriteDedupDecision::MergeIntoExisting {

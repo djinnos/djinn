@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/prompts.rs
+assertion_line: 767
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
@@ -35,7 +36,7 @@ expression: section
 *** End Patch
 
 Rules: ' ' prefix = context (must match file), '-' = delete, '+' = add. The @@ line text is searched in the file to locate each chunk. Multiple @@ chunks per file are allowed. Files being updated or deleted must be read first.
-- `memory_write(content, title, type, tags?)` — Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.
+- `memory_write(content, title, type, status?, tags?)` — Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.
 - `memory_edit(content, identifier, operation, find_text?, section?, type?)` — Edit an existing note. Operations: "append" (add to end), "prepend" (add after frontmatter), "find_replace" (exact text replacement, requires find_text), "replace_section" (replace content under a markdown heading, requires section).
 - `request_lead(id, reason, suggested_breakdown?)` — Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.
 - `submit_work(commit_title, summary, task_id, files_changed?, remaining_concerns?)` — Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.

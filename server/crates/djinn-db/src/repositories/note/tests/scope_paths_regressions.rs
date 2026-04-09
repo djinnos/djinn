@@ -15,6 +15,7 @@ async fn create_with_scope_writes_file_to_disk_for_adr() {
             "ADR-100 Scoped Decision",
             "This is a scoped ADR body.",
             "adr",
+            None,
             "[]",
             r#"["crates/foo"]"#,
         )
@@ -52,6 +53,7 @@ async fn create_with_scope_empty_array_also_writes_file_to_disk() {
             "ADR-101 Global Decision",
             "Global body.",
             "adr",
+            None,
             "[]",
             "[]",
         )

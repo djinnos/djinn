@@ -29,6 +29,14 @@ pub fn folder_for_type(note_type: &str) -> &'static str {
     }
 }
 
+/// Return the storage folder for a given note type and explicit write status.
+pub fn folder_for_type_with_status(note_type: &str, status: Option<&str>) -> &'static str {
+    match (note_type, status) {
+        ("adr", Some("proposed")) => "decisions/proposed",
+        _ => folder_for_type(note_type),
+    }
+}
+
 /// Returns `true` for note types that have exactly one instance per project.
 pub fn is_singleton(note_type: &str) -> bool {
     matches!(note_type, "brief" | "roadmap")
@@ -39,10 +47,14 @@ pub fn is_singleton(note_type: &str) -> bool {
 /// Singletons use their type name as the permalink (`"brief"`, `"roadmap"`).
 /// Other types use `"{folder}/{slug}"`.
 pub fn permalink_for(note_type: &str, title: &str) -> String {
+    permalink_for_with_status(note_type, title, None)
+}
+
+pub fn permalink_for_with_status(note_type: &str, title: &str, status: Option<&str>) -> String {
     if is_singleton(note_type) {
         return note_type.to_string();
     }
-    let folder = folder_for_type(note_type);
+    let folder = folder_for_type_with_status(note_type, status);
     let slug = slugify(title);
     if folder.is_empty() {
         slug
@@ -53,11 +65,20 @@ pub fn permalink_for(note_type: &str, title: &str) -> String {
 
 /// Return the absolute path where a note's markdown file should be stored.
 pub fn file_path_for(project_path: &Path, note_type: &str, title: &str) -> PathBuf {
+    file_path_for_with_status(project_path, note_type, title, None)
+}
+
+pub fn file_path_for_with_status(
+    project_path: &Path,
+    note_type: &str,
+    title: &str,
+    status: Option<&str>,
+) -> PathBuf {
     let djinn = project_path.join(".djinn");
     if is_singleton(note_type) {
         return djinn.join(format!("{note_type}.md"));
     }
-    let folder = folder_for_type(note_type);
+    let folder = folder_for_type_with_status(note_type, status);
     let slug = slugify(title);
     if folder.is_empty() {
         djinn.join(format!("{slug}.md"))
@@ -166,7 +187,7 @@ pub(super) fn infer_note_type(permalink: &str) -> String {
         .map(|(folder, _)| folder)
         .unwrap_or_default()
     {
-        "decisions" => "adr",
+        "decisions" | "decisions/proposed" => "adr",
         "patterns" => "pattern",
         "cases" => "case",
         "pitfalls" => "pitfall",

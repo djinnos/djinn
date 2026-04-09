@@ -150,6 +150,7 @@ pub(super) struct MemoryWriteParams {
     pub content: String,
     #[serde(rename = "type")]
     pub note_type: String,
+    pub status: Option<String>,
     pub tags: Option<Vec<String>>,
     pub scope_paths: Option<Vec<String>>,
 }

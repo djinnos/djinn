@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 196
 expression: tool_schemas_worker()
 ---
 [
@@ -433,6 +434,10 @@ expression: tool_schemas_worker()
       "properties": {
         "content": {
           "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Optional explicit status. For ADRs, use \"proposed\" to route into .djinn/decisions/proposed/.",
           "type": "string"
         },
         "tags": {

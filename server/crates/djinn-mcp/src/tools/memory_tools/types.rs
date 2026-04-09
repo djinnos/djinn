@@ -16,6 +16,9 @@ pub struct WriteParams {
     #[serde(rename = "type")]
     #[schemars(rename = "type")]
     pub note_type: String,
+    /// Optional explicit status for routed note types. For ADRs, `proposed`
+    /// writes into `.djinn/decisions/proposed/`.
+    pub status: Option<String>,
     pub tags: Option<Vec<String>>,
     /// Crate/module path prefixes this note applies to. Empty array means global.
     pub scope_paths: Option<Vec<String>>,
@@ -421,6 +424,11 @@ impl MemoryNoteResponse {
 
     pub fn deduplicated_from_note(note: &djinn_core::models::Note) -> Self {
         Self::from_note_with_deduplicated(note, true)
+    }
+
+    pub fn with_file_path(mut self, file_path: String) -> Self {
+        self.file_path = Some(file_path);
+        self
     }
 
     fn from_note_with_deduplicated(note: &djinn_core::models::Note, deduplicated: bool) -> Self {
