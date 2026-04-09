@@ -1,28 +1,32 @@
 import { useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Brain02Icon,
+  CheckmarkCircle02Icon,
   File01Icon,
   FolderDetailsIcon,
   LinkSquare02Icon,
+  XVariableCircleIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { useNavigate } from "react-router-dom";
 import { callMcpTool } from "@/api/mcpClient";
-import type {
-  ProposeAdrListOutput,
-  ProposeAdrShowOutput,
-} from "@/api/generated/mcp-tools.gen";
+import type { EpicListOutputSchema, ProposeAdrListOutput, ProposeAdrShowOutput } from "@/api/generated/mcp-tools.gen";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { showToast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
 type ProposalSummary = NonNullable<ProposeAdrListOutput["items"]>[number] & {
@@ -30,8 +34,15 @@ type ProposalSummary = NonNullable<ProposeAdrListOutput["items"]>[number] & {
 };
 
 type ProposalDetail = NonNullable<ProposeAdrShowOutput["adr"]>;
-
+type EpicShell = EpicListOutputSchema.EpicModel;
 type FilterValue = "all" | "epic" | "architectural" | "task-spike";
+type ReviewMode = "accept" | "reject" | null;
+type ProposalActionResult = {
+  tone: "success" | "error";
+  title: string;
+  description: string;
+  epic?: EpicShell | null;
+};
 
 const FILTERS: Array<{ value: FilterValue; label: string }> = [
   { value: "all", label: "All" },
@@ -90,9 +101,14 @@ function parseProposalItems(output: ProposeAdrListOutput): ProposalSummary[] {
   }));
 }
 
+async function callProposalAction(toolName: string, args: Record<string, unknown>): Promise<any> {
+  return callMcpTool(toolName as never, args as never);
+}
+
 export function ArchitectProposalsSection({ projectPath }: { projectPath: string }) {
   const [filter, setFilter] = useState<FilterValue>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const proposalsQuery = useQuery({
     queryKey: ["pulse", "architect-proposals", projectPath],
@@ -200,12 +216,23 @@ export function ArchitectProposalsSection({ projectPath }: { projectPath: string
               </ScrollArea>
             </div>
             <ProposalDetailPanel
+              projectPath={projectPath}
               proposal={selectedSummary}
               detail={detailQuery.data ?? null}
               loading={detailQuery.isLoading}
               error={detailQuery.error instanceof Error ? detailQuery.error.message : null}
               onRetry={() => detailQuery.refetch()}
               retrying={detailQuery.isFetching}
+              onReviewed={async (removedId) => {
+                if (removedId === selectedId) {
+                  setSelectedId(null);
+                }
+                await proposalsQuery.refetch();
+                await Promise.all([
+                  queryClient.invalidateQueries({ queryKey: ["epics"] }),
+                  queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+                ]);
+              }}
             />
           </div>
         )}
@@ -251,20 +278,57 @@ function ProposalListItem({
 }
 
 function ProposalDetailPanel({
+  projectPath,
   proposal,
   detail,
   loading,
   error,
   onRetry,
   retrying,
+  onReviewed,
 }: {
+  projectPath: string;
   proposal: ProposalSummary | null;
   detail: ProposalDetail | null;
   loading: boolean;
   error: string | null;
   onRetry: () => void;
   retrying: boolean;
+  onReviewed: (removedId: string) => Promise<void>;
 }) {
+  const navigate = useNavigate();
+  const [reviewMode, setReviewMode] = useState<ReviewMode>(null);
+  const [acceptTitle, setAcceptTitle] = useState("");
+  const [createEpic, setCreateEpic] = useState(true);
+  const [autoBreakdown, setAutoBreakdown] = useState(true);
+  const [rejectReason, setRejectReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [actionResult, setActionResult] = useState<ProposalActionResult | null>(null);
+
+  const active = detail ?? proposal;
+  const isArchitectural = normalizeWorkShape(active?.work_shape) === "architectural";
+
+  useEffect(() => {
+    if (!active) {
+      setReviewMode(null);
+      setAcceptTitle("");
+      setCreateEpic(true);
+      setAutoBreakdown(true);
+      setRejectReason("");
+      setSubmitting(false);
+      setActionResult(null);
+      return;
+    }
+
+    setReviewMode(null);
+    setAcceptTitle(active.title || "");
+    setCreateEpic(!isArchitectural);
+    setAutoBreakdown(true);
+    setRejectReason("");
+    setSubmitting(false);
+    setActionResult(null);
+  }, [active?.id, active?.title, isArchitectural]);
+
   if (!proposal) {
     return (
       <div className="flex min-h-[28rem] items-center justify-center rounded-xl border border-dashed border-border bg-background/20 p-6">
@@ -284,7 +348,88 @@ function ProposalDetailPanel({
     return <InlineError message={error} onRetry={onRetry} retrying={retrying} />;
   }
 
-  const active = detail ?? proposal;
+  const handleAccept = async () => {
+    const title = acceptTitle.trim();
+    if (!title) {
+      const description = "Accepted proposals need a title override or existing title.";
+      setActionResult({ tone: "error", title: "Could not accept proposal", description });
+      showToast.error("Could not accept proposal", { description });
+      return;
+    }
+
+    setSubmitting(true);
+    setActionResult(null);
+
+    try {
+      const response = await callProposalAction("propose_adr_accept", {
+        project: projectPath,
+        id: active.id,
+        title,
+        create_epic: isArchitectural ? false : createEpic,
+        auto_breakdown: autoBreakdown,
+      });
+
+      if (response?.error) {
+        throw new Error(String(response.error));
+      }
+
+      const epic = (response?.epic ?? null) as EpicShell | null;
+      const description = epic
+        ? `Accepted and created epic ${epic.short_id || epic.id}. Open the board to confirm it appeared.`
+        : `Accepted and moved to ${response?.accepted_path ?? "the decisions folder"}.`;
+
+      setActionResult({ tone: "success", title: "Proposal accepted", description, epic });
+      showToast.success("Proposal accepted", { description });
+      await onReviewed(active.id);
+    } catch (acceptError) {
+      const description = acceptError instanceof Error ? acceptError.message : "Failed to accept proposal.";
+      setActionResult({ tone: "error", title: "Could not accept proposal", description });
+      showToast.error("Could not accept proposal", { description });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleReject = async () => {
+    const reason = rejectReason.trim();
+    if (!reason) {
+      const description = "Rejecting a proposal requires a non-empty reason.";
+      setActionResult({ tone: "error", title: "Could not reject proposal", description });
+      showToast.error("Could not reject proposal", { description });
+      return;
+    }
+
+    setSubmitting(true);
+    setActionResult(null);
+
+    try {
+      const response = await callProposalAction("propose_adr_reject", {
+        project: projectPath,
+        id: active.id,
+        reason,
+      });
+
+      if (response?.error || response?.ok === false) {
+        throw new Error(String(response?.error ?? "Failed to reject proposal."));
+      }
+
+      const description = response?.feedback_target
+        ? `Feedback persisted to ${String(response.feedback_target)}.`
+        : active.originating_spike_id
+          ? `Feedback persisted to originating spike ${active.originating_spike_id}.`
+          : "Proposal rejected. No originating spike was recorded for feedback threading.";
+
+      setActionResult({ tone: "success", title: "Proposal rejected", description });
+      showToast.success("Proposal rejected", { description });
+      await onReviewed(active.id);
+    } catch (rejectError) {
+      const description = rejectError instanceof Error ? rejectError.message : "Failed to reject proposal.";
+      setActionResult({ tone: "error", title: "Could not reject proposal", description });
+      showToast.error("Could not reject proposal", { description });
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div className="min-h-[28rem] overflow-hidden rounded-xl border border-border/70 bg-background/30">
@@ -315,6 +460,130 @@ function ProposalDetailPanel({
               <SummaryTile icon={FolderDetailsIcon} label="Source" value={active.path} mono />
               <SummaryTile label="Work shape" value={workShapeLabel(active.work_shape)} />
             </div>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={() => setReviewMode(reviewMode === "accept" ? null : "accept")} disabled={submitting}>
+                Accept
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setReviewMode(reviewMode === "reject" ? null : "reject")}
+                disabled={submitting}
+              >
+                Reject
+              </Button>
+            </div>
+
+            {reviewMode === "accept" ? (
+              <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-4">
+                <div className="space-y-2">
+                  <Label htmlFor={`accept-title-${active.id}`}>Title override</Label>
+                  <Input
+                    id={`accept-title-${active.id}`}
+                    value={acceptTitle}
+                    onChange={(event) => setAcceptTitle(event.target.value)}
+                    disabled={submitting}
+                    placeholder="Accepted ADR title"
+                  />
+                </div>
+                {!isArchitectural ? (
+                  <div className="space-y-3 text-sm">
+                    <label className="flex items-center gap-2 text-foreground">
+                      <input
+                        type="checkbox"
+                        checked={createEpic}
+                        onChange={(event) => setCreateEpic(event.target.checked)}
+                        disabled={submitting}
+                      />
+                      <span>Create epic shell on accept</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-foreground">
+                      <input
+                        type="checkbox"
+                        checked={autoBreakdown}
+                        onChange={(event) => setAutoBreakdown(event.target.checked)}
+                        disabled={submitting || !createEpic}
+                      />
+                      <span>Auto-breakdown created epic</span>
+                    </label>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Architectural proposals are accepted into decisions only; they do not create epic shells.
+                  </p>
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" onClick={handleAccept} disabled={submitting}>
+                    {submitting ? "Accepting…" : "Confirm accept"}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setReviewMode(null)} disabled={submitting}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {reviewMode === "reject" ? (
+              <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-4">
+                <div className="space-y-2">
+                  <Label htmlFor={`reject-reason-${active.id}`}>Reason</Label>
+                  <Textarea
+                    id={`reject-reason-${active.id}`}
+                    value={rejectReason}
+                    onChange={(event) => setRejectReason(event.target.value)}
+                    disabled={submitting}
+                    rows={4}
+                    placeholder="Explain why this draft is being rejected."
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    This reason is sent with the rejection flow and should be threaded back to the originating spike.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="destructive" onClick={handleReject} disabled={submitting}>
+                    {submitting ? "Rejecting…" : "Confirm reject"}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setReviewMode(null)} disabled={submitting}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {actionResult ? (
+              <div
+                className={cn(
+                  "rounded-lg border p-3 text-sm",
+                  actionResult.tone === "success"
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+                    : "border-destructive/40 bg-destructive/10 text-destructive",
+                )}
+              >
+                <div className="flex items-start gap-2">
+                  <HugeiconsIcon
+                    icon={actionResult.tone === "success" ? CheckmarkCircle02Icon : XVariableCircleIcon}
+                    className="mt-0.5 h-4 w-4 shrink-0"
+                  />
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <p className="font-medium">{actionResult.title}</p>
+                    <p>{actionResult.description}</p>
+                    {actionResult.epic ? (
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <Badge variant="secondary">Epic {actionResult.epic.short_id || actionResult.epic.id}</Badge>
+                        <Button size="sm" variant="outline" onClick={() => navigate("/kanban")}>
+                          Open board
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <Separator />
