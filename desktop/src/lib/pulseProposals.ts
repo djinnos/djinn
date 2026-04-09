@@ -13,7 +13,7 @@ const notifiedDraftIds = new Set<string>();
 export function parseProposalItems(output: ProposeAdrListOutput): PulseProposalSummary[] {
   return (output.items ?? []).map((item) => ({
     ...item,
-    modifiedAt: null,
+    modifiedAt: typeof item.mtime === "string" && item.mtime.length > 0 ? item.mtime : null,
   }));
 }
 

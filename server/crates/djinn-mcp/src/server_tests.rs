@@ -309,6 +309,7 @@ mod tests {
             item.get("title").and_then(|value| value.as_str()),
             Some("Pipeline Draft")
         );
+        assert!(item.get("mtime").and_then(|value| value.as_str()).is_some());
     }
 
     #[tokio::test]
@@ -344,6 +345,12 @@ mod tests {
         assert_eq!(
             items[0].get("id").and_then(|value| value.as_str()),
             Some("adr-999-routing")
+        );
+        assert!(
+            items[0]
+                .get("mtime")
+                .and_then(|value| value.as_str())
+                .is_some()
         );
     }
 

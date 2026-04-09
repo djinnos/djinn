@@ -1935,6 +1935,7 @@ export namespace ProposeAdrListOutputSchema {
   export interface ProposedAdr {
   body?: string
   id: string
+  mtime?: string
   originating_spike_id?: string
   path: string
   title: string

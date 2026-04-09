@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::epic_ops::EpicModel;
@@ -145,6 +147,9 @@ pub struct ProposedAdr {
     /// Optional short_id of the originating spike task.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub originating_spike_id: Option<String>,
+    /// Last filesystem modified time for the proposal draft, encoded as RFC 3339.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<String>,
     /// Raw markdown body (frontmatter stripped).  Omitted in list
     /// responses to keep them small.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,6 +158,10 @@ pub struct ProposedAdr {
 
 impl ProposedAdr {
     fn from_file(path: &Path, include_body: bool) -> Result<Self, String> {
+        let mtime = fs::metadata(path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| OffsetDateTime::from(modified).format(&Rfc3339).ok());
         let content = fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let (front, body) = parse_frontmatter(&content);
@@ -170,6 +179,7 @@ impl ProposedAdr {
             title,
             work_shape,
             originating_spike_id,
+            mtime,
             body: if include_body { Some(body) } else { None },
         })
     }
@@ -277,7 +287,7 @@ pub struct ProposeAdrRejectResponse {
 impl DjinnMcpServer {
     /// List all ADR drafts under `.djinn/decisions/proposed/`.
     #[tool(
-        description = "ADR-051 Epic C: list ADR drafts under .djinn/decisions/proposed/. Returns frontmatter-parsed metadata (id, title, work_shape, originating_spike_id). Body text is omitted; use propose_adr_show to read a single draft in full."
+        description = "ADR-051 Epic C: list ADR drafts under .djinn/decisions/proposed/. Returns frontmatter-parsed metadata (id, title, work_shape, originating_spike_id) plus filesystem modified time in `mtime` (RFC 3339). Body text is omitted; use propose_adr_show to read a single draft in full."
     )]
     pub async fn propose_adr_list(
         &self,
@@ -660,6 +670,11 @@ mod tests {
         assert_eq!(adr.id, "adr-999-demo");
         assert_eq!(adr.title, "Demo ADR");
         assert_eq!(adr.work_shape.as_deref(), Some("epic"));
+        assert!(
+            adr.mtime
+                .as_deref()
+                .is_some_and(|value| value.contains('T'))
+        );
         assert!(adr.body.as_ref().unwrap().contains("Body"));
     }
 }
