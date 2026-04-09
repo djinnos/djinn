@@ -96,3 +96,30 @@ When patrol sees high memory-health counts:
 ## Routed next action
 
 Created follow-up planning task [[Route actionable project-memory cleanup after backlog triage]] to own the narrow actionable cleanup without reopening project-wide triage.
+
+
+## Follow-up decision: orphan-heavy folders reporting policy (2026-04-09)
+
+Decision: **do not change `memory_health()` aggregate counting or suppress `memory_orphans()` detail output for `cases` or `reference/repo-maps` right now.** The narrow durable fix is to make patrol interpretation explicit in canonical triage/design context:
+
+- `memory_health().orphan_note_count` remains a **gross inventory count** of all non-singleton, non-catalog orphan notes.
+- `memory_orphans()` remains the **raw detail list** and should continue to show `cases/*` and `reference/repo-maps/*` entries.
+- Planner/board-health patrols must treat orphan-heavy folders in two buckets:
+  - **Tolerated inventory bucket:** `cases/*`, `reference/repo-maps/*`
+  - **Actionable orphan debt bucket:** canonical current docs and other orphaned notes whose value depends on navigational linkage (for example `roadmap`-adjacent requirements, current reference notes, active design notes)
+
+Rationale:
+
+- The current tooling is behaving consistently after the empty-folder fix: the aggregate count is real, and the detail tool exposes the underlying notes.
+- Suppressing intentional folders inside the tool output would hide legitimate detail and create a second interpretation of "orphan count".
+- Adding new per-folder buckets to the MCP/API surface is possible later, but it is broader than needed to stop patrol churn today.
+- Repo maps and case-history notes are intentionally retrieval-oriented inventory; mass-linking or excluding them from storage/index semantics would be the wrong cleanup target.
+
+Operational rule for future patrols:
+
+1. Use `memory_health()` to notice that orphan volume is elevated.
+2. Use `memory_orphans()` / folder inspection to determine whether the volume is dominated by tolerated inventory (`cases`, `reference/repo-maps`).
+3. Escalate only when orphan findings are concentrated in canonical/current-note surfaces or reveal a concrete documentation defect.
+4. Do **not** open broad cleanup work solely because `cases` or `reference/repo-maps` dominate orphan counts.
+
+This closes the earlier optional question in this note: the chosen policy is **documented patrol interpretation, not tooling suppression and not mass relinking**. A future tooling enhancement is only warranted if patrol operators still misread the gross orphan count after following this guidance.
