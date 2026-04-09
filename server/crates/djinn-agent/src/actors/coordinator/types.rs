@@ -73,16 +73,6 @@ impl CoordinatorDeps {
         self.canonical_graph_warmer = Some(warmer);
         self
     }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(super) fn with_consolidation_runner(
-        mut self,
-        runner: Arc<dyn ConsolidationRunner>,
-    ) -> Self {
-        self.consolidation_runner = Some(runner);
-        self
-    }
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
