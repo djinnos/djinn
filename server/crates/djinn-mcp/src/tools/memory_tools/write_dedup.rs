@@ -1,5 +1,5 @@
 use djinn_core::models::{Note, NoteDedupCandidate};
-use djinn_db::{NoteRepository, folder_for_type, note_hash::note_content_hash};
+use djinn_db::{NoteRepository, folder_for_type_with_status, note_hash::note_content_hash};
 use djinn_provider::CompletionRequest;
 
 use super::MemoryNoteResponse;
@@ -108,7 +108,7 @@ pub(crate) async fn lookup_write_dedup_candidates(
     repo: &NoteRepository,
     pending: PendingWriteDedup<'_>,
 ) -> Result<Vec<NoteDedupCandidate>, String> {
-    let folder = folder_for_type(pending.note_type);
+    let folder = folder_for_type_with_status(pending.note_type, pending.status);
     let query_text = format!("{}\n\n{}", pending.title, pending.content);
     repo.dedup_candidates(
         pending.project_id,

@@ -8,6 +8,20 @@ use crate::tools::memory_tools::lifecycle::{
 };
 use crate::tools::memory_tools::{MemoryNoteResponse, WriteParams};
 
+fn actual_file_path_for_response(
+    note: &djinn_core::models::Note,
+    worktree_root: Option<&Path>,
+) -> String {
+    match worktree_root {
+        Some(root) => root
+            .join(".djinn")
+            .join(format!("{}.md", note.permalink))
+            .to_string_lossy()
+            .to_string(),
+        None => note.file_path.clone(),
+    }
+}
+
 pub(super) fn note_repository(
     server: &DjinnMcpServer,
     worktree_root: Option<PathBuf>,
@@ -38,6 +52,7 @@ pub(super) async fn maybe_update_singleton_note(
                 Ok(note) => {
                     schedule_summary_regeneration(server, &note.id);
                     MemoryNoteResponse::from_note(&note)
+                        .with_file_path(actual_file_path_for_response(&note, repo.worktree_root()))
                 }
                 Err(error) => MemoryNoteResponse::error(error.to_string()),
             },
@@ -80,17 +95,19 @@ pub(super) async fn create_note(
             &params.title,
             &params.content,
             &params.note_type,
+            params.status.as_deref(),
             tags_json,
             &scope_paths_json,
         )
         .await
     } else {
-        repo.create(
+        repo.create_with_status(
             project_id,
             Path::new(&canonical_project_path),
             &params.title,
             &params.content,
             &params.note_type,
+            params.status.as_deref(),
             tags_json,
         )
         .await
@@ -101,6 +118,7 @@ pub(super) async fn create_note(
             schedule_summary_regeneration(server, &note.id);
             detect_emit_and_schedule_contradictions(server, repo, &note).await;
             MemoryNoteResponse::from_note(&note)
+                .with_file_path(actual_file_path_for_response(&note, repo.worktree_root()))
         }
         Err(error) => MemoryNoteResponse::error(error.to_string()),
     }

@@ -8,6 +8,7 @@ struct CreateNoteParams<'a> {
     title: &'a str,
     content: &'a str,
     note_type: &'a str,
+    status: Option<&'a str>,
     tags: &'a str,
     storage: &'a str,
     scope_paths: &'a str,
@@ -165,6 +166,7 @@ impl<'a> CreateNoteParams<'a> {
             title,
             content,
             note_type,
+            status: None,
             tags,
             storage: "file",
             scope_paths: "[]",
@@ -184,6 +186,7 @@ impl<'a> CreateNoteParams<'a> {
             title,
             content,
             note_type,
+            status: None,
             tags,
             storage: "db",
             scope_paths: "[]",
@@ -204,6 +207,7 @@ impl<'a> CreateNoteParams<'a> {
             title,
             content,
             note_type,
+            status: None,
             tags,
             storage: "db",
             scope_paths,
@@ -225,6 +229,30 @@ impl<'a> CreateNoteParams<'a> {
             title,
             content,
             note_type,
+            status: None,
+            tags,
+            storage: "file",
+            scope_paths,
+        }
+    }
+
+    fn file_with_status(
+        project_id: &'a str,
+        project_path: Option<&'a Path>,
+        title: &'a str,
+        content: &'a str,
+        note_type: &'a str,
+        status: Option<&'a str>,
+        tags: &'a str,
+        scope_paths: &'a str,
+    ) -> Self {
+        Self {
+            project_id,
+            project_path,
+            title,
+            content,
+            note_type,
+            status,
             tags,
             storage: "file",
             scope_paths,
@@ -439,9 +467,15 @@ impl NoteRepository {
         Ok(note)
     }
 
-    fn note_file_path(&self, project_path: &Path, note_type: &str, title: &str) -> PathBuf {
+    fn note_file_path(
+        &self,
+        project_path: &Path,
+        note_type: &str,
+        title: &str,
+        status: Option<&str>,
+    ) -> PathBuf {
         let root = self.worktree_root.as_deref().unwrap_or(project_path);
-        file_path_for(root, note_type, title)
+        file_path_for_with_status(root, note_type, title, status)
     }
 
     fn existing_note_file_path(&self, current: &Note) -> PathBuf {
@@ -512,6 +546,29 @@ impl NoteRepository {
         .await
     }
 
+    pub async fn create_with_status(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        status: Option<&str>,
+        tags: &str,
+    ) -> Result<Note> {
+        self.create_internal(CreateNoteParams::file_with_status(
+            project_id,
+            Some(project_path),
+            title,
+            content,
+            note_type,
+            status,
+            tags,
+            "[]",
+        ))
+        .await
+    }
+
     /// File-backed create that also persists `scope_paths` on the new row.
     ///
     /// Unlike [`create_db_note_with_scope`], this routes through the file
@@ -526,15 +583,17 @@ impl NoteRepository {
         title: &str,
         content: &str,
         note_type: &str,
+        status: Option<&str>,
         tags: &str,
         scope_paths: &str,
     ) -> Result<Note> {
-        self.create_internal(CreateNoteParams::file_with_scope(
+        self.create_internal(CreateNoteParams::file_with_status(
             project_id,
             Some(project_path),
             title,
             content,
             note_type,
+            status,
             tags,
             scope_paths,
         ))
@@ -550,18 +609,19 @@ impl NoteRepository {
             title,
             content,
             note_type,
+            status,
             tags,
             storage,
             scope_paths,
         } = params;
 
         let id = uuid::Uuid::now_v7().to_string();
-        let permalink = permalink_for(note_type, title);
-        let file_path =
-            project_path.map(|project_path| self.note_file_path(project_path, note_type, title));
+        let permalink = permalink_for_with_status(note_type, title, status);
+        let file_path = project_path
+            .map(|project_path| self.note_file_path(project_path, note_type, title, status));
         let file_path_str = project_path
             .map(|project_path| {
-                file_path_for(project_path, note_type, title)
+                file_path_for_with_status(project_path, note_type, title, status)
                     .to_string_lossy()
                     .to_string()
             })
@@ -798,7 +858,7 @@ impl NoteRepository {
             Option<PathBuf>,
         ) = if heal_candidate && project_path_opt.is_some() {
             let project_path = PathBuf::from(project_path_opt.as_deref().unwrap());
-            let new_path = self.note_file_path(&project_path, &current.note_type, title);
+            let new_path = self.note_file_path(&project_path, &current.note_type, title, None);
             let canonical_str = file_path_for(&project_path, &current.note_type, title)
                 .to_string_lossy()
                 .to_string();
@@ -1015,7 +1075,7 @@ impl NoteRepository {
         }
 
         let current_file_path = self.existing_note_file_path(&current);
-        let new_file_path = self.note_file_path(project_path, new_note_type, new_title);
+        let new_file_path = self.note_file_path(project_path, new_note_type, new_title, None);
         let new_permalink = permalink_for(new_note_type, new_title);
         let new_folder = folder_for_type(new_note_type).to_owned();
         let new_file_path_str = file_path_for(project_path, new_note_type, new_title)

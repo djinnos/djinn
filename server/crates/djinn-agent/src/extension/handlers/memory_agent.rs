@@ -143,6 +143,7 @@ pub(super) async fn call_memory_write(
                 title: p.title,
                 content: p.content,
                 note_type: p.note_type,
+                status: p.status,
                 tags: p.tags,
                 scope_paths: p.scope_paths,
             }),

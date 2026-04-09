@@ -43,7 +43,10 @@ pub use scoring::{
 pub use indexing::UpdateNoteIndexParams;
 
 use file_helpers::{build_catalog, write_note_file};
-pub use file_helpers::{file_path_for, folder_for_type, is_singleton, permalink_for, slugify};
+pub use file_helpers::{
+    file_path_for, file_path_for_with_status, folder_for_type, folder_for_type_with_status,
+    is_singleton, permalink_for, permalink_for_with_status, slugify,
+};
 use indexing::{index_links_for_note, resolve_links_for_note};
 
 // ── SQL constant ─────────────────────────────────────────────────────────────
@@ -75,6 +78,10 @@ impl NoteRepository {
     pub fn with_worktree_root(mut self, worktree_root: Option<PathBuf>) -> Self {
         self.worktree_root = worktree_root;
         self
+    }
+
+    pub fn worktree_root(&self) -> Option<&Path> {
+        self.worktree_root.as_deref()
     }
 }
 
