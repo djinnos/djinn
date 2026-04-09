@@ -89,6 +89,11 @@ fn apply_edit_operation(
             if !content.contains(find) {
                 return Err(format!("text not found: '{find}'"));
             }
+            if find == new_content {
+                return Err(format!(
+                    "find_replace no-op: find_text equals new content ('{find}'); not updating note"
+                ));
+            }
             Ok(content.replacen(find, new_content, 1))
         }
         "replace_section" => {

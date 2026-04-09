@@ -11,7 +11,7 @@ mod tests {
     use crate::{
         server::DjinnMcpServer,
         state::stubs::test_mcp_state,
-        tools::memory_tools::{BrokenLinksParams, ReadParams, WriteParams, ops},
+        tools::memory_tools::{BrokenLinksParams, EditParams, ReadParams, WriteParams, ops},
     };
 
     async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
@@ -599,6 +599,200 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&canonical_path).unwrap(),
             std::fs::read_to_string(&worktree_path).unwrap()
+        );
+    }
+
+    // ── scope_paths routing regression tests ────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_adr_with_empty_scope_paths_writes_file_to_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let Json(created) = server
+            .memory_write(Parameters(WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "ADR-300 Empty Scope".to_string(),
+                content: "body for ADR-300".to_string(),
+                note_type: "adr".to_string(),
+                tags: None,
+                scope_paths: Some(vec![]),
+            }))
+            .await;
+
+        assert!(created.error.is_none(), "error: {:?}", created.error);
+        let file_path = created.file_path.clone().expect("file_path must be set");
+        assert!(!file_path.is_empty(), "file_path must not be empty");
+        assert!(
+            std::path::Path::new(&file_path).exists(),
+            "markdown file must exist on disk: {file_path}"
+        );
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        assert!(on_disk.contains("ADR-300 Empty Scope"));
+        assert!(on_disk.contains("body for ADR-300"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_adr_with_nonempty_scope_paths_writes_file_to_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let Json(created) = server
+            .memory_write(Parameters(WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "ADR-301 Scoped".to_string(),
+                content: "scoped body".to_string(),
+                note_type: "adr".to_string(),
+                tags: None,
+                scope_paths: Some(vec!["crates/foo".to_string()]),
+            }))
+            .await;
+
+        assert!(created.error.is_none(), "error: {:?}", created.error);
+        let file_path = created.file_path.clone().expect("file_path must be set");
+        assert!(std::path::Path::new(&file_path).exists());
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        assert!(on_disk.contains("ADR-301 Scoped"));
+        assert!(on_disk.contains("scoped body"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_write_adr_without_scope_paths_still_writes_file_to_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let Json(created) = server
+            .memory_write(Parameters(WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "ADR-302 Unscoped".to_string(),
+                content: "unscoped body".to_string(),
+                note_type: "adr".to_string(),
+                tags: None,
+                scope_paths: None,
+            }))
+            .await;
+
+        assert!(created.error.is_none(), "error: {:?}", created.error);
+        let file_path = created.file_path.clone().expect("file_path must be set");
+        assert!(std::path::Path::new(&file_path).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_edit_find_replace_on_scoped_adr_updates_file_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+
+        let Json(created) = server
+            .memory_write(Parameters(WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "ADR-303 Editable".to_string(),
+                content: "The quick brown fox".to_string(),
+                note_type: "adr".to_string(),
+                tags: None,
+                scope_paths: Some(vec!["crates/foo".to_string()]),
+            }))
+            .await;
+        assert!(created.error.is_none(), "error: {:?}", created.error);
+        let file_path = created.file_path.clone().expect("file_path must be set");
+
+        let Json(edited) = server
+            .memory_edit(Parameters(EditParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                identifier: created.permalink.clone().unwrap(),
+                operation: "find_replace".to_string(),
+                content: "slow purple turtle".to_string(),
+                find_text: Some("quick brown fox".to_string()),
+                section: None,
+                note_type: None,
+            }))
+            .await;
+
+        assert!(edited.error.is_none(), "edit error: {:?}", edited.error);
+
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        assert!(
+            on_disk.contains("The slow purple turtle"),
+            "new text must be present in file. got:\n{on_disk}"
+        );
+        assert!(
+            !on_disk.contains("quick brown fox"),
+            "old text must be gone from file. got:\n{on_disk}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_edit_find_replace_noop_returns_error_and_keeps_updated_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let _project = create_project(&db, tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        let Json(created) = server
+            .memory_write(Parameters(WriteParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                title: "ADR-304 NoopEdit".to_string(),
+                content: "hello world".to_string(),
+                note_type: "adr".to_string(),
+                tags: None,
+                scope_paths: None,
+            }))
+            .await;
+        assert!(created.error.is_none());
+        let note_id = created.id.clone().unwrap();
+
+        // Let any post-write background tasks (summary regen, contradiction
+        // analysis) drain before capturing the baseline timestamp.
+        sleep(Duration::from_millis(200)).await;
+        let before = repo.get(&note_id).await.unwrap().unwrap();
+        let before_updated_at = before.updated_at.clone();
+
+        // Small delay so any accidental bump from the edit would be detectable.
+        sleep(Duration::from_millis(50)).await;
+
+        let Json(edited) = server
+            .memory_edit(Parameters(EditParams {
+                project: tmp.path().to_str().unwrap().to_string(),
+                identifier: created.permalink.clone().unwrap(),
+                operation: "find_replace".to_string(),
+                content: "hello".to_string(),
+                find_text: Some("hello".to_string()),
+                section: None,
+                note_type: None,
+            }))
+            .await;
+
+        assert!(
+            edited.error.is_some(),
+            "find_replace no-op must return an error"
+        );
+        assert!(
+            edited
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no-op"),
+            "error message should mention no-op; got {:?}",
+            edited.error
+        );
+
+        let after = repo.get(&note_id).await.unwrap().unwrap();
+        assert_eq!(
+            after.updated_at, before_updated_at,
+            "updated_at must not change on no-op find_replace"
         );
     }
 }

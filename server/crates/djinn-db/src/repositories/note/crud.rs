@@ -71,6 +71,35 @@ impl<'a> CreateNoteParams<'a> {
             scope_paths,
         }
     }
+
+    fn file_with_scope(
+        project_id: &'a str,
+        project_path: Option<&'a Path>,
+        title: &'a str,
+        content: &'a str,
+        note_type: &'a str,
+        tags: &'a str,
+        scope_paths: &'a str,
+    ) -> Self {
+        Self {
+            project_id,
+            project_path,
+            title,
+            content,
+            note_type,
+            tags,
+            storage: "file",
+            scope_paths,
+        }
+    }
+}
+
+/// Returns `true` for note types whose `storage="db"` rows should remain
+/// db-only even after edits. These are the types whose db-backed rows are
+/// legitimately produced by the consolidation pipeline (see
+/// `consolidation.rs`) and must not be auto-promoted to file storage.
+pub(super) fn db_only_consolidation_type(note_type: &str) -> bool {
+    matches!(note_type, "case" | "pattern" | "pitfall")
 }
 
 impl NoteRepository {
@@ -276,6 +305,35 @@ impl NoteRepository {
             content,
             note_type,
             tags,
+        ))
+        .await
+    }
+
+    /// File-backed create that also persists `scope_paths` on the new row.
+    ///
+    /// Unlike [`create_db_note_with_scope`], this routes through the file
+    /// storage branch so the markdown file is written to disk and the DB
+    /// row carries a valid `file_path`. Used by the MCP write entry point
+    /// when the caller supplies `scope_paths`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_scope(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        tags: &str,
+        scope_paths: &str,
+    ) -> Result<Note> {
+        self.create_internal(CreateNoteParams::file_with_scope(
+            project_id,
+            Some(project_path),
+            title,
+            content,
+            note_type,
+            tags,
+            scope_paths,
         ))
         .await
     }
@@ -513,9 +571,50 @@ impl NoteRepository {
             .await?
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
-        if current.storage == "file" {
-            let canonical_file_path = PathBuf::from(&current.file_path);
-            let worktree_file_path = self.existing_note_file_path(&current);
+        // Heal-on-edit: if a pre-fix broken row has storage="db" but the note
+        // type is one that *should* have a file on disk (i.e. not a
+        // consolidation-owned db-only type), upgrade it to file storage now.
+        // This recovers ADRs and other file-backed notes that were accidentally
+        // created as db-only by the old MCP write path.
+        let heal_candidate = current.storage == "db"
+            && !db_only_consolidation_type(&current.note_type)
+            && !is_singleton(&current.note_type);
+
+        let project_path_opt: Option<String> = if heal_candidate {
+            sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?1")
+                .bind(&current.project_id)
+                .fetch_optional(self.db.pool())
+                .await?
+        } else {
+            None
+        };
+
+        let (effective_storage, healed_file_path_str, healed_file_path): (
+            String,
+            Option<String>,
+            Option<PathBuf>,
+        ) = if heal_candidate && project_path_opt.is_some() {
+            let project_path = PathBuf::from(project_path_opt.as_deref().unwrap());
+            let new_path = self.note_file_path(&project_path, &current.note_type, title);
+            let canonical_str = file_path_for(&project_path, &current.note_type, title)
+                .to_string_lossy()
+                .to_string();
+            ("file".to_string(), Some(canonical_str), Some(new_path))
+        } else {
+            (current.storage.clone(), None, None)
+        };
+
+        if effective_storage == "file" {
+            let canonical_file_path = if let Some(ref s) = healed_file_path_str {
+                PathBuf::from(s)
+            } else {
+                PathBuf::from(&current.file_path)
+            };
+            let worktree_file_path = if let Some(ref p) = healed_file_path {
+                p.clone()
+            } else {
+                self.existing_note_file_path(&current)
+            };
             let (primary_file_path, mirror_file_path) =
                 if is_singleton(&current.note_type) && self.worktree_root.is_some() {
                     (
@@ -545,22 +644,44 @@ impl NoteRepository {
 
         let content_hash = note_content_hash(&content);
 
-        sqlx::query(
-            "UPDATE notes SET
-                title   = ?2,
-                content = ?3,
-                tags    = ?4,
-                content_hash = ?5,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
-        )
-        .bind(&id)
-        .bind(&title)
-        .bind(&content)
-        .bind(&tags)
-        .bind(&content_hash)
-        .execute(&mut *tx)
-        .await?;
+        if let Some(file_path_str) = healed_file_path_str.as_ref() {
+            sqlx::query(
+                "UPDATE notes SET
+                    title   = ?2,
+                    content = ?3,
+                    tags    = ?4,
+                    content_hash = ?5,
+                    storage = 'file',
+                    file_path = ?6,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1",
+            )
+            .bind(&id)
+            .bind(&title)
+            .bind(&content)
+            .bind(&tags)
+            .bind(&content_hash)
+            .bind(file_path_str)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE notes SET
+                    title   = ?2,
+                    content = ?3,
+                    tags    = ?4,
+                    content_hash = ?5,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1",
+            )
+            .bind(&id)
+            .bind(&title)
+            .bind(&content)
+            .bind(&tags)
+            .bind(&content_hash)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         index_links_for_note(&mut tx, &id, &current.project_id, &content).await?;
         resolve_links_for_note(&mut tx, &id, &title, &permalink, &current.project_id).await?;

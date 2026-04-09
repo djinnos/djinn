@@ -60,6 +60,36 @@ impl NoteRepository {
                     summary.updated += 1;
                 }
                 None => {
+                    // Warn if a db-only row with the same title+note_type
+                    // already exists. This is the dual-row conflict that
+                    // the pre-fix MCP write path could produce: a db-only
+                    // row with `file_path=""` and a slightly-different
+                    // permalink coexisting with the real file on disk.
+                    if let Ok(Some((existing_id, existing_permalink))) =
+                        sqlx::query_as::<_, (String, String)>(
+                            "SELECT id, permalink FROM notes
+                             WHERE project_id = ?1
+                               AND storage = 'db'
+                               AND title = ?2
+                               AND note_type = ?3
+                             LIMIT 1",
+                        )
+                        .bind(project_id)
+                        .bind(&scanned_note.title)
+                        .bind(&scanned_note.note_type)
+                        .fetch_optional(self.db.pool())
+                        .await
+                    {
+                        tracing::warn!(
+                            target: "djinn_db::note::reindex",
+                            db_note_id = %existing_id,
+                            db_permalink = %existing_permalink,
+                            disk_permalink = %scanned_note.permalink,
+                            disk_file_path = %scanned_note.file_path,
+                            "dual-row conflict during reindex: db-only note coexists with file on disk for same title+type; next edit of the db-only row will heal it to file storage"
+                        );
+                    }
+
                     let created = self.insert_index_entry(project_id, &scanned_note).await?;
                     self.events.send(DjinnEventEnvelope::note_created(&created));
                     summary.created += 1;

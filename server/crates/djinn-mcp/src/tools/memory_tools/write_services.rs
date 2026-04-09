@@ -74,8 +74,9 @@ pub(super) async fn create_note(
         .unwrap_or_else(|| "[]".to_string());
 
     let create_result = if params.scope_paths.is_some() {
-        repo.create_db_note_with_scope(
+        repo.create_with_scope(
             project_id,
+            Path::new(&canonical_project_path),
             &params.title,
             &params.content,
             &params.note_type,
