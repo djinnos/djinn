@@ -12,9 +12,7 @@ use super::messages::CoordinatorMessage;
 use super::rules;
 use super::types::*;
 use crate::actors::slot::SlotPoolHandle;
-use crate::context::AgentContext;
 use crate::roles::RoleRegistry;
-use crate::task_merge;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
 use djinn_db::Database;
@@ -616,13 +614,6 @@ impl CoordinatorActor {
                     return;
                 };
                 if task.status == "closed" {
-                    if let Err(e) = self.sync_task_memory_on_close(&task).await {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            error = %e,
-                            "failed to sync worktree memory on task close"
-                        );
-                    }
                     // Record throughput event when a task with a merge commit closes.
                     if task.merge_commit_sha.is_some()
                         && let Some(epic_id) = task.epic_id.as_deref()
@@ -808,31 +799,6 @@ impl CoordinatorActor {
         }
 
         Ok(())
-    }
-
-    async fn sync_task_memory_on_close(
-        &self,
-        task: &djinn_core::models::Task,
-    ) -> djinn_db::Result<usize> {
-        let app_state = AgentContext {
-            db: self.db.clone(),
-            event_bus: crate::events::event_bus_for(&self.events_tx),
-            git_actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            role_registry: self.role_registry.clone(),
-            health_tracker: self.health.clone(),
-            file_time: Arc::new(crate::file_time::FileTime::new()),
-            lsp: self.lsp.clone(),
-            catalog: self.catalog.clone(),
-            coordinator: Arc::new(tokio::sync::Mutex::new(None)),
-            active_tasks: crate::context::ActivityTracker::default(),
-            task_ops_project_path_override: None,
-            working_root: None,
-            canonical_graph_warmer: self.canonical_graph_warmer.clone(),
-            repo_graph_ops: None,
-        };
-
-        task_merge::sync_task_session_memory_to_canonical(&task.id, &app_state).await
     }
 
     pub(super) fn is_project_dispatch_enabled(&self, project_id: &str) -> bool {
