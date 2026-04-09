@@ -178,7 +178,7 @@ impl CoordinatorHandle {
         F: Fn(&CoordinatorStatus) -> bool,
     {
         let mut rx = self.status_rx.clone();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if predicate(&rx.borrow().to_status(None)) {
                 return;
@@ -199,7 +199,7 @@ impl CoordinatorHandle {
     {
         let project_id = project_id.to_owned();
         let mut rx = self.status_rx.clone();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if predicate(&rx.borrow().to_status(Some(&project_id))) {
                 return;
