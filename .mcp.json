@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "djinn": {
-      "command": "./server/target/release/djinn-server",
-      "args": ["--mcp-connect"]
-    }
-  }
-}

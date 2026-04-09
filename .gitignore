@@ -16,8 +16,9 @@ tmp/
 .tmp-test/
 test-tmp/
 
-# MCP config (may contain API keys)
+# MCP config (machine-specific paths, may contain API keys)
 mcp.json
+.mcp.json
 
 # Package manager stores
 .pnpm-store/
