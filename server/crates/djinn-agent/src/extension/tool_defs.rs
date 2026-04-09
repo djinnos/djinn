@@ -518,6 +518,10 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(tool_apply_patch(), false));
     tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
     tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        false,
+    ));
     tool_values.push(serialize_tool(tool_request_lead(), false));
     tool_values.push(serialize_tool(
         crate::roles::finalize::tool_submit_work(),
@@ -530,6 +534,10 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
 /// task_update_ac is excluded — submit_review sets AC atomically.
 pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        false,
+    ));
     tool_values.push(serialize_tool(
         crate::roles::finalize::tool_submit_review(),
         false,

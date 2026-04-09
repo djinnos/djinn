@@ -10,6 +10,7 @@ use crate::sse;
 mod agents;
 mod chat;
 mod mcp_handler;
+mod project_tools;
 mod state;
 pub use state::AppState;
 
@@ -22,6 +23,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/chat/completions", post(chat::completions_handler))
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
+        .merge(project_tools::router())
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

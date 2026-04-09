@@ -9,15 +9,21 @@ import { InlineError } from "@/components/InlineError";
 import { cn } from "@/lib/utils";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Delete02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
   type BaseRole,
   type CreateAgentRequest,
   type LearnedPromptAmendment,
   type LearnedPromptHistory,
   type Agent,
+  type AvailableMcpServer,
+  type AvailableSkill,
   clearLearnedPrompt,
   createAgent,
   deleteAgent,
+  fetchAvailableMcpServers,
+  fetchAvailableSkills,
   fetchLearnedPromptHistory,
   fetchAgents,
   updateAgent,
@@ -39,17 +45,22 @@ interface AgentFormProps {
   fixedBaseRole?: BaseRole;
   submitLabel: string;
   isBusy: boolean;
+  availableMcpServers: AvailableMcpServer[];
+  availableSkills: AvailableSkill[];
   onSubmit: (data: Omit<CreateAgentRequest, "project_id">) => void;
   onCancel: () => void;
 }
 
-function AgentForm({ initial, fixedBaseRole, submitLabel, isBusy, onSubmit, onCancel }: AgentFormProps) {
+function AgentForm({ initial, fixedBaseRole, submitLabel, isBusy, availableMcpServers, availableSkills, onSubmit, onCancel }: AgentFormProps) {
   const [baseRole, setBaseRole] = useState<BaseRole>(fixedBaseRole ?? initial?.base_role ?? "worker");
   const [name, setName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
   const [extensions, setExtensions] = useState(
     (initial?.system_prompt_extensions ?? []).join("\n"),
   );
+  const [mcpServers, setMcpServers] = useState<string[]>(initial?.mcp_servers ?? []);
+  const [skills, setSkills] = useState<string[]>(initial?.skills ?? []);
+  const [verificationCommand, setVerificationCommand] = useState(initial?.verification_command ?? "");
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,8 +72,20 @@ function AgentForm({ initial, fixedBaseRole, submitLabel, isBusy, onSubmit, onCa
         .split("\n")
         .map((line) => line.trim())
         .filter(Boolean),
+      mcp_servers: mcpServers,
+      skills,
+      verification_command: verificationCommand.trim() || null,
     });
   };
+
+  // MCP servers not yet assigned
+  const unassignedMcpServers = availableMcpServers.filter(
+    (s) => !mcpServers.includes(s.name),
+  );
+  // Skills not yet assigned
+  const unassignedSkills = availableSkills.filter(
+    (s) => !skills.includes(s.name),
+  );
 
   return (
     <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
@@ -131,18 +154,166 @@ function AgentForm({ initial, fixedBaseRole, submitLabel, isBusy, onSubmit, onCa
         </div>
       </div>
 
-      {/* Large prompt editor */}
-      <div className="flex-1 min-h-0 flex flex-col p-6 pb-8">
-        <Label htmlFor="role-extensions" className="text-xs text-muted-foreground mb-2 block shrink-0">
-          System prompt extensions
-        </Label>
-        <Textarea
-          id="role-extensions"
-          placeholder={"You specialise in Rust systems programming.\nAlways write safe, idiomatic code.\n\nWhen reviewing code, focus on:\n- Memory safety\n- Error handling patterns\n- Idiomatic use of traits and generics"}
-          value={extensions}
-          onChange={(e) => setExtensions(e.target.value)}
-          className="font-mono text-sm flex-1 min-h-[200px] resize-none"
-        />
+      {/* Scrollable body */}
+      <div className="flex-1 min-h-0 overflow-y-auto p-6 pb-8 space-y-6">
+        {/* System prompt extensions */}
+        <div className="space-y-2">
+          <Label htmlFor="role-extensions" className="text-xs text-muted-foreground block">
+            System prompt extensions
+          </Label>
+          <Textarea
+            id="role-extensions"
+            placeholder={"You specialise in Rust systems programming.\nAlways write safe, idiomatic code.\n\nWhen reviewing code, focus on:\n- Memory safety\n- Error handling patterns\n- Idiomatic use of traits and generics"}
+            value={extensions}
+            onChange={(e) => setExtensions(e.target.value)}
+            className="font-mono text-sm min-h-[200px] resize-none"
+          />
+        </div>
+
+        {/* MCP Servers */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <Label className="text-xs text-muted-foreground">MCP Servers</Label>
+            {unassignedMcpServers.length > 0 && (
+              <select
+                className="text-xs rounded-md border border-border bg-card px-2 py-1 text-foreground"
+                value=""
+                onChange={(e) => {
+                  if (e.target.value) {
+                    setMcpServers((prev) => [...prev, e.target.value]);
+                  }
+                }}
+              >
+                <option value="">Add server...</option>
+                {unassignedMcpServers.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name} ({s.transport})
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          {mcpServers.length === 0 ? (
+            <p className="text-xs text-muted-foreground/60 italic">
+              {availableMcpServers.length === 0
+                ? "No MCP servers discovered. Add servers to mcp.json in your project."
+                : "No servers assigned. Use the dropdown to add one."}
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {mcpServers.map((serverName) => {
+                const info = availableMcpServers.find((s) => s.name === serverName);
+                return (
+                  <div
+                    key={serverName}
+                    className="flex items-center gap-3 rounded-lg border bg-card px-3 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <span className="text-sm font-medium">{serverName}</span>
+                      {info && (
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          {info.transport}
+                        </span>
+                      )}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        setMcpServers((prev) => prev.filter((n) => n !== serverName))
+                      }
+                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10 h-7 w-7 p-0"
+                    >
+                      <HugeiconsIcon icon={Delete02Icon} size={14} />
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Skills */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <Label className="text-xs text-muted-foreground">Skills</Label>
+            {unassignedSkills.length > 0 && (
+              <select
+                className="text-xs rounded-md border border-border bg-card px-2 py-1 text-foreground"
+                value=""
+                onChange={(e) => {
+                  if (e.target.value) {
+                    setSkills((prev) => [...prev, e.target.value]);
+                  }
+                }}
+              >
+                <option value="">Add skill...</option>
+                {unassignedSkills.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name}{s.description ? ` — ${s.description}` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          {skills.length === 0 ? (
+            <p className="text-xs text-muted-foreground/60 italic">
+              {availableSkills.length === 0
+                ? "No skills discovered. Add .md files to .djinn/skills/ in your project."
+                : "No skills assigned. Use the dropdown to add one."}
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {skills.map((skillName) => {
+                const info = availableSkills.find((s) => s.name === skillName);
+                return (
+                  <div
+                    key={skillName}
+                    className="flex items-center gap-3 rounded-lg border bg-card px-3 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <span className="text-sm font-medium">{skillName}</span>
+                      {info?.description && (
+                        <span className="ml-2 text-xs text-muted-foreground truncate">
+                          {info.description}
+                        </span>
+                      )}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        setSkills((prev) => prev.filter((n) => n !== skillName))
+                      }
+                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10 h-7 w-7 p-0"
+                    >
+                      <HugeiconsIcon icon={Delete02Icon} size={14} />
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Verification command */}
+        <div className="space-y-2">
+          <Label htmlFor="role-verification" className="text-xs text-muted-foreground block">
+            Verification command
+          </Label>
+          <Input
+            id="role-verification"
+            placeholder="e.g. cargo test -- --nocapture"
+            value={verificationCommand}
+            onChange={(e) => setVerificationCommand(e.target.value)}
+            className="font-mono text-sm"
+          />
+          <p className="text-xs text-muted-foreground/60">
+            Custom command to verify this agent's work. Leave empty to use project defaults.
+          </p>
+        </div>
       </div>
     </form>
   );
@@ -425,6 +596,27 @@ function AgentCard({ role, onEdit, onDelete, onRoleCleared, isDeleting }: AgentC
         </div>
       )}
 
+      {((role.mcp_servers?.length ?? 0) > 0 || (role.skills?.length ?? 0) > 0) && (
+        <div className="flex flex-wrap gap-1.5">
+          {(role.mcp_servers ?? []).map((name) => (
+            <span
+              key={`mcp-${name}`}
+              className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-700 dark:text-blue-300"
+            >
+              {name}
+            </span>
+          ))}
+          {(role.skills ?? []).map((name) => (
+            <span
+              key={`skill-${name}`}
+              className="inline-flex items-center rounded-full bg-purple-500/10 px-2 py-0.5 text-xs text-purple-700 dark:text-purple-300"
+            >
+              {name}
+            </span>
+          ))}
+        </div>
+      )}
+
       <LearnedPromptSection role={role} onCleared={onRoleCleared} />
     </div>
   );
@@ -437,6 +629,10 @@ export function AgentRoles() {
   const [roles, setRoles] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Available MCP servers and skills for the project
+  const [availableMcpServers, setAvailableMcpServers] = useState<AvailableMcpServer[]>([]);
+  const [availableSkills, setAvailableSkills] = useState<AvailableSkill[]>([]);
 
   // Create form
   const [isCreating, setIsCreating] = useState(false);
@@ -462,9 +658,31 @@ export function AgentRoles() {
     }
   }, [project?.id]);
 
+  // Load available MCP servers and skills when project changes or form opens
+  const loadAvailableOptions = useCallback(async () => {
+    if (!project?.id) return;
+    try {
+      const [servers, sk] = await Promise.all([
+        fetchAvailableMcpServers(project.id),
+        fetchAvailableSkills(project.id),
+      ]);
+      setAvailableMcpServers(servers);
+      setAvailableSkills(sk);
+    } catch {
+      // Non-fatal — form still works, just without suggestions
+    }
+  }, [project?.id]);
+
   useEffect(() => {
     void loadRoles();
   }, [loadRoles]);
+
+  // Load available MCP servers and skills when entering create/edit mode
+  useEffect(() => {
+    if (isCreating || editingId) {
+      void loadAvailableOptions();
+    }
+  }, [isCreating, editingId, loadAvailableOptions]);
 
   const handleCreate = async (data: Omit<CreateAgentRequest, "project_id">) => {
     if (!project) return;
@@ -487,6 +705,9 @@ export function AgentRoles() {
         name: data.name,
         description: data.description,
         system_prompt_extensions: data.system_prompt_extensions,
+        mcp_servers: data.mcp_servers,
+        skills: data.skills,
+        verification_command: data.verification_command,
       });
       setRoles((prev) => prev.map((r) => (r.id === id ? updated : r)));
       setEditingId(null);
@@ -525,6 +746,8 @@ export function AgentRoles() {
         <AgentForm
           submitLabel="Create"
           isBusy={createBusy}
+          availableMcpServers={availableMcpServers}
+          availableSkills={availableSkills}
           onSubmit={(data) => void handleCreate(data)}
           onCancel={() => setIsCreating(false)}
         />
@@ -541,10 +764,15 @@ export function AgentRoles() {
             name: editingRole.name,
             description: editingRole.description,
             system_prompt_extensions: editingRole.system_prompt_extensions,
+            mcp_servers: editingRole.mcp_servers,
+            skills: editingRole.skills,
+            verification_command: editingRole.verification_command,
           }}
           fixedBaseRole={editingRole.base_role}
           submitLabel="Save"
           isBusy={editBusy}
+          availableMcpServers={availableMcpServers}
+          availableSkills={availableSkills}
           onSubmit={(data) => void handleUpdate(editingRole.id, data)}
           onCancel={() => setEditingId(null)}
         />

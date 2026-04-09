@@ -13,6 +13,10 @@ export interface Agent {
   base_role: BaseRole;
   description: string;
   system_prompt_extensions: string[];
+  mcp_servers: string[];
+  skills: string[];
+  model_preference: string | null;
+  verification_command: string | null;
   is_default: boolean;
   learned_prompt: string | null;
 }
@@ -37,12 +41,56 @@ export interface CreateAgentRequest {
   base_role: BaseRole;
   description: string;
   system_prompt_extensions: string[];
+  mcp_servers?: string[];
+  skills?: string[];
+  model_preference?: string | null;
+  verification_command?: string | null;
 }
 
 export interface UpdateAgentRequest {
   name?: string;
   description?: string;
   system_prompt_extensions?: string[];
+  mcp_servers?: string[];
+  skills?: string[];
+  model_preference?: string | null;
+  verification_command?: string | null;
+}
+
+// ── Available MCP Servers & Skills ──────────────────────────────────────────
+
+export interface AvailableMcpServer {
+  name: string;
+  transport: string;
+}
+
+export interface AvailableSkill {
+  name: string;
+  description: string | null;
+}
+
+export async function fetchAvailableMcpServers(projectId: string): Promise<AvailableMcpServer[]> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(
+    `${baseUrl}/agents/available-mcp-servers?project_id=${encodeURIComponent(projectId)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch available MCP servers: ${response.status}`);
+  }
+  const data = (await response.json()) as { servers: AvailableMcpServer[] };
+  return data.servers;
+}
+
+export async function fetchAvailableSkills(projectId: string): Promise<AvailableSkill[]> {
+  const baseUrl = await getBaseUrl();
+  const response = await fetch(
+    `${baseUrl}/agents/available-skills?project_id=${encodeURIComponent(projectId)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch available skills: ${response.status}`);
+  }
+  const data = (await response.json()) as { skills: AvailableSkill[] };
+  return data.skills;
 }
 
 export async function fetchAgents(projectId?: string): Promise<Agent[]> {
