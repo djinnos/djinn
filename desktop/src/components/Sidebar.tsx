@@ -22,6 +22,7 @@ import {
 import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
 import { useEffect, useCallback, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useExecutionStatus } from '@/hooks/useExecutionStatus';
 import { useExecutionControl } from '@/hooks/useExecutionControl';
@@ -45,21 +46,33 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import {
+  markProposalDraftNotified,
+  pulseProposalListQueryOptions,
+  shouldNotifyForProposalDraft,
+} from '@/lib/pulseProposals';
 
 interface NavItemProps {
   icon: React.ReactNode;
   label: string;
   hotkey?: string;
+  badgeCount?: number;
   isActive: boolean;
   onClick: () => void;
 }
 
-function NavItem({ icon, label, hotkey, isActive, onClick }: NavItemProps) {
+function NavItem({ icon, label, hotkey, badgeCount, isActive, onClick }: NavItemProps) {
+  const pendingProposalLabel =
+    typeof badgeCount === 'number' && badgeCount > 0
+      ? `${label} has ${badgeCount} pending proposals`
+      : undefined;
+
   return (
     <Button
       variant={isActive ? 'secondary' : 'ghost'}
       size="default"
       onClick={onClick}
+      aria-label={pendingProposalLabel}
       className={cn(
         'w-full justify-start gap-3 transition-all duration-200',
         'h-9 px-3',
@@ -70,6 +83,11 @@ function NavItem({ icon, label, hotkey, isActive, onClick }: NavItemProps) {
         {icon}
       </span>
       <span className="text-sm font-medium truncate flex-1 text-left">{label}</span>
+      {typeof badgeCount === 'number' && badgeCount > 0 ? (
+        <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[11px] font-semibold leading-none text-primary-foreground">
+          {badgeCount}
+        </span>
+      ) : null}
       {hotkey && (
         <Kbd>{hotkey.toUpperCase()}</Kbd>
       )}
@@ -392,6 +410,13 @@ export function Sidebar() {
   const selectedProjectId = useSelectedProjectId();
   const isAll = selectedProjectId === ALL_PROJECTS;
   const { navigateToProject, navigateToView } = useProjectRoute();
+  const user = useAuthStore((state) => state.user);
+  const selectedProjectPath = projects.find((project) => project.id === selectedProjectId)?.path ?? '';
+  const pulseProposalsQuery = useQuery({
+    ...pulseProposalListQueryOptions(selectedProjectPath),
+    enabled: !!selectedProjectPath,
+  });
+  const pulseProposalCount = selectedProjectPath ? (pulseProposalsQuery.data?.length ?? 0) : 0;
 
   // Sync active section from URL
   useEffect(() => {
@@ -466,6 +491,19 @@ export function Sidebar() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
+  useEffect(() => {
+    for (const proposal of pulseProposalsQuery.data ?? []) {
+      if (!shouldNotifyForProposalDraft(proposal, user)) continue;
+
+      markProposalDraftNotified(proposal.id);
+      showToast.info('Architect proposal draft is ready', {
+        description: proposal.originating_spike_id
+          ? `Spike ${proposal.originating_spike_id} produced "${proposal.title || proposal.id}".`
+          : `"${proposal.title || proposal.id}" is ready for review in Pulse.`,
+      });
+    }
+  }, [pulseProposalsQuery.data, user]);
+
   const handleAddProject = useCallback(async () => {
     setIsAddingProject(true);
     try {
@@ -525,6 +563,7 @@ export function Sidebar() {
           icon={<HugeiconsIcon icon={Pulse01Icon} className="h-4 w-4" />}
           label="Pulse"
           hotkey="P"
+          badgeCount={pulseProposalCount}
           isActive={activeSection === 'pulse'}
           onClick={() => navigateToView('pulse')}
         />

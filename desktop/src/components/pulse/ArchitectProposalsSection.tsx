@@ -10,10 +10,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { callMcpTool } from "@/api/mcpClient";
-import type {
-  ProposeAdrListOutput,
-  ProposeAdrShowOutput,
-} from "@/api/generated/mcp-tools.gen";
+import type { ProposeAdrShowOutput } from "@/api/generated/mcp-tools.gen";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
 import { Badge } from "@/components/ui/badge";
@@ -23,11 +20,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { pulseProposalListQueryOptions, type PulseProposalSummary } from "@/lib/pulseProposals";
 import { cn } from "@/lib/utils";
 
-type ProposalSummary = NonNullable<ProposeAdrListOutput["items"]>[number] & {
-  modifiedAt: string | null;
-};
+type ProposalSummary = PulseProposalSummary;
 
 type ProposalDetail = NonNullable<ProposeAdrShowOutput["adr"]>;
 
@@ -83,25 +79,11 @@ function workShapeBadgeVariant(workShape?: string): "default" | "secondary" | "o
   }
 }
 
-function parseProposalItems(output: ProposeAdrListOutput): ProposalSummary[] {
-  return (output.items ?? []).map((item) => ({
-    ...item,
-    modifiedAt: null,
-  }));
-}
-
 export function ArchitectProposalsSection({ projectPath }: { projectPath: string }) {
   const [filter, setFilter] = useState<FilterValue>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const proposalsQuery = useQuery({
-    queryKey: ["pulse", "architect-proposals", projectPath],
-    queryFn: async () => parseProposalItems(await callMcpTool("propose_adr_list", { project: projectPath })),
-    enabled: !!projectPath,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
-    refetchOnWindowFocus: true,
-  });
+  const proposalsQuery = useQuery(pulseProposalListQueryOptions(projectPath));
 
   const proposals = proposalsQuery.data ?? [];
   const filteredProposals = useMemo(
