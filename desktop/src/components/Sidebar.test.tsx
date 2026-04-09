@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, userEvent, within } from '@/test/test-utils';
 import { Sidebar } from './Sidebar';
+import { callMcpTool } from '@/api/mcpClient';
 import { projectStore } from '@/stores/projectStore';
 import { epicStore } from '@/stores/epicStore';
 import { useSidebarStore } from '@/stores/sidebarStore';
@@ -13,9 +14,19 @@ vi.mock('@/hooks/useExecutionControl', () => ({
   useExecutionControl: () => ({ start: vi.fn(), pause: vi.fn(), resume: vi.fn() }),
 }));
 
+vi.mock('@/api/mcpClient', () => ({
+  callMcpTool: vi.fn(),
+}));
+
+vi.mock('@/lib/toast', () => ({
+  showToast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+}));
+
 describe('Sidebar component', () => {
   beforeEach(() => {
     localStorage.clear();
+    vi.mocked(callMcpTool).mockReset();
+    vi.mocked(callMcpTool).mockResolvedValue({ items: [] } as never);
 
     useSidebarStore.setState({
       activeSection: 'kanban',
@@ -111,5 +122,18 @@ describe('Sidebar component', () => {
     expect(within(nav).queryByText('Project Alpha')).not.toBeInTheDocument();
     expect(within(nav).queryByText('Project Beta')).not.toBeInTheDocument();
     expect(screen.getByText('All Projects')).toBeInTheDocument();
+  });
+
+  it('shows a Pulse badge matching the pending proposal count for the selected project', async () => {
+    vi.mocked(callMcpTool).mockResolvedValue({
+      items: [
+        { id: 'adr-1', title: 'Draft 1', path: '/tmp/adr-1.md' },
+        { id: 'adr-2', title: 'Draft 2', path: '/tmp/adr-2.md' },
+      ],
+    } as never);
+
+    render(<Sidebar />);
+
+    expect(await screen.findByLabelText('Pulse has 2 pending proposals')).toBeInTheDocument();
   });
 });
