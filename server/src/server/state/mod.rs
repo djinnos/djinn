@@ -556,7 +556,8 @@ impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
     }
 
     async fn commits_since(&self, project_root: &Path, pinned_commit: &str) -> Option<u64> {
-        crate::mcp_bridge::canonical_graph_count_commits_since(project_root, pinned_commit).await
+        crate::canonical_graph::canonical_graph_count_commits_since(project_root, pinned_commit)
+            .await
     }
 }
 
