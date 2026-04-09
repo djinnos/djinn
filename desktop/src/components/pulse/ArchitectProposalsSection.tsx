@@ -20,10 +20,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { pulseProposalListQueryOptions } from "@/lib/pulseProposals";
+import { pulseProposalListQueryOptions, type PulseProposalSummary } from "@/lib/pulseProposals";
 import { cn } from "@/lib/utils";
 
-type ProposalSummary = Awaited<ReturnType<ReturnType<typeof pulseProposalListQueryOptions>["queryFn"]>>[number];
+type ProposalSummary = PulseProposalSummary;
 
 type ProposalDetail = NonNullable<ProposeAdrShowOutput["adr"]>;
 
