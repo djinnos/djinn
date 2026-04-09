@@ -233,9 +233,20 @@ describe("Pulse architect proposal workflow", () => {
     await user.click(proposalCard.closest("button") as HTMLButtonElement);
 
     const detailPanel = await screen.findByLabelText("Proposal detail panel");
+    expect(mockNavigate).toHaveBeenCalledTimes(1);
     expect(within(detailPanel).getByText("Proposal ID")).toBeInTheDocument();
     expect(within(detailPanel).getByText("Ship a project-wide observability baseline.")).toBeInTheDocument();
     expect(within(detailPanel).getByText("Break down work for rollout")).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(callMcpTool).toHaveBeenCalledWith(
+        "propose_adr_show",
+        expect.objectContaining({
+          project: "/tmp/project-alpha",
+          id: "adr-observability",
+        }),
+      );
+    });
 
     await user.click(within(detailPanel).getByRole("button", { name: "Accept" }));
     await user.click(within(detailPanel).getByRole("button", { name: "Confirm accept" }));
@@ -251,6 +262,10 @@ describe("Pulse architect proposal workflow", () => {
           auto_breakdown: true,
         }),
       );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("No pending architect proposals")).toBeInTheDocument();
     });
 
     expect(epicStore.getState().getEpic("epic-observability")).toMatchObject({
@@ -336,6 +351,16 @@ describe("Pulse architect proposal workflow", () => {
 
     const detailPanel = await screen.findByLabelText("Proposal detail panel");
     expect(within(detailPanel).getByText("Needs constraints, rollout plan, and trade-offs.")).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(callMcpTool).toHaveBeenCalledWith(
+        "propose_adr_show",
+        expect.objectContaining({
+          project: "/tmp/project-alpha",
+          id: "adr-reject-me",
+        }),
+      );
+    });
 
     await user.click(within(detailPanel).getByRole("button", { name: "Reject" }));
     await user.type(within(detailPanel).getByLabelText("Reason"), "Please add trade-offs and rollout sequencing.");
