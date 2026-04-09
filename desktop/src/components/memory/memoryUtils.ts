@@ -24,6 +24,9 @@ export const NOTE_TYPE_LABELS: Record<string, string> = {
 /** Note types hidden from the UI. */
 export const HIDDEN_NOTE_TYPES = new Set(['repo_map']);
 
+/** Note types that can appear in the Scoped section when they have scope_paths. */
+const SCOPED_NOTE_TYPES = new Set(['case', 'pitfall', 'pattern']);
+
 export const NOTE_TYPE_ORDER: string[] = [
   'adr',
   'pattern',
@@ -62,10 +65,10 @@ export function partitionNotes(notes: NoteCompact[]): {
   for (const note of notes) {
     if (HIDDEN_NOTE_TYPES.has(note.note_type)) continue;
     const paths = parseScopePaths(note.scope_paths);
-    if (paths.length === 0) {
-      global.push(note);
-    } else {
+    if (paths.length > 0 && SCOPED_NOTE_TYPES.has(note.note_type)) {
       scoped.push(note);
+    } else {
+      global.push(note);
     }
   }
   return { global, scoped };
