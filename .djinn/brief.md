@@ -18,7 +18,7 @@ The current Go server has accumulated significant complexity:
 - **Epics are modeled as tasks.** Same table, same schema, filtered by `issue_type`. This leaks task lifecycle concerns (statuses, dependencies, phase assignment) into what should be a simple grouping concept.
 - **Two separate databases per project.** Tasks in `tasks.db`, memory in `memory.db`, each with their own CDC change tables — doubled maintenance, doubled sync complexity.
 - **CDC pipeline is brittle.** SQLite triggers → change tail goroutine → SSE → MCP re-fetch. Complex, keeps going out of sync, 150ms polling floor for change detection.
-- **Go's compiler misses critical bugs.** AI-generated Go code has 2x more concurrency bugs than human code, and the compiler catches none of them (see [[Language Selection — Compiler as AI Code Reviewer]]).
+- **Go's compiler misses critical bugs.** AI-generated Go code has 2x more concurrency bugs than human code, and the compiler catches none of them (see [[decisions/language-selection-—-compiler-as-ai-code-reviewer]]).
 
 ## Target Users
 
@@ -38,9 +38,9 @@ The current Go server has accumulated significant complexity:
 
 ## Constraints
 
-- **Language:** Rust (decided — [[Language Selection — Compiler as AI Code Reviewer]])
-- **Database:** libSQL/Turso (decided — [[Embedded Database Survey]])
-- **Stack:** Axum + Tokio + Serde + Clap (decided — [[Rust Agentic Ecosystem Survey]])
+- **Language:** Rust (decided — [[decisions/language-selection-—-compiler-as-ai-code-reviewer]])
+- **Database:** libSQL/Turso (decided — [[research/embedded-database-survey]])
+- **Stack:** Axum + Tokio + Serde + Clap (decided — [[research/rust-agentic-ecosystem-survey]])
 - **Agent harness:** Goose library (in-process async tasks) — see [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]
 - **Git integration:** Task branches merge directly to main upstream. No stacked branches. Local repo untouched.
 - **Hierarchy:** Epics are separate entities (not tasks). Tasks live under epics. No subepics, no subtasks. Flat.
@@ -73,7 +73,7 @@ The current Go server has accumulated significant complexity:
 - Wikilink graph (bidirectional links between notes)
 - Memory↔task references (bidirectional lookup)
 - Catalog auto-generation
-- **Cognitive memory layer (v1.1 — [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]):**
+- **Cognitive memory layer (v1.1 — [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]]):**
   - Multi-signal search via Reciprocal Rank Fusion (FTS + temporal priority + graph proximity + task affinity)
   - ACT-R temporal priority scoring from access frequency and recency
   - Hebbian implicit association learning from agent co-access patterns
@@ -127,12 +127,12 @@ The current Go server has accumulated significant complexity:
 - Open-sourcing the desktop
 - Hook bridge HTTP server for agent hook interception (deferred)
 ## Relations
-- [[Language Selection — Compiler as AI Code Reviewer]] — ADR driving language choice
-- [[Embedded Database Survey]] — ADR driving database choice
-- [[Rust Agentic Ecosystem Survey]] — stack ecosystem research
+- [[decisions/language-selection-—-compiler-as-ai-code-reviewer]] — ADR driving language choice
+- [[research/embedded-database-survey]] — ADR driving database choice
+- [[research/rust-agentic-ecosystem-survey]] — stack ecosystem research
 - [[requirements/v1-requirements]] — detailed requirement breakdown
 - [[roadmap]] — phased delivery plan
-- [[Stack Research]] — Rust server stack deep dive
-- [[Features Research]] — feature analysis for task orchestration systems
-- [[Architecture Research]] — system architecture patterns
-- [[Pitfalls Research]] — risks and anti-patterns to avoid
+- [[research/stack-research]] — Rust server stack deep dive
+- [[research/features-research]] — feature analysis for task orchestration systems
+- [[research/architecture-research]] — system architecture patterns
+- [[research/pitfalls-research]] — risks and anti-patterns to avoid
