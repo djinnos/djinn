@@ -77,6 +77,10 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub app_state: &'a crate::context::AgentContext,
     /// Optional MCP tool registry for dispatching tools to external MCP servers.
     pub mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
+    /// Skill names active in this session (for Langfuse metadata).
+    pub active_skill_names: &'a [String],
+    /// MCP server names connected in this session (for Langfuse metadata).
+    pub active_mcp_server_names: &'a [String],
 }
 
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
@@ -106,6 +110,8 @@ pub(super) async fn run_reply_loop(
         global_cancel,
         app_state,
         mcp_registry,
+        active_skill_names,
+        active_mcp_server_names,
     } = ctx;
 
     let tool_metadata = tool_concurrency_safety(tools);
@@ -146,6 +152,9 @@ pub(super) async fn run_reply_loop(
             agent_type: role_name,
             session_id,
         });
+        // Record active skills and MCP servers as metadata.
+        session.record_skills(active_skill_names);
+        session.record_mcp_servers(active_mcp_server_names);
         // Record system prompt from the first message.
         if let Some(sys_msg) = conversation.messages.first()
             && sys_msg.role == Role::System
@@ -947,6 +956,8 @@ mod tests {
                 global_cancel: &cancel,
                 app_state: &app_state,
                 mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
             },
             &mut conv,
             false,
@@ -1033,6 +1044,8 @@ mod tests {
                 global_cancel: &cancel,
                 app_state: &app_state,
                 mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
             },
             &mut conv,
             false,
@@ -1151,6 +1164,8 @@ mod tests {
                 global_cancel: &cancel,
                 app_state: &app_state,
                 mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
             },
             &mut conv,
             false,
@@ -1370,6 +1385,8 @@ mod tests {
                 global_cancel: &cancel,
                 app_state: &app_state,
                 mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
             },
             &mut conv,
             false,
@@ -1426,6 +1443,8 @@ mod tests {
                 global_cancel: &cancel,
                 app_state: &app_state,
                 mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
             },
             &mut conv,
             false,
@@ -1494,6 +1513,8 @@ mod tests {
                 global_cancel: &cancel,
                 app_state: &app_state,
                 mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
             },
             &mut conv,
             false,
@@ -1587,6 +1608,8 @@ mod tests {
                 global_cancel: &cancel,
                 app_state: &app_state,
                 mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
             },
             &mut conv,
             false,

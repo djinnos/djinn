@@ -382,8 +382,17 @@ pub(super) fn make_tool_future<'a>(
         serde_json::Value::Object(map) => Some(map.clone()),
         _ => None,
     };
+    let mcp_server_name = ctx
+        .mcp_registry
+        .as_ref()
+        .and_then(|r| r.server_for_tool(&name).map(str::to_string));
     let tool_span = ctx.otel_session.map(|session| {
-        let ts = telemetry::ToolSpan::start(session.context(), &name, &id);
+        let ts = telemetry::ToolSpan::start_with_server(
+            session.context(),
+            &name,
+            &id,
+            mcp_server_name.as_deref(),
+        );
         ts.record_input(&input_json.to_string());
         ts
     });

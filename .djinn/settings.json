@@ -1,63 +1,69 @@
 {
-  "verification_timeout_secs": 1800,
+  "agent_mcp_defaults": {
+    "*": [
+      "Tavilly"
+    ]
+  },
+  "global_skills": [],
   "setup": [],
   "verification_rules": [
     {
-      "match": "server/crates/djinn-agent/**",
       "commands": [
         "cd server && cargo test -p djinn-agent",
         "cd server && cargo clippy -p djinn-agent --all-targets -- -D warnings"
-      ]
+      ],
+      "match": "server/crates/djinn-agent/**"
     },
     {
-      "match": "server/crates/djinn-core/**",
       "commands": [
         "cd server && cargo test -p djinn-core",
         "cd server && cargo clippy -p djinn-core --all-targets -- -D warnings"
-      ]
+      ],
+      "match": "server/crates/djinn-core/**"
     },
     {
-      "match": "server/crates/djinn-db/**",
       "commands": [
         "cd server && cargo test -p djinn-db",
         "cd server && cargo clippy -p djinn-db --all-targets -- -D warnings"
-      ]
+      ],
+      "match": "server/crates/djinn-db/**"
     },
     {
-      "match": "server/crates/djinn-git/**",
       "commands": [
         "cd server && cargo test -p djinn-git",
         "cd server && cargo clippy -p djinn-git --all-targets -- -D warnings"
-      ]
+      ],
+      "match": "server/crates/djinn-git/**"
     },
     {
-      "match": "server/crates/djinn-mcp/**",
       "commands": [
         "cd server && cargo test -p djinn-mcp",
         "cd server && cargo clippy -p djinn-mcp --all-targets -- -D warnings"
-      ]
+      ],
+      "match": "server/crates/djinn-mcp/**"
     },
     {
-      "match": "server/crates/djinn-provider/**",
       "commands": [
         "cd server && cargo test -p djinn-provider",
         "cd server && cargo clippy -p djinn-provider --all-targets -- -D warnings"
-      ]
+      ],
+      "match": "server/crates/djinn-provider/**"
     },
     {
-      "match": "server/src/**",
       "commands": [
         "cd server && cargo test -p djinn-server",
         "cd server && cargo clippy -p djinn-server --all-targets -- -D warnings"
-      ]
+      ],
+      "match": "server/src/**"
     },
     {
-      "match": "desktop/{src,electron}/**",
       "commands": [
         "cd desktop && pnpm install --frozen-lockfile",
         "cd desktop && pnpm tsc --noEmit",
         "cd desktop && pnpm test"
-      ]
+      ],
+      "match": "desktop/{src,electron}/**"
     }
-  ]
+  ],
+  "verification_timeout_secs": 1800
 }

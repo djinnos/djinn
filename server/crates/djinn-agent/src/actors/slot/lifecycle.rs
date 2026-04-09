@@ -1395,6 +1395,8 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             global_cancel: &pause,
             app_state: &app_state,
             mcp_registry: mcp_registry.as_ref(),
+            active_skill_names: &effective_skills,
+            active_mcp_server_names: &effective_mcp_servers,
         },
         &mut conversation,
         resume_record_id.is_some(),

@@ -217,6 +217,26 @@ impl SessionSpan {
         ));
     }
 
+    /// Record which skills are active in this session (visible in Langfuse trace metadata).
+    pub fn record_skills(&self, skills: &[String]) {
+        if !skills.is_empty() {
+            self.cx.span().set_attribute(KeyValue::new(
+                "langfuse.trace.metadata.skills",
+                skills.join(", "),
+            ));
+        }
+    }
+
+    /// Record which MCP servers are connected in this session (visible in Langfuse trace metadata).
+    pub fn record_mcp_servers(&self, servers: &[String]) {
+        if !servers.is_empty() {
+            self.cx.span().set_attribute(KeyValue::new(
+                "langfuse.trace.metadata.mcp_servers",
+                servers.join(", "),
+            ));
+        }
+    }
+
     /// Record cumulative token usage on the session trace.
     pub fn record_usage(&self, input_tokens: u32, output_tokens: u32) {
         let span = self.cx.span();
@@ -359,16 +379,31 @@ pub struct ToolSpan {
 impl ToolSpan {
     /// Start a tool call span as a child of the session context.
     pub fn start(parent_cx: &Context, tool_name: &str, tool_use_id: &str) -> Self {
+        Self::start_with_server(parent_cx, tool_name, tool_use_id, None)
+    }
+
+    /// Start a tool call span with an optional MCP server name for provenance.
+    pub fn start_with_server(
+        parent_cx: &Context,
+        tool_name: &str,
+        tool_use_id: &str,
+        mcp_server: Option<&str>,
+    ) -> Self {
         let tracer = global::tracer(TRACER_NAME);
+
+        let mut attrs = vec![
+            KeyValue::new("langfuse.observation.type", "span"),
+            KeyValue::new("tool.name", tool_name.to_string()),
+            KeyValue::new("tool.use_id", tool_use_id.to_string()),
+        ];
+        if let Some(server) = mcp_server {
+            attrs.push(KeyValue::new("mcp.server_name", server.to_string()));
+        }
 
         let span = tracer
             .span_builder(format!("tool.{tool_name}"))
             .with_kind(SpanKind::Internal)
-            .with_attributes(vec![
-                KeyValue::new("langfuse.observation.type", "span"),
-                KeyValue::new("tool.name", tool_name.to_string()),
-                KeyValue::new("tool.use_id", tool_use_id.to_string()),
-            ])
+            .with_attributes(attrs)
             .start_with_context(&tracer, parent_cx);
 
         let cx = parent_cx.with_span(span);

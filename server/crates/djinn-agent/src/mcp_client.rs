@@ -29,14 +29,27 @@ use djinn_provider::repos::CredentialRepository;
 static PLACEHOLDER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([A-Za-z0-9_]+)\}").expect("valid MCP placeholder regex"));
 
+/// Format an MCP-namespaced tool name: `mcp__{server}__{tool}`.
+///
+/// This prevents collisions between servers and makes provenance visible
+/// in traces, Langfuse, and the LLM's tool-call output.
+pub fn mcp_namespaced_name(server_name: &str, tool_name: &str) -> String {
+    format!("mcp__{server_name}__{tool_name}")
+}
+
 /// Registry of MCP tool names → server connections built at session start.
 ///
 /// Holds live `Peer<RoleClient>` handles and the tool-name→server-name mapping
 /// so the reply loop can route unknown tool calls to the correct MCP server.
+///
+/// Tools are registered under namespaced names (`mcp__{server}__{tool}`) to
+/// prevent collisions and make provenance visible in traces.
 #[derive(Clone)]
 pub struct McpToolRegistry {
-    /// tool_name → server_name
+    /// namespaced_tool_name → server_name
     tool_to_server: HashMap<String, String>,
+    /// namespaced_tool_name → original tool name (as the MCP server knows it)
+    namespaced_to_original: HashMap<String, String>,
     /// server_name → live peer handle
     peers: HashMap<String, Arc<Peer<RoleClient>>>,
     /// All discovered tool schemas ready to append to the session tool list.
@@ -98,12 +111,20 @@ impl McpToolRegistry {
         self.tool_to_server.contains_key(name)
     }
 
+    /// Returns the MCP server name that provides the given tool, if any.
+    pub fn server_for_tool(&self, name: &str) -> Option<&str> {
+        self.tool_to_server.get(name).map(|s| s.as_str())
+    }
+
     /// Returns the discovered tool schemas (provider-compatible JSON).
     pub fn tool_schemas(&self) -> &[serde_json::Value] {
         &self.tool_schemas
     }
 
     /// Dispatch a tool call to the MCP server that owns the given tool name.
+    ///
+    /// `tool_name` should be the namespaced name (e.g. `mcp__Tavilly__web_search`).
+    /// The original tool name is resolved internally for the server call.
     ///
     /// Returns `Ok(json)` on success or `Err(message)` on failure.
     pub async fn call_tool(
@@ -121,13 +142,19 @@ impl McpToolRegistry {
             .get(tool_name)
             .ok_or_else(|| format!("MCP tool `{tool_name}` not found in registry"))?;
 
+        let original_name = self
+            .namespaced_to_original
+            .get(tool_name)
+            .map(|s| s.as_str())
+            .unwrap_or(tool_name);
+
         let peer = self
             .peers
             .get(server_name.as_str())
             .ok_or_else(|| format!("MCP server `{server_name}` peer not found"))?;
 
         let params = CallToolRequestParams {
-            name: tool_name.to_string().into(),
+            name: original_name.to_string().into(),
             arguments: arguments.map(|m| m.into_iter().collect()),
             meta: None,
             task: None,
@@ -195,6 +222,7 @@ pub async fn connect_and_discover(
     }
 
     let mut tool_to_server: HashMap<String, String> = HashMap::new();
+    let mut namespaced_to_original: HashMap<String, String> = HashMap::new();
     let mut peers: HashMap<String, Arc<Peer<RoleClient>>> = HashMap::new();
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
 
@@ -270,11 +298,19 @@ pub async fn connect_and_discover(
             Ok(result) => {
                 let tool_count = result.tools.len();
                 for tool in result.tools {
-                    let tool_name = tool.name.clone();
+                    let original_name = tool.name.to_string();
+                    let namespaced = mcp_namespaced_name(name, &original_name);
 
                     // Convert rmcp Tool to provider-compatible JSON schema.
                     let schema = match serde_json::to_value(&tool) {
                         Ok(mut v) => {
+                            // Rewrite the tool name in the schema to the namespaced form
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "name".to_string(),
+                                    serde_json::Value::String(namespaced.clone()),
+                                );
+                            }
                             shared_schemas::annotate_concurrent_safe(&mut v, false);
                             v
                         }
@@ -282,7 +318,7 @@ pub async fn connect_and_discover(
                             tracing::warn!(
                                 task_id = %task_short_id,
                                 server = %name,
-                                tool = %tool_name,
+                                tool = %original_name,
                                 error = %e,
                                 "Failed to serialize MCP tool schema; skipping tool"
                             );
@@ -290,16 +326,17 @@ pub async fn connect_and_discover(
                         }
                     };
 
-                    if tool_to_server.contains_key(&*tool_name) {
+                    if tool_to_server.contains_key(&namespaced) {
                         tracing::warn!(
                             task_id = %task_short_id,
                             server = %name,
-                            tool = %tool_name,
+                            tool = %namespaced,
                             "Duplicate MCP tool name; later server wins"
                         );
                     }
 
-                    tool_to_server.insert(tool_name.to_string(), name.clone());
+                    tool_to_server.insert(namespaced.clone(), name.clone());
+                    namespaced_to_original.insert(namespaced, original_name);
                     tool_schemas.push(schema);
                 }
                 peers.insert(name.clone(), peer);
@@ -329,6 +366,7 @@ pub async fn connect_and_discover(
 
     Some(McpToolRegistry {
         tool_to_server,
+        namespaced_to_original,
         peers,
         tool_schemas,
         #[cfg(test)]
@@ -527,6 +565,7 @@ mod tests {
     fn empty_registry_has_no_tools() {
         let registry = McpToolRegistry {
             tool_to_server: HashMap::new(),
+            namespaced_to_original: HashMap::new(),
             peers: HashMap::new(),
             tool_schemas: Vec::new(),
             test_dispatch: None,
@@ -537,30 +576,34 @@ mod tests {
 
     #[test]
     fn registry_lookup() {
+        let namespaced = mcp_namespaced_name("search-server", "web_search");
         let mut tool_to_server = HashMap::new();
-        tool_to_server.insert("web_search".to_string(), "search-server".to_string());
+        tool_to_server.insert(namespaced.clone(), "search-server".to_string());
+        let mut namespaced_to_original = HashMap::new();
+        namespaced_to_original.insert(namespaced.clone(), "web_search".to_string());
 
         let registry = McpToolRegistry {
             tool_to_server,
+            namespaced_to_original,
             peers: HashMap::new(),
-            tool_schemas: vec![serde_json::json!({"name": "web_search"})],
+            tool_schemas: vec![serde_json::json!({"name": namespaced})],
             test_dispatch: None,
         };
-        assert!(registry.has_tool("web_search"));
+        assert!(registry.has_tool(&mcp_namespaced_name("search-server", "web_search")));
+        assert!(!registry.has_tool("web_search")); // raw name no longer works
         assert!(!registry.has_tool("unknown_tool"));
         assert_eq!(registry.tool_schemas().len(), 1);
     }
 
     #[test]
     fn registry_schemas_default_to_concurrent_unsafe() {
+        let namespaced = mcp_namespaced_name("search-server", "web_search");
         let registry = McpToolRegistry {
-            tool_to_server: HashMap::from([(
-                "web_search".to_string(),
-                "search-server".to_string(),
-            )]),
+            tool_to_server: HashMap::from([(namespaced.clone(), "search-server".to_string())]),
+            namespaced_to_original: HashMap::from([(namespaced.clone(), "web_search".to_string())]),
             peers: HashMap::new(),
             tool_schemas: vec![serde_json::json!({
-                "name": "web_search",
+                "name": namespaced,
                 "description": "search",
                 "inputSchema": {"type": "object"},
                 "concurrent_safe": false
@@ -578,6 +621,7 @@ mod tests {
     async fn dispatch_unknown_tool_returns_error() {
         let registry = McpToolRegistry {
             tool_to_server: HashMap::new(),
+            namespaced_to_original: HashMap::new(),
             peers: HashMap::new(),
             tool_schemas: Vec::new(),
             test_dispatch: None,
@@ -603,8 +647,11 @@ mod tests {
                 + Sync
                 + 'static,
         {
+            let tool_to_server: HashMap<String, String> = mappings.into_iter().collect();
+            let namespaced_to_original = HashMap::new(); // test dispatch handles names directly
             Self {
-                tool_to_server: mappings.into_iter().collect(),
+                tool_to_server,
+                namespaced_to_original,
                 peers: HashMap::new(),
                 tool_schemas,
                 test_dispatch: Some(Arc::new(move |tool_name, arguments| {
