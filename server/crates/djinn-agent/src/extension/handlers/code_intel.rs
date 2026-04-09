@@ -306,14 +306,35 @@ pub(crate) async fn call_github_search(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let cred_repo = CredentialRepository::new(state.db.clone(), state.event_bus.clone());
+    let cred_repo = Arc::new(CredentialRepository::new(state.db.clone(), state.event_bus.clone()));
     let params: GithubSearchParams = parse_args(arguments)?;
     github_search::search(
-        &cred_repo,
+        cred_repo,
         &params.query,
         params.language.as_deref(),
         params.repo.as_deref(),
         params.path.as_deref(),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// github_fetch_file — fetch a file from a GitHub repository
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn call_github_fetch_file(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let cred_repo = Arc::new(CredentialRepository::new(state.db.clone(), state.event_bus.clone()));
+    let params: GithubFetchFileParams = parse_args(arguments)?;
+    github_search::fetch_file(
+        cred_repo,
+        &params.repo,
+        &params.path,
+        params.git_ref.as_deref(),
+        params.start_line,
+        params.end_line,
     )
     .await
 }

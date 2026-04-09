@@ -15,6 +15,7 @@ use crate::tools::execution_tools::{
     ExecutionKillTaskParams, ExecutionPauseParams, ExecutionResumeParams, ExecutionStartParams,
     ExecutionStatusParams, SessionForTaskParams,
 };
+use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
 use crate::tools::graph_tools::CodeGraphParams;
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
@@ -610,6 +611,18 @@ impl DjinnMcpServer {
                 name,
                 self.code_graph(Parameters(decode_args::<CodeGraphParams>(name, args)?))
                     .await,
+            ),
+            "github_search" => map_error_or(
+                name,
+                self.github_search(Parameters(decode_args::<GithubSearchParams>(name, args)?))
+                    .await,
+            ),
+            "github_fetch_file" => map_error_or(
+                name,
+                self.github_fetch_file(Parameters(decode_args::<GithubFetchFileParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             _ => Err(format!("unknown MCP tool: '{name}'")),
         }

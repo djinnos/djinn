@@ -327,3 +327,15 @@ pub(super) struct GithubSearchParams {
     #[serde(default)]
     pub path: Option<String>,
 }
+
+#[derive(Deserialize)]
+pub(super) struct GithubFetchFileParams {
+    pub repo: String,
+    pub path: String,
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    #[serde(default)]
+    pub end_line: Option<u32>,
+}

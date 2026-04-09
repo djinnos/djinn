@@ -164,7 +164,8 @@ impl DjinnMcpServer {
                 + Self::epic_tool_router()
                 + Self::proposal_tool_router()
                 + Self::agent_tool_router()
-                + Self::graph_tool_router(),
+                + Self::graph_tool_router()
+                + Self::github_tool_router(),
         }
     }
 

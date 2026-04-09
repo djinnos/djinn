@@ -425,9 +425,10 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
 pub(crate) fn tool_github_search() -> RmcpTool {
     RmcpTool::new(
         "github_search".to_string(),
-        "Search GitHub code across millions of public repositories via grep.app. \
-         Returns matching code snippets with file paths, line numbers, and repository info. \
-         Useful for finding real-world usage examples, implementation patterns, and API usage."
+        "Search GitHub code across public repositories using the GitHub Code Search API. \
+         Returns compact, navigable matches with snippets, file paths, URLs, and metadata. \
+         Each result has a result_id for reference. Use github_fetch_file to inspect the \
+         full file of a promising result."
             .to_string(),
         object!({
             "type": "object",
@@ -435,7 +436,7 @@ pub(crate) fn tool_github_search() -> RmcpTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query. Supports regex patterns."
+                    "description": "Search query. Supports GitHub code search syntax."
                 },
                 "language": {
                     "type": "string",
@@ -448,6 +449,42 @@ pub(crate) fn tool_github_search() -> RmcpTool {
                 "path": {
                     "type": "string",
                     "description": "Path filter to search within specific directories (e.g. \"src/\")"
+                }
+            }
+        }),
+    )
+}
+
+pub(crate) fn tool_github_fetch_file() -> RmcpTool {
+    RmcpTool::new(
+        "github_fetch_file".to_string(),
+        "Fetch the full contents of a file from a public GitHub repository. \
+         Use after github_search to inspect a promising result. Supports \
+         optional start_line/end_line for reading specific sections of large files."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["repo", "path"],
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File path within the repository (e.g. \"src/lib.rs\")"
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Branch, tag, or commit SHA (default: default branch)"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "First line to return (1-based, inclusive)"
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Last line to return (1-based, inclusive)"
                 }
             }
         }),
@@ -467,6 +504,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     // see it. The architect's role-specific schema function appends it directly.
     tool_values.push(serialize_tool(tool_ci_job_log(), true));
     tool_values.push(serialize_tool(tool_github_search(), true));
+    tool_values.push(serialize_tool(tool_github_fetch_file(), true));
     tool_values.push(serialize_tool(tool_output_view(), true));
     tool_values.push(serialize_tool(tool_output_grep(), true));
     tool_values

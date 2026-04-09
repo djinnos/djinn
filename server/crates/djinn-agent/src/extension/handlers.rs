@@ -47,7 +47,7 @@ mod task_epic;
 mod workspace;
 
 use ci::call_ci_job_log;
-pub(crate) use code_intel::{call_code_graph, call_github_search, call_lsp};
+pub(crate) use code_intel::{call_code_graph, call_github_fetch_file, call_github_search, call_lsp};
 use memory_agent::{
     call_agent_amend_prompt, call_agent_create, call_agent_metrics, call_memory_broken_links,
     call_memory_build_context, call_memory_edit, call_memory_health, call_memory_list,
@@ -208,6 +208,7 @@ where
             call_code_graph(state, &call.arguments, &root_str).await
         }
         "github_search" => call_github_search(state, &call.arguments).await,
+        "github_fetch_file" => call_github_fetch_file(state, &call.arguments).await,
         other => {
             if let Some(registry) = mcp_registry
                 && registry.has_tool(other)
