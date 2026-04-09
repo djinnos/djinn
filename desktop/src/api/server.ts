@@ -416,7 +416,7 @@ export async function fetchKanbanSnapshot(
   const allTasks: Task[] = [...(firstTaskPage.tasks as unknown as Task[])];
   if (firstTaskPage.has_more) {
     let offset = allTasks.length;
-    // eslint-disable-next-line no-constant-condition
+     
     while (true) {
       const page = await callMcpTool("task_list", {
         project: resolvedProjectPath,

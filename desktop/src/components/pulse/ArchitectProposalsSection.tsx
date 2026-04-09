@@ -348,6 +348,12 @@ function ProposalDetailPanel({
     return <InlineError message={error} onRetry={onRetry} retrying={retrying} />;
   }
 
+  if (!active) {
+    return <DetailLoadingState />;
+  }
+
+  const activeProposal = active;
+
   const handleAccept = async () => {
     const title = acceptTitle.trim();
     if (!title) {
@@ -363,7 +369,7 @@ function ProposalDetailPanel({
     try {
       const response = await callProposalAction("propose_adr_accept", {
         project: projectPath,
-        id: active.id,
+        id: activeProposal.id,
         title,
         create_epic: isArchitectural ? false : createEpic,
         auto_breakdown: autoBreakdown,
@@ -380,7 +386,7 @@ function ProposalDetailPanel({
 
       setActionResult({ tone: "success", title: "Proposal accepted", description, epic });
       showToast.success("Proposal accepted", { description });
-      await onReviewed(active.id);
+      await onReviewed(activeProposal.id);
     } catch (acceptError) {
       const description = acceptError instanceof Error ? acceptError.message : "Failed to accept proposal.";
       setActionResult({ tone: "error", title: "Could not accept proposal", description });
@@ -405,7 +411,7 @@ function ProposalDetailPanel({
     try {
       const response = await callProposalAction("propose_adr_reject", {
         project: projectPath,
-        id: active.id,
+        id: activeProposal.id,
         reason,
       });
 
@@ -415,13 +421,13 @@ function ProposalDetailPanel({
 
       const description = response?.feedback_target
         ? `Feedback persisted to ${String(response.feedback_target)}.`
-        : active.originating_spike_id
-          ? `Feedback persisted to originating spike ${active.originating_spike_id}.`
+        : activeProposal.originating_spike_id
+          ? `Feedback persisted to originating spike ${activeProposal.originating_spike_id}.`
           : "Proposal rejected. No originating spike was recorded for feedback threading.";
 
       setActionResult({ tone: "success", title: "Proposal rejected", description });
       showToast.success("Proposal rejected", { description });
-      await onReviewed(active.id);
+      await onReviewed(activeProposal.id);
     } catch (rejectError) {
       const description = rejectError instanceof Error ? rejectError.message : "Failed to reject proposal.";
       setActionResult({ tone: "error", title: "Could not reject proposal", description });
@@ -438,10 +444,10 @@ function ProposalDetailPanel({
           <div className="space-y-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="space-y-2">
-                <h3 className="text-lg font-semibold text-foreground">{active.title || active.id}</h3>
+                <h3 className="text-lg font-semibold text-foreground">{activeProposal.title || activeProposal.id}</h3>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={workShapeBadgeVariant(active.work_shape)}>
-                    {workShapeLabel(active.work_shape)}
+                  <Badge variant={workShapeBadgeVariant(activeProposal.work_shape)}>
+                    {workShapeLabel(activeProposal.work_shape)}
                   </Badge>
                   <span className="text-xs text-muted-foreground">
                     {proposal.modifiedAt ? `Updated ${relativeTime(proposal.modifiedAt)}` : "Pending review"}
@@ -451,14 +457,14 @@ function ProposalDetailPanel({
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <SummaryTile icon={File01Icon} label="Proposal ID" value={active.id} mono />
+              <SummaryTile icon={File01Icon} label="Proposal ID" value={activeProposal.id} mono />
               <SummaryTile
                 icon={LinkSquare02Icon}
                 label="Originating spike"
-                value={active.originating_spike_id ?? "Unspecified"}
+                value={activeProposal.originating_spike_id ?? "Unspecified"}
               />
-              <SummaryTile icon={FolderDetailsIcon} label="Source" value={active.path} mono />
-              <SummaryTile label="Work shape" value={workShapeLabel(active.work_shape)} />
+              <SummaryTile icon={FolderDetailsIcon} label="Source" value={activeProposal.path} mono />
+              <SummaryTile label="Work shape" value={workShapeLabel(activeProposal.work_shape)} />
             </div>
           </div>
 
@@ -482,9 +488,9 @@ function ProposalDetailPanel({
             {reviewMode === "accept" ? (
               <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-4">
                 <div className="space-y-2">
-                  <Label htmlFor={`accept-title-${active.id}`}>Title override</Label>
+                  <Label htmlFor={`accept-title-${activeProposal.id}`}>Title override</Label>
                   <Input
-                    id={`accept-title-${active.id}`}
+                    id={`accept-title-${activeProposal.id}`}
                     value={acceptTitle}
                     onChange={(event) => setAcceptTitle(event.target.value)}
                     disabled={submitting}
@@ -531,9 +537,9 @@ function ProposalDetailPanel({
             {reviewMode === "reject" ? (
               <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-4">
                 <div className="space-y-2">
-                  <Label htmlFor={`reject-reason-${active.id}`}>Reason</Label>
+                  <Label htmlFor={`reject-reason-${activeProposal.id}`}>Reason</Label>
                   <Textarea
-                    id={`reject-reason-${active.id}`}
+                    id={`reject-reason-${activeProposal.id}`}
                     value={rejectReason}
                     onChange={(event) => setRejectReason(event.target.value)}
                     disabled={submitting}
@@ -592,7 +598,7 @@ function ProposalDetailPanel({
             <h4 className="text-sm font-medium text-foreground">Draft body</h4>
             <div className="prose prose-sm max-w-none dark:prose-invert">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {active.body ?? "No body content available."}
+                {activeProposal.body ?? "No body content available."}
               </ReactMarkdown>
             </div>
           </div>
