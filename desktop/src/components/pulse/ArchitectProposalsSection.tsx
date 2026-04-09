@@ -93,10 +93,6 @@ function workShapeBadgeVariant(workShape?: string): "default" | "secondary" | "o
   }
 }
 
-async function callProposalAction(toolName: string, args: Record<string, unknown>): Promise<any> {
-  return callMcpTool(toolName as never, args as never);
-}
-
 export function ArchitectProposalsSection({ projectPath }: { projectPath: string }) {
   const [filter, setFilter] = useState<FilterValue>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -352,7 +348,7 @@ function ProposalDetailPanel({
     setActionResult(null);
 
     try {
-      const response = await callProposalAction("propose_adr_accept", {
+      const response = await callMcpTool("propose_adr_accept", {
         project: projectPath,
         id: activeProposal.id,
         title,
@@ -394,7 +390,7 @@ function ProposalDetailPanel({
     setActionResult(null);
 
     try {
-      const response = await callProposalAction("propose_adr_reject", {
+      const response = await callMcpTool("propose_adr_reject", {
         project: projectPath,
         id: activeProposal.id,
         reason,
@@ -423,7 +419,10 @@ function ProposalDetailPanel({
   };
 
   return (
-    <div className="min-h-[28rem] overflow-hidden rounded-xl border border-border/70 bg-background/30">
+    <div
+      aria-label="Proposal detail panel"
+      className="min-h-[28rem] overflow-hidden rounded-xl border border-border/70 bg-background/30"
+    >
       <ScrollArea className="h-[28rem] lg:h-full">
         <div className="space-y-5 p-5">
           <div className="space-y-3">
