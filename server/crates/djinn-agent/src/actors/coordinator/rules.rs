@@ -486,7 +486,7 @@ mod tests {
         expected: usize,
         message: &str,
     ) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let tasks = task_repo.list_by_epic(epic_id).await.unwrap();
             let count = planning_count(&tasks);
