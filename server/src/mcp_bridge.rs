@@ -892,25 +892,6 @@ impl RepoGraphOps for RepoGraphBridge {
     }
 }
 
-#[allow(dead_code)]
-async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option<u64> {
-    let output = tokio::process::Command::new("git")
-        .current_dir(project_root)
-        .args([
-            "rev-list",
-            "--count",
-            &format!("{pinned_commit}..origin/main"),
-        ])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8(output.stdout).ok()?;
-    raw.trim().parse::<u64>().ok()
-}
-
 /// Normalize a graph query path into both the registered project root and its
 /// canonical `_index` worktree path.
 ///
@@ -1278,18 +1259,6 @@ pub(crate) async fn canonical_graph_cache_pinned_commit_for(
     index_tree_path: &Path,
 ) -> Option<String> {
     crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
-}
-
-/// Crate-visible wrapper around the private `count_commits_since` helper so
-/// the production `CanonicalGraphWarmer` impl in `server::state` can perform
-/// the staleness comparison without re-implementing the `git rev-list`
-/// shell-out.
-#[allow(dead_code)]
-pub(crate) async fn canonical_graph_count_commits_since(
-    project_root: &Path,
-    pinned_commit: &str,
-) -> Option<u64> {
-    crate::canonical_graph::canonical_graph_count_commits_since(project_root, pinned_commit).await
 }
 
 /// Replace the in-memory canonical graph slot, moving the previous canonical
