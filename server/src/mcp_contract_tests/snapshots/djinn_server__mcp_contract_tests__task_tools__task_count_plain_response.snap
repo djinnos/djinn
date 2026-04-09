@@ -1,0 +1,7 @@
+---
+source: src/mcp_contract_tests/task_tools.rs
+expression: plain
+---
+{
+  "total_count": 2
+}

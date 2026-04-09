@@ -1,0 +1,12 @@
+---
+source: src/mcp_contract_tests/task_tools.rs
+expression: priority_grouped
+---
+{
+  "groups": [
+    {
+      "count": 2,
+      "key": "2"
+    }
+  ]
+}
