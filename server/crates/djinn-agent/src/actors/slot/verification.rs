@@ -7,7 +7,6 @@ use crate::verification::service::verify_commit;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::TransitionAction;
 use djinn_db::TaskRepository;
-use djinn_db::VerificationCacheRepository;
 use djinn_db::{VerificationResultRepository, VerificationStepInsert};
 
 use super::*;
@@ -251,79 +250,6 @@ async fn run_verification_pipeline(
     Ok(())
 }
 
-/// Run verification commands synchronously (blocking the caller) and return
-/// the failure feedback string if any command fails.  Used by `pm_approve` to
-/// gate merges — the task status is NOT modified here.
-///
-/// Returns `Ok(())` when all commands pass (or none are configured), and
-/// `Err(feedback)` with a human-readable failure description otherwise.
-// TODO: Will be called by coordinator PR dispatch path (ADR-040).
-#[allow(dead_code)]
-pub(crate) async fn run_verification_gate(
-    task_id: &str,
-    project_path: &str,
-    app_state: &AgentContext,
-) -> Result<(), String> {
-    let task = load_task(task_id, app_state)
-        .await
-        .map_err(|e| format!("failed to load task: {e}"))?;
-    let project_dir = PathBuf::from(project_path);
-
-    let branch = format!("task/{}", task.short_id);
-    let commit_sha = resolve_head_commit_for_branch(&project_dir, &branch)
-        .map_err(|e| format!("failed to resolve branch HEAD: {e}"))?;
-
-    let cache_repo = VerificationCacheRepository::new(app_state.db.clone());
-    if cache_repo
-        .get(&task.project_id, &commit_sha)
-        .await
-        .map_err(|e| format!("failed to query verification cache: {e}"))?
-        .is_some()
-    {
-        app_state
-            .event_bus
-            .send(DjinnEventEnvelope::verification_step(
-                &task.project_id,
-                Some(task_id),
-                "verification",
-                &StepEvent::CacheHit {
-                    commit_sha: commit_sha.clone(),
-                    cached_at: String::new(),
-                    original_duration_ms: 0,
-                },
-            ));
-        return Ok(());
-    }
-
-    let (worktree_path, _) = prepare_worktree(&project_dir, &task, app_state)
-        .await
-        .map_err(|e| format!("failed to create verification worktree: {e}"))?;
-
-    // Resolve scoped verification commands (AC-1 through AC-7).
-    let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
-    let target_branch = default_target_branch(&task.project_id, app_state).await;
-    let scoped_commands =
-        resolve_scoped_commands(&worktree_path, &target_branch, role_cmd_override.as_deref());
-
-    let result = verify_commit(
-        &task.project_id,
-        &commit_sha,
-        &worktree_path,
-        &app_state.db,
-        &scoped_commands,
-    )
-    .await
-    .map_err(|e| format!("verification execution failed: {e}"))?;
-    emit_verification_steps(&task.project_id, Some(task_id), &result, app_state).await;
-
-    cleanup_worktree(task_id, &worktree_path, app_state).await;
-    if result.passed {
-        Ok(())
-    } else {
-        Err(format_verification_failure_feedback(&result))
-    }
-}
-
 /// Log verification failure and transition appropriately.
 ///
 /// If the consecutive failure count will reach the escalation threshold, go
@@ -407,26 +333,6 @@ fn resolve_head_commit(worktree_path: &std::path::Path) -> anyhow::Result<String
     if !output.status.success() {
         anyhow::bail!(
             "git rev-parse HEAD failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-#[allow(dead_code)]
-fn resolve_head_commit_for_branch(
-    project_dir: &std::path::Path,
-    branch_name: &str,
-) -> anyhow::Result<String> {
-    let output = std::process::Command::new("git")
-        .arg("rev-parse")
-        .arg(branch_name)
-        .current_dir(project_dir)
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git rev-parse {} failed: {}",
-            branch_name,
             String::from_utf8_lossy(&output.stderr)
         );
     }
