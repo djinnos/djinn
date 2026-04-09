@@ -7,7 +7,10 @@ import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
-import { GitRemoteSetupBanner, useGitRemoteCheck } from "@/components/GitRemoteSetupBanner";
+import {
+  GitRemoteSetupBanner,
+  useGitRemoteCheck,
+} from "@/components/GitRemoteSetupBanner";
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
 import { GitHubAppBanner } from "@/components/GitHubAppBanner";
 import {
@@ -76,25 +79,77 @@ const STATUS_COLUMNS: Array<{
   glowClass: string;
   icon: typeof UnavailableIcon;
 }> = [
-  { key: "open", label: "Open", colorClass: "bg-[#4B5563]", glowClass: "", icon: CircleIcon },
-  { key: "in_progress", label: "In Progress", colorClass: "bg-[#3B82F6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#3B82F6]/40", icon: Progress02Icon },
-  { key: "pr_ready", label: "PR Ready", colorClass: "bg-[#8B5CF6]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#8B5CF6]/40", icon: GitPullRequestIcon },
-  { key: "done", label: "Merged", colorClass: "bg-[#10B981]", glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40", icon: CheckmarkCircle03Icon },
+  {
+    key: "open",
+    label: "Open",
+    colorClass: "bg-[#4B5563]",
+    glowClass: "",
+    icon: CircleIcon,
+  },
+  {
+    key: "in_progress",
+    label: "In Progress",
+    colorClass: "bg-[#3B82F6]",
+    glowClass: "shadow-[0_1px_6px_-1px] shadow-[#3B82F6]/40",
+    icon: Progress02Icon,
+  },
+  {
+    key: "pr_ready",
+    label: "PR Ready",
+    colorClass: "bg-[#8B5CF6]",
+    glowClass: "shadow-[0_1px_6px_-1px] shadow-[#8B5CF6]/40",
+    icon: GitPullRequestIcon,
+  },
+  {
+    key: "done",
+    label: "Merged",
+    colorClass: "bg-[#10B981]",
+    glowClass: "shadow-[0_1px_6px_-1px] shadow-[#10B981]/40",
+    icon: CheckmarkCircle03Icon,
+  },
 ];
 
 const PRIORITIES = [-1, 0, 1, 2, 3] as const;
 
-const PRIORITY_ICONS: Record<number, { icon: typeof FullSignalIcon; color: string; activeColor: string }> = {
-  [-1]: { icon: AlertDiamondIcon, color: "text-muted-foreground/50", activeColor: "text-orange-400" },
-  0: { icon: FullSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#D1D5DB]" },
-  1: { icon: MediumSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#9CA3AF]" },
-  2: { icon: LowSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#6B7280]" },
-  3: { icon: NoSignalIcon, color: "text-muted-foreground/50", activeColor: "text-[#4B5563]" },
+const PRIORITY_ICONS: Record<
+  number,
+  { icon: typeof FullSignalIcon; color: string; activeColor: string }
+> = {
+  [-1]: {
+    icon: AlertDiamondIcon,
+    color: "text-muted-foreground/50",
+    activeColor: "text-orange-400",
+  },
+  0: {
+    icon: FullSignalIcon,
+    color: "text-muted-foreground/50",
+    activeColor: "text-[#D1D5DB]",
+  },
+  1: {
+    icon: MediumSignalIcon,
+    color: "text-muted-foreground/50",
+    activeColor: "text-[#9CA3AF]",
+  },
+  2: {
+    icon: LowSignalIcon,
+    color: "text-muted-foreground/50",
+    activeColor: "text-[#6B7280]",
+  },
+  3: {
+    icon: NoSignalIcon,
+    color: "text-muted-foreground/50",
+    activeColor: "text-[#4B5563]",
+  },
 };
 
 function taskToColumnKey(task: Task): ColumnKey {
   if (task.status === "closed") return "done";
-  if (task.status === "approved" || task.status === "pr_draft" || task.status === "pr_review") return "pr_ready";
+  if (
+    task.status === "approved" ||
+    task.status === "pr_draft" ||
+    task.status === "pr_review"
+  )
+    return "pr_ready";
   if (
     task.status === "in_progress" ||
     task.status === "verifying" ||
@@ -111,7 +166,10 @@ function getEpicEmoji(epic: Epic | undefined): string {
   return epic?.emoji ?? "📌";
 }
 
-function getEpicTitle(epic: Epic | undefined, epicId: string | undefined): string {
+function getEpicTitle(
+  epic: Epic | undefined,
+  epicId: string | undefined,
+): string {
   if (!epicId) return "No Epic";
   return epic?.title ?? "Unknown Epic";
 }
@@ -141,22 +199,24 @@ function EpicFilter({
       list.push(epic);
       map.set(status, list);
     }
-    return EPIC_STATUS_GROUPS
-      .filter((g) => map.has(g.key))
-      .map((g) => ({ ...g, items: map.get(g.key)! }));
+    return EPIC_STATUS_GROUPS.filter((g) => map.has(g.key)).map((g) => ({
+      ...g,
+      items: map.get(g.key)!,
+    }));
   }, [epics]);
 
   const toggle = (id: string) => {
     onChange(
       selected.includes(id)
         ? selected.filter((s) => s !== id)
-        : [...selected, id]
+        : [...selected, id],
     );
   };
 
-  const label = selected.length > 0
-    ? `${selected.length} epic${selected.length > 1 ? "s" : ""}`
-    : "All epics";
+  const label =
+    selected.length > 0
+      ? `${selected.length} epic${selected.length > 1 ? "s" : ""}`
+      : "All epics";
 
   return (
     <SelectorRoot open={open} onOpenChange={setOpen}>
@@ -179,8 +239,15 @@ function EpicFilter({
         <ModelSelectorList>
           <ModelSelectorEmpty>No epics found.</ModelSelectorEmpty>
           {grouped.map((group) => (
-            <div key={group.key} data-slot="command-group" className="text-foreground overflow-hidden p-1">
-              <div data-slot="command-group-heading" className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
+            <div
+              key={group.key}
+              data-slot="command-group"
+              className="text-foreground overflow-hidden p-1"
+            >
+              <div
+                data-slot="command-group-heading"
+                className="px-2 py-1.5 text-xs font-medium text-muted-foreground"
+              >
                 {group.label}
               </div>
               <div data-slot="command-group-items">
@@ -190,10 +257,16 @@ function EpicFilter({
                     searchValue={epic.title ?? ""}
                     onSelect={() => toggle(epic.id)}
                   >
-                    <span className="shrink-0 text-xs leading-none">{getEpicEmoji(epic)}</span>
+                    <span className="shrink-0 text-xs leading-none">
+                      {getEpicEmoji(epic)}
+                    </span>
                     <ModelSelectorName>{epic.title}</ModelSelectorName>
                     {selected.includes(epic.id) && (
-                      <HugeiconsIcon icon={Tick02Icon} size={14} className="shrink-0 text-primary" />
+                      <HugeiconsIcon
+                        icon={Tick02Icon}
+                        size={14}
+                        className="shrink-0 text-primary"
+                      />
                     )}
                   </ModelSelectorItem>
                 ))}
@@ -228,12 +301,16 @@ export function KanbanBoard({
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
   const [searchParams, setSearchParams] = useSearchParams();
-  const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>(() => {
-    const next: Record<string, boolean> = {};
-    for (const key of initialCollapsedEpics ?? []) next[key] = true;
-    return next;
-  });
-  const [movingTaskIds, setMovingTaskIds] = useState<Record<string, boolean>>({});
+  const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>(
+    () => {
+      const next: Record<string, boolean> = {};
+      for (const key of initialCollapsedEpics ?? []) next[key] = true;
+      return next;
+    },
+  );
+  const [movingTaskIds, setMovingTaskIds] = useState<Record<string, boolean>>(
+    {},
+  );
   const previousTaskStatusesRef = useRef<Map<string, string>>(new Map());
 
   useEffect(() => {
@@ -272,17 +349,17 @@ export function KanbanBoard({
             return next;
           });
         }, 350);
-      }
+      },
     );
 
     return unsubscribe;
   }, [tasksProp]);
 
   const [epicFilters, setEpicFilters] = useState<string[]>(
-    (searchParams.get("epic") ?? "").split(",").filter(Boolean)
+    (searchParams.get("epic") ?? "").split(",").filter(Boolean),
   );
   const [ownerFilters, setOwnerFilters] = useState<string[]>(
-    (searchParams.get("owner") ?? "").split(",").filter(Boolean)
+    (searchParams.get("owner") ?? "").split(",").filter(Boolean),
   );
   const [priorityFilters, setPriorityFilters] = useState<number[]>(
     (searchParams.get("priority") ?? "")
@@ -293,13 +370,17 @@ export function KanbanBoard({
         const match = p.match(/^P?(-?\d)$/i);
         return match ? Number(match[1]) : -99;
       })
-      .filter((p) => p >= -1 && p <= 3)
+      .filter((p) => p >= -1 && p <= 3),
   );
   const [issueTypeFilters, setIssueTypeFilters] = useState<string[]>(
-    (searchParams.get("type") ?? "").split(",").filter(Boolean)
+    (searchParams.get("type") ?? "").split(",").filter(Boolean),
   );
-  const [searchInput, setSearchInput] = useState<string>(searchParams.get("q") ?? "");
-  const [textFilter, setTextFilter] = useState<string>(searchParams.get("q") ?? "");
+  const [searchInput, setSearchInput] = useState<string>(
+    searchParams.get("q") ?? "",
+  );
+  const [textFilter, setTextFilter] = useState<string>(
+    searchParams.get("q") ?? "",
+  );
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -308,16 +389,26 @@ export function KanbanBoard({
   };
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
-  const { hasRemote, check: checkRemote, setHasRemote } = useGitRemoteCheck(selectedProject?.path);
+  const {
+    hasRemote,
+    check: checkRemote,
+    setHasRemote,
+  } = useGitRemoteCheck(selectedProject?.path);
 
   const handleRefresh = useCallback(async () => {
     if (refreshing) return;
     setRefreshing(true);
     try {
       const allPaths = !selectedProject
-        ? projectStore.getState().projects.map((p) => p.path).filter(Boolean) as string[]
+        ? (projectStore
+            .getState()
+            .projects.map((p) => p.path)
+            .filter(Boolean) as string[])
         : undefined;
-      const snapshot = await fetchKanbanSnapshot(selectedProject?.path ?? null, allPaths);
+      const snapshot = await fetchKanbanSnapshot(
+        selectedProject?.path ?? null,
+        allPaths,
+      );
       taskStore.getState().setTasks(snapshot.tasks);
       epicStore.getState().setEpics(snapshot.epics);
     } catch (error) {
@@ -350,21 +441,38 @@ export function KanbanBoard({
     if (ownerFilters.length > 0) next.set("owner", ownerFilters.join(","));
     else next.delete("owner");
 
-    if (priorityFilters.length > 0) next.set("priority", priorityFilters.map((p) => p === -1 ? "critical" : `P${p}`).join(","));
+    if (priorityFilters.length > 0)
+      next.set(
+        "priority",
+        priorityFilters.map((p) => (p === -1 ? "critical" : `P${p}`)).join(","),
+      );
     else next.delete("priority");
 
-    if (issueTypeFilters.length > 0) next.set("type", issueTypeFilters.join(","));
+    if (issueTypeFilters.length > 0)
+      next.set("type", issueTypeFilters.join(","));
     else next.delete("type");
 
     if (textFilter.trim()) next.set("q", textFilter.trim());
     else next.delete("q");
 
     setSearchParams(next, { replace: true });
-  }, [epicFilters, ownerFilters, priorityFilters, issueTypeFilters, textFilter, searchParams, setSearchParams, disableSearchParamSync]);
+  }, [
+    epicFilters,
+    ownerFilters,
+    priorityFilters,
+    issueTypeFilters,
+    textFilter,
+    searchParams,
+    setSearchParams,
+    disableSearchParamSync,
+  ]);
 
   const epicOptions = useMemo(
-    () => Array.from(epics.values()).sort((a, b) => (a.title ?? "").localeCompare(b.title ?? "")),
-    [epics]
+    () =>
+      Array.from(epics.values()).sort((a, b) =>
+        (a.title ?? "").localeCompare(b.title ?? ""),
+      ),
+    [epics],
   );
 
   const ownerOptions = useMemo(() => {
@@ -379,14 +487,31 @@ export function KanbanBoard({
     const q = textFilter.trim().toLowerCase();
 
     return tasks.filter((task) => {
-      if (epicFilters.length > 0 && !epicFilters.includes(task.epic_id ?? "")) return false;
-      if (ownerFilters.length > 0 && !ownerFilters.includes(task.owner ?? "")) return false;
-      if (priorityFilters.length > 0 && !priorityFilters.includes(task.priority)) return false;
-      if (issueTypeFilters.length > 0 && !issueTypeFilters.includes(task.issue_type ?? "task")) return false;
+      if (epicFilters.length > 0 && !epicFilters.includes(task.epic_id ?? ""))
+        return false;
+      if (ownerFilters.length > 0 && !ownerFilters.includes(task.owner ?? ""))
+        return false;
+      if (
+        priorityFilters.length > 0 &&
+        !priorityFilters.includes(task.priority)
+      )
+        return false;
+      if (
+        issueTypeFilters.length > 0 &&
+        !issueTypeFilters.includes(task.issue_type ?? "task")
+      )
+        return false;
       if (q && !task.title.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [tasks, epicFilters, ownerFilters, priorityFilters, issueTypeFilters, textFilter]);
+  }, [
+    tasks,
+    epicFilters,
+    ownerFilters,
+    priorityFilters,
+    issueTypeFilters,
+    textFilter,
+  ]);
 
   const groupedByStatusThenEpic = useMemo(() => {
     const byColumn = new Map<ColumnKey, Map<string, Task[]>>();
@@ -399,7 +524,13 @@ export function KanbanBoard({
       const epicKey = task.epic_id ?? "no-epic";
       const columnKey = taskToColumnKey(task);
       // Hide review, breakdown, and planning tasks from the done/merged column
-      if (columnKey === "done" && (task.issue_type === "review" || task.issue_type === "decomposition" || task.issue_type === "planning")) continue;
+      if (
+        columnKey === "done" &&
+        (task.issue_type === "review" ||
+          task.issue_type === "decomposition" ||
+          task.issue_type === "planning")
+      )
+        continue;
       const columnMap = byColumn.get(columnKey);
       if (!columnMap) continue;
 
@@ -408,7 +539,7 @@ export function KanbanBoard({
       columnMap.set(epicKey, existing);
     }
 
-    // Seed empty epics into the Open column so they're visible on the board
+    // Seed empty open/drafting epics into the Open column so they're visible on the board
     const epicIdsWithTasks = new Set<string>();
     for (const columnMap of byColumn.values()) {
       for (const epicKey of columnMap.keys()) {
@@ -417,9 +548,10 @@ export function KanbanBoard({
     }
     const openColumn = byColumn.get("open");
     if (openColumn) {
-      const visibleEpicIds = epicFilters.length > 0 ? new Set(epicFilters) : null;
+      const visibleEpicIds =
+        epicFilters.length > 0 ? new Set(epicFilters) : null;
       for (const [epicId, epic] of epics) {
-        if (epic.status !== "open") continue;
+        if (epic.status !== "open" && epic.status !== "drafting") continue;
         if (epicIdsWithTasks.has(epicId)) continue;
         if (visibleEpicIds && !visibleEpicIds.has(epicId)) continue;
         openColumn.set(epicId, []);
@@ -431,7 +563,10 @@ export function KanbanBoard({
 
   const toggleEpic = (columnKey: ColumnKey, epicKey: string) => {
     const collapseKey = `${columnKey}:${epicKey}`;
-    setCollapsedEpics((prev) => ({ ...prev, [collapseKey]: !prev[collapseKey] }));
+    setCollapsedEpics((prev) => ({
+      ...prev,
+      [collapseKey]: !prev[collapseKey],
+    }));
   };
 
   return (
@@ -457,14 +592,14 @@ export function KanbanBoard({
                   setPriorityFilters((prev) =>
                     prev.includes(priority)
                       ? prev.filter((p) => p !== priority)
-                      : [...prev, priority]
+                      : [...prev, priority],
                   )
                 }
                 className={cn(
                   "flex h-7 w-7 items-center justify-center rounded-md transition-colors",
                   isActive
                     ? "bg-primary/20 ring-1 ring-primary/40"
-                    : "hover:bg-muted/50"
+                    : "hover:bg-muted/50",
                 )}
               >
                 <HugeiconsIcon
@@ -472,7 +607,11 @@ export function KanbanBoard({
                   size={16}
                   className={cn(
                     "shrink-0 transition-colors",
-                    isActive ? "text-primary" : noFilters ? config.activeColor : config.color
+                    isActive
+                      ? "text-primary"
+                      : noFilters
+                        ? config.activeColor
+                        : config.color,
                   )}
                 />
               </button>
@@ -494,10 +633,16 @@ export function KanbanBoard({
           multiple
           value={issueTypeFilters}
           onValueChange={(v) => setIssueTypeFilters(v ?? [])}
-          itemToStringLabel={(val) => ISSUE_TYPES.find((t) => t.value === val)?.label ?? val}
+          itemToStringLabel={(val) =>
+            ISSUE_TYPES.find((t) => t.value === val)?.label ?? val
+          }
         >
           <ComboboxInput
-            placeholder={issueTypeFilters.length > 0 ? `${issueTypeFilters.length} type${issueTypeFilters.length > 1 ? "s" : ""}` : "All types"}
+            placeholder={
+              issueTypeFilters.length > 0
+                ? `${issueTypeFilters.length} type${issueTypeFilters.length > 1 ? "s" : ""}`
+                : "All types"
+            }
             className="w-28"
           />
           <ComboboxContent>
@@ -518,7 +663,11 @@ export function KanbanBoard({
           onValueChange={(v) => setOwnerFilters(v ?? [])}
         >
           <ComboboxInput
-            placeholder={ownerFilters.length > 0 ? `${ownerFilters.length} owner${ownerFilters.length > 1 ? "s" : ""}` : "All owners"}
+            placeholder={
+              ownerFilters.length > 0
+                ? `${ownerFilters.length} owner${ownerFilters.length > 1 ? "s" : ""}`
+                : "All owners"
+            }
             className="w-36"
           />
           <ComboboxContent>
@@ -551,7 +700,10 @@ export function KanbanBoard({
             className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
             title="Refresh board"
           >
-            <HugeiconsIcon icon={Refresh01Icon} className={cn("size-3.5", refreshing && "animate-spin")} />
+            <HugeiconsIcon
+              icon={Refresh01Icon}
+              className={cn("size-3.5", refreshing && "animate-spin")}
+            />
           </button>
         </div>
       </div>
@@ -581,117 +733,165 @@ export function KanbanBoard({
 
       <div className="flex min-h-0 flex-1 overflow-x-auto pb-1">
         {STATUS_COLUMNS.map((column, colIdx) => {
-          const statusMap = groupedByStatusThenEpic.get(column.key) ?? new Map<string, Task[]>();
+          const statusMap =
+            groupedByStatusThenEpic.get(column.key) ??
+            new Map<string, Task[]>();
           const epicGroups = Array.from(statusMap.entries());
-          const taskCount = epicGroups.reduce((total, [, epicTasks]) => total + epicTasks.length, 0);
+          const taskCount = epicGroups.reduce(
+            (total, [, epicTasks]) => total + epicTasks.length,
+            0,
+          );
           const hasContent = epicGroups.length > 0;
 
           return (
             <div key={column.key} className="flex min-h-0 min-w-[360px] flex-1">
-              {colIdx > 0 && <div className="w-px shrink-0 self-stretch bg-white/[0.03]" />}
-              <Card
-                className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out"
-            >
-              <div className="flex flex-col">
-                <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
-                  <div className="flex items-center gap-2.5">
-                    {column.key === "in_progress" ? (
-                      <HugeiconsIcon
-                        icon={Loading02Icon}
-                        className="size-4 shrink-0 animate-spin text-blue-400"
-                      />
-                    ) : (
-                      <HugeiconsIcon
-                        icon={column.icon}
-                        className={cn(
-                          "size-4 shrink-0",
-                          column.key === "done" ? "text-[#10B981]" :
-                          column.key === "pr_ready" ? "text-[#8B5CF6]" :
-                          "text-muted-foreground"
-                        )}
-                      />
-                    )}
-                    <span className="leading-none">{column.label}</span>
-                    <span className="text-xs leading-none text-muted-foreground">{taskCount}</span>
+              {colIdx > 0 && (
+                <div className="w-px shrink-0 self-stretch bg-white/[0.03]" />
+              )}
+              <Card className="relative min-h-0 flex-1 gap-0 border-transparent bg-transparent py-0 ring-0 transition-all duration-300 ease-in-out">
+                <div className="flex flex-col">
+                  <div className="relative px-4 pb-2.5 pt-3.5 text-sm font-semibold">
+                    <div className="flex items-center gap-2.5">
+                      {column.key === "in_progress" ? (
+                        <HugeiconsIcon
+                          icon={Loading02Icon}
+                          className="size-4 shrink-0 animate-spin text-blue-400"
+                        />
+                      ) : (
+                        <HugeiconsIcon
+                          icon={column.icon}
+                          className={cn(
+                            "size-4 shrink-0",
+                            column.key === "done"
+                              ? "text-[#10B981]"
+                              : column.key === "pr_ready"
+                                ? "text-[#8B5CF6]"
+                                : "text-muted-foreground",
+                          )}
+                        />
+                      )}
+                      <span className="leading-none">{column.label}</span>
+                      <span className="text-xs leading-none text-muted-foreground">
+                        {taskCount}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="px-4">
+                    <div
+                      className={cn(
+                        "h-0.5 w-10 rounded-full",
+                        column.colorClass,
+                        column.glowClass,
+                      )}
+                    />
                   </div>
                 </div>
-                <div className="px-4">
-                  <div className={cn("h-0.5 w-10 rounded-full", column.colorClass, column.glowClass)} />
-                </div>
-              </div>
 
-              <CardContent className="relative z-10 flex-1 overflow-y-auto px-3 pt-4">
-                {!hasContent ? (
-                  <p className="px-1 text-xs text-muted-foreground/50">No tasks</p>
-                ) : (
-                <div className="flex flex-col gap-3.5">
-                  {epicGroups.map(([epicKey, epicTasks]) => {
-                    const firstTaskEpicId = epicTasks[0]?.epic_id ?? (epicKey !== "no-epic" ? epicKey : undefined);
-                    const epic = firstTaskEpicId ? epics.get(firstTaskEpicId) : undefined;
-                    const collapseKey = `${column.key}:${epicKey}`;
-                    const isCollapsed = !!collapsedEpics[collapseKey];
+                <CardContent className="relative z-10 flex-1 overflow-y-auto px-3 pt-4">
+                  {!hasContent ? (
+                    <p className="px-1 text-xs text-muted-foreground/50">
+                      No tasks
+                    </p>
+                  ) : (
+                    <div className="flex flex-col gap-3.5">
+                      {epicGroups.map(([epicKey, epicTasks]) => {
+                        const firstTaskEpicId =
+                          epicTasks[0]?.epic_id ??
+                          (epicKey !== "no-epic" ? epicKey : undefined);
+                        const epic = firstTaskEpicId
+                          ? epics.get(firstTaskEpicId)
+                          : undefined;
+                        const collapseKey = `${column.key}:${epicKey}`;
+                        const isCollapsed = !!collapsedEpics[collapseKey];
 
-                    return (
-                      <Card key={epicKey} size="sm" className={cn(
-                        "gap-0 cursor-pointer py-3 ring-white/[0.04]",
-                        epic?.status === "drafting" ? "border-amber-500/15 bg-zinc-900/60" : "bg-zinc-900"
-                      )} onClick={() => toggleEpic(column.key, epicKey)}>
-                        <CardContent>
-                          <div className="flex w-full items-center justify-between gap-2 px-1 py-1.5 text-sm font-medium">
-                            <span className="flex items-center gap-2 truncate">
-                              <span className="shrink-0 text-xs leading-none">{getEpicEmoji(epic)}</span>
-                              <span className="truncate">{getEpicTitle(epic, firstTaskEpicId)}</span>
-                              {epic?.status === "drafting" && (
-                                <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
-                                  Drafting
+                        return (
+                          <Card
+                            key={epicKey}
+                            size="sm"
+                            className={cn(
+                              "gap-0 cursor-pointer py-3 ring-white/[0.04]",
+                              epic?.status === "drafting"
+                                ? "border-amber-500/15 bg-zinc-900/60"
+                                : "bg-zinc-900",
+                            )}
+                            onClick={() => toggleEpic(column.key, epicKey)}
+                          >
+                            <CardContent>
+                              <div className="flex w-full items-center justify-between gap-2 px-1 py-1.5 text-sm font-medium">
+                                <span className="flex items-center gap-2 truncate">
+                                  <span className="shrink-0 text-xs leading-none">
+                                    {getEpicEmoji(epic)}
+                                  </span>
+                                  <span className="truncate">
+                                    {getEpicTitle(epic, firstTaskEpicId)}
+                                  </span>
+                                  {epic?.status === "drafting" && (
+                                    <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
+                                      Drafting
+                                    </span>
+                                  )}
                                 </span>
+                                <HugeiconsIcon
+                                  icon={
+                                    isCollapsed
+                                      ? ArrowRight01Icon
+                                      : ArrowDown01Icon
+                                  }
+                                  className="size-4 shrink-0 text-muted-foreground"
+                                />
+                              </div>
+
+                              {!isCollapsed && epicTasks.length === 0 && (
+                                <p className="px-1 pt-1.5 text-xs text-muted-foreground/50">
+                                  No tasks yet
+                                </p>
                               )}
-                            </span>
-                            <HugeiconsIcon
-                              icon={isCollapsed ? ArrowRight01Icon : ArrowDown01Icon}
-                              className="size-4 shrink-0 text-muted-foreground"
-                            />
-                          </div>
 
-                          {!isCollapsed && epicTasks.length === 0 && (
-                            <p className="px-1 pt-1.5 text-xs text-muted-foreground/50">No tasks yet</p>
-                          )}
-
-                          {!isCollapsed && epicTasks.length > 0 && (
-                            column.key === "done" ? (
-                              <ul className="flex flex-col pt-1.5" onClick={(e) => e.stopPropagation()}>
-                                {epicTasks.map((task) => (
-                                  <li key={task.id}>
-                                    <DoneTaskRow
-                                      task={task}
-                                      onClick={() => handleTaskClick(task)}
-                                    />
-                                  </li>
+                              {!isCollapsed &&
+                                epicTasks.length > 0 &&
+                                (column.key === "done" ? (
+                                  <ul
+                                    className="flex flex-col pt-1.5"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {epicTasks.map((task) => (
+                                      <li key={task.id}>
+                                        <DoneTaskRow
+                                          task={task}
+                                          onClick={() => handleTaskClick(task)}
+                                        />
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <ul
+                                    className="flex flex-col gap-3 pt-2.5"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {epicTasks.map((task) => (
+                                      <li key={task.id}>
+                                        <TaskCard
+                                          task={task}
+                                          epic={
+                                            task.epic_id
+                                              ? epics.get(task.epic_id)
+                                              : undefined
+                                          }
+                                          moving={!!movingTaskIds[task.id]}
+                                          onClick={() => handleTaskClick(task)}
+                                        />
+                                      </li>
+                                    ))}
+                                  </ul>
                                 ))}
-                              </ul>
-                            ) : (
-                              <ul className="flex flex-col gap-3 pt-2.5" onClick={(e) => e.stopPropagation()}>
-                                {epicTasks.map((task) => (
-                                  <li key={task.id}>
-                                    <TaskCard
-                                      task={task}
-                                      epic={task.epic_id ? epics.get(task.epic_id) : undefined}
-                                      moving={!!movingTaskIds[task.id]}
-                                      onClick={() => handleTaskClick(task)}
-                                    />
-                                  </li>
-                                ))}
-                              </ul>
-                            )
-                          )}
-                        </CardContent>
-                      </Card>
-                    );
-                  })}
-                </div>
-                )}
-              </CardContent>
-            </Card>
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             </div>
           );
         })}
@@ -700,7 +900,9 @@ export function KanbanBoard({
       <TaskDetailPanel
         open={!!selectedTask}
         task={selectedTask}
-        epic={selectedTask?.epic_id ? epics.get(selectedTask.epic_id) : undefined}
+        epic={
+          selectedTask?.epic_id ? epics.get(selectedTask.epic_id) : undefined
+        }
         onClose={() => setSelectedTask(null)}
       />
     </div>
