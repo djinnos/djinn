@@ -36,3 +36,17 @@ Mechanically split the oversized Rust test files in this epic into sibling scena
 
 ## Open note
 `mcp_contract_tests.rs` is the cleanest first task because the current top-level modules already map 1:1 to files; `task_tests.rs` is stretch and lower priority if session budget is tight.
+
+
+
+## Completion status
+Wave 1 is complete. All four planned file-split tasks landed successfully:
+- `3k38` — note repository tests split into scenario modules
+- `71xg` — MCP contract tests split by tool module
+- `fp6w` — extension tool tests split into scenario modules
+- `scp2` — stretch task repository tests split into scenario modules
+
+## Outcome
+- Every target from the epic description has been completed, including the stretch target.
+- The epic no longer has open worker work remaining.
+- No further decomposition wave is needed unless a separate follow-up epic is opened for newly identified oversized test files.
