@@ -920,7 +920,6 @@ pub(crate) async fn canonical_graph_cache_pinned_commit_for(
 ) -> Option<String> {
     crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
 }
-
 impl AppState {
     /// Build a `djinn_mcp::McpState` from this AppState, wiring all bridge impls.
     ///
@@ -1055,7 +1054,6 @@ pub(crate) mod graph_bridge_tests {
             external_symbols: vec![],
         }
     }
-
     pub(crate) fn build_test_graph() -> RepoDependencyGraph {
         RepoDependencyGraph::build(&[fixture_index()])
     }
@@ -1252,7 +1250,7 @@ pub(crate) mod graph_bridge_tests {
                 }],
                 external_symbols: vec![],
             };
-            let mut files = fixture_index().files;
+            let mut files = crate::canonical_graph::build_test_parsed_index_fixture().files;
             files.push(new_index.files.into_iter().next().unwrap());
             RepoDependencyGraph::build(&[ParsedScipIndex {
                 metadata: ScipMetadata::default(),

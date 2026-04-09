@@ -7,7 +7,7 @@ tags: []
 
 # V1 Requirements — Djinn Server Rust Rewrite
 
-Requirements derived from [[Project Brief]], [[Research Summary]], and the four research dimension notes. Each requirement traces to its source.
+Requirements derived from [[brief]], [[research/research-summary]], and the four research dimension notes. Each requirement traces to its source.
 
 ## Category: MCP (MCP Server Core)
 
@@ -201,16 +201,16 @@ Requirements derived from [[Project Brief]], [[Research Summary]], and the four 
 
 ## Relations
 
-- [[Project Brief]] — primary source for v1 scope
-- [[Research Summary]] — synthesis driving requirement priorities
-- [[Database Layer — rusqlite over libsql/Turso]] — ADR-002 driving DB requirements
-- [[Migrations — refinery with timestamp-based naming]] — ADR-003 driving migration requirements
-- [[Server Lifecycle — Desktop-Managed Daemon with Graceful Restart]] — ADR-005 driving LIFE requirements
-- [[Roadmap]] — phased delivery plan consuming these requirements
-- [[Stack Research]] — crate versions and API patterns
-- [[Features Research]] — market features informing v1/v2 classification
-- [[Architecture Research]] — patterns informing design requirements
-- [[Pitfalls Research]] — risks driving defensive requirements
+- [[brief]] — primary source for v1 scope
+- [[research/research-summary]] — synthesis driving requirement priorities
+- [[decisions/database-layer-—-rusqlite-over-libsql-turso]] — ADR-002 driving DB requirements
+- [[decisions/migrations-—-refinery-with-timestamp-based-naming]] — ADR-003 driving migration requirements
+- [[decisions/server-lifecycle-—-desktop-managed-daemon-with-graceful-restart]] — ADR-005 driving LIFE requirements
+- [[roadmap]] — phased delivery plan consuming these requirements
+- [[research/stack-research]] — crate versions and API patterns
+- [[research/features-research]] — market features informing v1/v2 classification
+- [[research/architecture-research]] — patterns informing design requirements
+- [[research/pitfalls-research]] — risks driving defensive requirements
 
 
 
