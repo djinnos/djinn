@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Pulse01Icon } from "@hugeicons/core-free-icons";
 import { Card } from "@/components/ui/card";
@@ -9,6 +10,7 @@ interface FreshnessStripProps {
   pinnedCommit: string | null;
   commitsSincePin: number | null;
   architectActive: boolean;
+  actions?: ReactNode;
 }
 
 function shortSha(sha: string | null): string {
@@ -21,6 +23,7 @@ export function FreshnessStrip({
   pinnedCommit,
   commitsSincePin,
   architectActive,
+  actions,
 }: FreshnessStripProps) {
   const lastPatrol = lastWarmAt ? relativeTime(lastWarmAt) : "not yet";
   const sha = shortSha(pinnedCommit);
@@ -60,6 +63,7 @@ export function FreshnessStrip({
             </p>
           )}
         </div>
+        {actions && <div className="shrink-0">{actions}</div>}
       </div>
     </Card>
   );
