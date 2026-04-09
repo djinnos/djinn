@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { screen, render, userEvent, waitFor, within } from "@/test/test-utils";
 import { PulsePage } from "@/pages/PulsePage";
 import { KanbanBoard } from "@/components/KanbanBoard";
+import { Sidebar } from "@/components/Sidebar";
 import { callMcpTool } from "@/api/mcpClient";
 import { projectStore } from "@/stores/projectStore";
 import { epicStore } from "@/stores/epicStore";
@@ -46,6 +47,14 @@ vi.mock("@/components/pulse/BlastRadiusPanel", () => ({
 
 vi.mock("@/components/pulse/PulseSettingsSheet", () => ({
   PulseSettingsSheet: () => <div data-testid="pulse-settings-sheet" />,
+}));
+
+vi.mock("@/hooks/useExecutionStatus", () => ({
+  useExecutionStatus: () => ({ state: "idle", refresh: vi.fn() }),
+}));
+
+vi.mock("@/hooks/useExecutionControl", () => ({
+  useExecutionControl: () => ({ start: vi.fn(), pause: vi.fn(), resume: vi.fn() }),
 }));
 
 describe("Pulse architect proposal workflow", () => {
@@ -229,6 +238,16 @@ describe("Pulse architect proposal workflow", () => {
 
     render(<PulsePage />);
 
+    render(<Sidebar />, {
+      wrapperOptions: {
+        routerProps: {
+          initialEntries: ["/projects/project-a/pulse"],
+        },
+      },
+    });
+
+    expect(await screen.findByLabelText("Pulse has 1 pending proposals")).toBeInTheDocument();
+
     const proposalCard = await screen.findByText("Observability rollout proposal");
     await user.click(proposalCard.closest("button") as HTMLButtonElement);
 
@@ -266,6 +285,10 @@ describe("Pulse architect proposal workflow", () => {
 
     await waitFor(() => {
       expect(screen.getByText("No pending architect proposals")).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/Pulse has .* pending proposals/)).not.toBeInTheDocument();
     });
 
     expect(epicStore.getState().getEpic("epic-observability")).toMatchObject({
