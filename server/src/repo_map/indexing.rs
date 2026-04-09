@@ -687,11 +687,10 @@ mod tests {
         assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
     }
 
-    /// `run_indexers_already_locked` must be callable directly, without
-    /// the caller having to acquire (or fake) any outer lock. This is the
-    /// entrypoint `mcp_bridge::ensure_canonical_graph` uses after it has
-    /// already taken the server-wide IndexerLock — replacing the previous
-    /// "fresh dummy mutex" workaround.
+    /// `run_indexers_already_locked` must be callable directly by code that
+    /// already holds the real server-wide IndexerLock. This is the entrypoint
+    /// `mcp_bridge::ensure_canonical_graph` uses after taking that lock, so
+    /// it should not require any extra wrapper or test-only locking shim.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // ENV_TEST_LOCK serialises env-mutating tests
     async fn run_indexers_already_locked_callable_without_outer_lock() {
