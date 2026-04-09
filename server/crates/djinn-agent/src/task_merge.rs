@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::context::AgentContext;
 use djinn_core::models::{SessionStatus, TransitionAction};
-use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
+use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 use djinn_git::GitError;
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
 use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
@@ -34,46 +34,6 @@ struct MergeConflictMetadata {
     merge_target: String,
 }
 
-pub(crate) async fn sync_task_session_memory_to_canonical(
-    task_id: &str,
-    app_state: &AgentContext,
-) -> djinn_db::Result<usize> {
-    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
-    let Some(task) = task_repo.get(task_id).await? else {
-        return Ok(0);
-    };
-    let Some(project_path) = project_repo.get_path(&task.project_id).await? else {
-        return Ok(0);
-    };
-
-    let sessions = session_repo.list_for_task(task_id).await?;
-    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let mut synced = 0usize;
-
-    for session in sessions {
-        let Some(worktree_path) = session.worktree_path.as_deref() else {
-            continue;
-        };
-        let worktree_root = PathBuf::from(worktree_path);
-        if !worktree_root.exists() {
-            continue;
-        }
-
-        synced += note_repo
-            .sync_worktree_notes_to_canonical(
-                &task.project_id,
-                Path::new(&project_path),
-                &worktree_root,
-            )
-            .await?;
-    }
-
-    Ok(synced)
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct MergeValidationFailureMetadata {
     base_branch: String,
@@ -86,7 +46,7 @@ struct MergeValidationFailureMetadata {
 }
 
 /// Transition actions to use for each merge outcome.
-/// Allows both the reviewer and lead approval paths to reuse the same merge logic.
+/// Allows coordinator-driven approval flows to reuse the same merge logic.
 pub(crate) struct MergeActions {
     pub(crate) approve: TransitionAction,
     pub(crate) conflict: TransitionAction,
@@ -100,39 +60,6 @@ pub(crate) struct MergeActions {
     /// the PR to be merged rather than closing immediately. Falls back to
     /// `approve` if None (used by the direct-push path where there is no PR).
     pub(crate) pr_created: Option<TransitionAction>,
-}
-
-/// Standard actions used by the task reviewer path.
-#[allow(dead_code)]
-pub(crate) const REVIEWER_MERGE_ACTIONS: MergeActions = MergeActions {
-    approve: TransitionAction::TaskReviewApprove,
-    conflict: TransitionAction::TaskReviewRejectConflict,
-    release: TransitionAction::ReleaseTaskReview,
-    // Pre-merge verification failure should reopen the task for the worker,
-    // not loop back to the reviewer who already approved.
-    verification_fail: Some(TransitionAction::TaskReviewReject),
-    // PR creation failure is an infra/auth issue, not a code issue. Escalate to
-    // lead intervention so a human can fix the credentials rather than looping
-    // the reviewer in an infinite approve → PR fail → re-review cycle.
-    pr_creation_fail: Some(TransitionAction::Escalate),
-    // When a GitHub PR is created, transition to pr_ready instead of closed.
-    // The PR poller will close the task via PrMerge once the PR is merged.
-    pr_created: Some(TransitionAction::PrCreated),
-};
-
-#[allow(dead_code)]
-pub(crate) async fn merge_after_task_review(
-    task_id: &str,
-    app_state: &AgentContext,
-    verification_gate: Option<VerificationGateFn>,
-) -> Option<(TransitionAction, Option<String>)> {
-    merge_and_transition(
-        task_id,
-        app_state,
-        &REVIEWER_MERGE_ACTIONS,
-        verification_gate,
-    )
-    .await
 }
 
 /// Attempt to create a GitHub PR for the task branch.
@@ -524,25 +451,11 @@ pub(crate) async fn merge_and_transition(
     .await
     {
         Ok(Some(pr_url)) => {
-            if let Err(e) = sync_task_session_memory_to_canonical(task_id, app_state).await {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "failed to sync worktree memory before PR-path teardown"
-                );
-            }
             // PR created and auto-merge enabled. Teardown worktree but keep
             // the branch — it must stay on the remote for the PR to merge.
             // The branch will be cleaned up by GitHub when the PR is merged
             // (if "Automatically delete head branches" is enabled in repo settings)
             // or by the PR poller after merge.
-            if let Err(e) = sync_task_session_memory_to_canonical(task_id, app_state).await {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "failed to sync worktree memory before empty-branch teardown"
-                );
-            }
             let worktree_path = project_dir
                 .join(".djinn")
                 .join("worktrees")
@@ -661,13 +574,6 @@ pub(crate) async fn merge_and_transition(
                     actions.release.clone(),
                     Some(format!("merged but failed to store merge SHA: {e}")),
                 ));
-            }
-            if let Err(e) = sync_task_session_memory_to_canonical(task_id, app_state).await {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "failed to sync worktree memory before direct-merge teardown"
-                );
             }
             // Tear down in correct order: LSP → worktree dir → branch (branch deletion
             // always failed before because the worktree still held a ref to it).
