@@ -4,6 +4,7 @@ import { Pulse01Icon } from "@hugeicons/core-free-icons";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { callMcpTool } from "@/api/mcpClient";
 import { FreshnessStrip } from "@/components/pulse/FreshnessStrip";
+import { ArchitectProposalsSection } from "@/components/pulse/ArchitectProposalsSection";
 import { HotspotsPanel } from "@/components/pulse/HotspotsPanel";
 import { DeadCodePanel } from "@/components/pulse/DeadCodePanel";
 import { CyclesPanel } from "@/components/pulse/CyclesPanel";
@@ -171,6 +172,7 @@ function ReadyState({
         </div>
         <PulseSettingsSheet projectPath={projectPath} />
       </div>
+      <ArchitectProposalsSection projectPath={projectPath} />
       <HotspotsPanel projectPath={projectPath} excludedPaths={settings.excluded_paths} />
       <DeadCodePanel
         projectPath={projectPath}
