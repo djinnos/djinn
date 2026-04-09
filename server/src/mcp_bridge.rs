@@ -5,7 +5,7 @@
 /// and SyncManager because both the trait (djinn-mcp) and the implementor
 /// (djinn-agent / crate::sync) are external to the server — orphan rule.
 /// AppState is a server-local type so it implements RuntimeOps and GitOps directly.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,9 +23,7 @@ use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 
-#[cfg(test)]
-use crate::canonical_graph::GRAPH_CACHE_TEST_GUARD;
-use crate::canonical_graph::{CachedGraph, CachedSccs, GRAPH_CACHE, PREVIOUS_GRAPH_CACHE};
+use crate::canonical_graph::{GRAPH_CACHE, PREVIOUS_GRAPH_CACHE};
 use crate::sync::SyncManager;
 
 mod graph_neighbors;
@@ -770,7 +768,7 @@ impl RepoGraphOps for RepoGraphBridge {
             }
         }
         // Ensure the current canonical graph for this project is built / cached.
-        let _ = build_graph_for_project(&self.state, project_path).await?;
+        let _ = crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
 
         let current = {
             let cache = GRAPH_CACHE.read().await;
@@ -899,52 +897,6 @@ impl RepoGraphOps for RepoGraphBridge {
     }
 }
 
-/// Normalize a graph query path into both the registered project root and its
-/// canonical `_index` worktree path.
-///
-/// Architect and chat tool dispatch pin `working_root` to the canonical
-/// `.djinn/worktrees/_index/` tree, so `code_graph` reaches the server bridge
-/// with that path rather than the project root. Accept both forms here so the
-/// same warmed canonical cache entry backs architect/chat and external MCP use.
-#[allow(dead_code)]
-fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathBuf) {
-    crate::canonical_graph::normalize_graph_query_paths(project_path)
-}
-
-#[allow(dead_code)]
-fn derive_graph_caches(
-    graph: &crate::repo_graph::RepoDependencyGraph,
-) -> (
-    Arc<crate::repo_graph::RepoGraphRanking>,
-    Arc<crate::canonical_graph::CachedSccs>,
-) {
-    crate::canonical_graph::derive_graph_caches(graph)
-}
-
-/// ADR-050 §3 Chunk C canonical-main graph entrypoint.
-///
-/// Idempotently makes the SCIP graph for `origin/main` of the supplied
-/// project available, returning a clone of the cached `RepoDependencyGraph`.
-/// Flow:
-///
-/// 1. `IndexTree::ensure(project_id, project_root)` brings up
-///    `<project_root>/.djinn/worktrees/_index/`.
-/// 2. `fetch_if_stale(60s)` runs `git fetch origin main` against the
-///    project root unless the cooldown blocks it.
-/// 3. `reset_to_origin_main()` hard-resets the index tree to the freshly
-///    fetched `origin/main` commit.
-/// 4. Look up `repo_graph_cache[(project_id, commit_sha)]`.
-///    - **Hit**: deserialize, install as canonical (moving the prior
-///      canonical into the in-memory previous slot per ADR-050 §3 diff
-///      contract), return.
-///    - **Miss**: acquire the server-wide `IndexerLock`, re-check the cache
-///      under the lock, then run SCIP indexers in the index tree, build
-///      the graph, persist to `repo_graph_cache`, install as canonical,
-///      release the lock, and return.
-///
-/// The returned `IndexTreeHandle` is also exposed to callers so they can
-/// reuse its `path()` as the architect/chat `working_root` and so worker
-/// dispatch sites can render the canonical skeleton from the same path.
 pub(crate) async fn ensure_canonical_graph(
     state: &AppState,
     project_id: &str,
@@ -959,355 +911,14 @@ pub(crate) async fn ensure_canonical_graph(
     crate::canonical_graph::ensure_canonical_graph(state, project_id, project_root).await
 }
 
-/// ADR-050 Chunk C C10: persist a pre-rendered canonical-main repo-map
-/// skeleton via the existing `RepoMapCacheRepository` + `repo_map` note
-/// pipeline so worker sessions (which consume the skeleton through the
-/// standard note path) see the canonical view.  The caller is responsible
-/// for producing `rendered` on a blocking thread — this function is purely
-/// async DB work.  Failures are logged and do not propagate.
-#[allow(dead_code)]
-async fn persist_canonical_skeleton(
-    state: &AppState,
-    project_id: &str,
-    project_root: &Path,
-    commit_sha: &str,
-    graph: &crate::repo_graph::RepoDependencyGraph,
-    rendered: &crate::repo_map::RenderedRepoMap,
-) {
-    use djinn_db::{NoteRepository, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository};
-
-    let project_path = project_root.to_string_lossy().into_owned();
-    let cache_repo = RepoMapCacheRepository::new(state.db().clone());
-    if let Err(e) = cache_repo
-        .insert(RepoMapCacheInsert {
-            key: RepoMapCacheKey {
-                project_id,
-                project_path: &project_path,
-                worktree_path: None,
-                commit_sha,
-            },
-            rendered_map: &rendered.content,
-            token_estimate: rendered.token_estimate as i64,
-            included_entries: rendered.included_entries as i64,
-            graph_artifact: graph.serialize_artifact().ok().as_deref(),
-        })
-        .await
-    {
-        tracing::warn!(
-            project_id = %project_id,
-            commit_sha = %commit_sha,
-            error = %e,
-            "persist_canonical_skeleton: repo_map_cache insert failed"
-        );
-    }
-
-    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
-    if let Err(e) =
-        crate::repo_map::persist_repo_map_note(&note_repo, project_id, commit_sha, rendered).await
-    {
-        tracing::warn!(
-            project_id = %project_id,
-            commit_sha = %commit_sha,
-            error = %e,
-            "persist_canonical_skeleton: repo_map note persist failed"
-        );
-    }
-}
-
-/// Fast-path lookup against the in-memory `GRAPH_CACHE` used by the
-/// canonical-graph warmer to decide whether a detached background warm task
-/// is required.  Returns `true` iff there is a cached graph whose
-/// `project_path` matches the supplied `_index` worktree path — which, in
-/// this process, is only ever populated by a previous successful
-/// `ensure_canonical_graph` run for this project.  We intentionally do NOT
-/// verify the commit SHA here: resolving the current `origin/main` SHA
-/// requires a `git fetch` and `git rev-parse` round-trip that would
-/// reintroduce the very blocking behavior the detached warmer is designed
-/// to avoid.  Instead, the background task itself does the full
-/// commit-accurate check and refetches the graph if `origin/main` has
-/// advanced.  A cold cache (no entry at all) returns `false`, causing the
-/// warmer to spawn the background task.
 pub(crate) async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
     crate::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
 }
 
-/// Lookup the cached `git_head` (pinned `origin/main` commit at warm time)
-/// for the canonical graph entry whose `project_path` matches the supplied
-/// `_index` worktree path.  Returns `None` on a cold cache or when the
-/// cached entry belongs to a different project.
-///
-/// Used by the proactive staleness refresh path
-/// (`AppStateCanonicalGraphWarmer::maybe_refresh_if_stale`) so the
-/// coordinator tick loop can compare the cached pin against the current
-/// `origin/main` without exposing the full `CachedGraph` struct across the
-/// module seam.
 pub(crate) async fn canonical_graph_cache_pinned_commit_for(
     index_tree_path: &Path,
 ) -> Option<String> {
     crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
-}
-
-/// Replace the in-memory canonical graph slot, moving the previous canonical
-/// into the diff predecessor slot per ADR-050 §3.
-#[allow(dead_code)]
-async fn install_as_canonical(
-    project_path: PathBuf,
-    git_head: String,
-    graph: crate::repo_graph::RepoDependencyGraph,
-    pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
-    sccs: Arc<CachedSccs>,
-) {
-    let mut cache = GRAPH_CACHE.write().await;
-    let old = cache.take();
-    if let Some(prior) = old {
-        let mut previous = PREVIOUS_GRAPH_CACHE.write().await;
-        *previous = Some(prior);
-    }
-    *cache = Some(CachedGraph {
-        graph,
-        project_path,
-        git_head,
-        last_warm_at: time::OffsetDateTime::now_utc(),
-        pagerank,
-        sccs,
-    });
-}
-
-/// Restore a cached `RepoGraphArtifact` from a persistent `repo_graph_cache`
-/// row and re-derive the in-memory caches that warm normally produces.
-/// Wrapped in `spawn_blocking` because both the bincode deserialize and the
-/// post-load PageRank/SCC derivation are CPU-bound and would otherwise block
-/// the async runtime.
-#[allow(dead_code)]
-async fn load_cached_artifact(
-    blob: Vec<u8>,
-) -> Result<
-    (
-        crate::repo_graph::RepoDependencyGraph,
-        Arc<crate::repo_graph::RepoGraphRanking>,
-        Arc<CachedSccs>,
-    ),
-    String,
-> {
-    tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let artifact: crate::repo_graph::RepoGraphArtifact =
-            bincode::deserialize(&blob).map_err(|e| format!("deserialize graph: {e}"))?;
-        let graph = crate::repo_graph::RepoDependencyGraph::from_artifact(&artifact);
-        let (pagerank, sccs) = derive_graph_caches(&graph);
-        Ok((graph, pagerank, sccs))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking join: {e}"))?
-}
-
-/// Error string returned by the cache-only graph readers when no warmed
-/// entry exists.  Callers — Pulse panels, chat `code_graph` tool invocations,
-/// worker reads — surface this verbatim to the UI so operators can disambiguate
-/// "not warmed" from a genuine tool failure.
-#[allow(dead_code)]
-const GRAPH_NOT_WARMED_ERR: &str =
-    "canonical graph not warmed yet — will populate on the next Planner patrol or Architect spike";
-
-/// Cache-only reader used by every non-warming `RepoGraphOps` read path.
-///
-/// Unlike [`ensure_canonical_graph`], this helper never advances the index
-/// tree, never fetches from the remote, and never triggers the SCIP indexer.
-/// It simply looks up the in-memory `GRAPH_CACHE` by the project's canonical
-/// `_index` worktree path and returns whatever the last warmer installed
-/// there, along with the derived PageRank and SCC caches.
-///
-/// Rationale: before this split, every Pulse panel load (and every worker
-/// `code_graph` read) went through `build_graph_for_project` →
-/// `ensure_canonical_graph`, which runs `git fetch` + `reset_to_origin_main`
-/// and then cache-misses whenever local `main` has advanced past the
-/// architect's last warm (common: architect warms at commit X, user makes 5
-/// commits, Pulse calls `ranked`, cache key mismatches, indexer reruns for
-/// 30 minutes, UI hangs on a skeleton loader).  Non-architect reads must
-/// serve stale-but-present rather than synchronously re-warming.
-///
-/// On a cold cache this returns [`GRAPH_NOT_WARMED_ERR`]; Pulse renders that
-/// as its "no data" state and the freshness strip already surfaces the
-/// `warmed: false` status via the read-only `status` op.
-#[allow(dead_code)]
-async fn read_cached_canonical_graph(
-    project_path: &str,
-) -> Result<
-    (
-        crate::repo_graph::RepoDependencyGraph,
-        Arc<crate::repo_graph::RepoGraphRanking>,
-        Arc<crate::canonical_graph::CachedSccs>,
-    ),
-    String,
-> {
-    crate::canonical_graph::read_cached_canonical_graph(project_path).await
-}
-
-/// `RepoGraphOps` shim used by every read operation that only needs the
-/// graph itself.  Cache-only: see [`read_cached_canonical_graph`].
-///
-/// Cold-cache behaviour (ADR-051 §3 "first consumer demand"): if the
-/// in-memory cache is empty for this project, we return
-/// [`GRAPH_NOT_WARMED_ERR`] *and* kick a single-flight background warm
-/// via [`maybe_kick_background_warm`].  Pulse renders its empty state;
-/// the next read (e.g. when the user re-mounts the panel a few seconds
-/// later) hits the populated cache.  The warmer is non-blocking,
-/// idempotent, and coalesces concurrent cold reads into one indexer
-/// run.
-async fn build_graph_for_project(
-    state: &AppState,
-    project_path: &str,
-) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
-    crate::canonical_graph::build_graph_for_project(state, project_path).await
-}
-
-/// Sibling of `build_graph_for_project` for read ops that need the derived
-/// caches (`code_graph ranked` → `pagerank`; `code_graph cycles` → `sccs`).
-/// Cache-only with the same cold-cache background-warm kick as
-/// [`build_graph_for_project`].
-#[allow(dead_code)]
-async fn build_graph_with_caches_for_project(
-    state: &AppState,
-    project_path: &str,
-) -> Result<
-    (
-        crate::repo_graph::RepoDependencyGraph,
-        Arc<crate::repo_graph::RepoGraphRanking>,
-        Arc<crate::canonical_graph::CachedSccs>,
-    ),
-    String,
-> {
-    crate::canonical_graph::build_graph_with_caches_for_project(state, project_path).await
-}
-
-/// ADR-051 §3: "canonical graph warming is infrastructure, not agent
-/// work … acquired on first consumer demand."
-///
-/// This helper is the server-managed warmer entry point.  It is called
-/// from the cache-only read path whenever the in-memory `GRAPH_CACHE`
-/// is cold for a project: `code_graph` reads (Pulse panels, worker
-/// shims, chat) return `GRAPH_NOT_WARMED_ERR` immediately *and* kick a
-/// detached background `ensure_canonical_graph` so the cache populates
-/// independently of any dispatched session.  Subsequent reads hit the
-/// warmed cache.
-///
-/// Concurrency guarantees:
-/// - **Single-flight** — `AppState::try_claim_canonical_warm_slot`
-///   coalesces concurrent cold reads into one indexer run per project.
-/// - **Detached** — spawned on a fresh tokio task so the calling read
-///   (which is usually inside a request handler) does not block on the
-///   45 s SCIP pipeline.
-/// - **Non-fatal** — errors during the detached warm are logged and
-///   discarded; the next cold read will retry.
-#[allow(dead_code)]
-fn maybe_kick_background_warm(state: &AppState, project_path: &str) {
-    let (project_root, _index_tree_path) = normalize_graph_query_paths(project_path);
-    let state = state.clone();
-    let project_path_owned = project_path.to_string();
-    tokio::spawn(async move {
-        // Resolve the project_id from the path (fuzzy match tolerates
-        // `/` vs no trailing slash).  If the project is not registered
-        // we cannot warm — log and bail.
-        let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
-        let project_id = match project_repo
-            .resolve_id_by_path_fuzzy(&project_path_owned)
-            .await
-        {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                tracing::debug!(
-                    project_path = %project_path_owned,
-                    "maybe_kick_background_warm: project not registered, skipping warm"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    project_path = %project_path_owned,
-                    error = %e,
-                    "maybe_kick_background_warm: project lookup failed"
-                );
-                return;
-            }
-        };
-
-        // Single-flight: if another warm is already claimed for this
-        // project, a detached task is already running; bail out.
-        if !state.try_claim_canonical_warm_slot(&project_id) {
-            tracing::debug!(
-                project_id = %project_id,
-                "maybe_kick_background_warm: warm already in flight, coalescing"
-            );
-            return;
-        }
-
-        tracing::info!(
-            project_id = %project_id,
-            project_path = %project_root.display(),
-            "maybe_kick_background_warm: cold-cache trigger, spawning background warm"
-        );
-        let started = std::time::Instant::now();
-        let result = ensure_canonical_graph(&state, &project_id, &project_root).await;
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-        match result {
-            Ok((handle, graph)) => {
-                tracing::info!(
-                    project_id = %project_id,
-                    elapsed_ms,
-                    commit_sha = %handle.commit_sha(),
-                    node_count = graph.node_count(),
-                    edge_count = graph.edge_count(),
-                    "maybe_kick_background_warm: background warm complete"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    project_id = %project_id,
-                    elapsed_ms,
-                    error = %e,
-                    "maybe_kick_background_warm: background warm failed"
-                );
-            }
-        }
-        state.release_canonical_warm_slot(&project_id);
-    });
-}
-
-/// Test helper: install a graph as the current canonical graph and the
-/// supplied predecessor in the previous slot. Used by integration tests for
-/// the `diff` operation.
-#[cfg(test)]
-#[allow(dead_code)]
-async fn install_test_graphs(
-    project_path: &Path,
-    previous: Option<crate::repo_graph::RepoDependencyGraph>,
-    current: crate::repo_graph::RepoDependencyGraph,
-) {
-    {
-        let mut prev_cache = PREVIOUS_GRAPH_CACHE.write().await;
-        *prev_cache = previous.map(|graph| {
-            let (pagerank, sccs) = derive_graph_caches(&graph);
-            CachedGraph {
-                graph,
-                project_path: project_path.to_path_buf(),
-                git_head: "previous".into(),
-                last_warm_at: time::OffsetDateTime::now_utc(),
-                pagerank,
-                sccs,
-            }
-        });
-    }
-    {
-        let (pagerank, sccs) = derive_graph_caches(&current);
-        let mut cache = GRAPH_CACHE.write().await;
-        *cache = Some(CachedGraph {
-            graph: current,
-            project_path: project_path.to_path_buf(),
-            git_head: "current".into(),
-            last_warm_at: time::OffsetDateTime::now_utc(),
-            pagerank,
-            sccs,
-        });
-    }
 }
 
 impl AppState {
@@ -1352,17 +963,6 @@ pub(crate) mod graph_bridge_tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
-    async fn clear_graph_test_caches() {
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-        {
-            let mut cache = PREVIOUS_GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-    }
-
     fn fixture_index() -> ParsedScipIndex {
         let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
         let helper_symbol = ScipSymbol {
@@ -1396,59 +996,59 @@ pub(crate) mod graph_bridge_tests {
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
         };
-
-        fn def_occ(symbol: &str) -> ScipOccurrence {
-            ScipOccurrence {
-                symbol: symbol.to_string(),
-                range: ScipRange {
-                    start_line: 0,
-                    start_character: 0,
-                    end_line: 0,
-                    end_character: 6,
-                },
-                enclosing_range: None,
-                roles: BTreeSet::from([ScipSymbolRole::Definition]),
-                syntax_kind: None,
-                override_documentation: vec![],
-            }
-        }
-        fn ref_occ(symbol: &str) -> ScipOccurrence {
-            ScipOccurrence {
-                symbol: symbol.to_string(),
-                range: ScipRange {
-                    start_line: 1,
-                    start_character: 4,
-                    end_line: 1,
-                    end_character: 10,
-                },
-                enclosing_range: None,
-                roles: BTreeSet::from([ScipSymbolRole::ReadAccess]),
-                syntax_kind: None,
-                override_documentation: vec![],
-            }
-        }
-
         ParsedScipIndex {
-            metadata: ScipMetadata {
-                project_root: Some("file:///workspace/repo".to_string()),
-                tool_name: Some("rust-analyzer".to_string()),
-                tool_version: Some("1.0.0".to_string()),
-            },
+            metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
                     language: "rust".to_string(),
                     relative_path: PathBuf::from("src/helper.rs"),
-                    definitions: vec![def_occ(&helper_symbol_name)],
+                    definitions: vec![ScipOccurrence {
+                        symbol: helper_symbol_name.clone(),
+                        range: ScipRange {
+                            start_line: 0,
+                            start_character: 0,
+                            end_line: 0,
+                            end_character: 6,
+                        },
+                        enclosing_range: None,
+                        roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                        syntax_kind: None,
+                        override_documentation: vec![],
+                    }],
                     references: vec![],
-                    occurrences: vec![def_occ(&helper_symbol_name)],
+                    occurrences: vec![],
                     symbols: vec![helper_symbol],
                 },
                 ScipFile {
                     language: "rust".to_string(),
                     relative_path: PathBuf::from("src/app.rs"),
-                    definitions: vec![def_occ(&main_symbol.symbol)],
-                    references: vec![ref_occ(&helper_symbol_name)],
-                    occurrences: vec![def_occ(&main_symbol.symbol), ref_occ(&helper_symbol_name)],
+                    definitions: vec![ScipOccurrence {
+                        symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
+                        range: ScipRange {
+                            start_line: 0,
+                            start_character: 0,
+                            end_line: 0,
+                            end_character: 4,
+                        },
+                        enclosing_range: None,
+                        roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                        syntax_kind: None,
+                        override_documentation: vec![],
+                    }],
+                    references: vec![ScipOccurrence {
+                        symbol: helper_symbol_name,
+                        range: ScipRange {
+                            start_line: 1,
+                            start_character: 4,
+                            end_line: 1,
+                            end_character: 10,
+                        },
+                        enclosing_range: None,
+                        roles: BTreeSet::new(),
+                        syntax_kind: None,
+                        override_documentation: vec![],
+                    }],
+                    occurrences: vec![],
                     symbols: vec![main_symbol, trait_symbol],
                 },
             ],
@@ -1465,22 +1065,6 @@ pub(crate) mod graph_bridge_tests {
         let graph = build_test_graph();
         assert!(resolve_node(&graph, "src/app.rs").is_ok());
         assert!(resolve_node(&graph, "file:src/app.rs").is_ok());
-    }
-
-    #[test]
-    fn normalize_graph_query_paths_accepts_project_root_and_index_tree() {
-        let project_root = PathBuf::from("/tmp/example-project");
-        let canonical_index = djinn_core::index_tree::index_tree_path(&project_root);
-
-        let (root_from_project, index_from_project) =
-            normalize_graph_query_paths(project_root.to_string_lossy().as_ref());
-        assert_eq!(root_from_project, project_root);
-        assert_eq!(index_from_project, canonical_index);
-
-        let (root_from_index, index_from_index) =
-            normalize_graph_query_paths(canonical_index.to_string_lossy().as_ref());
-        assert_eq!(root_from_index, project_root);
-        assert_eq!(index_from_index, canonical_index);
     }
 
     #[test]
@@ -1539,7 +1123,6 @@ pub(crate) mod graph_bridge_tests {
             !neighbors.is_empty(),
             "expected at least one neighbor for src/app.rs"
         );
-        // Should contain the helper symbol as a neighbor
         assert!(neighbors.iter().any(|n| n.display_name == "helper"));
     }
 
@@ -1566,7 +1149,6 @@ pub(crate) mod graph_bridge_tests {
             })
             .collect();
         assert!(!nodes.is_empty());
-        // Scores should be non-negative
         for node in &nodes {
             assert!(node.score >= 0.0);
         }
@@ -1628,7 +1210,6 @@ pub(crate) mod graph_bridge_tests {
                 }
             }
         }
-        // The helper symbol should be depended on by src/app.rs (via file reference)
         assert!(
             !result.is_empty(),
             "expected at least one node in the impact set"
@@ -1637,7 +1218,6 @@ pub(crate) mod graph_bridge_tests {
 
     #[test]
     fn compute_graph_diff_reports_added_and_removed_nodes() {
-        // Previous graph has one file; current graph has that file plus a new one.
         let previous = build_test_graph();
         let current = {
             let new_index = ParsedScipIndex {
@@ -1699,580 +1279,6 @@ pub(crate) mod graph_bridge_tests {
         assert!(
             diff.removed_nodes.is_empty(),
             "no nodes should be removed in this scenario"
-        );
-    }
-
-    /// `RepoGraphBridge::status` returns `warmed: false` with all optional
-    /// fields `None` when `GRAPH_CACHE` has no entry matching the project's
-    /// `_index` worktree path.  No SCIP indexing is triggered.
-    #[tokio::test]
-    async fn status_returns_unwarmed_for_empty_cache() {
-        use crate::test_helpers::create_test_db;
-        use djinn_db::ProjectRepository;
-        use tokio_util::sync::CancellationToken;
-
-        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
-        clear_graph_test_caches().await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        // Use a unique project_root per test to avoid the global GRAPH_CACHE
-        // colliding with concurrently-running test cases.
-        let project_root = tmp.path().join("status-empty-repo");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        let project = proj_repo
-            .create("test-status-empty", project_root.to_string_lossy().as_ref())
-            .await
-            .expect("create project");
-
-        let bridge = RepoGraphBridge::new(state);
-        let project_root_str = project_root.to_string_lossy().into_owned();
-        let status = bridge.status(&project_root_str).await.expect("status ok");
-        assert_eq!(status.project_id, project.id);
-        assert!(!status.warmed);
-        assert!(status.last_warm_at.is_none());
-        assert!(status.pinned_commit.is_none());
-        assert!(status.commits_since_pin.is_none());
-
-        clear_graph_test_caches().await;
-    }
-
-    /// `RepoGraphBridge::status` returns `warmed: true` together with
-    /// `pinned_commit` and an RFC3339 `last_warm_at` when the in-memory
-    /// canonical cache slot has an entry whose `project_path` matches the
-    /// project's `_index` worktree path.
-    #[tokio::test]
-    async fn status_returns_warmed_when_cache_populated() {
-        use crate::test_helpers::create_test_db;
-        use djinn_db::ProjectRepository;
-        use tokio_util::sync::CancellationToken;
-
-        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
-        clear_graph_test_caches().await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = tmp.path().join("status-warm-repo");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        let project = proj_repo
-            .create("test-status-warm", project_root.to_string_lossy().as_ref())
-            .await
-            .expect("create project");
-
-        // Plant a CachedGraph entry whose project_path is exactly what
-        // status() recomputes from the project root.
-        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
-        let pinned_sha = "deadbeefcafebabe1234567890abcdef00000001".to_string();
-        {
-            let graph = build_test_graph();
-            let (pagerank, sccs) = derive_graph_caches(&graph);
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = Some(CachedGraph {
-                graph,
-                project_path: index_tree_path.clone(),
-                git_head: pinned_sha.clone(),
-                last_warm_at: time::OffsetDateTime::now_utc(),
-                pagerank,
-                sccs,
-            });
-        }
-
-        let bridge = RepoGraphBridge::new(state);
-        let project_root_str = project_root.to_string_lossy().into_owned();
-        let status = bridge.status(&project_root_str).await.expect("status ok");
-
-        assert_eq!(status.project_id, project.id);
-        assert!(status.warmed);
-        assert_eq!(status.pinned_commit.as_deref(), Some(pinned_sha.as_str()));
-        let ts = status.last_warm_at.expect("last_warm_at populated");
-        assert!(
-            ts.contains('T') && (ts.ends_with('Z') || ts.contains('+') || ts.contains('-')),
-            "expected RFC3339 timestamp, got {ts}"
-        );
-        // commits_since_pin is best-effort: project_root has no git repo so
-        // the rev-list call fails and we expect None.  This still proves the
-        // status path does not panic when git is unavailable.
-        assert!(status.commits_since_pin.is_none());
-
-        clear_graph_test_caches().await;
-    }
-
-    #[tokio::test]
-    async fn chat_code_graph_ranked_succeeds_via_agent_bridge_from_index_tree_root() {
-        use crate::test_helpers::create_test_db;
-        use djinn_db::ProjectRepository;
-        use tokio_util::sync::CancellationToken;
-
-        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
-        clear_graph_test_caches().await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = tmp.path().join("chat-code-graph-repo");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        proj_repo
-            .create(
-                "test-chat-code-graph",
-                project_root.to_string_lossy().as_ref(),
-            )
-            .await
-            .expect("create project");
-
-        let index_tree_path = djinn_core::index_tree::index_tree_path(&project_root);
-        let graph = build_test_graph();
-        let (pagerank, sccs) = derive_graph_caches(&graph);
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = Some(CachedGraph {
-                graph,
-                project_path: index_tree_path.clone(),
-                git_head: "deadbeefcafebabe1234567890abcdef00000001".to_string(),
-                last_warm_at: time::OffsetDateTime::now_utc(),
-                pagerank,
-                sccs,
-            });
-        }
-
-        let mut ctx = state.agent_context();
-        ctx.working_root = Some(index_tree_path);
-        let result = djinn_agent::chat_tools::dispatch_chat_tool(
-            &ctx,
-            "code_graph",
-            serde_json::json!({
-                "operation": "ranked",
-                "kind_filter": "file",
-                "limit": 10,
-            }),
-            &project_root,
-        )
-        .await
-        .expect("chat code_graph ranked should succeed through agent bridge");
-
-        let ranked = result
-            .as_array()
-            .expect("ranked response should be an array");
-        assert!(
-            !ranked.is_empty(),
-            "expected ranked files from fixture graph"
-        );
-        let keys: Vec<&str> = ranked
-            .iter()
-            .filter_map(|entry| entry.get("key").and_then(|value| value.as_str()))
-            .collect();
-        assert!(
-            keys.iter()
-                .any(|key| *key == "file:src/app.rs" || *key == "src/app.rs"),
-            "expected fixture file in ranked output, got {keys:?}"
-        );
-
-        let rendered = result.to_string();
-        assert!(
-            !rendered.contains("code_graph not available in agent bridge"),
-            "bridge should use the real RepoGraphOps implementation, got {rendered}"
-        );
-
-        clear_graph_test_caches().await;
-    }
-}
-
-#[cfg(test)]
-mod ensure_canonical_graph_tests {
-    use super::*;
-    use crate::test_helpers::create_test_db;
-    use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
-    use tokio_util::sync::CancellationToken;
-
-    /// Build a tiny on-disk git project with a single commit so
-    /// `ensure_canonical_graph` can resolve a HEAD SHA without touching
-    /// any remote.
-    async fn make_project(tmp: &std::path::Path) -> std::path::PathBuf {
-        let project_root = tmp.join("repo");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-        let run = |args: &[&str]| {
-            let pr = project_root.clone();
-            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            async move {
-                tokio::process::Command::new("git")
-                    .current_dir(&pr)
-                    .args(&args)
-                    .output()
-                    .await
-                    .unwrap()
-            }
-        };
-        run(&["init", "-q", "-b", "main"]).await;
-        run(&["config", "user.email", "t@t"]).await;
-        run(&["config", "user.name", "t"]).await;
-        tokio::fs::write(project_root.join("a.txt"), "hi")
-            .await
-            .unwrap();
-        run(&["add", "a.txt"]).await;
-        run(&["commit", "-q", "-m", "init"]).await;
-        project_root
-    }
-
-    /// Cache-hit path: when `repo_graph_cache` already contains a row for
-    /// `(project_id, commit_sha)`, `ensure_canonical_graph` deserializes it
-    /// and returns the graph WITHOUT spawning the SCIP indexer.  In tests
-    /// the indexer would fail (no rust-analyzer on PATH and no SCIP files
-    /// in tempdir), so a successful return is itself the proof.
-    #[tokio::test]
-    async fn ensure_canonical_graph_serves_cache_hit_without_running_indexer() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = make_project(tmp.path()).await;
-
-        // Build AppState wired to a fresh in-memory DB.
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-
-        // Register the project so `build_graph_for_project` would resolve
-        // it (this test calls `ensure_canonical_graph` directly so the
-        // registration is only needed for parity with the prod path).
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        let project = proj_repo
-            .create("test-canonical", project_root.to_string_lossy().as_ref())
-            .await
-            .expect("create project");
-
-        // Pre-build a tiny graph and stash it in repo_graph_cache for
-        // BOTH possible commit SHAs the index tree could end up on
-        // (origin/main fetch fails in tests, so the index tree resets to
-        // HEAD).  We resolve HEAD before the call so we know which key
-        // matters.
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
-            .await
-            .unwrap();
-        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
-
-        let graph = graph_bridge_tests::build_test_graph();
-        let blob = bincode::serialize(&graph.to_artifact()).expect("serialize fixture graph");
-        let cache_repo = RepoGraphCacheRepository::new(db.clone());
-        cache_repo
-            .upsert(RepoGraphCacheInsert {
-                project_id: &project.id,
-                commit_sha: &head_sha,
-                graph_blob: &blob,
-            })
-            .await
-            .expect("seed cache");
-
-        // Cache-hit path must succeed.  If it ran the indexer it would
-        // fail (no SCIP artifacts produced).
-        let result = ensure_canonical_graph(&state, &project.id, &project_root).await;
-        assert!(result.is_ok(), "expected cache-hit success, got {result:?}");
-        let (_handle, returned_graph) = result.unwrap();
-        // The deserialized graph should be structurally identical to the
-        // fixture (round-trip equality is the contract Chunk B added).
-        assert_eq!(returned_graph.node_count(), graph.node_count());
-    }
-
-    /// IndexerLock contention: two concurrent `ensure_canonical_graph`
-    /// calls against the same project should serialize on the lock and
-    /// both succeed via the cache (the second is forced through the
-    /// re-check-under-lock path).
-    #[tokio::test]
-    async fn ensure_canonical_graph_serializes_concurrent_callers() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = make_project(tmp.path()).await;
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        let project = proj_repo
-            .create(
-                "test-canonical-concurrent",
-                project_root.to_string_lossy().as_ref(),
-            )
-            .await
-            .expect("create project");
-
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
-            .await
-            .unwrap();
-        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
-
-        let graph = graph_bridge_tests::build_test_graph();
-        let blob = bincode::serialize(&graph.to_artifact()).expect("serialize");
-        RepoGraphCacheRepository::new(db.clone())
-            .upsert(RepoGraphCacheInsert {
-                project_id: &project.id,
-                commit_sha: &head_sha,
-                graph_blob: &blob,
-            })
-            .await
-            .expect("seed cache");
-
-        let state_a = state.clone();
-        let project_root_a = project_root.clone();
-        let project_id_a = project.id.clone();
-        let state_b = state.clone();
-        let project_root_b = project_root.clone();
-        let project_id_b = project.id.clone();
-        let (a, b) = tokio::join!(
-            tokio::spawn(async move {
-                ensure_canonical_graph(&state_a, &project_id_a, &project_root_a).await
-            }),
-            tokio::spawn(async move {
-                ensure_canonical_graph(&state_b, &project_id_b, &project_root_b).await
-            }),
-        );
-        let a = a.expect("task a panicked").expect("a result");
-        let b = b.expect("task b panicked").expect("b result");
-        assert_eq!(a.1.node_count(), b.1.node_count());
-        assert_eq!(a.1.node_count(), graph.node_count());
-    }
-
-    /// Stale-blob path: a row whose `graph_blob` is not bincode-decodable
-    /// (e.g. left over from the brief Chunk C JSON era) must be treated as
-    /// a cache miss.  We seed garbage bytes and assert that
-    /// `ensure_canonical_graph` does NOT bubble the deserialize error;
-    /// instead it falls through to the indexer path.  In this test
-    /// environment the indexer has no SCIP toolchain available, so the
-    /// expected outcome is a failure with an indexer-shaped error message
-    /// (NOT a "deserialize cached graph" / UTF-8 error from the cache
-    /// path).
-    #[tokio::test]
-    async fn ensure_canonical_graph_treats_stale_blob_as_cache_miss() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = make_project(tmp.path()).await;
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        let project = proj_repo
-            .create(
-                "test-canonical-stale",
-                project_root.to_string_lossy().as_ref(),
-            )
-            .await
-            .expect("create project");
-
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
-            .await
-            .unwrap();
-        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
-
-        // Seed an undecodable blob.  Pure ASCII so a UTF-8 path would
-        // _not_ trip; the only thing that should reject it is bincode.
-        let garbage = b"this is definitely not a bincoded RepoDependencyGraph";
-        RepoGraphCacheRepository::new(db.clone())
-            .upsert(RepoGraphCacheInsert {
-                project_id: &project.id,
-                commit_sha: &head_sha,
-                graph_blob: garbage,
-            })
-            .await
-            .expect("seed cache");
-
-        // The call must NOT short-circuit with a cache-deserialize error;
-        // it must fall through to the indexer.  In tests the indexer has
-        // no SCIP toolchain, so we expect either Err(indexer-shaped) or
-        // Ok (if the host happens to have rust-analyzer on PATH).  In
-        // either case, the failure mode we are guarding against — a hard
-        // error mentioning the cache deserialize path — must NOT occur.
-        let result = ensure_canonical_graph(&state, &project.id, &project_root).await;
-        if let Err(msg) = &result {
-            assert!(
-                !msg.contains("deserialize cached graph")
-                    && !msg.contains("graph_blob is not valid UTF-8"),
-                "stale blob bubbled cache-path error instead of falling through: {msg}"
-            );
-        }
-    }
-
-    /// Regression test for the Pulse "infinite loader" symptom: when local
-    /// `main` has advanced past the architect's last warm, non-architect
-    /// `RepoGraphOps` read ops must serve whatever is currently cached rather
-    /// than re-running `ensure_canonical_graph` (which would `fetch` +
-    /// `reset_to_origin_main` + cache-miss + trigger a full SCIP rebuild).
-    ///
-    /// This test seeds `GRAPH_CACHE` under a deliberately stale `git_head`
-    /// sha that does not match `HEAD`, then calls both
-    /// `build_graph_for_project` and `build_graph_with_caches_for_project`.
-    /// Both must return Ok without ever consulting the index tree or the
-    /// indexer (the test project has no SCIP toolchain, so any indexer
-    /// invocation would fail hard).
-    #[tokio::test]
-    async fn non_warming_readers_serve_cached_graph_regardless_of_commit_sha() {
-        use super::graph_bridge_tests::build_test_graph;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = make_project(tmp.path()).await;
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let _ = ProjectRepository::new(db.clone(), state.event_bus())
-            .create(
-                "test-cache-only-readers",
-                project_root.to_string_lossy().as_ref(),
-            )
-            .await
-            .expect("create project");
-
-        // Plant a CachedGraph whose `project_path` matches what the readers
-        // compute from `project_root` but whose `git_head` is a synthetic
-        // sha that will never match the tempdir repo's real HEAD.  If the
-        // readers tried to refresh, they would cache-miss on this sha and
-        // attempt to run the indexer against a repo with no rust-analyzer
-        // available — hard failure, not a quiet stale read.
-        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
-        let stale_sha = "0000000000000000000000000000000000000000".to_string();
-        let expected_node_count = {
-            let graph = build_test_graph();
-            let node_count = graph.node_count();
-            let (pagerank, sccs) = derive_graph_caches(&graph);
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = Some(CachedGraph {
-                graph,
-                project_path: index_tree_path.clone(),
-                git_head: stale_sha,
-                last_warm_at: time::OffsetDateTime::now_utc(),
-                pagerank,
-                sccs,
-            });
-            node_count
-        };
-
-        let project_root_str = project_root.to_string_lossy().into_owned();
-        let graph_only = build_graph_for_project(&state, &project_root_str)
-            .await
-            .expect("cache-only reader must succeed without warming");
-        let (graph_with_caches, pagerank, _sccs) =
-            build_graph_with_caches_for_project(&state, &project_root_str)
-                .await
-                .expect("cache-only reader (with caches) must succeed without warming");
-
-        // Drain the cache so sibling tests in this process aren't poisoned.
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-
-        assert_eq!(graph_only.node_count(), expected_node_count);
-        assert_eq!(graph_with_caches.node_count(), expected_node_count);
-        // `pagerank` is an Arc; proving it points at the derived ranking is
-        // enough to show `build_graph_with_caches_for_project` handed back
-        // the cache's Arc rather than recomputing.
-        assert_eq!(pagerank.nodes.len(), expected_node_count);
-    }
-
-    /// Cold-cache case: with no `GRAPH_CACHE` entry at all, the non-warming
-    /// readers must fail fast with the documented "not warmed" error.  This
-    /// is how Pulse panels render the empty state instead of spinning.
-    #[tokio::test]
-    async fn non_warming_readers_fail_fast_when_cache_is_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = make_project(tmp.path()).await;
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let _ = ProjectRepository::new(db.clone(), state.event_bus())
-            .create(
-                "test-cache-only-empty",
-                project_root.to_string_lossy().as_ref(),
-            )
-            .await
-            .expect("create project");
-
-        // Defensive: clear any leftover cache from a sibling test.
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-
-        let project_root_str = project_root.to_string_lossy().into_owned();
-        let err = build_graph_for_project(&state, &project_root_str)
-            .await
-            .expect_err("cold cache must error rather than warm");
-        assert!(
-            err.contains("not warmed"),
-            "expected GRAPH_NOT_WARMED_ERR shape, got: {err}"
-        );
-        let err = match build_graph_with_caches_for_project(&state, &project_root_str).await {
-            Ok(_) => panic!("cold cache must error rather than warm"),
-            Err(e) => e,
-        };
-        assert!(
-            err.contains("not warmed"),
-            "expected GRAPH_NOT_WARMED_ERR shape, got: {err}"
-        );
-    }
-
-    /// ADR-051 §3: "canonical graph warming is infrastructure, not agent
-    /// work … acquired on first consumer demand."  A cold-cache Pulse
-    /// read must NOT block on the warmer — it returns
-    /// `GRAPH_NOT_WARMED_ERR` synchronously and kicks a detached
-    /// background warm via `maybe_kick_background_warm`.  We can't
-    /// observe the detached task's completion deterministically in a
-    /// unit test (its claim-release cycle races against our polling),
-    /// so this test verifies the synchronous contract only:
-    ///
-    /// 1. A cold read against a REGISTERED project returns
-    ///    `GRAPH_NOT_WARMED_ERR` quickly (no SCIP wait).
-    /// 2. The read does not panic or wedge when the project exists in
-    ///    the DB — exercising the `resolve_id_by_path_fuzzy` lookup path
-    ///    inside the detached `maybe_kick_background_warm` task.
-    ///
-    /// Manual integration verification: click Pulse in the running app
-    /// against a cold cache; the panel should show the empty state and
-    /// a subsequent click (a few seconds later) should render the
-    /// warmed graph.
-    #[tokio::test]
-    async fn cold_cache_read_triggers_background_warm_without_blocking() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = make_project(tmp.path()).await;
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let _project = ProjectRepository::new(db.clone(), state.event_bus())
-            .create(
-                "cold-cache-kicks-background-warm",
-                project_root.to_string_lossy().as_ref(),
-            )
-            .await
-            .expect("create project");
-
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-
-        let project_root_str = project_root.to_string_lossy().into_owned();
-        let started = std::time::Instant::now();
-        let err = build_graph_for_project(&state, &project_root_str)
-            .await
-            .expect_err("cold cache must return GRAPH_NOT_WARMED_ERR");
-        let elapsed = started.elapsed();
-        assert!(err.contains("not warmed"));
-        assert!(
-            elapsed < std::time::Duration::from_secs(3),
-            "cold-cache read must not block on the warmer; elapsed={elapsed:?}"
         );
     }
 }
