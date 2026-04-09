@@ -1,5 +1,6 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{SessionRecord, SessionStatus};
+use serde_json::Value;
 
 use crate::Result;
 use crate::database::Database;
@@ -379,6 +380,41 @@ impl SessionRepository {
             .await?;
 
         Ok(())
+    }
+
+    /// Return the most recent non-null event taxonomy JSON for a task.
+    pub async fn latest_event_taxonomy_for_task(&self, task_id: &str) -> Result<Option<Value>> {
+        self.db.ensure_initialized().await?;
+
+        let row: Option<String> = sqlx::query_scalar(
+            "SELECT event_taxonomy FROM sessions
+             WHERE task_id = ?1 AND event_taxonomy IS NOT NULL
+             ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        Ok(row.and_then(|json| serde_json::from_str::<Value>(&json).ok()))
+    }
+
+    /// Return the most recent non-null `worktree_path` recorded for any session
+    /// that belongs to the given task.  Used by the coordinator to locate the
+    /// on-disk worktree of a finished simple-lifecycle session so it can probe
+    /// for uncommitted changes before deciding whether to short-circuit close.
+    pub async fn latest_worktree_path_for_task(&self, task_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+
+        let row: Option<String> = sqlx::query_scalar(
+            "SELECT worktree_path FROM sessions
+             WHERE task_id = ?1 AND worktree_path IS NOT NULL
+             ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        Ok(row)
     }
 
     /// Find the most recent paused session for a task that matches the given

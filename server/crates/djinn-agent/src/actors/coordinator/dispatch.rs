@@ -20,6 +20,140 @@ enum DispatchOutcome {
 }
 
 impl CoordinatorActor {
+    fn session_taxonomy_has_durable_artifacts(taxonomy: &serde_json::Value) -> bool {
+        taxonomy
+            .get("files_changed")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|count| count > 0)
+            || taxonomy
+                .get("notes_written")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|count| count > 0)
+    }
+
+    fn activity_entry_mentions_djinn_path(entry: &djinn_core::models::ActivityEntry) -> bool {
+        if !entry.payload.contains(".djinn/") {
+            return false;
+        }
+
+        serde_json::from_str::<serde_json::Value>(&entry.payload)
+            .ok()
+            .and_then(|payload| {
+                payload
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| entry.payload.clone())
+            .contains(".djinn/")
+    }
+
+    /// Probe a session worktree on disk for uncommitted changes (modified,
+    /// staged, or untracked files).  This is the ground-truth signal: it
+    /// catches files written via `call_shell`, file moves, and anything the
+    /// session-extraction taxonomy (which only counts `write|edit|apply_patch`
+    /// tool calls) cannot see.
+    ///
+    /// Returns `true` if the path exists, opens as a git repo, and reports any
+    /// non-clean entry.  Errors and missing paths conservatively return
+    /// `false` so we never *promote* a task to the PR flow on a bogus signal —
+    /// the in-DB signals (taxonomy, comments) are still consulted as a
+    /// fallback.
+    pub(super) fn worktree_has_uncommitted_changes(worktree_path: &std::path::Path) -> bool {
+        if !worktree_path.exists() {
+            return false;
+        }
+        let repo = match git2::Repository::open(worktree_path) {
+            Ok(repo) => repo,
+            Err(e) => {
+                tracing::debug!(
+                    path = %worktree_path.display(),
+                    error = %e,
+                    "worktree_has_uncommitted_changes: not a git repo"
+                );
+                return false;
+            }
+        };
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true)
+            .include_ignored(false)
+            .recurse_untracked_dirs(true);
+        match repo.statuses(Some(&mut opts)) {
+            Ok(statuses) => statuses.iter().any(|entry| {
+                let s = entry.status();
+                s.intersects(
+                    git2::Status::INDEX_NEW
+                        | git2::Status::INDEX_MODIFIED
+                        | git2::Status::INDEX_DELETED
+                        | git2::Status::INDEX_RENAMED
+                        | git2::Status::INDEX_TYPECHANGE
+                        | git2::Status::WT_NEW
+                        | git2::Status::WT_MODIFIED
+                        | git2::Status::WT_DELETED
+                        | git2::Status::WT_TYPECHANGE
+                        | git2::Status::WT_RENAMED,
+                )
+            }),
+            Err(e) => {
+                tracing::debug!(
+                    path = %worktree_path.display(),
+                    error = %e,
+                    "worktree_has_uncommitted_changes: status() failed"
+                );
+                false
+            }
+        }
+    }
+
+    pub(super) async fn simple_lifecycle_task_has_durable_artifacts(&self, task_id: &str) -> bool {
+        let session_repo = SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+
+        // Signal 1: real worktree git status (catches shell-driven changes
+        // that the tool-call-based extraction in session_extraction.rs misses).
+        if let Ok(Some(worktree)) = session_repo.latest_worktree_path_for_task(task_id).await {
+            let path = std::path::PathBuf::from(&worktree);
+            if Self::worktree_has_uncommitted_changes(&path) {
+                tracing::info!(
+                    task_id = %task_id,
+                    worktree = %worktree,
+                    "simple-lifecycle artifact detected: worktree has uncommitted changes"
+                );
+                return true;
+            }
+        }
+
+        // Signal 2: session event taxonomy (files_changed / notes_written).
+        if let Ok(Some(taxonomy)) = session_repo.latest_event_taxonomy_for_task(task_id).await
+            && Self::session_taxonomy_has_durable_artifacts(&taxonomy)
+        {
+            tracing::info!(
+                task_id = %task_id,
+                "simple-lifecycle artifact detected: non-zero files_changed/notes_written in taxonomy"
+            );
+            return true;
+        }
+
+        // Signal 3: task comments referencing .djinn/ paths.
+        let repo = self.task_repo();
+        if let Ok(entries) = repo.list_activity(task_id).await
+            && entries
+                .iter()
+                .filter(|entry| entry.event_type == "comment")
+                .any(Self::activity_entry_mentions_djinn_path)
+        {
+            tracing::info!(
+                task_id = %task_id,
+                "simple-lifecycle artifact detected: task comment references .djinn/ path"
+            );
+            return true;
+        }
+
+        false
+    }
+
     /// Shared model-resolution → health-check → pool-dispatch loop used by
     /// both regular task dispatch and planner dispatch.
     ///
@@ -1178,13 +1312,18 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // Simple-lifecycle tasks (planning, spike, research, review) don't
-            // produce code changes — close them directly instead of entering
-            // the PR/merge flow.
+            // Simple-lifecycle tasks normally close directly, but sessions that
+            // produced durable artifacts (file changes, memory writes, or task
+            // comments pointing at .djinn paths) must survive as branch/PR
+            // artifacts instead of being short-circuited here.
             let simple = IssueType::parse(&task.issue_type)
                 .map(|it| it.uses_simple_lifecycle())
                 .unwrap_or(false);
-            if simple {
+            if simple
+                && !self
+                    .simple_lifecycle_task_has_durable_artifacts(&task.id)
+                    .await
+            {
                 tracing::info!(
                     task_id = %task.short_id,
                     issue_type = %task.issue_type,
@@ -1208,6 +1347,14 @@ impl CoordinatorActor {
                     );
                 }
                 continue;
+            }
+
+            if simple {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    issue_type = %task.issue_type,
+                    "CoordinatorActor: simple-lifecycle task approved with durable artifacts — routing through PR flow"
+                );
             }
 
             tracing::info!(

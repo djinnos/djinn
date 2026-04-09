@@ -66,6 +66,8 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Mutex;
 
+    use serde_json::json;
+    use tokio::process::Command;
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
 
@@ -238,6 +240,415 @@ mod tests {
             .await
             .unwrap();
         (task, note)
+    }
+
+    fn coordinator_actor_for_tests(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+    ) -> CoordinatorActor {
+        CoordinatorActor {
+            receiver: tokio::sync::mpsc::channel(1).1,
+            events: tx.subscribe(),
+            cancel: CancellationToken::new(),
+            tick: tokio::time::interval(STUCK_INTERVAL),
+            db: db.clone(),
+            events_tx: tx.clone(),
+            pool: SlotPoolHandle::spawn(
+                test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+                CancellationToken::new(),
+                SlotPoolConfig {
+                    models: vec![ModelSlotConfig {
+                        model_id: DEFAULT_MODEL_ID.to_owned(),
+                        max_slots: 1,
+                        roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+                    }],
+                    role_priorities: HashMap::new(),
+                },
+            ),
+            catalog: CatalogService::new(),
+            health: HealthTracker::new(),
+            role_registry: Arc::new(RoleRegistry::new()),
+            lsp: crate::lsp::LspManager::new(),
+            self_sender: tokio::sync::mpsc::channel(1).0,
+            status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
+                paused_projects: HashSet::new(),
+                unhealthy_project_ids: HashSet::new(),
+                unhealthy_project_errors: HashMap::new(),
+                dispatched: 0,
+                recovered: 0,
+                epic_throughput: HashMap::new(),
+                pr_errors: HashMap::new(),
+                rate_limited_until: None,
+            })
+            .0,
+            paused_projects: HashSet::new(),
+            dispatch_limit: 50,
+            model_priorities: HashMap::new(),
+            unhealthy_projects: HashMap::new(),
+            pr_errors: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
+            verification_tracker: VerificationTracker::default(),
+            consolidation_runner: Arc::new(RecordingConsolidationRunner::new()),
+            last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
+            last_graph_refresh: StdInstant::now(),
+            canonical_graph_warmer: None,
+            prune_tick_counter: 0,
+            last_patrol_completed: StdInstant::now(),
+            next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
+            throughput_events: HashMap::new(),
+            escalation_counts: HashMap::new(),
+            pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
+            stall_killed: HashSet::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
+            dispatched: 0,
+            recovered: 0,
+        }
+    }
+
+    async fn create_simple_task(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+        issue_type: &str,
+        title: &str,
+    ) -> (djinn_core::models::Task, String) {
+        let project = test_helpers::create_test_project(db).await;
+        std::fs::create_dir_all(Path::new(&project.path)).unwrap();
+        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let task = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx))
+            .create_in_project(
+                &project.id,
+                Some(&epic.id),
+                title,
+                "test task description",
+                "test task design",
+                issue_type,
+                2,
+                "test-owner",
+                Some("approved"),
+                None,
+            )
+            .await
+            .unwrap();
+        (task, project.path)
+    }
+
+    /// Initialize a minimal git repo at `path` with an initial commit on
+    /// `main`.  Used by the architect-spike integration test to give the
+    /// session worktree a real git2-openable repo whose `git status` reflects
+    /// the durable artifact the test writes.
+    async fn init_git_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+
+        let output = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(path)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {:?}", output);
+
+        let _ = Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()
+            .await;
+        let _ = Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()
+            .await;
+
+        tokio::fs::write(path.join("README.md"), "base\n")
+            .await
+            .unwrap();
+        let output = Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git add failed: {:?}", output);
+
+        let output = Command::new("git")
+            .args(["commit", "-m", "initial commit"])
+            .current_dir(path)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "git commit failed: {:?}", output);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approved_simple_task_without_durable_artifacts_closes_directly() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (task, _project_path) =
+            create_simple_task(&db, &tx, "spike", "artifact-free spike").await;
+
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.process_approved_tasks().await;
+
+        let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, "closed");
+        assert_eq!(updated.close_reason.as_deref(), Some("completed"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approved_simple_task_with_memory_write_signal_skips_direct_close() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (task, _project_path) =
+            create_simple_task(&db, &tx, "research", "memory-writing research").await;
+
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "test-model",
+                agent_type: "architect",
+                worktree_path: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        session_repo
+            .set_event_taxonomy(
+                &session.id,
+                &json!({"files_changed": 0, "notes_written": 1}).to_string(),
+            )
+            .await
+            .unwrap();
+
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.process_approved_tasks().await;
+
+        let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, "approved");
+        assert_ne!(
+            updated.close_reason.as_deref(),
+            Some("simple-lifecycle task — no PR needed")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approved_simple_task_with_djinn_comment_signal_skips_direct_close() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (task, _project_path) =
+            create_simple_task(&db, &tx, "review", "commented review").await;
+
+        TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .log_activity(
+                Some(&task.id),
+                "architect",
+                "architect",
+                "comment",
+                &json!({"body": "Wrote ADR at .djinn/decisions/proposed/adr-123.md"}).to_string(),
+            )
+            .await
+            .unwrap();
+
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.process_approved_tasks().await;
+
+        let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, "approved");
+        assert_ne!(
+            updated.close_reason.as_deref(),
+            Some("simple-lifecycle task — no PR needed")
+        );
+    }
+
+    // ── Unit coverage for the real worktree git-status signal ─────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_has_uncommitted_changes_detects_untracked_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path()).await;
+
+        // Clean repo: no signal.
+        assert!(!CoordinatorActor::worktree_has_uncommitted_changes(
+            tmp.path()
+        ));
+
+        // Untracked file (the kind a `call_shell` mkdir/echo would leave).
+        std::fs::create_dir_all(tmp.path().join(".djinn/decisions/proposed")).unwrap();
+        std::fs::write(
+            tmp.path().join(".djinn/decisions/proposed/adr-999.md"),
+            "# new ADR\n",
+        )
+        .unwrap();
+
+        assert!(
+            CoordinatorActor::worktree_has_uncommitted_changes(tmp.path()),
+            "untracked .djinn/decisions/proposed/adr-999.md must be detected"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_has_uncommitted_changes_detects_modified_tracked_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path()).await;
+
+        std::fs::write(tmp.path().join("README.md"), "base modified\n").unwrap();
+        assert!(CoordinatorActor::worktree_has_uncommitted_changes(
+            tmp.path()
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_has_uncommitted_changes_returns_false_for_missing_path() {
+        let missing = std::path::PathBuf::from("/nonexistent/djinn/worktree/path/xyz");
+        assert!(!CoordinatorActor::worktree_has_uncommitted_changes(
+            &missing
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_has_uncommitted_changes_returns_false_for_non_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("loose-file.md"), "x").unwrap();
+        assert!(!CoordinatorActor::worktree_has_uncommitted_changes(
+            tmp.path()
+        ));
+    }
+
+    // ── Integration coverage for the architect-spike scenario ─────────────────
+
+    /// End-to-end regression for the dtn6 root cause: an architect-style spike
+    /// session that produces an unstaged ADR file inside its worktree must
+    /// NOT be auto-closed with `simple-lifecycle task — no PR needed`.
+    ///
+    /// This test deliberately:
+    ///   - sets up a *real* git repo at the session worktree path,
+    ///   - creates a *real* `sessions` row pointing at that worktree,
+    ///   - writes a *real* untracked `.djinn/decisions/proposed/adr-*.md` file,
+    ///   - injects NO synthetic event_taxonomy (the worktree-status signal
+    ///     must be the one that triggers the routing change), and
+    ///   - does NOT pre-create the `task/<short_id>` branch (the whole point
+    ///     of the assertion is that we *route through* the PR flow because
+    ///     the artifact was detected, instead of short-circuiting to close).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn architect_spike_with_real_adr_file_routes_through_pr_flow_via_worktree_signal() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (task, project_path) =
+            create_simple_task(&db, &tx, "spike", "architect ADR spike").await;
+
+        // Real worktree directory inside the project, initialized as a git repo
+        // so git2 status() actually has something to read.
+        let worktree_path = Path::new(&project_path)
+            .join(".djinn")
+            .join("worktrees")
+            .join(&task.short_id);
+        init_git_repo(&worktree_path).await;
+
+        // The architect "writes the ADR" via a shell command — i.e. exactly
+        // the kind of change session_extraction.rs would miss because it only
+        // counts write/edit/apply_patch tool calls, not call_shell side
+        // effects.  We model that here by creating the file directly with std::fs.
+        std::fs::create_dir_all(worktree_path.join(".djinn/decisions/proposed")).unwrap();
+        std::fs::write(
+            worktree_path.join(".djinn/decisions/proposed/adr-dtn6-test.md"),
+            "# ADR: dtn6 regression coverage\n\nbody body body\n",
+        )
+        .unwrap();
+
+        // Real session row, with worktree_path set so the coordinator can find
+        // it.  Note: NO event_taxonomy is set — we want to prove the
+        // worktree-status signal is what actually fires.
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "test-model",
+                agent_type: "architect",
+                worktree_path: Some(worktree_path.to_str().unwrap()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        session_repo.pause(&session.id, 0, 0).await.unwrap();
+
+        // Pre-flight: verify the helper sees the change directly.  This rules
+        // out test-environment quirks (e.g. git2 unable to open the repo)
+        // before we make the higher-level routing assertion.
+        assert!(
+            CoordinatorActor::worktree_has_uncommitted_changes(&worktree_path),
+            "test fixture broken: worktree should report uncommitted changes"
+        );
+
+        let actor = coordinator_actor_for_tests(&db, &tx);
+        // Drive the same predicate process_approved_tasks() consults — this
+        // exercises the real extraction path (DB query for worktree_path +
+        // git2 status), no synthetic taxonomy injection.
+        let durable = actor
+            .simple_lifecycle_task_has_durable_artifacts(&task.id)
+            .await;
+        assert!(
+            durable,
+            "spike with real ADR file in worktree must be classified as durable"
+        );
+
+        // Now drive the full routing path.  Because the artifact is detected,
+        // process_approved_tasks must NOT take the simple-lifecycle close
+        // shortcut.  Without a pre-created task branch the merge attempt
+        // itself will fail, but that failure is intentional: it leaves the
+        // task in `approved` (via the SKIP_SENTINEL release action) instead
+        // of closing it as `simple-lifecycle task — no PR needed`.
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.process_approved_tasks().await;
+
+        let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            updated.close_reason.as_deref(),
+            Some("simple-lifecycle task — no PR needed"),
+            "task with durable ADR artifact must not auto-close as simple-lifecycle"
+        );
+        assert_ne!(
+            updated.status, "closed",
+            "task with durable ADR artifact must not be closed by the short-circuit"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
