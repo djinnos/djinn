@@ -23,8 +23,6 @@ use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 
-#[cfg(test)]
-use crate::canonical_graph::{CachedGraph, GRAPH_CACHE_TEST_GUARD};
 use crate::canonical_graph::{GRAPH_CACHE, PREVIOUS_GRAPH_CACHE};
 use crate::sync::SyncManager;
 
@@ -1145,121 +1143,17 @@ impl AppState {
 #[cfg(test)]
 pub(crate) mod graph_bridge_tests {
     use super::*;
-    use crate::canonical_graph::derive_graph_caches;
+    use crate::canonical_graph::build_test_graph_fixture;
     use crate::repo_graph::{RepoDependencyGraph, RepoNodeKey};
     use crate::scip_parser::{
-        ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
-        ScipRelationshipKind, ScipSymbol, ScipSymbolKind, ScipSymbolRole,
+        ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipSymbol,
+        ScipSymbolKind, ScipSymbolRole,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
-    async fn clear_graph_test_caches() {
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-        {
-            let mut cache = PREVIOUS_GRAPH_CACHE.write().await;
-            *cache = None;
-        }
-    }
-
-    fn fixture_index() -> ParsedScipIndex {
-        let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
-        let helper_symbol = ScipSymbol {
-            symbol: helper_symbol_name.clone(),
-            kind: Some(ScipSymbolKind::Function),
-            display_name: Some("helper".to_string()),
-            signature: Some("fn helper()".to_string()),
-            documentation: vec![],
-            relationships: vec![],
-            visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        };
-        let trait_symbol = ScipSymbol {
-            symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
-            kind: Some(ScipSymbolKind::Type),
-            display_name: Some("HelperTrait".to_string()),
-            signature: None,
-            documentation: vec![],
-            relationships: vec![],
-            visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        };
-        let main_symbol = ScipSymbol {
-            symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
-            kind: Some(ScipSymbolKind::Function),
-            display_name: Some("main".to_string()),
-            signature: Some("fn main()".to_string()),
-            documentation: vec![],
-            relationships: vec![ScipRelationship {
-                source_symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
-                target_symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
-                kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
-            }],
-            visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        };
-
-        fn def_occ(symbol: &str) -> ScipOccurrence {
-            ScipOccurrence {
-                symbol: symbol.to_string(),
-                range: ScipRange {
-                    start_line: 0,
-                    start_character: 0,
-                    end_line: 0,
-                    end_character: 6,
-                },
-                enclosing_range: None,
-                roles: BTreeSet::from([ScipSymbolRole::Definition]),
-                syntax_kind: None,
-                override_documentation: vec![],
-            }
-        }
-        fn ref_occ(symbol: &str) -> ScipOccurrence {
-            ScipOccurrence {
-                symbol: symbol.to_string(),
-                range: ScipRange {
-                    start_line: 1,
-                    start_character: 4,
-                    end_line: 1,
-                    end_character: 10,
-                },
-                enclosing_range: None,
-                roles: BTreeSet::from([ScipSymbolRole::ReadAccess]),
-                syntax_kind: None,
-                override_documentation: vec![],
-            }
-        }
-
-        ParsedScipIndex {
-            metadata: ScipMetadata {
-                project_root: Some("file:///workspace/repo".to_string()),
-                tool_name: Some("rust-analyzer".to_string()),
-                tool_version: Some("1.0.0".to_string()),
-            },
-            files: vec![
-                ScipFile {
-                    language: "rust".to_string(),
-                    relative_path: PathBuf::from("src/helper.rs"),
-                    definitions: vec![def_occ(&helper_symbol_name)],
-                    references: vec![],
-                    occurrences: vec![def_occ(&helper_symbol_name)],
-                    symbols: vec![helper_symbol],
-                },
-                ScipFile {
-                    language: "rust".to_string(),
-                    relative_path: PathBuf::from("src/app.rs"),
-                    definitions: vec![def_occ(&main_symbol.symbol)],
-                    references: vec![ref_occ(&helper_symbol_name)],
-                    occurrences: vec![def_occ(&main_symbol.symbol), ref_occ(&helper_symbol_name)],
-                    symbols: vec![main_symbol, trait_symbol],
-                },
-            ],
-            external_symbols: vec![],
-        }
-    }
-
     pub(crate) fn build_test_graph() -> RepoDependencyGraph {
-        RepoDependencyGraph::build(&[fixture_index()])
+        build_test_graph_fixture()
     }
 
     #[test]
@@ -1458,7 +1352,7 @@ pub(crate) mod graph_bridge_tests {
                 }],
                 external_symbols: vec![],
             };
-            let mut files = fixture_index().files;
+            let mut files = crate::canonical_graph::build_test_parsed_index_fixture().files;
             files.push(new_index.files.into_iter().next().unwrap());
             RepoDependencyGraph::build(&[ParsedScipIndex {
                 metadata: ScipMetadata::default(),
@@ -1486,189 +1380,5 @@ pub(crate) mod graph_bridge_tests {
             diff.removed_nodes.is_empty(),
             "no nodes should be removed in this scenario"
         );
-    }
-
-    /// `RepoGraphBridge::status` returns `warmed: false` with all optional
-    /// fields `None` when `GRAPH_CACHE` has no entry matching the project's
-    /// `_index` worktree path.  No SCIP indexing is triggered.
-    #[tokio::test]
-    async fn status_returns_unwarmed_for_empty_cache() {
-        use crate::test_helpers::create_test_db;
-        use djinn_db::ProjectRepository;
-        use tokio_util::sync::CancellationToken;
-
-        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
-        clear_graph_test_caches().await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        // Use a unique project_root per test to avoid the global GRAPH_CACHE
-        // colliding with concurrently-running test cases.
-        let project_root = tmp.path().join("status-empty-repo");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        let project = proj_repo
-            .create("test-status-empty", project_root.to_string_lossy().as_ref())
-            .await
-            .expect("create project");
-
-        let bridge = RepoGraphBridge::new(state);
-        let project_root_str = project_root.to_string_lossy().into_owned();
-        let status = bridge.status(&project_root_str).await.expect("status ok");
-        assert_eq!(status.project_id, project.id);
-        assert!(!status.warmed);
-        assert!(status.last_warm_at.is_none());
-        assert!(status.pinned_commit.is_none());
-        assert!(status.commits_since_pin.is_none());
-
-        clear_graph_test_caches().await;
-    }
-
-    /// `RepoGraphBridge::status` returns `warmed: true` together with
-    /// `pinned_commit` and an RFC3339 `last_warm_at` when the in-memory
-    /// canonical cache slot has an entry whose `project_path` matches the
-    /// project's `_index` worktree path.
-    #[tokio::test]
-    async fn status_returns_warmed_when_cache_populated() {
-        use crate::test_helpers::create_test_db;
-        use djinn_db::ProjectRepository;
-        use tokio_util::sync::CancellationToken;
-
-        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
-        clear_graph_test_caches().await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = tmp.path().join("status-warm-repo");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        let project = proj_repo
-            .create("test-status-warm", project_root.to_string_lossy().as_ref())
-            .await
-            .expect("create project");
-
-        // Plant a CachedGraph entry whose project_path is exactly what
-        // status() recomputes from the project root.
-        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
-        let pinned_sha = "deadbeefcafebabe1234567890abcdef00000001".to_string();
-        {
-            let graph = build_test_graph();
-            let (pagerank, sccs) = derive_graph_caches(&graph);
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = Some(CachedGraph {
-                graph,
-                project_path: index_tree_path.clone(),
-                git_head: pinned_sha.clone(),
-                last_warm_at: time::OffsetDateTime::now_utc(),
-                pagerank,
-                sccs,
-            });
-        }
-
-        let bridge = RepoGraphBridge::new(state);
-        let project_root_str = project_root.to_string_lossy().into_owned();
-        let status = bridge.status(&project_root_str).await.expect("status ok");
-
-        assert_eq!(status.project_id, project.id);
-        assert!(status.warmed);
-        assert_eq!(status.pinned_commit.as_deref(), Some(pinned_sha.as_str()));
-        let ts = status.last_warm_at.expect("last_warm_at populated");
-        assert!(
-            ts.contains('T') && (ts.ends_with('Z') || ts.contains('+') || ts.contains('-')),
-            "expected RFC3339 timestamp, got {ts}"
-        );
-        // commits_since_pin is best-effort: project_root has no git repo so
-        // the rev-list call fails and we expect None.  This still proves the
-        // status path does not panic when git is unavailable.
-        assert!(status.commits_since_pin.is_none());
-
-        clear_graph_test_caches().await;
-    }
-
-    #[tokio::test]
-    async fn chat_code_graph_ranked_succeeds_via_agent_bridge_from_index_tree_root() {
-        use crate::test_helpers::create_test_db;
-        use djinn_db::ProjectRepository;
-        use tokio_util::sync::CancellationToken;
-
-        let _guard = GRAPH_CACHE_TEST_GUARD.lock().await;
-        clear_graph_test_caches().await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = tmp.path().join("chat-code-graph-repo");
-        tokio::fs::create_dir_all(&project_root).await.unwrap();
-
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
-        proj_repo
-            .create(
-                "test-chat-code-graph",
-                project_root.to_string_lossy().as_ref(),
-            )
-            .await
-            .expect("create project");
-
-        let index_tree_path = djinn_core::index_tree::index_tree_path(&project_root);
-        let graph = build_test_graph();
-        let (pagerank, sccs) = derive_graph_caches(&graph);
-        {
-            let mut cache = GRAPH_CACHE.write().await;
-            *cache = Some(CachedGraph {
-                graph,
-                project_path: index_tree_path.clone(),
-                git_head: "deadbeefcafebabe1234567890abcdef00000001".to_string(),
-                last_warm_at: time::OffsetDateTime::now_utc(),
-                pagerank,
-                sccs,
-            });
-        }
-
-        let mut ctx = state.agent_context();
-        ctx.working_root = Some(index_tree_path);
-        let result = djinn_agent::chat_tools::dispatch_chat_tool(
-            &ctx,
-            "code_graph",
-            serde_json::json!({
-                "operation": "ranked",
-                "kind_filter": "file",
-                "limit": 10,
-            }),
-            &project_root,
-        )
-        .await
-        .expect("chat code_graph ranked should succeed through agent bridge");
-
-        let ranked = result
-            .as_array()
-            .expect("ranked response should be an array");
-        assert!(
-            !ranked.is_empty(),
-            "expected ranked files from fixture graph"
-        );
-        let keys: Vec<&str> = ranked
-            .iter()
-            .filter_map(|entry| entry.get("key").and_then(|value| value.as_str()))
-            .collect();
-        assert!(
-            keys.iter()
-                .any(|key| *key == "file:src/app.rs" || *key == "src/app.rs"),
-            "expected fixture file in ranked output, got {keys:?}"
-        );
-
-        let rendered = result.to_string();
-        assert!(
-            !rendered.contains("code_graph not available in agent bridge"),
-            "bridge should use the real RepoGraphOps implementation, got {rendered}"
-        );
-
-        clear_graph_test_caches().await;
     }
 }
