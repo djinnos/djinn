@@ -4,6 +4,7 @@ type: adr
 tags: ["adr","pulse","architect","proposal-pipeline","adr-051","epic-c"]
 ---
 
+
 # ADR-052: Pulse Proposal Inbox, Ask-Architect Trigger, and Proposed Epic Lane
 
 ## Status: Proposed — Reconstructed from lost architect session
@@ -12,7 +13,7 @@ Date: 2026-04-08
 
 Originating spike: `ih6u` — *"Finish ADR-051 Epic C: Pulse surfaces + proposed epic lane"*
 
-Extends: [[ADR-051: Planner-as-Patrol, Architect-as-Consultant, ADR-to-Epic Pipeline, and Auto-Dispatch Reentrance Guards]]
+Extends: [["ADR-051: Planner-as-Patrol, Architect-as-Consultant, ADR-to-Epic Pipeline, and Auto-Dispatch Reentrance Guards"]]
 
 Related: [[ADR-050: Architect/Chat Code-Graph Consolidation]], [[ADR-046: Chat-Driven Planning]]
 
