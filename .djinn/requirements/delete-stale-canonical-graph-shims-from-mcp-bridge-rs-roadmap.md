@@ -31,3 +31,11 @@ Make `server/src/canonical_graph.rs` the single source of truth for canonical-gr
 
 ## Relations
 - [[decisions/adr-051-planner-as-patrol-and-architect-as-consultant]]
+
+
+## Wave 2
+- `wpjx` completed: `server/src/server/state/mod.rs` now calls `crate::canonical_graph::canonical_graph_count_commits_since` directly and the old `mcp_bridge` wrapper is gone.
+- `4w76` completed: the stale canonical-graph shim block and duplicate tests were removed from `server/src/mcp_bridge.rs`, leaving `server/src/canonical_graph.rs` as the single implementation seam.
+
+## Status
+Epic complete. Wave 1 roadmap items are all closed and the codebase now reflects the intended single-source-of-truth canonical-graph seam.
