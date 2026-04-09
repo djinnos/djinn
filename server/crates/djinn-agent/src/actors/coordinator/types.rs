@@ -39,7 +39,6 @@ pub struct CoordinatorDeps {
 
 impl CoordinatorDeps {
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         events_tx: broadcast::Sender<DjinnEventEnvelope>,
         cancel: CancellationToken,
@@ -71,16 +70,6 @@ impl CoordinatorDeps {
     /// off-server contexts that omit this leave the tick as a no-op.
     pub fn with_canonical_graph_warmer(mut self, warmer: Arc<dyn CanonicalGraphWarmer>) -> Self {
         self.canonical_graph_warmer = Some(warmer);
-        self
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(super) fn with_consolidation_runner(
-        mut self,
-        runner: Arc<dyn ConsolidationRunner>,
-    ) -> Self {
-        self.consolidation_runner = Some(runner);
         self
     }
 }

@@ -33,3 +33,15 @@ Keep these explicitly out of scope:
 
 ## Notes
 If repo inspection shows some items share a small compile-fix seam, blockers may be added to keep overlapping edits serialized.
+
+
+## Wave 1 results
+All five planned removal tasks landed and the epic's confirmed-dead targets are no longer present in the codebase:
+1. `crates/djinn-agent/src/task_merge.rs` reviewer-only dead entrypoints removed.
+2. `crates/djinn-agent/src/actors/slot/verification.rs` dead verification gate helpers removed.
+3. `crates/djinn-agent/src/actors/coordinator/rules.rs` / `types.rs` dead constant and builder removed.
+4. `src/repo_map/indexing.rs` dead single-flight wrapper removed.
+5. `src/repo_graph.rs` dead accessor methods and their dead-code suppressions removed.
+
+## Completion status
+Epic `pfq7` is complete. Repository grep over the targeted symbols shows no remaining definitions for the confirmed-dead items. A fresh `cargo check --tests` attempt from `server/` in this planning session was blocked by an `aws-lc-sys` custom-build failure in the environment rather than by Rust compile fallout from this epic's changes, so no follow-up implementation wave is needed here.
