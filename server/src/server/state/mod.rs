@@ -548,11 +548,11 @@ struct AppStateCanonicalGraphRefreshProbe;
 #[async_trait::async_trait]
 impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
     async fn cache_has_entry_for(&self, index_tree_path: &Path) -> bool {
-        crate::mcp_bridge::canonical_graph_cache_has_entry_for(index_tree_path).await
+        crate::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
     }
 
     async fn pinned_commit_for(&self, index_tree_path: &Path) -> Option<String> {
-        crate::mcp_bridge::canonical_graph_cache_pinned_commit_for(index_tree_path).await
+        crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
     }
 
     async fn commits_since(&self, project_root: &Path, pinned_commit: &str) -> Option<u64> {
