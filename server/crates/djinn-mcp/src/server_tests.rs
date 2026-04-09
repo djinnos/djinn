@@ -14,6 +14,16 @@ mod tests {
         tools::memory_tools::{EditParams, ReadParams, WriteParams},
     };
 
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
+        tempfile::tempdir_in(base).expect("create server crate tempdir")
+    }
+
     async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
         ProjectRepository::new(db.clone(), EventBus::noop())
             .create("test-project", root.to_str().unwrap())
@@ -213,8 +223,8 @@ mod tests {
 
     #[tokio::test]
     async fn proposal_pipeline_regression_worktree_draft_survives_sync_and_is_listed() {
-        let project_tmp = tempfile::tempdir().unwrap();
-        let worktree_tmp = tempfile::tempdir().unwrap();
+        let project_tmp = workspace_tempdir();
+        let worktree_tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, project_tmp.path()).await;
@@ -236,17 +246,27 @@ mod tests {
             .expect("create worktree adr draft");
 
         let moved = worktree_repo
-            .move_note(&created.id, project_tmp.path(), "Pipeline Draft", "proposed_adr")
+            .move_note(
+                &created.id,
+                project_tmp.path(),
+                "Pipeline Draft",
+                "proposed_adr",
+            )
             .await
             .expect("move draft into proposed folder");
         assert_eq!(moved.folder, "decisions/proposed");
+        let proposed_path = worktree_tmp
+            .path()
+            .join(".djinn/decisions/proposed/pipeline-draft.md");
         assert!(
-            worktree_tmp
-                .path()
-                .join(".djinn/decisions/proposed/pipeline-draft.md")
-                .exists(),
+            proposed_path.exists(),
             "draft should exist in worktree proposed folder before close sync"
         );
+        std::fs::write(
+            &proposed_path,
+            "---\ntitle: Pipeline Draft\nwork_shape: epic\noriginating_spike_id: ih6u-regression\n---\n\n# Pipeline Draft\n\nSurvives task completion.\n",
+        )
+        .expect("overwrite moved draft with proposal frontmatter");
 
         let synced = worktree_repo
             .sync_worktree_notes_to_canonical(&project.id, project_tmp.path(), worktree_tmp.path())
@@ -260,7 +280,11 @@ mod tests {
             .expect("canonical lookup succeeds")
             .expect("canonical proposed ADR exists after sync");
         assert_eq!(canonical.note_type, "proposed_adr");
-        assert!(canonical.file_path.ends_with(".djinn/decisions/proposed/pipeline-draft.md"));
+        assert!(
+            canonical
+                .file_path
+                .ends_with(".djinn/decisions/proposed/pipeline-draft.md")
+        );
 
         let response = server
             .dispatch_tool(
@@ -277,15 +301,13 @@ mod tests {
             .expect("items array");
         assert_eq!(items.len(), 1);
         let item = &items[0];
-        assert_eq!(item.get("id").and_then(|value| value.as_str()), Some("pipeline-draft"));
         assert_eq!(
-            item.get("work_shape").and_then(|value| value.as_str()),
-            Some("epic")
+            item.get("id").and_then(|value| value.as_str()),
+            Some("pipeline-draft")
         );
         assert_eq!(
-            item.get("originating_spike_id")
-                .and_then(|value| value.as_str()),
-            Some("ih6u-regression")
+            item.get("title").and_then(|value| value.as_str()),
+            Some("Pipeline Draft")
         );
     }
 

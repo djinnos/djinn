@@ -6,6 +6,14 @@ pub(super) async fn memory_move(
     server: &DjinnMcpServer,
     Parameters(p): Parameters<MoveParams>,
 ) -> Json<MemoryNoteResponse> {
+    memory_move_with_worktree(server, Parameters(p), None).await
+}
+
+pub(super) async fn memory_move_with_worktree(
+    server: &DjinnMcpServer,
+    Parameters(p): Parameters<MoveParams>,
+    worktree_root: Option<std::path::PathBuf>,
+) -> Json<MemoryNoteResponse> {
     let Some(project_id) = server.project_id_for_path(&p.project).await else {
         return Json(MemoryNoteResponse::error(format!(
             "project not found: {}",
@@ -13,7 +21,8 @@ pub(super) async fn memory_move(
         )));
     };
 
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_worktree_root(worktree_root);
 
     let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
         return Json(MemoryNoteResponse::error(format!(

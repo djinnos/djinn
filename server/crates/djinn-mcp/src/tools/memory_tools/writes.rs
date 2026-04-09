@@ -140,4 +140,12 @@ impl DjinnMcpServer {
     ) -> Json<MemoryNoteResponse> {
         super::move_ops::memory_move(self, Parameters(p)).await
     }
+
+    pub(crate) async fn memory_move_with_worktree(
+        &self,
+        Parameters(p): Parameters<MoveParams>,
+        worktree_root: Option<PathBuf>,
+    ) -> Json<MemoryNoteResponse> {
+        super::move_ops::memory_move_with_worktree(self, Parameters(p), worktree_root).await
+    }
 }

@@ -653,7 +653,12 @@ async fn sync_worktree_proposed_adr_survives_close_and_lands_in_proposed_folder(
         .unwrap();
 
     let moved = worktree_repo
-        .move_note(&created.id, project_tmp.path(), "Pipeline Draft", "proposed_adr")
+        .move_note(
+            &created.id,
+            project_tmp.path(),
+            "Pipeline Draft",
+            "proposed_adr",
+        )
         .await
         .unwrap();
 
@@ -678,6 +683,10 @@ async fn sync_worktree_proposed_adr_survives_close_and_lands_in_proposed_folder(
         .unwrap();
     assert_eq!(canonical.note_type, "proposed_adr");
     assert_eq!(canonical.folder, "decisions/proposed");
-    assert!(canonical.file_path.ends_with(".djinn/decisions/proposed/pipeline-draft.md"));
+    assert!(
+        canonical
+            .file_path
+            .ends_with(".djinn/decisions/proposed/pipeline-draft.md")
+    );
     assert!(Path::new(&canonical.file_path).exists());
 }
