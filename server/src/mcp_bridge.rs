@@ -892,25 +892,6 @@ impl RepoGraphOps for RepoGraphBridge {
     }
 }
 
-#[allow(dead_code)]
-async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option<u64> {
-    let output = tokio::process::Command::new("git")
-        .current_dir(project_root)
-        .args([
-            "rev-list",
-            "--count",
-            &format!("{pinned_commit}..origin/main"),
-        ])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8(output.stdout).ok()?;
-    raw.trim().parse::<u64>().ok()
-}
-
 /// Normalize a graph query path into both the registered project root and its
 /// canonical `_index` worktree path.
 ///
