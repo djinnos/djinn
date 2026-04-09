@@ -1915,6 +1915,59 @@ export namespace ProjectRemoveOutputSchema {
 
 }
 export type ProjectRemoveOutput = ProjectRemoveOutputSchema.ProjectRemoveOutput;
+export namespace ProposeAdrListInputSchema {
+  export interface ProposeAdrListInput {
+  /**
+   * Absolute project path.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrListInput = ProposeAdrListInputSchema.ProposeAdrListInput;
+export namespace ProposeAdrListOutputSchema {
+  export interface ProposeAdrListOutput {
+  error?: string
+  items?: ProposedAdr[]
+  [k: string]: any
+  }
+  export interface ProposedAdr {
+  body?: string
+  id: string
+  originating_spike_id?: string
+  path: string
+  title: string
+  work_shape?: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrListOutput = ProposeAdrListOutputSchema.ProposeAdrListOutput;
+export namespace ProposeAdrShowInputSchema {
+  export interface ProposeAdrShowInput {
+  /**
+   * File stem of the proposed ADR, e.g. `"adr-052-foo"`.
+   */
+  id: string
+  /**
+   * Absolute project path.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrShowInput = ProposeAdrShowInputSchema.ProposeAdrShowInput;
+export namespace ProposeAdrShowOutputSchema {
+  export interface ProposeAdrShowOutput {
+  adr?: ProposeAdrListOutputSchema.ProposedAdr
+  error?: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrShowOutput = ProposeAdrShowOutputSchema.ProposeAdrShowOutput;
 export namespace ProjectSettingsValidateInputSchema {
   export interface ProjectSettingsValidateInput {
   /**
@@ -3316,7 +3369,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_list" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3371,6 +3424,8 @@ export interface McpToolMap {
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
   "project_settings_validate": { input: ProjectSettingsValidateInput; output: ProjectSettingsValidateOutput };
+  "propose_adr_list": { input: ProposeAdrListInput; output: ProposeAdrListOutput };
+  "propose_adr_show": { input: ProposeAdrShowInput; output: ProposeAdrShowOutput };
   "provider_add_custom": { input: ProviderAddCustomInput; output: ProviderAddCustomOutput };
   "provider_catalog": { input: ProviderCatalogInput; output: ProviderCatalogOutput };
   "provider_connected": { input: ProviderConnectedInput; output: ProviderConnectedOutput };
