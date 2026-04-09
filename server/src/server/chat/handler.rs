@@ -250,8 +250,12 @@ pub(super) async fn completions_handler_impl(
             );
             ctx.working_root = Some(cached_root);
         } else {
-            match crate::mcp_bridge::ensure_canonical_graph(&state, project_id, project_path_buf)
-                .await
+            match crate::canonical_graph::ensure_canonical_graph(
+                &state,
+                project_id,
+                project_path_buf,
+            )
+            .await
             {
                 Ok((handle, _graph)) => {
                     let root = handle.path().to_path_buf();

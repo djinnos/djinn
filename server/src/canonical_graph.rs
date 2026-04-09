@@ -46,10 +46,6 @@ pub(crate) static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> 
 pub(crate) static PREVIOUS_GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
 
-#[cfg(test)]
-pub(crate) static GRAPH_CACHE_TEST_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
-
 pub(crate) fn derive_graph_caches(
     graph: &crate::repo_graph::RepoDependencyGraph,
 ) -> (Arc<crate::repo_graph::RepoGraphRanking>, Arc<CachedSccs>) {
@@ -644,6 +640,113 @@ pub(crate) async fn clear_test_caches() {
 }
 
 #[cfg(test)]
+pub(crate) fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex {
+    use crate::scip_parser::{
+        ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
+        ScipRelationshipKind, ScipSymbol, ScipSymbolKind, ScipSymbolRole,
+    };
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
+    let helper_symbol = ScipSymbol {
+        symbol: helper_symbol_name.clone(),
+        kind: Some(ScipSymbolKind::Function),
+        display_name: Some("helper".to_string()),
+        signature: Some("fn helper()".to_string()),
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+    };
+    let trait_symbol = ScipSymbol {
+        symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
+        kind: Some(ScipSymbolKind::Type),
+        display_name: Some("HelperTrait".to_string()),
+        signature: None,
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+    };
+    let main_symbol = ScipSymbol {
+        symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
+        kind: Some(ScipSymbolKind::Function),
+        display_name: Some("main".to_string()),
+        signature: Some("fn main()".to_string()),
+        documentation: vec![],
+        relationships: vec![ScipRelationship {
+            source_symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
+            target_symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
+            kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
+        }],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+    };
+
+    fn def_occ(symbol: &str) -> ScipOccurrence {
+        ScipOccurrence {
+            symbol: symbol.to_string(),
+            range: ScipRange {
+                start_line: 0,
+                start_character: 0,
+                end_line: 0,
+                end_character: 6,
+            },
+            enclosing_range: None,
+            roles: BTreeSet::from([ScipSymbolRole::Definition]),
+            syntax_kind: None,
+            override_documentation: vec![],
+        }
+    }
+
+    fn ref_occ(symbol: &str) -> ScipOccurrence {
+        ScipOccurrence {
+            symbol: symbol.to_string(),
+            range: ScipRange {
+                start_line: 1,
+                start_character: 4,
+                end_line: 1,
+                end_character: 10,
+            },
+            enclosing_range: None,
+            roles: BTreeSet::from([ScipSymbolRole::ReadAccess]),
+            syntax_kind: None,
+            override_documentation: vec![],
+        }
+    }
+
+    ParsedScipIndex {
+        metadata: ScipMetadata {
+            project_root: Some("file:///workspace/repo".to_string()),
+            tool_name: Some("rust-analyzer".to_string()),
+            tool_version: Some("1.0.0".to_string()),
+        },
+        files: vec![
+            ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/helper.rs"),
+                definitions: vec![def_occ(&helper_symbol_name)],
+                references: vec![],
+                occurrences: vec![def_occ(&helper_symbol_name)],
+                symbols: vec![helper_symbol],
+            },
+            ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/app.rs"),
+                definitions: vec![def_occ(&main_symbol.symbol)],
+                references: vec![ref_occ(&helper_symbol_name)],
+                occurrences: vec![def_occ(&main_symbol.symbol), ref_occ(&helper_symbol_name)],
+                symbols: vec![main_symbol, trait_symbol],
+            },
+        ],
+        external_symbols: vec![],
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn build_test_graph_fixture() -> crate::repo_graph::RepoDependencyGraph {
+    crate::repo_graph::RepoDependencyGraph::build(&[build_test_parsed_index_fixture()])
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_helpers::create_test_db;
@@ -699,7 +802,7 @@ mod tests {
             .unwrap();
         let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
 
-        let graph = crate::mcp_bridge::graph_bridge_tests::build_test_graph();
+        let graph = build_test_graph_fixture();
         let blob = bincode::serialize(&graph.to_artifact()).expect("serialize fixture graph");
         let cache_repo = RepoGraphCacheRepository::new(db.clone());
         cache_repo
@@ -779,7 +882,7 @@ mod tests {
         let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
         let stale_sha = "0000000000000000000000000000000000000000".to_string();
         let expected_node_count = {
-            let graph = crate::mcp_bridge::graph_bridge_tests::build_test_graph();
+            let graph = build_test_graph_fixture();
             let node_count = graph.node_count();
             let (pagerank, sccs) = derive_graph_caches(&graph);
             let mut cache = GRAPH_CACHE.write().await;
@@ -834,7 +937,7 @@ mod tests {
             .unwrap();
         let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
 
-        let graph = crate::mcp_bridge::graph_bridge_tests::build_test_graph();
+        let graph = build_test_graph_fixture();
         let rendered = crate::repo_map::render_repo_map(
             &graph,
             &graph.rank(),
