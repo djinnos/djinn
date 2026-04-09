@@ -498,7 +498,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worktree_has_uncommitted_changes_detects_untracked_file() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-coordinator-");
+        let tmp = test_helpers::test_tempdir("coordinator-worktree-status-");
         init_git_repo(tmp.path()).await;
 
         // Clean repo: no signal.
@@ -522,7 +522,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worktree_has_uncommitted_changes_detects_modified_tracked_file() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-coordinator-");
+        let tmp = test_helpers::test_tempdir("coordinator-worktree-status-");
         init_git_repo(tmp.path()).await;
 
         std::fs::write(tmp.path().join("README.md"), "base modified\n").unwrap();
@@ -541,7 +541,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worktree_has_uncommitted_changes_returns_false_for_non_git_dir() {
-        let tmp = crate::test_helpers::test_tempdir("djinn-coordinator-");
+        let tmp = test_helpers::test_tempdir("coordinator-worktree-status-");
         std::fs::write(tmp.path().join("loose-file.md"), "x").unwrap();
         assert!(!CoordinatorActor::worktree_has_uncommitted_changes(
             tmp.path()
@@ -1313,16 +1313,30 @@ mod tests {
 
         // Pausing a project marks it paused in project-scoped status.
         handle.pause_project(project_id).await.unwrap();
-        handle
-            .wait_for_project_status(project_id, |s| s.paused)
-            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if handle.get_project_status(project_id).unwrap().paused {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for paused project status");
         assert!(handle.get_project_status(project_id).unwrap().paused);
 
         // Resuming removes it from the paused set.
         handle.resume_project(project_id).await.unwrap();
-        handle
-            .wait_for_project_status(project_id, |s| !s.paused)
-            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if !handle.get_project_status(project_id).unwrap().paused {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for resumed project status");
         assert!(!handle.get_project_status(project_id).unwrap().paused);
     }
 

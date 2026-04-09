@@ -18,10 +18,6 @@ use djinn_db::EpicRepository;
 /// Per ADR-051 §1 the Planner owns the board patrol (previously Architect).
 pub(super) const DEFAULT_PLANNER_PATROL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Default patrol interval in minutes (used when the planner has not self-scheduled).
-#[allow(dead_code)]
-pub(crate) const DEFAULT_PLANNER_PATROL_MINUTES: u32 = 5;
-
 /// Minimum patrol interval the planner may request.
 pub(crate) const MIN_PLANNER_PATROL_MINUTES: u32 = 5;
 
