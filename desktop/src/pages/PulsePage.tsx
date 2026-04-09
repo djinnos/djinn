@@ -8,6 +8,7 @@ import { HotspotsPanel } from "@/components/pulse/HotspotsPanel";
 import { DeadCodePanel } from "@/components/pulse/DeadCodePanel";
 import { CyclesPanel } from "@/components/pulse/CyclesPanel";
 import { BlastRadiusPanel } from "@/components/pulse/BlastRadiusPanel";
+import { AskArchitectDialog } from "@/components/pulse/AskArchitectDialog";
 import { PulseSettingsSheet } from "@/components/pulse/PulseSettingsSheet";
 import { useArchitectActive } from "@/hooks/useArchitectActive";
 import { usePulseSettings } from "@/hooks/usePulseSettings";
@@ -165,6 +166,7 @@ function ReadyState({
             pinnedCommit={pinnedCommit}
             commitsSincePin={commitsSincePin}
             architectActive={architectActive}
+            actions={<AskArchitectDialog projectPath={projectPath} />}
           />
         </div>
         <PulseSettingsSheet projectPath={projectPath} />
