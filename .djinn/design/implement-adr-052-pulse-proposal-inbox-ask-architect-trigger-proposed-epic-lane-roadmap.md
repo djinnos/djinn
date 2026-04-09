@@ -50,3 +50,14 @@ Close the epic once:
 - [[decisions/adr-052-pulse-proposal-inbox-ask-architect-trigger-and-virtual-proposed-epic-lane]]
 - [[decisions/adr-051-planner-as-patrol-and-architect-as-consultant]]
 - [[design/fix-proposal-pipeline-plumbing-defects-adr-052-defects-uncovered-roadmap]]
+
+
+
+## Final wave completed
+The final v1 polish/verification wave is now landed on main:
+- `qa8e` — typed desktop MCP contract parity for `propose_adr_accept` / `propose_adr_reject`
+- `pvzd` — real proposal modified-time metadata and age display in Pulse
+- `c4ew` — Pulse-only dogfood regression covering ask-architect → proposal inbox → accept/reject → epic-shell handoff
+
+## Closure decision
+Epic `bvid` is complete and ready to close. The remaining v1 acceptance criteria are satisfied by the landed final wave, so no additional decomposition is needed.
