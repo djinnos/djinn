@@ -4549,6 +4549,11 @@ expression: signatures
               "description": "File stem, e.g. `\"adr-052-new-pipeline\"`.",
               "type": "string"
             },
+            "mtime": {
+              "description": "Last filesystem modified time for the proposal draft, encoded as RFC 3339.",
+              "nullable": true,
+              "type": "string"
+            },
             "originating_spike_id": {
               "description": "Optional short_id of the originating spike task.",
               "nullable": true,
@@ -4675,6 +4680,11 @@ expression: signatures
             },
             "id": {
               "description": "File stem, e.g. `\"adr-052-new-pipeline\"`.",
+              "type": "string"
+            },
+            "mtime": {
+              "description": "Last filesystem modified time for the proposal draft, encoded as RFC 3339.",
+              "nullable": true,
               "type": "string"
             },
             "originating_spike_id": {

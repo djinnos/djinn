@@ -342,8 +342,8 @@ export namespace CodeGraphInputSchema {
    */
   kind_filter?: string
   /**
-   * Maximum results for `ranked`/`search`/`orphans`/`edges` (default 20) or
-   * max traversal depth for `impact` (default 3).
+   * Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
+   * (default 20) or max traversal depth for `impact` (default 3).
    */
   limit?: number
   /**
@@ -496,6 +496,10 @@ export namespace EpicCloseInputSchema {
 export type EpicCloseInput = EpicCloseInputSchema.EpicCloseInput;
 export namespace EpicCloseOutputSchema {
   export interface EpicCloseOutput {
+  /**
+   * ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
+   */
+  auto_breakdown?: boolean
   closed_at?: string
   color?: string
   created_at?: string
@@ -504,6 +508,10 @@ export namespace EpicCloseOutputSchema {
   error?: string
   id?: string
   memory_refs?: string[]
+  /**
+   * ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+   */
+  originating_adr_id?: string
   owner?: string
   short_id?: string
   status?: string
@@ -547,6 +555,12 @@ export namespace EpicCountOutputSchema {
 export type EpicCountOutput = EpicCountOutputSchema.EpicCountOutput;
 export namespace EpicCreateInputSchema {
   export interface EpicCreateInput {
+  /**
+   * ADR-051 Epic C — when `false`, the coordinator will NOT
+   * auto-dispatch a breakdown Planner when this epic is created.
+   * Defaults to `true` (preserving the existing behaviour).
+   */
+  auto_breakdown?: boolean
   color?: string
   description?: string
   emoji?: string
@@ -554,13 +568,21 @@ export namespace EpicCreateInputSchema {
    * Memory reference URLs for this epic (e.g. ADR paths).
    */
   memory_refs?: string[]
+  /**
+   * ADR-051 Epic C — slug of the accepted ADR that spawned this
+   * epic.  Threaded into the breakdown Planner's session context
+   * so downstream task creation inherits the architectural rationale.
+   */
+  originating_adr_id?: string
   owner?: string
   /**
    * Absolute project path.
    */
   project: string
   /**
-   * Initial status: "drafting" (default) or "open".
+   * Initial status: "proposed", "drafting" (default), or "open".
+   * Proposed epics (ADR-051 Epic C) are architect-drafted shells
+   * that never trigger auto-dispatch until explicitly accepted.
    */
   status?: string
   title: string
@@ -571,6 +593,10 @@ export namespace EpicCreateInputSchema {
 export type EpicCreateInput = EpicCreateInputSchema.EpicCreateInput;
 export namespace EpicCreateOutputSchema {
   export interface EpicCreateOutput {
+  /**
+   * ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
+   */
+  auto_breakdown?: boolean
   closed_at?: string
   color?: string
   created_at?: string
@@ -579,6 +605,10 @@ export namespace EpicCreateOutputSchema {
   error?: string
   id?: string
   memory_refs?: string[]
+  /**
+   * ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+   */
+  originating_adr_id?: string
   owner?: string
   short_id?: string
   status?: string
@@ -647,6 +677,10 @@ export namespace EpicListOutputSchema {
   [k: string]: any
   }
   export interface EpicModel {
+  /**
+   * ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
+   */
+  auto_breakdown: boolean
   closed_at?: string
   color: string
   created_at: string
@@ -654,6 +688,10 @@ export namespace EpicListOutputSchema {
   emoji: string
   id: string
   memory_refs: string[]
+  /**
+   * ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+   */
+  originating_adr_id?: string
   owner: string
   short_id: string
   status: string
@@ -681,6 +719,10 @@ export namespace EpicReopenInputSchema {
 export type EpicReopenInput = EpicReopenInputSchema.EpicReopenInput;
 export namespace EpicReopenOutputSchema {
   export interface EpicReopenOutput {
+  /**
+   * ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
+   */
+  auto_breakdown?: boolean
   closed_at?: string
   color?: string
   created_at?: string
@@ -689,6 +731,10 @@ export namespace EpicReopenOutputSchema {
   error?: string
   id?: string
   memory_refs?: string[]
+  /**
+   * ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+   */
+  originating_adr_id?: string
   owner?: string
   short_id?: string
   status?: string
@@ -716,6 +762,10 @@ export namespace EpicShowInputSchema {
 export type EpicShowInput = EpicShowInputSchema.EpicShowInput;
 export namespace EpicShowOutputSchema {
   export interface EpicShowOutput {
+  /**
+   * ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
+   */
+  auto_breakdown?: boolean
   closed_at?: string
   closed_count?: number
   color?: string
@@ -727,6 +777,10 @@ export namespace EpicShowOutputSchema {
   in_progress_count?: number
   memory_refs?: string[]
   open_count?: number
+  /**
+   * ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+   */
+  originating_adr_id?: string
   owner?: string
   short_id?: string
   status?: string
@@ -839,6 +893,10 @@ export namespace EpicUpdateInputSchema {
 export type EpicUpdateInput = EpicUpdateInputSchema.EpicUpdateInput;
 export namespace EpicUpdateOutputSchema {
   export interface EpicUpdateOutput {
+  /**
+   * ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
+   */
+  auto_breakdown?: boolean
   closed_at?: string
   color?: string
   created_at?: string
@@ -847,6 +905,10 @@ export namespace EpicUpdateOutputSchema {
   error?: string
   id?: string
   memory_refs?: string[]
+  /**
+   * ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+   */
+  originating_adr_id?: string
   owner?: string
   short_id?: string
   status?: string
@@ -1466,7 +1528,8 @@ export namespace MemoryMoveInputSchema {
    */
   title?: string
   /**
-   * New note type to move the note to.
+   * New note type to move the note to. Use `proposed_adr` to recover a
+   * mis-routed ADR draft into `.djinn/decisions/proposed/`.
    */
   type: string
   [k: string]: any
@@ -1682,6 +1745,11 @@ export namespace MemoryWriteInputSchema {
    * Crate/module path prefixes this note applies to. Empty array means global.
    */
   scope_paths?: string[]
+  /**
+   * Optional explicit status for routed note types. For ADRs, `proposed`
+   * writes into `.djinn/decisions/proposed/`.
+   */
+  status?: string
   tags?: string[]
   title: string
   /**
@@ -1915,60 +1983,6 @@ export namespace ProjectRemoveOutputSchema {
 
 }
 export type ProjectRemoveOutput = ProjectRemoveOutputSchema.ProjectRemoveOutput;
-export namespace ProposeAdrListInputSchema {
-  export interface ProposeAdrListInput {
-  /**
-   * Absolute project path.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type ProposeAdrListInput = ProposeAdrListInputSchema.ProposeAdrListInput;
-export namespace ProposeAdrListOutputSchema {
-  export interface ProposeAdrListOutput {
-  error?: string
-  items?: ProposedAdr[]
-  [k: string]: any
-  }
-  export interface ProposedAdr {
-  body?: string
-  id: string
-  mtime?: string
-  originating_spike_id?: string
-  path: string
-  title: string
-  work_shape?: string
-  [k: string]: any
-  }
-
-}
-export type ProposeAdrListOutput = ProposeAdrListOutputSchema.ProposeAdrListOutput;
-export namespace ProposeAdrShowInputSchema {
-  export interface ProposeAdrShowInput {
-  /**
-   * File stem of the proposed ADR, e.g. `"adr-052-foo"`.
-   */
-  id: string
-  /**
-   * Absolute project path.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type ProposeAdrShowInput = ProposeAdrShowInputSchema.ProposeAdrShowInput;
-export namespace ProposeAdrShowOutputSchema {
-  export interface ProposeAdrShowOutput {
-  adr?: ProposeAdrListOutputSchema.ProposedAdr
-  error?: string
-  [k: string]: any
-  }
-
-}
-export type ProposeAdrShowOutput = ProposeAdrShowOutputSchema.ProposeAdrShowOutput;
 export namespace ProjectSettingsValidateInputSchema {
   export interface ProjectSettingsValidateInput {
   /**
@@ -1989,6 +2003,212 @@ export namespace ProjectSettingsValidateOutputSchema {
 
 }
 export type ProjectSettingsValidateOutput = ProjectSettingsValidateOutputSchema.ProjectSettingsValidateOutput;
+export namespace ProposeAdrAcceptInputSchema {
+  export interface ProposeAdrAcceptInput {
+  /**
+   * When creating the epic, set `auto_breakdown` to this value.
+   * Defaults to `true` so the normal breakdown Planner fires.
+   */
+  auto_breakdown?: boolean
+  /**
+   * When `true` (default), a matching `Epic` shell is created for
+   * `work_shape ∈ {task, epic, spike}` ADRs.  Architectural ADRs
+   * never spawn an epic regardless of this flag.
+   */
+  create_epic?: boolean
+  /**
+   * File stem of the proposed ADR, e.g. `"adr-052-foo"`.
+   */
+  id: string
+  /**
+   * Absolute project path.
+   */
+  project: string
+  /**
+   * Optional accepted title override. Defaults to the draft title.
+   */
+  title?: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrAcceptInput = ProposeAdrAcceptInputSchema.ProposeAdrAcceptInput;
+export namespace ProposeAdrAcceptOutputSchema {
+  export interface ProposeAdrAcceptOutput {
+  accepted_path?: string
+  epic: EpicModel
+  error?: string
+  [k: string]: any
+  }
+  export interface EpicModel {
+  /**
+   * ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
+   */
+  auto_breakdown: boolean
+  closed_at?: string
+  color: string
+  created_at: string
+  description: string
+  emoji: string
+  id: string
+  memory_refs: string[]
+  /**
+   * ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+   */
+  originating_adr_id?: string
+  owner: string
+  short_id: string
+  status: string
+  title: string
+  updated_at: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrAcceptOutput = ProposeAdrAcceptOutputSchema.ProposeAdrAcceptOutput;
+export namespace ProposeAdrListInputSchema {
+  export interface ProposeAdrListInput {
+  /**
+   * Absolute project path.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrListInput = ProposeAdrListInputSchema.ProposeAdrListInput;
+export namespace ProposeAdrListOutputSchema {
+  export interface ProposeAdrListOutput {
+  error?: string
+  items?: ProposedAdr[]
+  [k: string]: any
+  }
+  /**
+   * A parsed proposed ADR.  Serialized back to the MCP client.
+   */
+  export interface ProposedAdr {
+  /**
+   * Raw markdown body (frontmatter stripped).  Omitted in list
+   * responses to keep them small.
+   */
+  body?: string
+  /**
+   * File stem, e.g. `"adr-052-new-pipeline"`.
+   */
+  id: string
+  /**
+   * Last filesystem modified time for the proposal draft, encoded as RFC 3339.
+   */
+  mtime?: string
+  /**
+   * Optional short_id of the originating spike task.
+   */
+  originating_spike_id?: string
+  /**
+   * Absolute filesystem path of the source file (under `proposed/`).
+   */
+  path: string
+  /**
+   * Title pulled from frontmatter or the first H1.
+   */
+  title: string
+  /**
+   * Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`).
+   */
+  work_shape?: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrListOutput = ProposeAdrListOutputSchema.ProposeAdrListOutput;
+export namespace ProposeAdrRejectInputSchema {
+  export interface ProposeAdrRejectInput {
+  /**
+   * File stem of the proposed ADR.
+   */
+  id: string
+  /**
+   * Absolute project path.
+   */
+  project: string
+  /**
+   * Required rejection reason, persisted back to the originating spike when available.
+   */
+  reason: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrRejectInput = ProposeAdrRejectInputSchema.ProposeAdrRejectInput;
+export namespace ProposeAdrRejectOutputSchema {
+  export interface ProposeAdrRejectOutput {
+  error?: string
+  feedback_target?: string
+  ok: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrRejectOutput = ProposeAdrRejectOutputSchema.ProposeAdrRejectOutput;
+export namespace ProposeAdrShowInputSchema {
+  export interface ProposeAdrShowInput {
+  /**
+   * File stem of the proposed ADR, e.g. `"adr-052-foo"`.
+   */
+  id: string
+  /**
+   * Absolute project path.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrShowInput = ProposeAdrShowInputSchema.ProposeAdrShowInput;
+export namespace ProposeAdrShowOutputSchema {
+  export interface ProposeAdrShowOutput {
+  adr: ProposedAdr
+  error?: string
+  [k: string]: any
+  }
+  /**
+   * A parsed proposed ADR.  Serialized back to the MCP client.
+   */
+  export interface ProposedAdr {
+  /**
+   * Raw markdown body (frontmatter stripped).  Omitted in list
+   * responses to keep them small.
+   */
+  body?: string
+  /**
+   * File stem, e.g. `"adr-052-new-pipeline"`.
+   */
+  id: string
+  /**
+   * Last filesystem modified time for the proposal draft, encoded as RFC 3339.
+   */
+  mtime?: string
+  /**
+   * Optional short_id of the originating spike task.
+   */
+  originating_spike_id?: string
+  /**
+   * Absolute filesystem path of the source file (under `proposed/`).
+   */
+  path: string
+  /**
+   * Title pulled from frontmatter or the first H1.
+   */
+  title: string
+  /**
+   * Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`).
+   */
+  work_shape?: string
+  [k: string]: any
+  }
+
+}
+export type ProposeAdrShowOutput = ProposeAdrShowOutputSchema.ProposeAdrShowOutput;
 export namespace ProviderAddCustomInputSchema {
   export interface ProviderAddCustomInput {
   /**
@@ -3370,7 +3590,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_list" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3425,7 +3645,9 @@ export interface McpToolMap {
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
   "project_settings_validate": { input: ProjectSettingsValidateInput; output: ProjectSettingsValidateOutput };
+  "propose_adr_accept": { input: ProposeAdrAcceptInput; output: ProposeAdrAcceptOutput };
   "propose_adr_list": { input: ProposeAdrListInput; output: ProposeAdrListOutput };
+  "propose_adr_reject": { input: ProposeAdrRejectInput; output: ProposeAdrRejectOutput };
   "propose_adr_show": { input: ProposeAdrShowInput; output: ProposeAdrShowOutput };
   "provider_add_custom": { input: ProviderAddCustomInput; output: ProviderAddCustomOutput };
   "provider_catalog": { input: ProviderCatalogInput; output: ProviderCatalogOutput };
