@@ -4406,6 +4406,11 @@ expression: signatures
         "project": {
           "description": "Absolute project path.",
           "type": "string"
+        },
+        "title": {
+          "description": "Optional accepted title override. Defaults to the draft title.",
+          "nullable": true,
+          "type": "string"
         }
       },
       "required": [
@@ -4600,11 +4605,16 @@ expression: signatures
         "project": {
           "description": "Absolute project path.",
           "type": "string"
+        },
+        "reason": {
+          "description": "Required rejection reason, persisted back to the originating spike when available.",
+          "type": "string"
         }
       },
       "required": [
         "project",
-        "id"
+        "id",
+        "reason"
       ],
       "title": "ProposeAdrRejectParams",
       "type": "object"
@@ -4614,6 +4624,10 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "feedback_target": {
           "nullable": true,
           "type": "string"
         },

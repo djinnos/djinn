@@ -200,7 +200,7 @@ export async function pollDeviceFlow(
 ): Promise<TokenResponse> {
   let pollInterval = Math.max(interval, 5) * 1000; // ms
 
-  // eslint-disable-next-line no-constant-condition
+   
   while (true) {
     await sleep(pollInterval);
 

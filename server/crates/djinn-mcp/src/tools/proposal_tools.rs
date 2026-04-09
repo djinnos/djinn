@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::epic_ops::EpicModel;
+use crate::tools::task_tools::ErrorOr;
+use crate::tools::task_tools::ops::{CommentTaskRequest, add_task_comment};
 use djinn_db::EpicRepository;
 
 // ── Filesystem layout ────────────────────────────────────────────────────────
@@ -228,6 +230,8 @@ pub struct ProposeAdrAcceptParams {
     pub project: String,
     /// File stem of the proposed ADR, e.g. `"adr-052-foo"`.
     pub id: String,
+    /// Optional accepted title override. Defaults to the draft title.
+    pub title: Option<String>,
     /// When `true` (default), a matching `Epic` shell is created for
     /// `work_shape ∈ {task, epic, spike}` ADRs.  Architectural ADRs
     /// never spawn an epic regardless of this flag.
@@ -254,11 +258,15 @@ pub struct ProposeAdrRejectParams {
     pub project: String,
     /// File stem of the proposed ADR.
     pub id: String,
+    /// Required rejection reason, persisted back to the originating spike when available.
+    pub reason: String,
 }
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProposeAdrRejectResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -431,11 +439,19 @@ impl DjinnMcpServer {
             }
         };
 
-        let title = if adr.title.is_empty() {
-            adr.id.clone()
-        } else {
-            adr.title.clone()
-        };
+        let title = p
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| {
+                if adr.title.is_empty() {
+                    adr.id.clone()
+                } else {
+                    adr.title.clone()
+                }
+            });
         let description = format!(
             "Epic shell spawned from accepted ADR `{}`.\n\n\
              Work shape: {}\n\
@@ -488,21 +504,89 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ProposeAdrRejectParams>,
     ) -> Json<ProposeAdrRejectResponse> {
+        if p.reason.trim().is_empty() {
+            return Json(ProposeAdrRejectResponse {
+                ok: false,
+                feedback_target: None,
+                error: Some("rejection reason is required".to_string()),
+            });
+        }
         let root = PathBuf::from(&p.project);
         let path = proposed_file_for(&root, &p.id);
         if !path.exists() {
             return Json(ProposeAdrRejectResponse {
                 ok: false,
+                feedback_target: None,
                 error: Some(format!("proposed ADR not found: {}", p.id)),
             });
         }
+        let adr = match ProposedAdr::from_file(&path, true) {
+            Ok(adr) => adr,
+            Err(e) => {
+                return Json(ProposeAdrRejectResponse {
+                    ok: false,
+                    feedback_target: None,
+                    error: Some(e),
+                });
+            }
+        };
+
+        let feedback_target = if let Some(originating_spike_id) =
+            adr.originating_spike_id.as_deref()
+        {
+            let project_id = match self.require_project_id_public(&p.project).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return Json(ProposeAdrRejectResponse {
+                        ok: false,
+                        feedback_target: None,
+                        error: Some(e.error),
+                    });
+                }
+            };
+            let body = format!(
+                "Proposal `{}` rejected.\n\nReason: {}",
+                adr.id,
+                p.reason.trim()
+            );
+            match add_task_comment(
+                self,
+                &project_id,
+                CommentTaskRequest {
+                    id: originating_spike_id.to_string(),
+                    body,
+                    actor_id: "pulse".to_string(),
+                    actor_role: "user".to_string(),
+                },
+            )
+            .await
+            .0
+            {
+                ErrorOr::Ok(_) => Some(format!("originating spike {originating_spike_id}")),
+                ErrorOr::Error(error) => {
+                    return Json(ProposeAdrRejectResponse {
+                        ok: false,
+                        feedback_target: None,
+                        error: Some(format!(
+                            "failed to persist rejection feedback to originating spike {originating_spike_id}: {}",
+                            error.error
+                        )),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
         match fs::remove_file(&path) {
             Ok(()) => Json(ProposeAdrRejectResponse {
                 ok: true,
+                feedback_target,
                 error: None,
             }),
             Err(e) => Json(ProposeAdrRejectResponse {
                 ok: false,
+                feedback_target: None,
                 error: Some(format!("failed to remove {}: {e}", path.display())),
             }),
         }

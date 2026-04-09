@@ -378,7 +378,7 @@ export function startHealthMonitor(
 
     let wasHealthy = true;
 
-    // eslint-disable-next-line no-constant-condition
+     
     while (true) {
       await sleep(3000);
 
@@ -437,7 +437,7 @@ export function startTunnelMonitor(
     // Let the initial connection settle.
     await sleep(5000);
 
-    // eslint-disable-next-line no-constant-condition
+     
     while (true) {
       await sleep(5000);
 
