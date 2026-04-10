@@ -151,7 +151,11 @@ pub(super) fn ensure_path_within_worktree(path: &Path, worktree_path: &Path) -> 
     };
 
     if !candidate.starts_with(&canonical_base) {
-        return Err(format!("path is outside worktree: {}", path.display()));
+        return Err(format!(
+            "path is outside worktree: {}. Use the shell tool to read files outside your worktree (e.g. cat {})",
+            path.display(),
+            path.display(),
+        ));
     }
 
     Ok(())

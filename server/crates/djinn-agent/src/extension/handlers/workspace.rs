@@ -49,7 +49,6 @@ pub(crate) async fn call_read(
 ) -> Result<serde_json::Value, String> {
     let p: ReadParams = parse_args(arguments)?;
     let path = resolve_path(&p.file_path, worktree_path);
-    ensure_path_within_worktree(&path, worktree_path)?;
 
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
