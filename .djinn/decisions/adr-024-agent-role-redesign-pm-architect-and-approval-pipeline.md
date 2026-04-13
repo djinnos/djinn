@@ -5,6 +5,7 @@ tags: ["adr","agents","pm","architect","approval"]
 ---
 
 
+
 # ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline
 
 **Status:** Proposed
@@ -264,6 +265,6 @@ The reviewer correctly marked these unmet (no Docker in the worktree to verify),
 
 - [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — circuit breaker escalation target
 - [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]] — KB hygiene signals
-- [[ADR-012 Epic Review Batches and Structured Output Nudging]] — superseded (epic review eliminated)
+- [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — superseded (epic review eliminated)
 - [[ADR-016: EpicReviewer Detached HEAD Worktree]] — superseded (epic reviewer eliminated)
 - [[roadmap]] — adds to Phase 10
