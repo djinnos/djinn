@@ -1,8 +1,9 @@
 ---
 title: ADR-043 Roadmap — Active Decomposition Status
-type: roadmap
+type: 
 tags: ["adr-043","repo-map","scip","worktree"]
 ---
+
 
 # ADR-043: Monorepo-aware SCIP indexing, project-add trigger, and worktree reuse
 
@@ -47,3 +48,18 @@ Epic remains open. Core repo-map behavior exists, but the decomposition goal is 
 ## Relations
 - [[decisions/adr-043-repository-map-scip-powered-structural-context-for-agent-sessions]]
 - [[brief]]
+
+
+
+## Epic 7izs — Docker-Based Deployment, Web UI, and OpenViking Memory Backend
+
+Canonical roadmap reference for the current active wave: use [[roadmap]] until a dedicated design note is promoted into project memory.
+
+Wave status:
+- `rpgb`: serve the React app from `djinn-server`
+- `h3p6`: introduce a browser-compatible frontend runtime boundary
+- `4a4t`: create the OpenViking memory backend seam and bootstrap client
+- `2744`: replace native project/file pickers with server-backed filesystem browsing
+- `aijd`: package `djinn-server` and OpenViking with Docker Compose
+
+Planner note (2026-04-13): the prior `design/docker-based-deployment-web-ui-and-openviking-memory-backend-roadmap` reference was missing from project memory, so epic/task `memory_refs` are being normalized to the existing canonical `roadmap` note for now.
