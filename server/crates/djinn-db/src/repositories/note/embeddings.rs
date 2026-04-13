@@ -149,10 +149,15 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?;
 
+        let total = rows.len();
+        let start = std::time::Instant::now();
         let mut repaired = 0u64;
         for (note_id, title, note_type, tags, content, embedded_hash, embedded_model_version) in
             rows
         {
+            // Yield between notes so the async runtime stays responsive
+            // during bulk embedding repair (can be 1000+ notes).
+            tokio::task::yield_now().await;
             let expected_hash = embedding_content_hash(&title, &note_type, &tags, &content);
             let needs_refresh = embedded_hash.as_deref() != Some(expected_hash.as_str())
                 || embedded_model_version.as_deref() != Some(current_model_version.as_str());
@@ -161,6 +166,16 @@ impl NoteRepository {
                 self.sync_note_embedding(&note_id, &title, &note_type, &tags, &content)
                     .await;
             }
+        }
+
+        if repaired > 0 {
+            tracing::info!(
+                project_id,
+                total,
+                repaired,
+                elapsed_secs = start.elapsed().as_secs_f32(),
+                "embedding repair completed"
+            );
         }
 
         Ok(repaired)

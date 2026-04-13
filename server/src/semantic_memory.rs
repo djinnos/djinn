@@ -187,6 +187,13 @@ impl EmbeddingService {
             return Err(error);
         }
 
+        tracing::info!(
+            model = %self.inner.model.model_id,
+            cache_dir = %self.inner.cache_dir.display(),
+            "loading embedding model"
+        );
+        let start = std::time::Instant::now();
+
         match self
             .inner
             .runtime
@@ -198,9 +205,22 @@ impl EmbeddingService {
             })
             .await
         {
-            Ok(runtime) => Ok(runtime.clone()),
+            Ok(runtime) => {
+                tracing::info!(
+                    model = %self.inner.model.model_id,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "embedding model loaded"
+                );
+                Ok(runtime.clone())
+            }
             Err(error) => {
                 let message = format!("failed to load embedding model: {error:#}");
+                tracing::warn!(
+                    model = %self.inner.model.model_id,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    %error,
+                    "embedding model load failed"
+                );
                 *self.inner.load_failure.lock().await = Some(message.clone());
                 Err(message)
             }
@@ -250,8 +270,8 @@ impl EmbeddingRuntimeLoader for CandleEmbeddingRuntimeLoader {
 }
 
 struct CandleEmbeddingRuntime {
-    tokenizer: Mutex<Tokenizer>,
-    model: Mutex<NomicBertModel>,
+    tokenizer: Arc<std::sync::Mutex<Tokenizer>>,
+    model: Arc<std::sync::Mutex<NomicBertModel>>,
     device: Device,
 }
 
@@ -305,8 +325,8 @@ impl CandleEmbeddingRuntime {
         let model = NomicBertModel::load(vb, &config).context("load nomic bert model")?;
 
         Ok(Self {
-            tokenizer: Mutex::new(tokenizer),
-            model: Mutex::new(model),
+            tokenizer: Arc::new(std::sync::Mutex::new(tokenizer)),
+            model: Arc::new(std::sync::Mutex::new(model)),
             device,
         })
     }
@@ -332,34 +352,45 @@ impl EmbeddingRuntime for CandleEmbeddingRuntime {
             bail!("cannot embed empty text")
         }
 
+        // Tokenization and model inference are CPU-bound.  Run them on
+        // the blocking thread pool so they don't starve the async
+        // runtime (health endpoint, MCP, SSE, etc.).
         let prepared = Self::prepare_text(&kind, text);
-        let encoding = {
-            let tokenizer = self.tokenizer.lock().await;
-            tokenizer
-                .encode(prepared, true)
-                .map_err(anyhow::Error::msg)
-                .context("tokenize embedding input")?
-        };
+        let tokenizer = self.tokenizer.clone();
+        let model = self.model.clone();
+        let device = self.device.clone();
 
-        let token_ids = Tensor::new(encoding.get_ids(), &self.device)
-            .context("build token id tensor")?
-            .unsqueeze(0)
-            .context("reshape token id tensor")?;
-        let attention_mask = Tensor::new(encoding.get_attention_mask(), &self.device)
-            .context("build attention mask tensor")?
-            .unsqueeze(0)
-            .context("reshape attention mask tensor")?;
+        tokio::task::spawn_blocking(move || {
+            let encoding = {
+                let tokenizer = tokenizer.lock().expect("tokenizer lock poisoned");
+                tokenizer
+                    .encode(prepared, true)
+                    .map_err(anyhow::Error::msg)
+                    .context("tokenize embedding input")?
+            };
 
-        let hidden_states = {
-            let model = self.model.lock().await;
-            model
-                .forward(&token_ids, None, Some(&attention_mask))
-                .context("run embedding model")?
-        };
-        let pooled = nomic_bert::mean_pooling(&hidden_states, &attention_mask)
-            .context("mean-pool embedding")?;
-        let normalized = nomic_bert::l2_normalize(&pooled).context("normalize embedding")?;
-        Self::tensor_to_vec(normalized.get(0).context("extract batch item 0")?)
+            let token_ids = Tensor::new(encoding.get_ids(), &device)
+                .context("build token id tensor")?
+                .unsqueeze(0)
+                .context("reshape token id tensor")?;
+            let attention_mask = Tensor::new(encoding.get_attention_mask(), &device)
+                .context("build attention mask tensor")?
+                .unsqueeze(0)
+                .context("reshape attention mask tensor")?;
+
+            let hidden_states = {
+                let model = model.lock().expect("model lock poisoned");
+                model
+                    .forward(&token_ids, None, Some(&attention_mask))
+                    .context("run embedding model")?
+            };
+            let pooled = nomic_bert::mean_pooling(&hidden_states, &attention_mask)
+                .context("mean-pool embedding")?;
+            let normalized = nomic_bert::l2_normalize(&pooled).context("normalize embedding")?;
+            Self::tensor_to_vec(normalized.get(0).context("extract batch item 0")?)
+        })
+        .await
+        .context("embedding task panicked")?
     }
 }
 

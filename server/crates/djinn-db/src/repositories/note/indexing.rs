@@ -15,7 +15,13 @@ impl NoteRepository {
     ) -> Result<ReindexSummary> {
         self.db.ensure_initialized().await?;
 
-        let scanned = scan_project_notes(project_path)?;
+        // Scan is pure sync I/O (read_dir + read_to_string for every .md
+        // file).  Run it on the blocking pool so it cannot starve the async
+        // runtime that services health/MCP/SSE endpoints.
+        let project_path_owned = project_path.to_path_buf();
+        let scanned = tokio::task::spawn_blocking(move || scan_project_notes(&project_path_owned))
+            .await
+            .map_err(|e| Error::InvalidData(format!("scan task panicked: {e}")))??;
         let mut summary = ReindexSummary::default();
         let mut seen_permalinks = HashSet::new();
 
@@ -26,6 +32,9 @@ impl NoteRepository {
             .collect();
 
         for scanned_note in scanned {
+            // Yield between notes so the async runtime can service other
+            // tasks (health checks, MCP, SSE) during large reindexes.
+            tokio::task::yield_now().await;
             seen_permalinks.insert(scanned_note.permalink.clone());
 
             match existing_by_permalink.remove(&scanned_note.permalink) {
