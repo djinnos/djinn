@@ -126,26 +126,15 @@ Operational rule for future patrols:
 This closes the earlier optional question in this note: the chosen policy is **documented patrol interpretation, not tooling suppression and not mass relinking**. A future tooling enhancement is only warranted if patrol operators still misread the gross orphan count after following this guidance.
 
 
+### 4. Residual current-note/case cognitive-memory slice (2026-04-13) — **mixed: one true content defect plus recent-case wording drift, not backend normalization noise**
+Direct reads of the residual slice showed two different conditions:
 
-## Narrow singleton/current-note recheck (2026-04-13)
+- `requirements/v1-requirements` contained a live broken wikilink to `[[Cognitive Memory Scope]]`. This was a **true note-content defect** because the existing canonical target is the current note [[reference/cognitive-memory-scope]] (title: "Cognitive Memory Infrastructure Scope"). The requirement note has been normalized to the canonical permalink.
+- The recent case notes did **not** require canonical wikilinks to the scope note in their preserved lesson text. Two notes were describing earlier cleanup work and used broken wikilink syntax only inside inline-code examples / quoted references (`[[reference/cognitive-memory-scope]]` and `[[Cognitive Memory Scope]]`). Those should be treated as **content wording drift in recent case-note prose**, not evidence of memory backend normalization/indexing drift.
+- One recent case note (`cases/normalize-planner-authored-maintenance-note-wikilinks-to-canonical-targets`) still intentionally contains `[[reference/cognitive-memory-scope]]` as a literal example inside explanatory prose and still appears in `memory_broken_links()`. This is best classified as **indexing/parser noise caused by literal example text being parsed as a live wikilink**, not a missing canonical target.
 
-Direct re-read results for the canonical current-note surfaces in scope:
-
-- `brief`: direct read shows no singleton-style broken wikilinks in the current canonical note body relevant to this pass.
-- `roadmap`: direct read shows no singleton-style broken wikilinks in the current singleton note body relevant to this pass.
-- `requirements/v1-requirements`: the canonical worktree note content now points the CMEM relation at `[[reference/cognitive-memory-scope]]` rather than `[[Cognitive Memory Scope]]`.
-
-Classification of the residual singleton-style findings:
-
-1. `requirements/v1-requirements` / raw_text `Cognitive Memory Scope` is now best classified as **indexing or DB/content drift**, not a remaining current-note content defect.
-   - Evidence: direct file read of the canonical note shows `[[reference/cognitive-memory-scope]]` in the CMEM relations section.
-   - However, `memory_broken_links(folder="requirements")` still reports raw_text `Cognitive Memory Scope` for `requirements/v1-requirements`, which no longer matches the canonical worktree content.
-   - This indicates the broken-link report is reading stale indexed or DB-backed content for that note rather than the current branch-local canonical file.
-
-2. Remaining singleton-style `Roadmap` / `V1 Requirements` findings outside the canonical current notes are still best treated as **historical alias debt on older ADR/reference/research/case notes**, not a reason to reopen broad singleton cleanup.
-   - Current singleton notes (`brief`, `roadmap`) did not show fresh defects during this pass.
-   - The residual backlog remains concentrated in historical notes that still use title-style aliases.
-
-Scope boundary reaffirmed:
-- Do not reopen broad historical alias cleanup from this pass.
-- Treat the current actionable follow-up, if needed, as memory-indexing / canonical-note-source drift investigation rather than more mass content replacement.
+Decision:
+- Treat this residual slice primarily as **narrow content debt in current canonical notes**, plus a small amount of **case-note prose/parser noise** where literal example text is written with live wikilink syntax.
+- Future patrols should repair current-note findings like `requirements/v1-requirements` when the canonical permalink is known.
+- Future patrols should treat recent case-note findings that merely quote `[[...]]` examples as **indexing noise / prose-formatting debt**, unless the sentence is actually intended to create a navigable link.
+- Do **not** broaden this slice into the older ADR-title/singleton alias backlog; that remains separate historical cleanup work.
