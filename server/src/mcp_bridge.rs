@@ -19,12 +19,11 @@ use djinn_mcp::bridge::{
 };
 use petgraph::visit::EdgeRef;
 
+use crate::canonical_graph::{GRAPH_CACHE, PREVIOUS_GRAPH_CACHE};
+use crate::sync::SyncManager;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
-
-use crate::canonical_graph::{GRAPH_CACHE, PREVIOUS_GRAPH_CACHE};
-use crate::sync::SyncManager;
 
 mod graph_neighbors;
 
@@ -969,6 +968,7 @@ impl AppState {
             coordinator,
             pool,
             Some(Arc::new(self.embedding_service().clone())),
+            Some(self.note_vector_store()),
             Arc::new(LspBridge(self.lsp().clone())),
             Arc::new(SyncBridge(self.sync_manager().clone())),
             Arc::new(self.clone()),

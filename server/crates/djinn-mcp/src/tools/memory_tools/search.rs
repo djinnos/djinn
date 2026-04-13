@@ -32,7 +32,8 @@ impl DjinnMcpServer {
             });
         };
         let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
-            .with_embedding_provider(self.state.embedding_provider());
+            .with_embedding_provider(self.state.embedding_provider())
+            .with_vector_store(self.state.vector_store());
         let graph = repo.graph(&project_id).await.unwrap_or_default();
         Json(MemoryGraphResponse {
             nodes: graph.nodes,
@@ -57,7 +58,8 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
+            .with_vector_store(self.state.vector_store());
 
         let Some(note) = repo
             .get_by_permalink(&project_id, &p.permalink)
@@ -71,7 +73,6 @@ impl DjinnMcpServer {
             });
         };
 
-        // Guard: DB-only notes have no file to diff
         if note.storage != "file" {
             return Json(MemoryDiffResponse {
                 diff: String::new(),
@@ -104,7 +105,8 @@ impl DjinnMcpServer {
             });
         };
 
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
+            .with_vector_store(self.state.vector_store());
         let summary = repo
             .reindex_from_disk(&project_id, Path::new(&params.project))
             .await

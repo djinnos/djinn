@@ -37,6 +37,92 @@ pub struct NoteEmbeddingMatch {
     pub distance: f64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoteVectorBackend {
+    SqliteVec,
+    Qdrant,
+    Noop,
+}
+
+#[async_trait::async_trait]
+pub trait NoteVectorStore: Send + Sync {
+    fn backend(&self) -> NoteVectorBackend;
+
+    async fn can_index(&self, repo: &NoteRepository) -> Result<bool>;
+
+    async fn upsert_embedding(
+        &self,
+        repo: &NoteRepository,
+        input: UpsertNoteEmbedding<'_>,
+    ) -> Result<NoteEmbeddingRecord>;
+
+    async fn delete_embedding(&self, repo: &NoteRepository, note_id: &str) -> Result<()>;
+
+    async fn query_similar_embeddings(
+        &self,
+        repo: &NoteRepository,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<NoteEmbeddingMatch>>;
+}
+
+#[derive(Debug, Default)]
+pub struct SqliteVecNoteVectorStore;
+
+#[derive(Debug, Default)]
+pub struct NoopNoteVectorStore;
+
+#[derive(Clone, Debug)]
+pub struct QdrantConfig {
+    pub url: String,
+    pub api_key: Option<String>,
+    pub collection: String,
+}
+
+impl Default for QdrantConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://127.0.0.1:6334".to_owned(),
+            api_key: None,
+            collection: "notes".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct QdrantNoteVectorStore {
+    config: QdrantConfig,
+}
+
+impl QdrantNoteVectorStore {
+    pub fn new(config: QdrantConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn config(&self) -> &QdrantConfig {
+        &self.config
+    }
+}
+
+#[cfg(feature = "qdrant")]
+impl QdrantNoteVectorStore {
+    pub fn client(&self) -> std::result::Result<qdrant_client::Qdrant, String> {
+        let builder = qdrant_client::Qdrant::from_url(&self.config.url);
+        let builder = match &self.config.api_key {
+            Some(api_key) => builder.api_key(api_key),
+            None => builder,
+        };
+        builder.build().map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(not(feature = "qdrant"))]
+impl QdrantNoteVectorStore {
+    pub fn client(&self) -> std::result::Result<(), String> {
+        Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
+    }
+}
+
 type EmbeddingRepairRow = (
     String,
     String,
@@ -72,6 +158,233 @@ pub(super) fn embedding_content_hash(
     crate::note_hash::note_content_hash(&embedding_document_text(title, note_type, tags, content))
 }
 
+async fn upsert_embedding_metadata(
+    repo: &NoteRepository,
+    input: UpsertNoteEmbedding<'_>,
+    extension_state: &str,
+) -> Result<NoteEmbeddingRecord> {
+    let embedding_dim = i64::try_from(input.embedding.len())
+        .map_err(|_| Error::InvalidData("embedding dimension exceeds i64".to_owned()))?;
+    let embedding_blob = embedding_to_blob(input.embedding);
+
+    let mut tx = repo.db.pool().begin().await?;
+
+    sqlx::query(
+        "INSERT INTO note_embeddings (note_id, embedding, embedding_dim, updated_at)
+         VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(note_id) DO UPDATE SET
+             embedding = excluded.embedding,
+             embedding_dim = excluded.embedding_dim,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+    )
+    .bind(input.note_id)
+    .bind(embedding_blob)
+    .bind(embedding_dim)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO note_embedding_meta (
+            note_id, content_hash, embedded_at, model_version, embedding_dim, extension_state
+         ) VALUES (
+            ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3, ?4, ?5
+         )
+         ON CONFLICT(note_id) DO UPDATE SET
+            content_hash = excluded.content_hash,
+            embedded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+            model_version = excluded.model_version,
+            embedding_dim = excluded.embedding_dim,
+            extension_state = excluded.extension_state",
+    )
+    .bind(input.note_id)
+    .bind(input.content_hash)
+    .bind(input.model_version)
+    .bind(embedding_dim)
+    .bind(extension_state)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    repo.get_embedding(input.note_id)
+        .await?
+        .ok_or_else(|| Error::Internal("embedding row missing after upsert".to_owned()))
+}
+
+async fn delete_embedding_metadata(repo: &NoteRepository, note_id: &str) -> Result<()> {
+    let mut tx = repo.db.pool().begin().await?;
+    sqlx::query("DELETE FROM note_embeddings WHERE note_id = ?1")
+        .bind(note_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM note_embedding_meta WHERE note_id = ?1")
+        .bind(note_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl NoteVectorStore for SqliteVecNoteVectorStore {
+    fn backend(&self) -> NoteVectorBackend {
+        NoteVectorBackend::SqliteVec
+    }
+
+    async fn can_index(&self, repo: &NoteRepository) -> Result<bool> {
+        Ok(repo.db.sqlite_vec_status().await?.available)
+    }
+
+    async fn upsert_embedding(
+        &self,
+        repo: &NoteRepository,
+        input: UpsertNoteEmbedding<'_>,
+    ) -> Result<NoteEmbeddingRecord> {
+        let status = repo.db.sqlite_vec_status().await?;
+        let record = upsert_embedding_metadata(
+            repo,
+            UpsertNoteEmbedding {
+                note_id: input.note_id,
+                content_hash: input.content_hash,
+                model_version: input.model_version,
+                embedding: input.embedding,
+            },
+            if status.available { "ready" } else { "pending" },
+        )
+        .await?;
+
+        if status.available {
+            let mut tx = repo.db.pool().begin().await?;
+            sqlx::query("DELETE FROM note_embeddings_vec WHERE note_id = ?1")
+                .bind(input.note_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO note_embeddings_vec (note_id, embedding) VALUES (?1, ?2)")
+                .bind(input.note_id)
+                .bind(embedding_to_blob(input.embedding))
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+
+        Ok(record)
+    }
+
+    async fn delete_embedding(&self, repo: &NoteRepository, note_id: &str) -> Result<()> {
+        let status = repo.db.sqlite_vec_status().await?;
+        if status.available {
+            sqlx::query("DELETE FROM note_embeddings_vec WHERE note_id = ?1")
+                .bind(note_id)
+                .execute(repo.db.pool())
+                .await?;
+        }
+        delete_embedding_metadata(repo, note_id).await
+    }
+
+    async fn query_similar_embeddings(
+        &self,
+        repo: &NoteRepository,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<NoteEmbeddingMatch>> {
+        let status = repo.db.sqlite_vec_status().await?;
+        if !status.available {
+            return Ok(vec![]);
+        }
+
+        let limit = i64::try_from(limit)
+            .map_err(|_| Error::InvalidData("embedding query limit exceeds i64".to_owned()))?;
+        let rows = sqlx::query_as::<_, (String, f64)>(
+            "SELECT note_id, distance
+             FROM note_embeddings_vec
+             WHERE embedding MATCH ?1 AND k = ?2",
+        )
+        .bind(embedding_to_blob(query_embedding))
+        .bind(limit)
+        .fetch_all(repo.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(note_id, distance)| NoteEmbeddingMatch { note_id, distance })
+            .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl NoteVectorStore for NoopNoteVectorStore {
+    fn backend(&self) -> NoteVectorBackend {
+        NoteVectorBackend::Noop
+    }
+
+    async fn can_index(&self, _repo: &NoteRepository) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn upsert_embedding(
+        &self,
+        repo: &NoteRepository,
+        input: UpsertNoteEmbedding<'_>,
+    ) -> Result<NoteEmbeddingRecord> {
+        upsert_embedding_metadata(repo, input, "pending").await
+    }
+
+    async fn delete_embedding(&self, repo: &NoteRepository, note_id: &str) -> Result<()> {
+        delete_embedding_metadata(repo, note_id).await
+    }
+
+    async fn query_similar_embeddings(
+        &self,
+        _repo: &NoteRepository,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<NoteEmbeddingMatch>> {
+        Ok(vec![])
+    }
+}
+
+#[async_trait::async_trait]
+impl NoteVectorStore for QdrantNoteVectorStore {
+    fn backend(&self) -> NoteVectorBackend {
+        NoteVectorBackend::Qdrant
+    }
+
+    async fn can_index(&self, _repo: &NoteRepository) -> Result<bool> {
+        match self.client() {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    collection = %self.config.collection,
+                    "qdrant vector store unavailable; falling back to metadata-only embedding persistence"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    async fn upsert_embedding(
+        &self,
+        repo: &NoteRepository,
+        input: UpsertNoteEmbedding<'_>,
+    ) -> Result<NoteEmbeddingRecord> {
+        let ready = self.can_index(repo).await?;
+        upsert_embedding_metadata(repo, input, if ready { "ready" } else { "pending" }).await
+    }
+
+    async fn delete_embedding(&self, repo: &NoteRepository, note_id: &str) -> Result<()> {
+        delete_embedding_metadata(repo, note_id).await
+    }
+
+    async fn query_similar_embeddings(
+        &self,
+        _repo: &NoteRepository,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<NoteEmbeddingMatch>> {
+        Ok(vec![])
+    }
+}
+
 impl NoteRepository {
     pub(super) async fn sync_note_embedding(
         &self,
@@ -85,15 +398,8 @@ impl NoteRepository {
             return;
         };
 
-        // Skip embedding computation entirely when vec0 is unavailable —
-        // there's no point burning CPU on vectors that can't be searched.
-        let vec0_ready = self
-            .db
-            .sqlite_vec_status()
-            .await
-            .map(|s| s.available)
-            .unwrap_or(false);
-        if !vec0_ready {
+        let can_index = self.vector_store().can_index(self).await.unwrap_or(false);
+        if !can_index {
             return;
         }
 
@@ -167,8 +473,6 @@ impl NoteRepository {
         for (note_id, title, note_type, tags, content, embedded_hash, embedded_model_version) in
             rows
         {
-            // Yield between notes so the async runtime stays responsive
-            // during bulk embedding repair (can be 1000+ notes).
             tokio::task::yield_now().await;
             let expected_hash = embedding_content_hash(&title, &note_type, &tags, &content);
             let needs_refresh = embedded_hash.as_deref() != Some(expected_hash.as_str())
@@ -198,66 +502,7 @@ impl NoteRepository {
         input: UpsertNoteEmbedding<'_>,
     ) -> Result<NoteEmbeddingRecord> {
         self.db.ensure_initialized().await?;
-        let status = self.db.sqlite_vec_status().await?;
-
-        let embedding_dim = i64::try_from(input.embedding.len())
-            .map_err(|_| Error::InvalidData("embedding dimension exceeds i64".to_owned()))?;
-        let embedding_blob = embedding_to_blob(input.embedding);
-        let extension_state = if status.available { "ready" } else { "pending" };
-
-        let mut tx = self.db.pool().begin().await?;
-
-        sqlx::query(
-            "INSERT INTO note_embeddings (note_id, embedding, embedding_dim, updated_at)
-             VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             ON CONFLICT(note_id) DO UPDATE SET
-                 embedding = excluded.embedding,
-                 embedding_dim = excluded.embedding_dim,
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-        )
-        .bind(input.note_id)
-        .bind(embedding_blob)
-        .bind(embedding_dim)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "INSERT INTO note_embedding_meta (
-                note_id, content_hash, embedded_at, model_version, embedding_dim, extension_state
-             ) VALUES (
-                ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3, ?4, ?5
-             )
-             ON CONFLICT(note_id) DO UPDATE SET
-                content_hash = excluded.content_hash,
-                embedded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                model_version = excluded.model_version,
-                embedding_dim = excluded.embedding_dim,
-                extension_state = excluded.extension_state",
-        )
-        .bind(input.note_id)
-        .bind(input.content_hash)
-        .bind(input.model_version)
-        .bind(embedding_dim)
-        .bind(extension_state)
-        .execute(&mut *tx)
-        .await?;
-
-        if status.available {
-            sqlx::query("DELETE FROM note_embeddings_vec WHERE note_id = ?1")
-                .bind(input.note_id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("INSERT INTO note_embeddings_vec (note_id, embedding) VALUES (?1, ?2)")
-                .bind(input.note_id)
-                .bind(embedding_to_blob(input.embedding))
-                .execute(&mut *tx)
-                .await?;
-        }
-
-        tx.commit().await?;
-        self.get_embedding(input.note_id)
-            .await?
-            .ok_or_else(|| Error::Internal("embedding row missing after upsert".to_owned()))
+        self.vector_store().upsert_embedding(self, input).await
     }
 
     pub async fn get_embedding(&self, note_id: &str) -> Result<Option<NoteEmbeddingRecord>> {
@@ -276,25 +521,7 @@ impl NoteRepository {
 
     pub async fn delete_embedding(&self, note_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        let status = self.db.sqlite_vec_status().await?;
-
-        let mut tx = self.db.pool().begin().await?;
-        if status.available {
-            sqlx::query("DELETE FROM note_embeddings_vec WHERE note_id = ?1")
-                .bind(note_id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        sqlx::query("DELETE FROM note_embeddings WHERE note_id = ?1")
-            .bind(note_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM note_embedding_meta WHERE note_id = ?1")
-            .bind(note_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
+        self.vector_store().delete_embedding(self, note_id).await
     }
 
     pub async fn query_similar_embeddings(
@@ -303,26 +530,8 @@ impl NoteRepository {
         limit: usize,
     ) -> Result<Vec<NoteEmbeddingMatch>> {
         self.db.ensure_initialized().await?;
-        let status = self.db.sqlite_vec_status().await?;
-        if !status.available {
-            return Ok(vec![]);
-        }
-
-        let limit = i64::try_from(limit)
-            .map_err(|_| Error::InvalidData("embedding query limit exceeds i64".to_owned()))?;
-        let rows = sqlx::query_as::<_, (String, f64)>(
-            "SELECT note_id, distance
-             FROM note_embeddings_vec
-             WHERE embedding MATCH ?1 AND k = ?2",
-        )
-        .bind(embedding_to_blob(query_embedding))
-        .bind(limit)
-        .fetch_all(self.db.pool())
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|(note_id, distance)| NoteEmbeddingMatch { note_id, distance })
-            .collect())
+        self.vector_store()
+            .query_similar_embeddings(self, query_embedding, limit)
+            .await
     }
 }

@@ -33,6 +33,7 @@ mod tests {
             Some(Arc::new(StubCoordinatorOps)),
             Some(Arc::new(StubSlotPoolOps)),
             None,
+            None,
             Arc::new(StubLspOps),
             Arc::new(StubSyncOps),
             Arc::new(StubRuntimeOps),

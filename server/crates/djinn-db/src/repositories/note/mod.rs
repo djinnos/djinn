@@ -38,8 +38,9 @@ pub use djinn_core::models::{
     NoteDedupCandidate,
 };
 pub use embeddings::{
-    EmbeddedNote, NoteEmbeddingMatch, NoteEmbeddingProvider, NoteEmbeddingRecord,
-    UpsertNoteEmbedding,
+    EmbeddedNote, NoopNoteVectorStore, NoteEmbeddingMatch, NoteEmbeddingProvider,
+    NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore, QdrantNoteVectorStore,
+    SqliteVecNoteVectorStore, UpsertNoteEmbedding,
 };
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
@@ -82,6 +83,7 @@ pub struct NoteRepository {
     events: EventBus,
     worktree_root: Option<PathBuf>,
     embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
+    vector_store: Arc<dyn NoteVectorStore>,
 }
 
 impl NoteRepository {
@@ -91,6 +93,7 @@ impl NoteRepository {
             events,
             worktree_root: None,
             embedding_provider: None,
+            vector_store: Arc::new(SqliteVecNoteVectorStore) as Arc<dyn NoteVectorStore>,
         }
     }
 
@@ -107,12 +110,23 @@ impl NoteRepository {
         self
     }
 
+    pub fn with_vector_store(mut self, vector_store: Option<Arc<dyn NoteVectorStore>>) -> Self {
+        if let Some(vector_store) = vector_store {
+            self.vector_store = vector_store;
+        }
+        self
+    }
+
     pub fn worktree_root(&self) -> Option<&Path> {
         self.worktree_root.as_deref()
     }
 
     pub fn embedding_provider(&self) -> Option<Arc<dyn NoteEmbeddingProvider>> {
         self.embedding_provider.clone()
+    }
+
+    pub fn vector_store(&self) -> Arc<dyn NoteVectorStore> {
+        self.vector_store.clone()
     }
 }
 

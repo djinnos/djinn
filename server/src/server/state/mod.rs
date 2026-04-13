@@ -13,7 +13,10 @@ use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
-use djinn_db::{Database, NoteRepository, ProjectRepository, SettingsRepository};
+use djinn_db::{
+    Database, NoopNoteVectorStore, NoteRepository, NoteVectorStore, ProjectRepository,
+    QdrantNoteVectorStore, SettingsRepository, SqliteVecNoteVectorStore,
+};
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
@@ -226,6 +229,18 @@ impl AppState {
 
     pub fn embedding_service(&self) -> &EmbeddingService {
         &self.inner.embedding_service
+    }
+
+    pub fn note_vector_store(&self) -> Arc<dyn NoteVectorStore> {
+        match std::env::var("DJINN_VECTOR_BACKEND") {
+            Ok(value) if value.eq_ignore_ascii_case("qdrant") => {
+                Arc::new(QdrantNoteVectorStore::new(Default::default())) as Arc<dyn NoteVectorStore>
+            }
+            Ok(value) if value.eq_ignore_ascii_case("noop") => {
+                Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>
+            }
+            _ => Arc::new(SqliteVecNoteVectorStore) as Arc<dyn NoteVectorStore>,
+        }
     }
 
     /// Register a task as having an in-flight verification pipeline.
@@ -470,7 +485,8 @@ impl AppState {
     async fn reindex_all_projects_on_startup(&self) {
         let project_repo = ProjectRepository::new(self.db().clone(), self.event_bus());
         let note_repo = NoteRepository::new(self.db().clone(), self.event_bus())
-            .with_embedding_provider(Some(Arc::new(self.embedding_service().clone())));
+            .with_embedding_provider(Some(Arc::new(self.embedding_service().clone())))
+            .with_vector_store(Some(self.note_vector_store()));
         let projects = match project_repo.list().await {
             Ok(projects) => projects,
             Err(e) => {
