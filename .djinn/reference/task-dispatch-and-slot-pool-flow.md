@@ -103,4 +103,4 @@ flowchart TD
 ## Relations
 - [[Task Lifecycle and Session Flow]]
 - [[Session Resume and Compaction Flow]]
-- [[ADR-009: Simplified Execution]]
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution]]

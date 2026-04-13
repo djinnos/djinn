@@ -127,43 +127,38 @@ This closes the earlier optional question in this note: the chosen policy is **d
 
 
 
-## Follow-up classification pass (2026-04-13)
+## Historical ADR-title and shorthand alias cleanup pass (2026-04-13)
 
-After the 2026-04-13 patrol and the follow-up routing task [[tbkc]], the backlog profile is clearer:
+Scoped this pass to historical `decisions/*`, `reference/*`, and `research/*` alias debt only, excluding singleton/current-note routing defects already handled elsewhere.
 
-### Broken-link classes now visible
+### Canonical replacements applied in this pass
+- `reference/git-workflow-diagrams`
+  - `[[ADR-007 djinn Namespace Git Sync]]` → `[[decisions/djinn-namespace-git-sync|ADR-007 djinn Namespace Git Sync]]`
+  - `[[ADR-015 Session Continuity and Resume]]` → `[[decisions/adr-015-session-continuity-resume|ADR-015 Session Continuity and Resume]]`
+- `reference/session-resume-and-compaction-flow`
+  - `[[ADR-015: Session Continuity and Resume]]` → `[[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity and Resume]]`
+- `reference/setup-verification-and-merge-conflict-flow`
+  - `[[ADR-014: Project Setup and Verification Commands]]` → `[[decisions/adr-014-project-setup-verification-commands|ADR-014: Project Setup and Verification Commands]]`
+- `reference/task-dispatch-and-slot-pool-flow`
+  - `[[ADR-009: Simplified Execution]]` → `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution]]`
+- `research/rust-compilation-and-tooling-optimization-strategy`
+  - `[[Cognitive Memory Scope]]` → `[[reference/cognitive-memory-scope|Cognitive Memory Scope]]`
+- `decisions/adr-004-execution-settings-per-role-model-priority-and-per-model-session-limits`
+  - `[[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]` → `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]`
+- `decisions/adr-005-project-scoped-epics-tasks-and-sessions`
+  - `[[ADR-003: Split Epic and Task MCP Tools with Input Validation]]` → `[[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]]`
+  - `[[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]` → `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]`
+- `decisions/adr-030-repo-committed-verification-and-commit-hash-caching`
+  - `[[ADR-006]]` → `[[decisions/project-.djinn-directory-—-notes-only,-git-tracked|ADR-006]]`
+  - `[[ADR-009]]` → `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009]]`
+  - `[[ADR-014]]` → `[[decisions/adr-014-project-setup-verification-commands|ADR-014]]`
+  - `[[ADR-022]]` → `[[decisions/adr-022-outcome-based-session-validation-agent-role-redesign|ADR-022]]`
 
-1. **Active canonical/current-note defects — already routed to `tbkc`, do not duplicate here**
-   - `[[v1-requirements]]` from [[brief]]
-   - `[[Cognitive Memory Scope]]` from [[requirements/v1-requirements]]
-   These remain the only clearly current canonical note defects in the latest detail output, and they are already covered by active task `tbkc` (fix canonical note edit routing plus apply the intended relinks).
+### Concrete unresolved / deferred exceptions from this narrow slice
+These remain intentionally deferred because a confident canonical target or stable permalink could not be proven within the scoped historical alias pass, or because the current backend detail output appears stale relative to branch-local note edits.
 
-2. **Historical singleton-alias links on legacy notes — actionable narrow cleanup slice**
-   Repeated broken raw texts `Roadmap`, `Project Brief`, and `V1 Requirements` still dominate many remaining entries across historical `decisions/*`, plus smaller `reference/*` and `research/*` surfaces. These are existing canonical notes being referenced by legacy title/shorthand aliases rather than canonical permalinks (`[[roadmap]]`, `[[brief]]`, `[[requirements/v1-requirements]]`).
-   - Approximate folder concentration from local scan of note content: `decisions` dominates, with smaller `reference` and `research` tails.
-   - This is concrete cleanup work, but it should be handled as a **single narrow historical singleton-alias pass**, not mixed with the current-note routing bug.
+- `reference/git-workflow-diagrams` still appears in `memory_broken_links()` for `ADR-007 djinn Namespace Git Sync` and `ADR-015 Session Continuity and Resume` even after canonical replacements were written in the branch-local note. Treat this as reindex/detail staleness to re-verify later, not as a reason to broaden the cleanup.
+- `decisions/adr-029-vertical-workspace-splitting-and-agent-role-trait` links `[[Rust Compilation and Tooling Optimization Strategy]]`; the canonical permalink is not provable from current broken-link output because the note/backend naming currently disagrees on folder/permalink shape after edits. Leave as a concrete renamed-target exception until memory indexing is re-verified.
+- Broad historical singleton/current-note aliases (`[[Roadmap]]`, `[[Project Brief]]`, `[[V1 Requirements]]`) remain out of scope for this pass by task design.
 
-3. **Historical ADR title/shorthand aliases — real but broader deferred backlog**
-   Repeated broken raw texts include long ADR titles and shorthand such as:
-   - `ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning`
-   - `ADR-009: Simplified Execution — No Phases, Direct Task Dispatch`
-   - short/variant forms like `ADR-006`, `ADR-014`, `ADR-019`, `ADR-022`
-   These are heavily concentrated in historical ADR-to-ADR references under `decisions/*`, with smaller pockets in `reference/*`, `research/*`, and a few `design/*` notes. They are legitimate legacy alias debt, but not an urgent canonical-note defect. Defer broad title/shorthand normalization until after the singleton-alias slice and current-note routing work are complete.
-
-4. **Non-canonical planner/case-note noise — do not treat as emergency board-health defects**
-   A few new broken links come from recently written `cases/*` / `design/*` notes that intentionally captured historical titles in prose-linked form (for example `Project Brief`, `Roadmap`, or the task-title-style link `Route actionable project-memory cleanup after backlog triage`). These are lower-priority planner-memory hygiene issues, not current product-note defects.
-
-### Orphan classification refresh
-
-The orphan backlog is still dominated by intentionally orphan-heavy or retrieval-oriented folders rather than current documentation drift:
-
-- **`reference/repo-maps/*` — intentional inventory / false-positive-for-patrol-noise bucket.** These are hash-addressed repository map artifacts and are expected to be mostly unlinked.
-- **`cases/*` — intentional retrieval-oriented historical inventory.** Large orphan volume here should not trigger broad relinking work by itself.
-- **`patterns/*`, many `decisions/*`, and older `research/*` notes — mixed archival/reference inventory.** These may remain orphaned without being urgent defects unless an active epic starts depending on them as navigational docs.
-- **Current/canonical notes orphaned in `requirements/`, `design/`, or top-level reference surfaces — actionable only when they are live documentation for active work.** `requirements/v1-requirements` remains notable, but its current defect is already routed to `tbkc` rather than a separate orphan campaign.
-
-### Routing decision from this pass
-
-- **Create one narrow follow-up task** for historical singleton alias cleanup (`Roadmap` / `Project Brief` / `V1 Requirements`) on legacy ADR/reference/research notes.
-- **Do not create a mass backlog task** for all historical ADR title/shorthand aliases yet.
-- **Do not create orphan cleanup work** for `cases/*` or `reference/repo-maps/*`; treat them as tolerated inventory unless a future patrol finds a concrete canonical-note defect there.
+Decision: stop here rather than reopen backlog-wide historical note cleanup. Any next pass should start from freshly reindexed broken-link detail and only handle proven renamed-target exceptions.

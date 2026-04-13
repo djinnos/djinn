@@ -1,8 +1,9 @@
 ---
 title: Rust Compilation and Tooling Optimization Strategy
-type: research
+type: 
 tags: ["compilation","performance","tooling","worktree","cargo"]
 ---
+
 
 # Rust Compilation and Tooling Optimization Strategy
 
@@ -114,4 +115,4 @@ Add cargo-hakari immediately after first split.
 
 - [[ADR-028 Module Visibility Enforcement and Deep Module Architecture]]
 - [[Deep Modules Pattern for AI Codebases]]
-- [[Cognitive Memory Scope]]
+- [[reference/cognitive-memory-scope|Cognitive Memory Scope]]

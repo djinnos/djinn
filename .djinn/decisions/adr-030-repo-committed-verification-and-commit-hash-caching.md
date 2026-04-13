@@ -12,9 +12,9 @@ Date: 2026-03-13
 
 ## Related
 
-- [[ADR-014]]: Project Setup & Verification Commands (SUPERSEDED by this ADR)
-- [[ADR-009]]: Simplified Execution
-- [[ADR-022]]: Outcome-Based Session Validation
+- [[decisions/adr-014-project-setup-verification-commands|ADR-014]]: Project Setup & Verification Commands (SUPERSEDED by this ADR)
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009]]: Simplified Execution
+- [[decisions/adr-022-outcome-based-session-validation-agent-role-redesign|ADR-022]]: Outcome-Based Session Validation
 
 ## Context
 
@@ -389,6 +389,6 @@ Steps are ephemeral (in-memory store only). Historical results are available via
 
 ## References
 
-- [[ADR-006]]: Project .djinn Directory — Notes Only, Git-Tracked
-- [[ADR-014]]: Project Setup & Verification Commands
-- [[ADR-009]]: Simplified Execution
+- [[decisions/project-.djinn-directory-—-notes-only,-git-tracked|ADR-006]]: Project .djinn Directory — Notes Only, Git-Tracked
+- [[decisions/adr-014-project-setup-verification-commands|ADR-014]]: Project Setup & Verification Commands
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009]]: Simplified Execution

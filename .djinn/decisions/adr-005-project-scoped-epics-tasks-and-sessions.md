@@ -68,6 +68,6 @@ Resolution: MCP tools accept project path (string), resolve to project_id via pr
 - All repository queries need project_id WHERE clause
 
 ## Relations
-- [[ADR-003: Split Epic and Task MCP Tools with Input Validation]] — tool signatures affected
-- [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — phase_review rename
+- [[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]] — tool signatures affected
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — phase_review rename
 - [[V1 Requirements]] — KANBAN-08 project selector depends on this

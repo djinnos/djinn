@@ -196,4 +196,4 @@ sequenceDiagram
 - [[decisions/adr-036-structured-session-finalization-finalize-tools-and-forced-tool-choice|ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]]
 - [[Task Dispatch and Slot Pool Flow]]
 - [[decisions/adr-024-agent-role-redesign-pm-architect-and-approval-pipeline|ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline]]
-- [[ADR-014: Project Setup and Verification Commands]]
+- [[decisions/adr-014-project-setup-verification-commands|ADR-014: Project Setup and Verification Commands]]

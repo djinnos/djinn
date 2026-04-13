@@ -124,4 +124,4 @@ flowchart LR
 - [[Task Dispatch and Slot Pool Flow]]
 - [[Task Lifecycle and Session Flow]]
 - [[decisions/adr-036-structured-session-finalization-finalize-tools-and-forced-tool-choice|ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]]
-- [[ADR-015: Session Continuity and Resume]]
+- [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity and Resume]]
