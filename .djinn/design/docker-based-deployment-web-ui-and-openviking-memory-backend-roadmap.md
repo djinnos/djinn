@@ -4,6 +4,12 @@ type: design
 tags: ["adr-053","docker","web-ui","openviking","roadmap"]
 ---
 
+---
+title: Docker-Based Deployment, Web UI, and OpenViking Memory Backend — Roadmap
+type: design
+tags: ["adr-053","docker","web-ui","openviking","roadmap"]
+---
+
 # Docker-Based Deployment, Web UI, and OpenViking Memory Backend — Roadmap
 
 ## Status
@@ -17,6 +23,7 @@ Epic `7izs` remains open. The architectural direction from [[decisions/adr-053-d
 - `2744` — replace native project/file pickers with server-backed filesystem browsing. Worker implementation is in progress and currently blocked in verification by unrelated `djinn-agent` snapshot drift rather than picker-specific failures.
 - `4a4t` — create the OpenViking memory backend seam and bootstrap client.
 - `wpe0` — repair unrelated `djinn-db` baseline test failures so epic tasks can verify against a green server baseline.
+- `3ok1` — diagnose the `djinn-agent` prompt snapshot drift that is causing unrelated ADR-053 verification churn across multiple tasks.
 
 ## Next-wave sequencing
 
@@ -35,21 +42,25 @@ Epic `7izs` remains open. The architectural direction from [[decisions/adr-053-d
 
 ## Active task map
 - Browser/runtime foundation: `h3p6` ✅
-- Static frontend hosting: `rpgb`
+- Static frontend hosting: `rpgb` (blocked by `wpe0`)
 - Browser filesystem picker: `2744`
 - Browser SSH/deploy flows: `24v4`
-- Docker packaging: `aijd`
+- Docker packaging: `aijd` (blocked by `rpgb`, `4a4t`)
 - OpenViking backend seam: `4a4t`
-- Dual-read shadow: `vce4`
-- Write/bootstrap migration: `d4qf`
-- `memory_refs` URI transition: `ow2x`
-- Legacy memory cleanup: `ow2c`
+- Dual-read shadow: `vce4` (blocked by `4a4t`)
+- Write/bootstrap migration: `d4qf` (blocked by `vce4`)
+- `memory_refs` URI transition: `ow2x` (blocked by `d4qf`)
+- Legacy memory cleanup: `ow2c` (blocked by `ow2x`)
 - Verification-baseline repair: `wpe0`
+- Prompt-snapshot diagnosis spike: `3ok1`
 
 ## Planning notes
 - Do not create additional broad ADR-053 worker tasks until the current queue shrinks; the epic already has enough decomposed work for the next execution wave.
 - Prefer blocker relationships over new decomposition rows where work is already represented.
-- If `djinn-agent` prompt snapshot churn continues to block unrelated verification after `wpe0`, split that into a focused baseline-remediation task rather than broadening feature tasks.
+- `wpe0` is the immediate verification-baseline gate for server-hosting work such as `rpgb`.
+- `aijd` should wait on both server-side frontend hosting (`rpgb`) and the OpenViking seam/bootstrap (`4a4t`) so Docker packaging is wired against the real runtime shape instead of placeholder assumptions.
+- The OpenViking migration sequence is now explicitly chained: `4a4t` → `vce4` → `d4qf` → `ow2x` → `ow2c`.
+- Keep `3ok1` focused on diagnosing prompt snapshot churn; if the outcome is “expected snapshots changed”, future feature tasks should update snapshots rather than absorbing unrelated verification noise.
 
 ## Relations
 - [[decisions/adr-053-docker-based-deployment-web-ui-and-openviking-memory-backend]]
