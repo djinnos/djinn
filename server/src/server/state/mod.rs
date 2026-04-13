@@ -424,7 +424,13 @@ impl AppState {
         // Prune stale verification cache entries (>7 days old).
         self.prune_verification_cache_on_startup().await;
 
-        self.reindex_all_projects_on_startup().await;
+        // Reindex in the background so the HTTP listener can bind immediately.
+        // The reindex can be slow (especially with embeddings) and is not
+        // required for the server to be functional.
+        let reindex_self = self.clone();
+        tokio::spawn(async move {
+            reindex_self.reindex_all_projects_on_startup().await;
+        });
 
         // Watch .djinn/ directories for KB note changes and auto-reindex.
         crate::watchers::spawn_kb_watchers(

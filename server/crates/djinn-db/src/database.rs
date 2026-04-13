@@ -551,6 +551,56 @@ mod tests {
         }
     }
 
+    /// Guard against modifying already-applied migrations.
+    ///
+    /// Refinery stores a checksum of each migration when it is first applied.
+    /// If someone later edits an already-applied .sql file, the embedded
+    /// checksum diverges from the DB record and **every** database operation
+    /// fails at runtime (see: V20260409000001 incident).
+    ///
+    /// This test applies all migrations to a fresh DB, then compares the
+    /// checksums refinery recorded with the checksums of the embedded files.
+    /// A mismatch means a migration was edited after being committed —
+    /// split the change into a new migration instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn migration_checksums_are_stable_after_apply() {
+        use crate::migrations::embedded_checksums;
+
+        // Apply all migrations to a fresh in-memory database.
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+
+        // Read what refinery recorded in the schema history table.
+        // Refinery stores checksum as TEXT in SQLite, so we parse it.
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT version, checksum FROM refinery_schema_history ORDER BY version")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        let applied: Vec<(i64, u64)> = rows
+            .into_iter()
+            .map(|(v, c)| (v, c.parse::<u64>().expect("checksum should be a u64")))
+            .collect();
+
+        // Compare against the embedded (compile-time) checksums.
+        let embedded = embedded_checksums();
+        for (version, recorded_checksum) in &applied {
+            let entry = embedded
+                .iter()
+                .find(|(v, _, _)| *v == *version)
+                .unwrap_or_else(|| {
+                    panic!("applied migration V{version} not found in embedded migrations")
+                });
+            assert_eq!(
+                *recorded_checksum, entry.2,
+                "Migration V{}_{} has been modified after it was applied! \
+                 Do NOT edit existing migrations — create a new one instead. \
+                 (recorded checksum {recorded_checksum} != embedded checksum {})",
+                version, entry.1, entry.2
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sqlite_vec_can_be_policy_disabled_without_breaking_db_use() {
         set_sqlite_vec_disabled_for_tests(true);

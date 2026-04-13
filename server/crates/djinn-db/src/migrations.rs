@@ -16,6 +16,16 @@ pub fn run(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     Ok(())
 }
 
+/// Return the embedded migration list (version, name, checksum) for testing.
+#[cfg(test)]
+pub(crate) fn embedded_checksums() -> Vec<(i64, String, u64)> {
+    embedded::migrations::runner()
+        .get_migrations()
+        .iter()
+        .map(|m| (m.version(), m.name().to_string(), m.checksum()))
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) fn run_until(
     path: &Path,
