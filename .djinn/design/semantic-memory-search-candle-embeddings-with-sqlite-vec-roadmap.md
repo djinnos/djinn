@@ -58,6 +58,9 @@ The epic can close only when all of the following are true:
 - systems without a working model or sqlite-vec extension degrade cleanly to FTS-only
 - tests cover the new initialization, indexing, and retrieval behavior
 
+## Maintenance Note
+This roadmap note was re-written through `memory_write` after patrol found artifact drift: the markdown file already existed under `design/semantic-memory-search-candle-embeddings-with-sqlite-vec-roadmap`, but `memory_read` could not resolve it. The canonical permalink remains `design/semantic-memory-search-candle-embeddings-with-sqlite-vec-roadmap`; references should keep using this permalink rather than creating a duplicate note.
+
 ## Relations
-- [[decisions/proposed/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
+- [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
 - [[brief]]
