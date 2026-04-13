@@ -572,11 +572,12 @@ mod tests {
 
         // Read what refinery recorded in the schema history table.
         // Refinery stores checksum as TEXT in SQLite, so we parse it.
-        let rows: Vec<(i64, String)> =
-            sqlx::query_as("SELECT version, checksum FROM refinery_schema_history ORDER BY version")
-                .fetch_all(db.pool())
-                .await
-                .unwrap();
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT version, checksum FROM refinery_schema_history ORDER BY version",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
         let applied: Vec<(i64, u64)> = rows
             .into_iter()
             .map(|(v, c)| (v, c.parse::<u64>().expect("checksum should be a u64")))
