@@ -374,17 +374,14 @@ fn extract_text_matches(item: &serde_json::Value) -> (String, Option<u32>) {
         if first_line.is_none()
             && let Some(matches) = tm.get("matches").and_then(|v| v.as_array())
             && let Some(first) = matches.first()
-        {
             // indices[0] is the byte offset within the fragment
-            if let Some(indices) = first.get("indices").and_then(|v| v.as_array())
-                && let Some(start) = indices.first().and_then(|v| v.as_u64())
-            {
-                // Count newlines before the match to get a rough line number
-                if let Some(fragment) = tm.get("fragment").and_then(|v| v.as_str()) {
-                    let line = fragment[..start as usize].matches('\n').count() as u32 + 1;
-                    first_line = Some(line);
-                }
-            }
+            && let Some(indices) = first.get("indices").and_then(|v| v.as_array())
+            && let Some(start) = indices.first().and_then(|v| v.as_u64())
+            // Count newlines before the match to get a rough line number
+            && let Some(fragment) = tm.get("fragment").and_then(|v| v.as_str())
+        {
+            let line = fragment[..start as usize].matches('\n').count() as u32 + 1;
+            first_line = Some(line);
         }
     }
     (fragments.join("\n---\n"), first_line)
