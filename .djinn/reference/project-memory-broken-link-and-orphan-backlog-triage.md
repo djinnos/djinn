@@ -127,91 +127,70 @@ This closes the earlier optional question in this note: the chosen policy is **d
 
 
 
-## Orphan classification refresh (2026-04-13)
 
-Fresh evidence from the current pass:
+## Prioritized orphan backlog refresh (2026-04-13)
 
-- `memory_health()`: **765 orphans / 844 total notes**
-- `memory_orphans(folder="reference/repo-maps")`: **62** orphaned repo-map snapshots
-- `memory_orphans(folder="requirements")`: **4** orphaned requirement notes
-- `memory_orphans(folder="research")`: **6** orphaned research notes
-- `memory_orphans(folder="cases")`: still a very large historical/session-derived slice; detail output remains dominated by `cases/*`, but this pass intentionally sampled/classified rather than trying to relink that whole bucket
+Current measurement from `memory_health()` / `memory_orphans()`:
+- `memory_health().orphan_note_count`: **797** gross orphans
+- `reference/repo-maps/*`: **66** orphan notes — intentional/generated repo-map artifacts
+- `cases/*`: **225** orphan notes — mostly tolerated historical/session inventory, but not generated
+- `requirements/*`: **4** orphan notes — all roadmap-style requirement notes for already-complete epics
+- `research/*`: **6** orphan notes — mixed archival surveys and WIP implementation scratchpads
+- top-level `reference/*`: **20** orphan notes — mixed inventory/test-fixture/reference debt
 
-### Refined buckets
+### Updated split for patrol interpretation
 
-#### 1. Intentional / generated orphan-heavy inventory — **ignore for patrol escalation by default**
+Use three interpretation buckets instead of treating the 797 total as one cleanup backlog:
 
-**Confirmed bucket:** `reference/repo-maps/*` (**62 current orphans**)
+1. **Intentional/generated noise — 66 notes**
+   - `reference/repo-maps/*`
+   - These are the expected generated artifact slice. Future patrols should treat this folder as baseline noise unless a stable index note is later supposed to backlink them.
 
-Representative examples:
-- `reference/repo-maps/00d81c76211b`
-- `reference/repo-maps/4d941c575f21`
-- `reference/repo-maps/7cf9c6ef3254`
-- `reference/repo-maps/f62baaa142c8`
+2. **Tolerated retrieval-oriented inventory — 225+ notes**
+   - dominated by `cases/*`
+   - Most case notes remain acceptable as search-first historical memory and should not trigger broad manual relinking.
+   - This bucket is *not* the same as generated noise, but it also should not be treated as emergency cleanup by count alone.
 
-Why this bucket is tolerated:
-- titles are hash-addressed `Repository Map <id>` snapshots rather than navigational docs
-- the notes are generated/cache-like reference artifacts
-- the backlog would remain dominated by these snapshots even if a few knowledge-note orphans were cleaned up
+3. **Actionable knowledge-note candidates — currently smallest, highest-value slice**
+   - `requirements/*` orphan roadmaps: 4 notes
+   - `research/*` orphan notes: 6 notes
+   - selected active-epic `cases/*` clusters whose guidance should be consolidated into canonical notes instead of staying as unlinked duplicates
 
-**Patrol rule:** treat repo-map orphan volume as background inventory unless a canonical index/navigator note starts claiming these snapshots should be explicitly linked.
+### High-value first cleanup slice
 
-#### 2. Historical retrieval-oriented knowledge inventory — **usually tolerated, sample only when current work needs it**
+The first cleanup batch should target the **active semantic-memory orphan case cluster**, not the completed-epic roadmap requirements or older archival research notes.
 
-**Dominant non-generated bucket:** `cases/*`
+Recommended first batch:
+- [[cases/embedding-runtime-seam-added-for-semantic-memory]]
+- [[cases/thread-semantic-search-context-through-bridge-and-state-layers]]
+- [[cases/blend-semantic-retrieval-into-existing-note-search-without-changing-the-mcp-interface]]
+- [[cases/added-vector-aware-ranking-to-the-existing-note-search-pipeline]]
+- [[cases/blend-semantic-vector-search-into-existing-memory-search-ranking]]
 
-Representative examples from the current orphan list:
-- `cases/broken-link-backlog-shifted-from-roadmap-artifact-to-legacy-shorthand-adr-title-aliases`
-- `cases/canonical-current-note-wikilinks-should-be-normalized-narrowly-without-expanding-backlog-cleanup`
-- `cases/embedding-runtime-seam-added-for-semantic-memory`
-- `cases/stale-memory-index-can-contradict-repaired-canonical-singleton-notes`
+Rationale:
+- all five are recent orphan case notes tied to the still-active semantic-memory epic (`h1yj`)
+- they duplicate or refine guidance that belongs in canonical ADR/roadmap/design surfaces for active work
+- several are clearly sequential session extracts for the same implementation story, so they are strong candidates for **linking from the roadmap/ADR context, merging into canonical notes, or deprecating as redundant session residue**
+- cleaning this slice will improve future retrieval around active work more than touching completed-epic roadmap notes or old survey research
 
-Classification:
-- these are mostly session-derived learnings retrievable by search/context-building rather than by manual backlink navigation
-- many are useful as point references for an active task or epic, but mass-linking the whole folder would be low-value cleanup
+### Lower-priority actionable slice after the semantic-memory batch
 
-**Patrol rule:** do not treat `cases/*` orphan count as undifferentiated debt. Only escalate when a specific case becomes canonical guidance for active work and still lacks the one or two backlinks that would make it discoverable from that canonical note.
+1. `requirements/*` orphan roadmap notes for completed epics:
+   - [[requirements/delete-stale-canonical-graph-shims-from-mcp-bridge-rs-roadmap]]
+   - [[requirements/remove-verified-dead-code-across-agent-repo-map-repo-graph-roadmap]]
+   - [[requirements/split-oversized-production-hubs-agent-mcp-bridge-roadmap]]
+   - [[requirements/split-oversized-test-files-by-scenario-module-roadmap]]
 
-#### 3. Actionable orphan slice — **small, scoped knowledge cleanup candidates**
+   These are likely deprecation/archive candidates because each note already records epic completion and no longer appears to serve active navigation.
 
-This pass found a narrow set worth routing into future cleanup work because the notes read like canonical planning/reference artifacts rather than disposable history.
+2. `research/*` orphan notes:
+   - archival surveys like [[research/embedded-database-survey-2026]] and [[research/rust-agentic-ecosystem-2026]] are acceptable to leave orphaned unless a canonical note should cite them
+   - WIP implementation scratchpads like [[research/djinn-mcp-extraction-wip]] and [[research/djinn-mcp-wiring-wip]] are better deprecation/consolidation candidates than link targets
 
-**Requirement-roadmap notes (4 current orphans):**
-- `requirements/delete-stale-canonical-graph-shims-from-mcp-bridge-rs-roadmap`
-- `requirements/remove-verified-dead-code-across-agent-repo-map-repo-graph-roadmap`
-- `requirements/split-oversized-production-hubs-agent-mcp-bridge-roadmap`
-- `requirements/split-oversized-test-files-by-scenario-module-roadmap`
+### Patrol rule update
 
-Why actionable:
-- these are roadmap-shaped planning notes in `requirements/*`, not generated artifacts
-- they likely want either an inbound link from a canonical triage/roadmap note, or a deprecation/archive decision if the wave is complete and the note is no longer meant to be navigated
-
-**Research notes (6 current orphans):**
-- `research/rust-compilation-and-tooling-optimization-strategy`
-- `research/embedded-database-survey-2026`
-- `research/rust-agentic-ecosystem-2026`
-- `research/goose-library-integration-research-phase-5`
-- `research/djinn-mcp-extraction-wip`
-- `research/djinn-mcp-wiring-wip`
-
-Why mixed/actionable:
-- the first four look like durable reference research that may deserve linkage from canonical requirements/design/ADR notes when still active
-- the two `djinn-mcp-*wip` notes look more archival and may instead deserve explicit deprecation/archive handling rather than new backlinks
-
-### Narrow next actions
-
-Do **not** open broad orphan-backlog cleanup. If future patrols want concrete follow-up, keep it to one of these small slices:
-
-1. **Requirement-roadmap orphan pass (preferred first follow-up):** decide for the 4 orphaned `requirements/*roadmap` notes whether each should gain one canonical inbound link or be explicitly retired/deprecated.
-2. **Research-note curation pass (optional, max 4–6 notes):** classify durable research references vs archival WIP notes, then either add one canonical backlink or mark them archival.
-3. **Case-note linking only by demand:** when an active epic repeatedly cites a specific orphaned case, add the targeted backlink then; do not mass-link `cases/*`.
-
-### Updated patrol guidance
-
-When `memory_health().orphan_note_count` looks alarming:
-
-- first subtract the confirmed tolerated repo-map slice (**62 currently**) mentally
-- then assume `cases/*` is mostly retrieval-oriented historical inventory unless a specific active canonical doc depends on one of those notes
-- route cleanup attention to small canonical-ish slices (`requirements/*roadmap`, durable `research/*`, current design/reference docs) instead of the raw gross orphan total
-
-This refresh keeps the earlier policy unchanged: **documented interpretation beats tooling suppression**, and the actionable orphan debt should be handled as small targeted follow-ups rather than a project-wide relinking campaign.
+For future orphan patrols:
+- treat **66 repo-map orphans** as the intentional/generated baseline noise floor
+- do **not** open broad cleanup work because the `cases/*` bucket is large
+- prefer narrow follow-up tasks only when orphan findings cluster around active epics or clearly redundant canonical-adjacent notes
+- use the semantic-memory case cluster above as the current named first cleanup batch
