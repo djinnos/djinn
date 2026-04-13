@@ -85,6 +85,18 @@ impl NoteRepository {
             return;
         };
 
+        // Skip embedding computation entirely when vec0 is unavailable —
+        // there's no point burning CPU on vectors that can't be searched.
+        let vec0_ready = self
+            .db
+            .sqlite_vec_status()
+            .await
+            .map(|s| s.available)
+            .unwrap_or(false);
+        if !vec0_ready {
+            return;
+        }
+
         let semantic_text = embedding_document_text(title, note_type, tags, content);
         let content_hash = embedding_content_hash(title, note_type, tags, content);
 

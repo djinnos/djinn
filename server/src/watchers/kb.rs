@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::DjinnEventEnvelope;
-use crate::semantic_memory::{EmbeddingService, default_embedding_cache_dir};
+use crate::semantic_memory::EmbeddingService;
 use djinn_db::{Database, NoteRepository, ProjectRepository};
 
 /// Debounce window — reindex fires this long after the last file change.
@@ -19,6 +19,7 @@ struct WatcherState {
     watchers: HashMap<PathBuf, Debouncer<notify::RecommendedWatcher>>,
     db: Database,
     events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
+    embedding_service: EmbeddingService,
 }
 
 /// Spawn a background task that watches `.djinn/` directories for all registered
@@ -29,11 +30,13 @@ pub(crate) fn spawn_kb_watchers(
     db: Database,
     events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
     cancel: CancellationToken,
+    embedding_service: EmbeddingService,
 ) {
     let state = Arc::new(Mutex::new(WatcherState {
         watchers: HashMap::new(),
         db: db.clone(),
         events_tx: events_tx.clone(),
+        embedding_service,
     }));
 
     let state_clone = state.clone();
@@ -115,6 +118,7 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
 
     let db = state.db.clone();
     let events_tx = crate::events::event_bus_for(&state.events_tx);
+    let embedding_service = state.embedding_service.clone();
     let project_id = project_id.to_string();
     let project_path_owned = project_path.to_path_buf();
     // Capture the runtime handle here (we're in async context); the debouncer
@@ -141,7 +145,7 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
                     let events_tx = events_tx.clone();
                     let project_id = project_id.clone();
                     let project_path = project_path_owned.clone();
-                    let embedding_service = EmbeddingService::new(default_embedding_cache_dir());
+                    let embedding_service = embedding_service.clone();
 
                     // Spawn reindex on the captured runtime handle — safe to call
                     // from non-Tokio threads (notify's debouncer thread).
@@ -271,6 +275,9 @@ mod tests {
             watchers: HashMap::new(),
             db,
             events_tx,
+            embedding_service: EmbeddingService::new(
+                crate::semantic_memory::default_embedding_cache_dir(),
+            ),
         };
 
         let missing = workspace_tempdir("watchers-kb-");
@@ -305,7 +312,12 @@ mod tests {
             .await
             .unwrap();
 
-        spawn_kb_watchers(db.clone(), events_tx.clone(), cancel.clone());
+        spawn_kb_watchers(
+            db.clone(),
+            events_tx.clone(),
+            cancel.clone(),
+            EmbeddingService::new(crate::semantic_memory::default_embedding_cache_dir()),
+        );
 
         wait_for(|| {
             let db = db.clone();

@@ -437,6 +437,7 @@ impl AppState {
             self.db().clone(),
             self.events().clone(),
             self.cancel().clone(),
+            self.embedding_service().clone(),
         );
 
         // ADR-050 Chunk C: the filesystem-watcher SCIP trigger has been
@@ -468,25 +469,8 @@ impl AppState {
 
     async fn reindex_all_projects_on_startup(&self) {
         let project_repo = ProjectRepository::new(self.db().clone(), self.event_bus());
-        // Only attach the embedding provider if vec0 is available — computing
-        // embeddings is CPU-heavy and pointless when they can't be indexed for
-        // vector search.
-        let vec0_ready = self
-            .db()
-            .sqlite_vec_status()
-            .await
-            .map(|s| s.available)
-            .unwrap_or(false);
-        let embedding_provider = if vec0_ready {
-            tracing::info!("startup reindex: vec0 available, embeddings will be computed");
-            Some(Arc::new(self.embedding_service().clone())
-                as Arc<dyn djinn_db::NoteEmbeddingProvider>)
-        } else {
-            tracing::info!("startup reindex: vec0 unavailable, skipping embedding computation");
-            None
-        };
         let note_repo = NoteRepository::new(self.db().clone(), self.event_bus())
-            .with_embedding_provider(embedding_provider);
+            .with_embedding_provider(Some(Arc::new(self.embedding_service().clone())));
         let projects = match project_repo.list().await {
             Ok(projects) => projects,
             Err(e) => {
