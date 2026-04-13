@@ -191,7 +191,7 @@ impl ProjectRepository {
         Ok(project)
     }
 
-    /// Insert 6 default agent roles (one per base_role) for a newly created project.
+    /// Insert 5 default agent roles (one per base_role) for a newly created project.
     /// Uses INSERT OR IGNORE so re-seeding is safe if called on an existing project.
     async fn seed_default_roles(&self, project_id: &str) -> Result<()> {
         const DEFAULT_ROLES: &[(&str, &str)] = &[
@@ -531,7 +531,7 @@ mod tests {
         assert_eq!(
             rows.len(),
             5,
-            "expected 6 default roles, got {}",
+            "expected 5 default roles, got {}",
             rows.len()
         );
         for ((name, base_role, is_default), expected) in rows.iter().zip(expected_base_roles.iter())
@@ -553,7 +553,7 @@ mod tests {
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(total, 12, "2 projects × 6 roles = 12 default rows");
+        assert_eq!(total, 10, "2 projects × 5 roles = 10 default rows");
     }
 
     // ── VerificationRule validation ──────────────────────────────────────────
