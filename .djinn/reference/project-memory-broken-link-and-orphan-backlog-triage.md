@@ -127,91 +127,66 @@ This closes the earlier optional question in this note: the chosen policy is **d
 
 
 
-## Orphan classification refresh (2026-04-13)
+## Residual broken-link classification after alias cleanup (2026-04-13)
 
-Fresh evidence from the current pass:
+Latest evidence:
 
-- `memory_health()`: **765 orphans / 844 total notes**
-- `memory_orphans(folder="reference/repo-maps")`: **62** orphaned repo-map snapshots
-- `memory_orphans(folder="requirements")`: **4** orphaned requirement notes
-- `memory_orphans(folder="research")`: **6** orphaned research notes
-- `memory_orphans(folder="cases")`: still a very large historical/session-derived slice; detail output remains dominated by `cases/*`, but this pass intentionally sampled/classified rather than trying to relink that whole bucket
+- `memory_health()`: **136 broken links**, **797 orphans**
+- The residual broken-link backlog is now dominated by **historical alias/title debt**, not by current canonical-note defects.
+- Representative recurring targets from the latest `memory_broken_links()` detail output:
+  - `Roadmap` — **32** occurrences
+  - `ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning` — **14** occurrences
+  - `ADR-009: Simplified Execution — No Phases, Direct Task Dispatch` — **8** occurrences
+  - `ADR-003: Split Epic and Task MCP Tools with Input Validation` — **4** occurrences
+  - `ADR-010: Session Cost Tracking — Per-Task Token Metrics` — **4** occurrences
+  - `Cognitive Memory Scope` — **3** occurrences
+  - `wikilinks` — **1** occurrence
 
-### Refined buckets
+### Residual buckets
 
-#### 1. Intentional / generated orphan-heavy inventory — **ignore for patrol escalation by default**
+#### 1. True defects in still-canonical/current notes — **small actionable slice**
+Direct reads of the residual backlog show only a very small set of still-actionable canonical-note defects:
 
-**Confirmed bucket:** `reference/repo-maps/*` (**62 current orphans**)
+- [[reference/cognitive-memory-scope]] still ends with `[[roadmap]]` in Relations. This is a true broken wikilink in a still-canonical reference note and should either be normalized to the canonical singleton permalink if/when singleton title resolution is intentionally supported, or rewritten to an existing canonical target/plain text.
+- `research/rust-compilation-and-tooling-optimization-strategy` still ends with `[[Cognitive Memory Scope]]`. The canonical target exists as [[reference/cognitive-memory-scope]], so this is a straightforward content fix.
+
+Guidance:
+- Treat this bucket as the only currently routable content-repair slice from the 136-link backlog.
+- Keep the repair pass narrow: current reference/research notes only, with existing canonical permalinks.
+
+#### 2. Historical title/shorthand alias debt in legacy ADR/reference notes — **narrow cleanup candidate, not urgent patrol debt**
+The dominant remaining backlog is older historical content using title-style or shorthand wikilinks instead of canonical permalinks.
 
 Representative examples:
-- `reference/repo-maps/00d81c76211b`
-- `reference/repo-maps/4d941c575f21`
-- `reference/repo-maps/7cf9c6ef3254`
-- `reference/repo-maps/f62baaa142c8`
-
-Why this bucket is tolerated:
-- titles are hash-addressed `Repository Map <id>` snapshots rather than navigational docs
-- the notes are generated/cache-like reference artifacts
-- the backlog would remain dominated by these snapshots even if a few knowledge-note orphans were cleaned up
-
-**Patrol rule:** treat repo-map orphan volume as background inventory unless a canonical index/navigator note starts claiming these snapshots should be explicitly linked.
-
-#### 2. Historical retrieval-oriented knowledge inventory — **usually tolerated, sample only when current work needs it**
-
-**Dominant non-generated bucket:** `cases/*`
-
-Representative examples from the current orphan list:
-- `cases/broken-link-backlog-shifted-from-roadmap-artifact-to-legacy-shorthand-adr-title-aliases`
-- `cases/canonical-current-note-wikilinks-should-be-normalized-narrowly-without-expanding-backlog-cleanup`
-- `cases/embedding-runtime-seam-added-for-semantic-memory`
-- `cases/stale-memory-index-can-contradict-repaired-canonical-singleton-notes`
+- `[[Roadmap]]` / `[[roadmap]]` across older ADRs and reference notes
+- old ADR-title links such as `[[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]`
+- other old ADR-title or shorthand references such as `[[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]`, `[[ADR-003: Split Epic and Task MCP Tools with Input Validation]]`, and `[[ADR-010: Session Cost Tracking — Per-Task Token Metrics]]`
 
 Classification:
-- these are mostly session-derived learnings retrievable by search/context-building rather than by manual backlink navigation
-- many are useful as point references for an active task or epic, but mass-linking the whole folder would be low-value cleanup
+- This is **historical alias debt**, not evidence that current canonical notes are broadly broken.
+- Future follow-up should stay narrowly scoped to legacy ADR/reference notes and replace only confidently known aliases with existing canonical permalinks.
+- Do **not** reopen broad singleton cleanup or mass note normalization just because this bucket dominates the count.
 
-**Patrol rule:** do not treat `cases/*` orphan count as undifferentiated debt. Only escalate when a specific case becomes canonical guidance for active work and still lacks the one or two backlinks that would make it discoverable from that canonical note.
+#### 3. Probable indexing/parser normalization noise — **do not route as content cleanup unless reconfirmed by direct read**
+A small residual slice still looks like tooling/index behavior rather than meaningful documentation defects:
 
-#### 3. Actionable orphan slice — **small, scoped knowledge cleanup candidates**
+- recent case notes that mention literal wikilink examples in quoted prose can still appear in `memory_broken_links()` even when the note is documenting an earlier cleanup, not intending to create a live navigation edge
+- generated inventory like `catalog` still contains title-style links such as `[[Roadmap]]` and older ADR titles; because this file is generated, patrols should not treat those hits as manual cleanup debt unless catalog generation itself becomes a separate tooling task
+- `[[wikilinks]]` in [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]] looks like a parser/index false positive around prose terminology rather than a missing note that patrol should prioritize
 
-This pass found a narrow set worth routing into future cleanup work because the notes read like canonical planning/reference artifacts rather than disposable history.
+Guidance:
+- Patrols should verify these findings by direct read before opening cleanup work.
+- If the note is quoting literal `[[...]]` text or the source is generated inventory, classify it as tolerated parser/index noise unless there is clear navigational intent.
 
-**Requirement-roadmap notes (4 current orphans):**
-- `requirements/delete-stale-canonical-graph-shims-from-mcp-bridge-rs-roadmap`
-- `requirements/remove-verified-dead-code-across-agent-repo-map-repo-graph-roadmap`
-- `requirements/split-oversized-production-hubs-agent-mcp-bridge-roadmap`
-- `requirements/split-oversized-test-files-by-scenario-module-roadmap`
+### Updated patrol rule for residual broken-link backlog
 
-Why actionable:
-- these are roadmap-shaped planning notes in `requirements/*`, not generated artifacts
-- they likely want either an inbound link from a canonical triage/roadmap note, or a deprecation/archive decision if the wave is complete and the note is no longer meant to be navigated
+When `memory_health().broken_link_count` stays high after cleanup waves:
 
-**Research notes (6 current orphans):**
-- `research/rust-compilation-and-tooling-optimization-strategy`
-- `research/embedded-database-survey-2026`
-- `research/rust-agentic-ecosystem-2026`
-- `research/goose-library-integration-research-phase-5`
-- `research/djinn-mcp-extraction-wip`
-- `research/djinn-mcp-wiring-wip`
+1. Check whether the detail list is still dominated by `Roadmap` and old ADR-title aliases in legacy `decisions/*` and `reference/*` notes.
+2. Route only the small slice of **current canonical notes with confidently known targets**.
+3. Treat legacy ADR-title/title-case alias debt as a **separate narrow historical cleanup stream**, not as a signal that canonical docs are regressing.
+4. Treat generated catalog hits and literal-example `[[...]]` prose in case notes as **probable parser/index noise** unless a direct read shows intended live links.
 
-Why mixed/actionable:
-- the first four look like durable reference research that may deserve linkage from canonical requirements/design/ADR notes when still active
-- the two `djinn-mcp-*wip` notes look more archival and may instead deserve explicit deprecation/archive handling rather than new backlinks
+### Routed next action (2026-04-13)
 
-### Narrow next actions
-
-Do **not** open broad orphan-backlog cleanup. If future patrols want concrete follow-up, keep it to one of these small slices:
-
-1. **Requirement-roadmap orphan pass (preferred first follow-up):** decide for the 4 orphaned `requirements/*roadmap` notes whether each should gain one canonical inbound link or be explicitly retired/deprecated.
-2. **Research-note curation pass (optional, max 4–6 notes):** classify durable research references vs archival WIP notes, then either add one canonical backlink or mark them archival.
-3. **Case-note linking only by demand:** when an active epic repeatedly cites a specific orphaned case, add the targeted backlink then; do not mass-link `cases/*`.
-
-### Updated patrol guidance
-
-When `memory_health().orphan_note_count` looks alarming:
-
-- first subtract the confirmed tolerated repo-map slice (**62 currently**) mentally
-- then assume `cases/*` is mostly retrieval-oriented historical inventory unless a specific active canonical doc depends on one of those notes
-- route cleanup attention to small canonical-ish slices (`requirements/*roadmap`, durable `research/*`, current design/reference docs) instead of the raw gross orphan total
-
-This refresh keeps the earlier policy unchanged: **documented interpretation beats tooling suppression**, and the actionable orphan debt should be handled as small targeted follow-ups rather than a project-wide relinking campaign.
+Create a narrow follow-up task to repair the small remaining canonical-note slice in [[reference/cognitive-memory-scope]] and `research/rust-compilation-and-tooling-optimization-strategy`, without reopening the larger historical ADR-title alias backlog.
