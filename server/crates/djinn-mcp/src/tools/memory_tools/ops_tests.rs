@@ -340,6 +340,7 @@ mod tests {
             "test-user".into(),
             Some(Arc::new(StubCoordinatorOps)),
             Some(Arc::new(StubSlotPoolOps)),
+            None,
             Arc::new(StubLspOps),
             Arc::new(StubSyncOps),
             Arc::new(SemanticRuntimeOps {
