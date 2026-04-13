@@ -4,6 +4,8 @@ type: adr
 tags: ["adr","dolt","database","branching","migration","qdrant","knowledge-management"]
 ---
 
+
+
 # ADR-055 Proposal: Dolt Migration and Per-Task Knowledge Branching
 
 ## Status
@@ -294,15 +296,10 @@ DoltLite (announced 2026-03-25) is a SQLite fork with Prolly Trees and Dolt-styl
 - Configure Dolt GC thresholds
 - Monitor commit graph growth
 
-### Phase 5 — History features
-- Knowledge blame in memory tools
-- Time-travel queries in `memory_build_context`
-- Knowledge diff in Planner patrol context
-- Rollback capability in MCP tools
-
 ## Relations
 
 - [[ADR-054 Proposal: Memory Extraction Quality Gates and Note Taxonomy]]
 - [[ADR-053: Semantic Memory Search — Candle Embeddings with sqlite-vec]]
 - [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
 - [[ADR-056 Proposal: Planner-Driven Codebase Learning and Memory Hygiene]]
+- [[reference/adr-055-sqlite-seam-inventory-for-dolt-migration]] — concrete SQLite/Dolt/Qdrant seam inventory for Wave 1 migration tasks
