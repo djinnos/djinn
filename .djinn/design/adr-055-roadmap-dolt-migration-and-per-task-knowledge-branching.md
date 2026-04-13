@@ -20,6 +20,7 @@ Implement [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-bra
 - `y70d` — refactor database bootstrap for selectable SQLite vs Dolt/MySQL backends
 - `keit` — prototype Dolt/MySQL FULLTEXT notes search to replace FTS5
 - `4hkv` — design task-branch knowledge promotion flow for ADR-055
+  - output: [[design/adr-055-task-branch-knowledge-promotion-flow]]
 
 ### What Wave 1 must answer
 1. Where SQLite-specific assumptions currently live (`database.rs`, note search, embeddings, migration/bootstrap, worktree note sync).
