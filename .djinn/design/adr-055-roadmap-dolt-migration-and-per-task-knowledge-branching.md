@@ -6,57 +6,48 @@ tags: ["adr-055","roadmap","dolt","qdrant","knowledge-branching"]
 
 # ADR-055 Roadmap — Dolt Migration and Per-Task Knowledge Branching
 
-## Goal
-Migrate Djinn from SQLite + sqlite-vec to Dolt + Qdrant, then use Dolt branches to isolate per-task knowledge and selectively promote reviewed notes into canonical `main`.
+## Status
+Epic remains open. Wave 1 backend-seam work is active and not yet complete, so the epic is not ready for closure.
 
-## Current State
-The codebase is still SQLite-first:
-- `server/crates/djinn-db/src/database.rs` opens `SqlitePool`, applies SQLite pragmas, and initializes `sqlite-vec`.
-- `server/crates/djinn-db/schema.sql` defines `notes_fts` as an FTS5 virtual table plus sync triggers.
-- `server/crates/djinn-db/src/repositories/note/search.rs` hardcodes FTS5/BM25 queries.
-- `server/crates/djinn-db/src/repositories/note/embeddings.rs` stores vectors in SQLite tables plus `note_embeddings_vec`.
-- `server/crates/djinn-db/src/repositories/note/crud.rs` already has a useful precursor seam: worktree-scoped note files can be synced into canonical storage, which is conceptually adjacent to future task-branch promotion.
+## Architectural goal
+Implement [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]] by replacing SQLite-specific note storage/search seams with Dolt + MySQL-compatible relational storage, Qdrant-backed vector retrieval, and a per-task knowledge-branch lifecycle that isolates speculative extraction until promotion.
 
-No Dolt, MySQL, or Qdrant implementation seams are present yet.
+## Current wave (Wave 1) — foundation and uncertainty reduction
 
-## Planning Decision
-The epic is **not complete**. This wave should establish the first migration seams rather than attempt end-to-end cutover in one step.
+### In flight / planned
+- `mved` — catalog SQLite-specific migration seams for Dolt/MySQL + Qdrant
+- `6iiz` — introduce vector-store abstraction and Qdrant scaffold for note embeddings
+- `y70d` — refactor database bootstrap for selectable SQLite vs Dolt/MySQL backends
+- `keit` — prototype Dolt/MySQL FULLTEXT notes search to replace FTS5
+- `4hkv` — design task-branch knowledge promotion flow for ADR-055
 
-## Delivery Strategy
+### What Wave 1 must answer
+1. Where SQLite-specific assumptions currently live (`database.rs`, note search, embeddings, migration/bootstrap, worktree note sync).
+2. What backend seams are required so SQLite remains functional while Dolt/Qdrant scaffolding lands.
+3. How task dispatch, session extraction, branch-scoped note IO, promotion review, and cleanup should interact under Dolt task branches.
 
-### Wave 1 — Prepare backend seams and independent sidecar work
-1. Extract/document the SQLite-specific database/search/vector surfaces that must become backend-aware.
-2. Introduce a vector-store abstraction and land a Qdrant-backed implementation behind config while preserving current behavior.
-3. Add Dolt/MySQL runtime bootstrap and health-management scaffolding without cutting over the default backend.
-4. Prototype/port notes schema and lexical search to a MySQL-compatible path, including FULLTEXT-backed retrieval semantics.
-5. Define the task-branch knowledge lifecycle contract so dispatch, extraction, merge, and cleanup hooks can be wired in a later wave without re-planning the data model.
+### Concrete code seams confirmed during planning
+- `server/crates/djinn-db/src/database.rs` is tightly coupled to SQLite pool types, pragma setup, and sqlite-vec initialization.
+- `server/crates/djinn-db/src/repositories/note/search.rs` depends on FTS5 tables and BM25-specific SQL query shape.
+- `server/crates/djinn-db/src/repositories/note/embeddings.rs` assumes sqlite-vec availability and local embedding persistence semantics.
+- `server/crates/djinn-db/src/repositories/note/crud.rs` already contains worktree `.djinn/` note parsing and file-backed note sync behavior that must be reconciled with branch-aware canonical storage.
+- `server/crates/djinn-agent/src/actors/coordinator/dispatch.rs`, `server/crates/djinn-agent/src/actors/slot/session_extraction.rs`, and `server/crates/djinn-agent/src/actors/slot/llm_extraction.rs` are the key lifecycle seams for branch creation, branch-scoped extraction writes, and cleanup/promotion triggers.
 
-### Wave 2 — Dual-path backend implementation
-- Port schema/migrations for operational tables.
-- Add repository support for MySQL/Dolt note/task/session storage.
-- Wire Qdrant into semantic retrieval and backfill flows.
-- Validate search/retrieval parity against current SQLite behavior.
+## Next wave (Wave 2) — implementation after Wave 1 lands
+Wave 2 should not start until the seam inventory, backend bootstrap seam, lexical-search prototype, vector-store seam, and branch-flow contract exist. The tasks below are pre-created and blocked on Wave 1 outputs so they are ready once the foundation is merged.
 
-### Wave 3 — Per-task knowledge branching
-- Create Dolt branches at dispatch time.
-- Bind task/session knowledge writes to the task branch.
-- Implement diff, quality-gated promotion, and branch cleanup.
-- Add branch-aware Qdrant payload filtering.
+### Wave 2 tasks
+1. MySQL/Dolt schema and migration port for note/task storage.
+2. Branch-aware session database routing plus task-branch lifecycle hooks.
+3. Promotion-review execution flow that diffs task branches, applies quality gates, and cleans up branch/Qdrant residue.
+4. Branch-aware embedding sync and retrieval filtering across `main` + task branches.
 
-### Wave 4 — Operational lifecycle and history features
-- Compaction/flatten maintenance flows.
-- History/diff/blame tooling surfaces.
-- Rollback/admin support and monitoring.
-
-## Wave 1 Task Shape
-This wave intentionally favors seam extraction and backend scaffolding over full cutover. The main risk is mixing backend abstraction, schema migration, and branching semantics into one oversized task. Tasks should stay narrowly scoped and use blockers where they touch the same repositories.
-
-## Open Risks
-- MySQL FULLTEXT quality may not match current FTS5 scoring closely enough without additional tuning.
-- Dolt SQL procedure semantics may require transactional patterns different from current `sqlx` repository assumptions.
-- Branch-aware semantic retrieval needs payload/filter design in Qdrant before cutover.
+## Closure check
+Do not close this epic until:
+- Wave 1 tasks are reviewed and merged.
+- Wave 2 migration tasks are complete.
+- The codebase has an end-to-end task-branch knowledge flow, not just scaffolding.
 
 ## Relations
 - [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]
-- [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
-- [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
+- [[reference/adr-055-sqlite-seam-inventory-for-dolt-migration]]
