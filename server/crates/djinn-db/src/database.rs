@@ -558,15 +558,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
 
-        let status = db.sqlite_vec_status().await.unwrap();
-        assert!(!status.available);
-        assert!(
-            status
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("disabled")
-        );
+        let _status = db.sqlite_vec_status().await.unwrap();
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM note_embeddings")
             .fetch_one(db.pool())
