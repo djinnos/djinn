@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
+use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
 use crate::semantic_memory::{EmbeddingService, default_embedding_cache_dir};
 use crate::sync::SyncManager;
@@ -36,6 +37,7 @@ pub struct AppState {
 
 struct Inner {
     pub db: Database,
+    pub db_runtime: DatabaseRuntimeManager,
     pub cancel: CancellationToken,
     pub events: broadcast::Sender<DjinnEventEnvelope>,
     pub git_actors: Arc<Mutex<HashMap<PathBuf, GitActorHandle>>>,
@@ -90,10 +92,26 @@ struct Inner {
 
 impl AppState {
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
-        Self::new_inner(db, cancel)
+        let runtime =
+            DatabaseRuntimeManager::new(crate::db::runtime::DatabaseRuntimeConfig::sqlite(
+                db.bootstrap_info().target.clone().into(),
+            ));
+        Self::new_with_runtime(db, runtime, cancel)
     }
 
-    fn new_inner(db: Database, cancel: CancellationToken) -> Self {
+    pub fn new_with_runtime(
+        db: Database,
+        db_runtime: DatabaseRuntimeManager,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self::new_inner(db, db_runtime, cancel)
+    }
+
+    fn new_inner(
+        db: Database,
+        db_runtime: DatabaseRuntimeManager,
+        cancel: CancellationToken,
+    ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let sync = SyncManager::new(db.clone(), events.clone());
         let sync_user_id = resolve_sync_user_id();
@@ -101,6 +119,7 @@ impl AppState {
         Self {
             inner: Arc::new(Inner {
                 db,
+                db_runtime,
                 cancel,
                 events,
                 git_actors: Arc::new(Mutex::new(HashMap::new())),
@@ -188,6 +207,14 @@ impl AppState {
 
     pub fn db(&self) -> &Database {
         &self.inner.db
+    }
+
+    pub fn db_runtime(&self) -> &DatabaseRuntimeManager {
+        &self.inner.db_runtime
+    }
+
+    pub fn database_health(&self) -> DatabaseRuntimeHealth {
+        self.inner.db_runtime.health_snapshot(self.db())
     }
 
     pub fn cancel(&self) -> &CancellationToken {
