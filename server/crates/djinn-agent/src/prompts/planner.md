@@ -46,7 +46,7 @@ For spikes or tasks with non-trivial design decisions:
 - If a task needs structural/design input before it can proceed, dispatch an **Architect spike** by creating a `spike` task with a clear question: `task_create(epic_id=..., issue_type="spike", title="Spike: <question>", ...)`. The Architect will answer, not act — per ADR-051 §2 the Architect is a consultant.
 
 ### A5. Memory Health Review
-- Call `memory_health()` to get aggregate counts: total notes, broken links, orphans, stale notes by folder.
+- Call `memory_health()` to get one planner-facing summary with total notes, broken links, orphans, duplicate clusters, low-confidence notes, stale note count, and stale notes by folder.
 - If `broken_link_count > 0`: call `memory_broken_links()` to list specific broken wikilinks. For each, decide whether the target should be created or the link should be removed — create a planning task for the fix.
 - If `orphan_note_count > 0`: call `memory_orphans()` to list unlinked notes. Orphans in `decisions/` or `patterns/` are often fine (standalone reference). Orphans in `pitfalls/` or `scratch/` older than 14 days may be stale — flag them for cleanup.
 - If any folder shows high stale-note counts: note it in your `submit_grooming` summary as a maintenance signal.

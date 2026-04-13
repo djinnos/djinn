@@ -176,6 +176,9 @@ pub struct HealthReport {
     pub total_notes: i64,
     pub broken_link_count: i64,
     pub orphan_note_count: i64,
+    pub duplicate_cluster_count: i64,
+    pub low_confidence_note_count: i64,
+    pub stale_note_count: i64,
     pub stale_notes_by_folder: Vec<StaleFolder>,
 }
 
