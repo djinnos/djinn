@@ -11,12 +11,12 @@ tags: ["semantic-search","memory","candle","sqlite-vec","roadmap"]
 Implement semantic memory search for Djinn by adding in-process embedding inference via candle and vector storage/search via sqlite-vec, while preserving the existing cognitive-memory behavior and graceful fallback to today's FTS-driven retrieval.
 
 ## Current State
-- Epic `h1yj` is still in progress; it is **not** ready for closure yet.
-- Wave 1 foundation work is complete: DB/vector storage + sqlite-vec initialization (`3tvp`) and the candle embedding runtime/degradation seam (`sljn`) are closed.
-- Wave 2 integration work is in verification: embedding lifecycle/reindex sync (`z6yv`) and semantic retrieval merge (`tn0f`) have both submitted work and reported focused server test passes on their task branches.
-- Wave 3 hardening remains the last clear epic gate: verification coverage task `l8q4` is still open and should consolidate migration/init, lifecycle, merged-search, and FTS-only fallback assertions after the two integration branches land.
-- An unrelated planner-maintenance PR draft (`e0r1`) is still attached to this epic, so epic closure should wait for board cleanup in addition to semantic-memory verification completion.
-- The acceptance gate remains unchanged: close only after the integration branches land, semantic + fallback behavior is verified, and the remaining board noise is resolved.
+- Epic `h1yj` is not complete yet.
+- The current memory search path is still FTS-only plus existing RRF fusion signals in `server/crates/djinn-db/src/repositories/note/search.rs`.
+- MCP `memory_search` still advertises and dispatches an FTS/BM25-only contract in `server/crates/djinn-mcp/src/tools/memory_tools/search.rs` and `server/crates/djinn-mcp/src/tools/memory_tools/ops.rs`.
+- The note schema currently has `notes` + `notes_fts` but no vector table or embedding metadata in `server/crates/djinn-db/schema.sql`.
+- Note writes and reindexing currently update only the lexical index in `server/crates/djinn-db/src/repositories/note/crud.rs` and `server/crates/djinn-db/src/repositories/note/indexing.rs`.
+- DB initialization/migrations currently use embedded refinery migrations and WAL pragmas in `server/crates/djinn-db/src/database.rs` and `server/crates/djinn-db/src/migrations.rs`.
 
 ## Wave Plan
 
@@ -65,3 +65,10 @@ This roadmap note was re-written through `memory_write` after patrol found artif
 ## Relations
 - [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
 - [[brief]]
+
+
+
+## Completion Update (2026-04-13)
+- All implementation and cleanup tasks under epic `h1yj` are now closed, including semantic vector storage, candle embedding runtime, write/reindex integration, blended retrieval, verification coverage, and the follow-on roadmap/broken-link/orphan-note maintenance needed to keep the semantic-memory knowledge surfaces usable.
+- The epic acceptance gate is satisfied: semantic retrieval is implemented, fallback behavior was verified, and no additional follow-up wave is identified in the roadmap or recent task history.
+- Epic `h1yj` should be treated as complete and closed.
