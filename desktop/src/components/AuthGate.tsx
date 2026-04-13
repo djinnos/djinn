@@ -30,7 +30,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
           return fetchState();
         }
 
-        useAuthStore.setState({ isLoading: false, isAuthenticated: false });
+        const { isAuthenticated: alreadyAuthenticated } = useAuthStore.getState();
+        if (!alreadyAuthenticated) {
+          useAuthStore.setState({ isLoading: false, isAuthenticated: false });
+        }
         return undefined;
       })
       .catch(() => {

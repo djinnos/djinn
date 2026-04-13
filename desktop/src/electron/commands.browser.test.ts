@@ -5,7 +5,11 @@ describe("electron commands browser runtime", () => {
     vi.resetModules();
     vi.unstubAllGlobals();
     window.localStorage.clear();
-    Reflect.deleteProperty(window, "electronAPI");
+    Object.defineProperty(window, "electronAPI", {
+      value: undefined,
+      writable: true,
+      configurable: true,
+    });
   });
 
   afterEach(() => {

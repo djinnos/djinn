@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest"
+import { vi } from "vitest"
 
 // jsdom doesn't provide Web Streams API — polyfill so eventsource-parser (and anything
 // else using TransformStream/ReadableStream/WritableStream) can load without crashing.
@@ -38,6 +39,7 @@ Object.defineProperty(window, 'electronAPI', {
     })),
   },
   writable: true,
+  configurable: true,
 });
 
 // Test utility: emit events to registered listeners
