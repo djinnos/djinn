@@ -12,11 +12,13 @@
 
 import { useEffect, useRef } from "react";
 import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
-import { getServerPort, retryServerConnection } from "@/electron/commands";
+import { getServerUrl, retryServerConnection } from "@/electron/commands";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { projectStore, ALL_PROJECTS } from "@/stores/projectStore";
+import type { ProjectState } from "@/stores/projectStore";
+import type { Project } from "@/api/types";
 import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
@@ -78,7 +80,7 @@ export function useEventSource(projectId?: string | null) {
     const hydrateSnapshot = async (projectPath: string | null) => {
       try {
         const allPaths = isAll
-          ? projectStore.getState().projects.map((p) => p.path).filter(Boolean) as string[]
+          ? projectStore.getState().projects.map((p: Project) => p.path).filter(Boolean) as string[]
           : undefined;
         const snapshot = await fetchKanbanSnapshot(projectPath, allPaths);
         if (!isActive) return;
@@ -98,11 +100,11 @@ export function useEventSource(projectId?: string | null) {
     // this effect.
     let unsubProjectPath: (() => void) | undefined;
     if (!selectedProjectPath && projectId) {
-      unsubProjectPath = projectStore.subscribe((state) => {
+      unsubProjectPath = projectStore.subscribe((state: ProjectState) => {
         if (!isActive) return;
         if (isAll) {
           // ALL_PROJECTS mode: wait for projects to load, then hydrate all
-          const paths = state.projects.map((p) => p.path).filter(Boolean) as string[];
+          const paths = state.projects.map((p: Project) => p.path).filter(Boolean) as string[];
           if (paths.length > 0) {
             unsubProjectPath?.();
             unsubProjectPath = undefined;
@@ -123,10 +125,10 @@ export function useEventSource(projectId?: string | null) {
       try {
         await hydrateSnapshot(selectedProjectPath);
 
-        const port = await getServerPort();
+        const baseUrl = await getServerUrl();
         
         // Build URL with Last-Event-ID if available
-        let url = `http://127.0.0.1:${port}/events`;
+        let url = `${baseUrl}/events`;
         if (projectId && !isAll) {
           url += `?project_id=${encodeURIComponent(projectId)}`;
         }

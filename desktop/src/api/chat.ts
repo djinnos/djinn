@@ -1,9 +1,8 @@
-import { getServerPort } from "@/electron/commands";
+import { getServerUrl } from "@/electron/commands";
 import type { ChatMessage } from "@/stores/chatStore";
 
 async function getBaseUrl(): Promise<string> {
-  const port = await getServerPort();
-  return `http://127.0.0.1:${port}`;
+  return getServerUrl();
 }
 
 type ContentBlock =

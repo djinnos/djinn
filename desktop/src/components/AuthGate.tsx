@@ -24,10 +24,22 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
     // Attempt silent auth now that the server is connected.
     // This replaces the backend-driven approach that was removed from lib.rs.
-    attemptSilentAuth().catch(() => {
-      // If silent auth fails, fall through to show login screen
-      useAuthStore.setState({ isLoading: false, isAuthenticated: false });
-    });
+    attemptSilentAuth()
+      .then((authenticated) => {
+        if (authenticated) {
+          return fetchState();
+        }
+
+        const { isAuthenticated: alreadyAuthenticated } = useAuthStore.getState();
+        if (!alreadyAuthenticated) {
+          useAuthStore.setState({ isLoading: false, isAuthenticated: false });
+        }
+        return undefined;
+      })
+      .catch(() => {
+        // If silent auth fails, fall through to show login screen
+        useAuthStore.setState({ isLoading: false, isAuthenticated: false });
+      });
 
     listen<{ isAuthenticated: boolean; user: AuthUser | null }>("auth:state-changed", (event) => {
       const state = event.payload;
