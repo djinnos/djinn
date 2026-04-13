@@ -24,6 +24,8 @@ mod tests {
         embedding: Vec<f32>,
     }
 
+    struct FailingSemanticRuntimeOps;
+
     #[async_trait::async_trait]
     impl RuntimeOps for SemanticRuntimeOps {
         async fn apply_settings(
@@ -40,6 +42,27 @@ mod tests {
             Ok(Some(SemanticQueryEmbedding {
                 values: self.embedding.clone(),
             }))
+        }
+
+        async fn reset_runtime_settings(&self) {}
+        async fn persist_model_health_state(&self) {}
+        async fn purge_worktrees(&self) {}
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeOps for FailingSemanticRuntimeOps {
+        async fn apply_settings(
+            &self,
+            _: &djinn_core::models::DjinnSettings,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn embed_memory_query(
+            &self,
+            _: &str,
+        ) -> Result<Option<SemanticQueryEmbedding>, String> {
+            Err("embedding model unavailable".to_string())
         }
 
         async fn reset_runtime_settings(&self) {}
@@ -378,12 +401,68 @@ mod tests {
 
         if semantic_candidates.iter().any(|(id, _)| id == &semantic.id) {
             assert!(ids.contains(&semantic.id.as_str()));
+            assert_eq!(
+                ids.iter().filter(|&&id| id == semantic.id.as_str()).count(),
+                1,
+                "merged semantic+lexical results should be deduplicated"
+            );
         } else {
             assert!(
                 !ids.contains(&semantic.id.as_str()),
                 "semantic-only match should be absent when semantic candidate retrieval returns no match"
             );
         }
+
+        assert_eq!(
+            ids.iter().filter(|&&id| id == lexical.id.as_str()).count(),
+            1,
+            "lexical matches should also remain deduplicated"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_ops_falls_back_to_fts_when_query_embedding_fails() {
+        let setup = setup_server().await;
+        let failing_server = DjinnMcpServer::new(McpState::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+            djinn_provider::catalog::CatalogService::new(),
+            djinn_provider::catalog::HealthTracker::new(),
+            "test-user".into(),
+            Some(Arc::new(StubCoordinatorOps)),
+            Some(Arc::new(StubSlotPoolOps)),
+            None,
+            Arc::new(StubLspOps),
+            Arc::new(StubSyncOps),
+            Arc::new(FailingSemanticRuntimeOps),
+            Arc::new(StubGitOps),
+            Arc::new(StubRepoGraphOps),
+        ));
+
+        let response = ops::memory_search(
+            &failing_server,
+            SearchParams {
+                project: setup.project,
+                query: "architecture".to_string(),
+                folder: None,
+                note_type: None,
+                limit: Some(10),
+            },
+            None,
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(
+            !response.results.is_empty(),
+            "fts fallback should still return lexical matches"
+        );
+        assert!(
+            response
+                .results
+                .iter()
+                .any(|result| result.title == "Seed Note" || result.title == "Related Note")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
