@@ -5,7 +5,7 @@
  * Node.js module function that registers all IPC handlers.
  */
 
-import { ipcMain, dialog, shell, BrowserWindow } from "electron";
+import { ipcMain, dialog, shell, BrowserWindow, type IpcMainInvokeEvent } from "electron";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -173,7 +173,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     return tokenRefresh.getValidAccessToken();
   });
 
-  ipcMain.handle("set_auth_token", async (_e, args: { token: string }) => {
+  ipcMain.handle("set_auth_token", async (_e: IpcMainInvokeEvent, args: { token: string }) => {
     // Legacy — store directly in session
     const session = auth.getAuthSession();
     if (session) {
@@ -199,7 +199,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
   });
 
-  ipcMain.handle("set_refresh_token", async (_e, args: { token: string }) => {
+  ipcMain.handle("set_refresh_token", async (_e: IpcMainInvokeEvent, args: { token: string }) => {
     const raw = await auth.retrieveToken();
     const stored = raw ? JSON.parse(raw) : {};
     stored.refresh_token = args.token;
@@ -241,7 +241,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
   // ── Server ───────────────────────────────────────────────────────────
 
-  ipcMain.handle("greet", async (_e, args: { name: string }) => {
+  ipcMain.handle("greet", async (_e: IpcMainInvokeEvent, args: { name: string }) => {
     return `Hello, ${args.name}! You've been greeted from Electron!`;
   });
 
@@ -267,7 +267,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     return connectionMode.load();
   });
 
-  ipcMain.handle("set_connection_mode", async (_e, args: { mode: connectionMode.ConnectionMode }) => {
+  ipcMain.handle("set_connection_mode", async (_e: IpcMainInvokeEvent, args: { mode: connectionMode.ConnectionMode }) => {
     connectionMode.save(args.mode);
   });
 
@@ -285,15 +285,15 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     return ssh.loadHosts();
   });
 
-  ipcMain.handle("save_ssh_host", async (_e, args: { host: ssh.SshHost }) => {
+  ipcMain.handle("save_ssh_host", async (_e: IpcMainInvokeEvent, args: { host: ssh.SshHost }) => {
     ssh.addHost(args.host);
   });
 
-  ipcMain.handle("remove_ssh_host", async (_e, args: { id: string }) => {
+  ipcMain.handle("remove_ssh_host", async (_e: IpcMainInvokeEvent, args: { id: string }) => {
     ssh.removeHost(args.id);
   });
 
-  ipcMain.handle("test_ssh_connection", async (_e, args: { hostId: string }) => {
+  ipcMain.handle("test_ssh_connection", async (_e: IpcMainInvokeEvent, args: { hostId: string }) => {
     const host = ssh.findHost(args.hostId);
     if (!host) throw new Error(`SSH host not found: ${args.hostId}`);
     return ssh.testConnection(host);
@@ -310,7 +310,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     return { status: "disconnected" };
   });
 
-  ipcMain.handle("deploy_server_to_host", async (_e, args: { hostId: string }) => {
+  ipcMain.handle("deploy_server_to_host", async (_e: IpcMainInvokeEvent, args: { hostId: string }) => {
     const host = ssh.findHost(args.hostId);
     if (!host) throw new Error(`SSH host not found: ${args.hostId}`);
     const result = await deploy.deployToHost(host);
@@ -329,7 +329,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
   // ── Git ──────────────────────────────────────────────────────────────
 
-  ipcMain.handle("check_git_remote", async (_e, args: { projectPath: string }) => {
+  ipcMain.handle("check_git_remote", async (_e: IpcMainInvokeEvent, args: { projectPath: string }) => {
     try {
       const url = execSync("git remote get-url origin", {
         cwd: args.projectPath,
@@ -342,7 +342,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
   });
 
-  ipcMain.handle("list_git_branches", async (_e, args: { projectPath: string }) => {
+  ipcMain.handle("list_git_branches", async (_e: IpcMainInvokeEvent, args: { projectPath: string }) => {
     try {
       const output = execSync("git branch --format=%(refname:short)", {
         cwd: args.projectPath,
@@ -355,7 +355,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
   });
 
-  ipcMain.handle("setup_git_remote", async (_e, args: { projectPath: string; remoteUrl: string }) => {
+  ipcMain.handle("setup_git_remote", async (_e: IpcMainInvokeEvent, args: { projectPath: string; remoteUrl: string }) => {
     execSync(`git remote add origin ${args.remoteUrl}`, {
       cwd: args.projectPath,
       encoding: "utf-8",
@@ -394,13 +394,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
   // ── Shell ────────────────────────────────────────────────────────────
 
-  ipcMain.handle("shell:open-external", async (_e, args: { url: string }) => {
+  ipcMain.handle("shell:open-external", async (_e: IpcMainInvokeEvent, args: { url: string }) => {
     await shell.openExternal(args.url);
   });
 
   // ── Dialogs ──────────────────────────────────────────────────────────
 
-  ipcMain.handle("select_directory", async (_e, args?: { title?: string }) => {
+  ipcMain.handle("select_directory", async (_e: IpcMainInvokeEvent, args?: { title?: string }) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ["openDirectory"],
       title: args?.title,
@@ -408,7 +408,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     return result.filePaths[0] ?? null;
   });
 
-  ipcMain.handle("select_file", async (_e, args?: { title?: string }) => {
+  ipcMain.handle("select_file", async (_e: IpcMainInvokeEvent, args?: { title?: string }) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ["openFile"],
       title: args?.title,
