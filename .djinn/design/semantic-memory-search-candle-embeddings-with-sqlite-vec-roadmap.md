@@ -4,11 +4,6 @@ type: design
 tags: ["semantic-search","memory","candle","sqlite-vec","roadmap"]
 ---
 
----
-title: Semantic Memory Search — Candle Embeddings with sqlite-vec Roadmap
-type: design
-tags: ["semantic-search","memory","candle","sqlite-vec","roadmap"]
----
 
 # Semantic Memory Search — Candle Embeddings with sqlite-vec Roadmap
 
@@ -50,17 +45,11 @@ Implement semantic memory search for Djinn by adding in-process embedding infere
    - repository tests for vector upsert/query/delete and fallback behavior
    - end-to-end search/write tests proving FTS+semantic merge and graceful degradation
 
-## Active Wave Status
-- `3tvp` — DB/vector storage and initialization seam (in progress)
-- `sljn` — candle embedder runtime and degraded-service contract (in progress)
-- `z6yv` — note write/reindex embedding lifecycle integration (ready after both foundations)
-- `tn0f` — semantic query retrieval merged into `memory_search` (ready after both foundations)
-- `l8q4` — focused verification for init, lifecycle, retrieval, and fallback behavior (after integration tasks)
-
-## Dependency Shape
-- `3tvp` and `sljn` are the foundation tasks and can proceed in parallel.
-- `z6yv` and `tn0f` should wait on both foundation tasks because they consume both the DB/vector seam and the embedder contract.
-- `l8q4` should wait on `z6yv` and `tn0f` so verification targets the landed integration behavior instead of speculative seams.
+## Task Shape for This Wave
+This wave creates five tasks matching the implementation seams above. The dependency chain should be:
+- DB/vector foundation and embedder runtime can start first.
+- Write-path integration and retrieval integration depend on both foundations.
+- Hardening/tests depend on the integration tasks landing.
 
 ## Acceptance Gate for Epic Closure
 The epic can close only when all of the following are true:
@@ -70,8 +59,27 @@ The epic can close only when all of the following are true:
 - systems without a working model or sqlite-vec extension degrade cleanly to FTS-only
 - tests cover the new initialization, indexing, and retrieval behavior
 
-## Maintenance Note
-This roadmap note was re-written through `memory_write` after patrol found artifact drift: the markdown file already existed under `design/semantic-memory-search-candle-embeddings-with-sqlite-vec-roadmap`, but `memory_read` could not resolve it. The canonical permalink remains `design/semantic-memory-search-candle-embeddings-with-sqlite-vec-roadmap`; references should keep using this permalink rather than creating a duplicate note.
+
+## Current Wave Status (2026-04-13)
+- Foundation task `3tvp` is effectively complete and now sits in `approved` with its acceptance criteria marked met. It added the sqlite-vec schema/migration, DB initialization seam, repository API for note embeddings, and associated tests.
+- Foundation task `sljn` is still in progress. The branch already contains the candle embedding runtime/service seam and related snapshot updates, but it is still burning down branch-local verification fallout before it can merge cleanly.
+- Follow-on implementation tasks remain the right next wave and are already shaped/sequenced correctly:
+  - `z6yv` — embedding updates in note lifecycle + reindex flows
+  - `tn0f` — semantic retrieval merged into `memory_search`
+  - `l8q4` — verification coverage after implementation lands
+- `z6yv` and `tn0f` should stay blocked on both foundations. `l8q4` should stay blocked on both implementation tasks so coverage lands after the code paths stabilize.
+
+## Immediate Next-Wave Focus
+1. Land `sljn` without discarding the existing embedding-service implementation.
+2. Once both foundations are closed, dispatch `z6yv` to wire embedding maintenance into create/update/delete/reindex flows.
+3. Dispatch `tn0f` after or alongside `z6yv` once the shared seams are stable, keeping the public MCP contract unchanged and preserving FTS-only fallback.
+4. Dispatch `l8q4` last to consolidate migration/init, lifecycle, retrieval, and degraded-mode verification.
+
+## Closure Readiness Check
+The epic is **not** ready to close yet. Remaining closure gates from ADR-053 and this roadmap are still open:
+- note lifecycle paths do not yet persist/refresh embeddings end-to-end
+- `memory_search` has not yet merged semantic candidates with lexical candidates in the live pipeline
+- final hardening/verification for fallback behavior is still pending
 
 ## Relations
 - [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
