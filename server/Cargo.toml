@@ -72,6 +72,11 @@ petgraph = "0.8"
 scip = "0.7"
 globset = "0.4"
 tempfile = "3"
+candle-core = "0.10.2"
+candle-nn = "0.10.2"
+candle-transformers = "0.10.2"
+hf-hub = "0.5.0"
+tokenizers = "0.22.2"
 workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
