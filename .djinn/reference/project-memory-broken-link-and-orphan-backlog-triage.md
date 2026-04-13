@@ -127,49 +127,91 @@ This closes the earlier optional question in this note: the chosen policy is **d
 
 
 
-## Follow-up classification pass (2026-04-13)
+## Orphan classification refresh (2026-04-13)
 
-After the 2026-04-13 patrol and the follow-up routing task [[tbkc]], the backlog profile is clearer:
+Fresh evidence from the current pass:
 
-### Broken-link classes now visible
+- `memory_health()`: **765 orphans / 844 total notes**
+- `memory_orphans(folder="reference/repo-maps")`: **62** orphaned repo-map snapshots
+- `memory_orphans(folder="requirements")`: **4** orphaned requirement notes
+- `memory_orphans(folder="research")`: **6** orphaned research notes
+- `memory_orphans(folder="cases")`: still a very large historical/session-derived slice; detail output remains dominated by `cases/*`, but this pass intentionally sampled/classified rather than trying to relink that whole bucket
 
-1. **Active canonical/current-note defects — already routed to `tbkc`, do not duplicate here**
-   - `[[v1-requirements]]` from [[brief]]
-   - `[[Cognitive Memory Scope]]` from [[requirements/v1-requirements]]
-   These remain the only clearly current canonical note defects in the latest detail output, and they are already covered by active task `tbkc` (fix canonical note edit routing plus apply the intended relinks).
+### Refined buckets
 
-2. **Historical singleton-alias links on legacy notes — actionable narrow cleanup slice**
-   Repeated broken raw texts `Roadmap`, `Project Brief`, and `V1 Requirements` still dominate many remaining entries across historical `decisions/*`, plus smaller `reference/*` and `research/*` surfaces. These are existing canonical notes being referenced by legacy title/shorthand aliases rather than canonical permalinks (`[[roadmap]]`, `[[brief]]`, `[[requirements/v1-requirements]]`).
-   - Approximate folder concentration from local scan of note content: `decisions` dominates, with smaller `reference` and `research` tails.
-   - This is concrete cleanup work, but it should be handled as a **single narrow historical singleton-alias pass**, not mixed with the current-note routing bug.
+#### 1. Intentional / generated orphan-heavy inventory — **ignore for patrol escalation by default**
 
-3. **Historical ADR title/shorthand aliases — real but broader deferred backlog**
-   Repeated broken raw texts include long ADR titles and shorthand such as:
-   - `ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning`
-   - `ADR-009: Simplified Execution — No Phases, Direct Task Dispatch`
-   - short/variant forms like `ADR-006`, `ADR-014`, `ADR-019`, `ADR-022`
-   These are heavily concentrated in historical ADR-to-ADR references under `decisions/*`, with smaller pockets in `reference/*`, `research/*`, and a few `design/*` notes. They are legitimate legacy alias debt, but not an urgent canonical-note defect. Defer broad title/shorthand normalization until after the singleton-alias slice and current-note routing work are complete.
+**Confirmed bucket:** `reference/repo-maps/*` (**62 current orphans**)
 
-4. **Non-canonical planner/case-note noise — do not treat as emergency board-health defects**
-   A few new broken links come from recently written `cases/*` / `design/*` notes that intentionally captured historical titles in prose-linked form (for example `Project Brief`, `Roadmap`, or the task-title-style link `Route actionable project-memory cleanup after backlog triage`). These are lower-priority planner-memory hygiene issues, not current product-note defects.
+Representative examples:
+- `reference/repo-maps/00d81c76211b`
+- `reference/repo-maps/4d941c575f21`
+- `reference/repo-maps/7cf9c6ef3254`
+- `reference/repo-maps/f62baaa142c8`
 
-### Orphan classification refresh
+Why this bucket is tolerated:
+- titles are hash-addressed `Repository Map <id>` snapshots rather than navigational docs
+- the notes are generated/cache-like reference artifacts
+- the backlog would remain dominated by these snapshots even if a few knowledge-note orphans were cleaned up
 
-The orphan backlog is still dominated by intentionally orphan-heavy or retrieval-oriented folders rather than current documentation drift:
+**Patrol rule:** treat repo-map orphan volume as background inventory unless a canonical index/navigator note starts claiming these snapshots should be explicitly linked.
 
-- **`reference/repo-maps/*` — intentional inventory / false-positive-for-patrol-noise bucket.** These are hash-addressed repository map artifacts and are expected to be mostly unlinked.
-- **`cases/*` — intentional retrieval-oriented historical inventory.** Large orphan volume here should not trigger broad relinking work by itself.
-- **`patterns/*`, many `decisions/*`, and older `research/*` notes — mixed archival/reference inventory.** These may remain orphaned without being urgent defects unless an active epic starts depending on them as navigational docs.
-- **Current/canonical notes orphaned in `requirements/`, `design/`, or top-level reference surfaces — actionable only when they are live documentation for active work.** `requirements/v1-requirements` remains notable, but its current defect is already routed to `tbkc` rather than a separate orphan campaign.
+#### 2. Historical retrieval-oriented knowledge inventory — **usually tolerated, sample only when current work needs it**
 
-### Routing decision from this pass
+**Dominant non-generated bucket:** `cases/*`
 
-- **Create one narrow follow-up task** for historical singleton alias cleanup (`Roadmap` / `Project Brief` / `V1 Requirements`) on legacy ADR/reference/research notes.
-- **Do not create a mass backlog task** for all historical ADR title/shorthand aliases yet.
-- **Do not create orphan cleanup work** for `cases/*` or `reference/repo-maps/*`; treat them as tolerated inventory unless a future patrol finds a concrete canonical-note defect there.
+Representative examples from the current orphan list:
+- `cases/broken-link-backlog-shifted-from-roadmap-artifact-to-legacy-shorthand-adr-title-aliases`
+- `cases/canonical-current-note-wikilinks-should-be-normalized-narrowly-without-expanding-backlog-cleanup`
+- `cases/embedding-runtime-seam-added-for-semantic-memory`
+- `cases/stale-memory-index-can-contradict-repaired-canonical-singleton-notes`
 
-#### Outcome after the narrow singleton-alias cleanup pass
+Classification:
+- these are mostly session-derived learnings retrievable by search/context-building rather than by manual backlink navigation
+- many are useful as point references for an active task or epic, but mass-linking the whole folder would be low-value cleanup
 
-- **2026-04-13 singleton-alias cleanup outcome:** historical `decisions/*`, plus matching `reference/*` and `research/*` notes in the scoped slice, were normalized from backticked legacy aliases (`Roadmap`, `Project Brief`, `V1 Requirements`) to canonical permalinks `[[roadmap]]`, `[[brief]]`, and `[[requirements/v1-requirements]]` where those canonical notes already exist.
-- **Remaining broken-link follow-up after this pass:** treat only concrete renamed/missing-target exceptions such as `Autoresearch Reference`, `wikilinks`, `Djinn Namespace Git Sync`, and `Cognitive Memory Scope`.
-- **Do not reopen mass backlog triage:** broader historical ADR title/shorthand alias cleanup remains deferred, and tolerated orphan-heavy folders (`cases/*`, `reference/repo-maps/*`) still do not justify separate cleanup work by themselves.
+**Patrol rule:** do not treat `cases/*` orphan count as undifferentiated debt. Only escalate when a specific case becomes canonical guidance for active work and still lacks the one or two backlinks that would make it discoverable from that canonical note.
+
+#### 3. Actionable orphan slice — **small, scoped knowledge cleanup candidates**
+
+This pass found a narrow set worth routing into future cleanup work because the notes read like canonical planning/reference artifacts rather than disposable history.
+
+**Requirement-roadmap notes (4 current orphans):**
+- `requirements/delete-stale-canonical-graph-shims-from-mcp-bridge-rs-roadmap`
+- `requirements/remove-verified-dead-code-across-agent-repo-map-repo-graph-roadmap`
+- `requirements/split-oversized-production-hubs-agent-mcp-bridge-roadmap`
+- `requirements/split-oversized-test-files-by-scenario-module-roadmap`
+
+Why actionable:
+- these are roadmap-shaped planning notes in `requirements/*`, not generated artifacts
+- they likely want either an inbound link from a canonical triage/roadmap note, or a deprecation/archive decision if the wave is complete and the note is no longer meant to be navigated
+
+**Research notes (6 current orphans):**
+- `research/rust-compilation-and-tooling-optimization-strategy`
+- `research/embedded-database-survey-2026`
+- `research/rust-agentic-ecosystem-2026`
+- `research/goose-library-integration-research-phase-5`
+- `research/djinn-mcp-extraction-wip`
+- `research/djinn-mcp-wiring-wip`
+
+Why mixed/actionable:
+- the first four look like durable reference research that may deserve linkage from canonical requirements/design/ADR notes when still active
+- the two `djinn-mcp-*wip` notes look more archival and may instead deserve explicit deprecation/archive handling rather than new backlinks
+
+### Narrow next actions
+
+Do **not** open broad orphan-backlog cleanup. If future patrols want concrete follow-up, keep it to one of these small slices:
+
+1. **Requirement-roadmap orphan pass (preferred first follow-up):** decide for the 4 orphaned `requirements/*roadmap` notes whether each should gain one canonical inbound link or be explicitly retired/deprecated.
+2. **Research-note curation pass (optional, max 4–6 notes):** classify durable research references vs archival WIP notes, then either add one canonical backlink or mark them archival.
+3. **Case-note linking only by demand:** when an active epic repeatedly cites a specific orphaned case, add the targeted backlink then; do not mass-link `cases/*`.
+
+### Updated patrol guidance
+
+When `memory_health().orphan_note_count` looks alarming:
+
+- first subtract the confirmed tolerated repo-map slice (**62 currently**) mentally
+- then assume `cases/*` is mostly retrieval-oriented historical inventory unless a specific active canonical doc depends on one of those notes
+- route cleanup attention to small canonical-ish slices (`requirements/*roadmap`, durable `research/*`, current design/reference docs) instead of the raw gross orphan total
+
+This refresh keeps the earlier policy unchanged: **documented interpretation beats tooling suppression**, and the actionable orphan debt should be handled as small targeted follow-ups rather than a project-wide relinking campaign.
