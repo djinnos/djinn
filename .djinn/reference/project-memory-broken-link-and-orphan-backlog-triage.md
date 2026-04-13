@@ -138,15 +138,10 @@ After the 2026-04-13 patrol and the follow-up routing task [[tbkc]], the backlog
    - `[[Cognitive Memory Scope]]` from [[requirements/v1-requirements]]
    These remain the only clearly current canonical note defects in the latest detail output, and they are already covered by active task `tbkc` (fix canonical note edit routing plus apply the intended relinks).
 
-<<<<<<< HEAD
-#### 1. Singleton alias links (`[[roadmap]]`, `[[brief]]`) — **real legacy-content debt, defer broad fix / repair selectively**
-These remain one of the most common raw-text targets in the broken-link report. Canonical singleton notes do exist as `[[roadmap]]` and `[[brief]]`, so this bucket is not a missing-note defect. It is legacy note content still linking by display title rather than canonical permalink.
-=======
 2. **Historical singleton-alias links on legacy notes — actionable narrow cleanup slice**
    Repeated broken raw texts `Roadmap`, `Project Brief`, and `V1 Requirements` still dominate many remaining entries across historical `decisions/*`, plus smaller `reference/*` and `research/*` surfaces. These are existing canonical notes being referenced by legacy title/shorthand aliases rather than canonical permalinks (`[[roadmap]]`, `[[brief]]`, `[[requirements/v1-requirements]]`).
    - Approximate folder concentration from local scan of note content: `decisions` dominates, with smaller `reference` and `research` tails.
    - This is concrete cleanup work, but it should be handled as a **single narrow historical singleton-alias pass**, not mixed with the current-note routing bug.
->>>>>>> origin/main
 
 3. **Historical ADR title/shorthand aliases — real but broader deferred backlog**
    Repeated broken raw texts include long ADR titles and shorthand such as:
@@ -169,38 +164,12 @@ The orphan backlog is still dominated by intentionally orphan-heavy or retrieval
 
 ### Routing decision from this pass
 
-<<<<<<< HEAD
-Decision:
-- Treat this as a **small subset to verify during the focused cleanup pass**.
-- Do not open a separate tool/reporting defect unless the repair pass finds a target that truly has no valid canonical replacement.
-
-#### 4. False-positive/tooling bucket — **no new evidence of a fresh reporting bug**
-The earlier aggregate/detail mismatch has not reappeared. Detail output is populated and consistent with the gross counts.
-
-Decision:
-- Broken-link noise is still best understood as content debt plus a small renamed-target subset.
-- Do **not** reopen the earlier memory-health detail bug.
-
-### Orphan refresh
-
-#### `pitfalls/*` orphan concentration — **expected curation debt / retrieval-oriented inventory**
-The orphan count remains heavily dominated by `pitfalls/*` inventory, similar to the earlier tolerated-orphan findings for `cases/*` and `reference/repo-maps/*`. The current detail output shows a wide spread of narrowly scoped pitfall notes rather than one obvious canonical note missing backlinks.
-
-Decision:
-- Treat the large `pitfalls` orphan block as **expected curation debt / retrieval-oriented inventory**, not an acute memory-tool defect.
-- No evidence in this patrol pass suggests `memory_orphans()` is misreporting the folder.
-- Only escalate future orphan work if a smaller subset of active canonical notes emerges that clearly should be linked now.
-
-### Canonical outcome of this refresh
-
-- **Actionable now:** one focused cleanup task for canonical/current notes with legacy ADR and singleton alias wikilinks; verify the small renamed-target subset while there.
-- **2026-04-13 singleton-alias cleanup outcome:** historical `decisions/*`, plus matching `reference/*` and `research/*` notes in the scoped slice, were normalized from backticked legacy aliases (`Roadmap`, `Project Brief`, `V1 Requirements`) to canonical permalinks `[[roadmap]]`, `[[brief]]`, and `[[requirements/v1-requirements]]` where those canonical notes already exist.
-- **Remaining broken-link follow-up after this pass:** treat only concrete renamed/missing-target exceptions such as `Autoresearch Reference`, `wikilinks`, `Djinn Namespace Git Sync`, and `Cognitive Memory Scope`; do not reopen broad singleton-alias triage.
-- **Deferred as backlog:** broad historical-note replacement for all alias-style links.
-- **Deferred as curation debt:** the large `pitfalls/*` orphan inventory.
-- **Not a current tooling bug:** aggregate/detail reporting for memory health.
-=======
 - **Create one narrow follow-up task** for historical singleton alias cleanup (`Roadmap` / `Project Brief` / `V1 Requirements`) on legacy ADR/reference/research notes.
 - **Do not create a mass backlog task** for all historical ADR title/shorthand aliases yet.
 - **Do not create orphan cleanup work** for `cases/*` or `reference/repo-maps/*`; treat them as tolerated inventory unless a future patrol finds a concrete canonical-note defect there.
->>>>>>> origin/main
+
+#### Outcome after the narrow singleton-alias cleanup pass
+
+- **2026-04-13 singleton-alias cleanup outcome:** historical `decisions/*`, plus matching `reference/*` and `research/*` notes in the scoped slice, were normalized from backticked legacy aliases (`Roadmap`, `Project Brief`, `V1 Requirements`) to canonical permalinks `[[roadmap]]`, `[[brief]]`, and `[[requirements/v1-requirements]]` where those canonical notes already exist.
+- **Remaining broken-link follow-up after this pass:** treat only concrete renamed/missing-target exceptions such as `Autoresearch Reference`, `wikilinks`, `Djinn Namespace Git Sync`, and `Cognitive Memory Scope`.
+- **Do not reopen mass backlog triage:** broader historical ADR title/shorthand alias cleanup remains deferred, and tolerated orphan-heavy folders (`cases/*`, `reference/repo-maps/*`) still do not justify separate cleanup work by themselves.

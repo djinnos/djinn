@@ -5,7 +5,6 @@ tags: []
 ---
 
 
-
 # V1 Requirements — Djinn Server Rust Rewrite
 
 Requirements derived from [[brief]], [[research/research-summary]], and the four research dimension notes. Each requirement traces to its source.
@@ -254,6 +253,6 @@ Requirements derived from [[brief]], [[research/research-summary]], and the four
 | CMEM-15 | Vector/semantic search via sqlite-vec: embedding-based similarity as additional RRF signal for paraphrase-robust retrieval | v2 | ADR-023 future signal, DB-08 |
 
 ## Relations (CMEM)
-- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]]
-- [[research/cognitive-memory-systems-research]]
-- [[reference/cognitive-memory-scope]]
+- [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+- [[Cognitive Memory Systems Research]]
+- [[Cognitive Memory Scope]]
