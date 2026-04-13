@@ -4,70 +4,61 @@ type: design
 tags: ["docker","web-ui","openviking","roadmap","epic-7izs"]
 ---
 
-# Docker-Based Deployment, Web UI, and OpenViking Memory Backend — Roadmap
+# Docker-Based Deployment, Web UI, and OpenViking Memory Backend Roadmap
 
 ## Status
-In progress. Epic `7izs` is **not complete**.
+In progress. Epic `7izs` is not complete: foundational browser-runtime work has landed (`h3p6`), roadmap-reference repair landed (`sgs2`), and the next execution wave is already represented by active worker tasks. No epic closure is warranted.
 
-## Goal
-Migrate Djinn from an Electron desktop shell plus custom memory system to:
-- Docker Compose deployment
-- browser-served web UI from `djinn-server`
-- OpenViking-backed memory services and `viking://` memory references
-
-This roadmap is the canonical wave-planning note for epic `7izs` and should be preferred over the singleton [[roadmap]] note for this epic's active work.
-
-## Architectural guardrails
-- Follow [[decisions/adr-053-docker-based-deployment-web-ui-and-openviking-memory-backend]].
-- Keep `djinn-server` as the single runtime entrypoint that serves both API routes and the SPA bundle.
-- Replace Electron-only capabilities with server-owned HTTP APIs and browser-compatible UI flows.
-- Migrate memory in phases: seam/bootstrap → shadow reads → write/import cutover → `viking://` refs → legacy cleanup.
-- Do not remove legacy memory systems until OpenViking is authoritative for read and write paths.
+## Architecture anchor
+- [[decisions/adr-053-docker-based-deployment-web-ui-and-openviking-memory-backend]] defines the target shape: Docker Compose deployment, browser-delivered UI, and phased OpenViking migration.
+- `memory_refs` must keep working during migration; use compatibility layers rather than big-bang replacement.
 
 ## Completed work
-- `h3p6` closed: browser-compatible frontend runtime boundary landed.
-- `sgs2` closed: canonical roadmap/memory-ref repair completed so active work points at a real roadmap artifact.
+1. **Browser runtime boundary landed** — `h3p6`
+   - Frontend can now run without mandatory `window.electronAPI`.
+   - Shared transport/runtime seams exist for browser mode.
+2. **Roadmap reference repair landed** — `sgs2`
+   - Epic/task references were normalized after the missing-note incident.
 
 ## Active wave
-### In progress / verifying
-- `rpgb` — serve the React web app from `djinn-server`
-- `2744` — replace native project/file pickers with server-backed filesystem browsing
-- `4a4t` — create the OpenViking memory backend seam and bootstrap client
+### Web / deployment track
+- `rpgb` — Serve the React web app from `djinn-server`
+- `2744` — Replace native project/file pickers with server-backed filesystem browsing
+- `24v4` — Move SSH connection and deployment flows behind server-owned browser APIs
+- `aijd` — Package `djinn-server` and OpenViking with Docker Compose
 
-### Ready next once active items land
-1. `aijd` — package `djinn-server` and OpenViking with Docker Compose
-2. `24v4` — move SSH connection and deployment flows behind server-owned browser APIs
-3. `vce4` — add OpenViking dual-read shadow for memory reads and context retrieval
-4. `d4qf` — migrate memory writes and bootstrap data into OpenViking
-5. `ow2x` — transition task and epic `memory_refs` to `viking://` URIs with legacy compatibility
-6. `ow2c` — retire legacy memory confidence, watcher, and obsolete MCP tool surfaces after OpenViking cutover
+### Memory migration track
+- `4a4t` — Create the OpenViking memory backend seam and bootstrap client
+- `vce4` — Add OpenViking dual-read shadow for memory reads and context retrieval
+- `d4qf` — Migrate memory writes and bootstrap data into OpenViking
+- `ow2x` — Transition task and epic `memory_refs` to `viking://` URIs with legacy compatibility
+- `ow2c` — Retire legacy memory confidence, watcher, and obsolete MCP tool surfaces after OpenViking cutover
 
-## Sequencing
-1. **Web delivery foundation**
-   - `rpgb` provides SPA/static hosting from the Rust server.
-   - `2744` removes the most visible Electron-only picker dependency.
-2. **Memory backend foundation**
-   - `4a4t` establishes the backend seam and OpenViking bootstrap/config.
-3. **Deployment + remaining Electron removal**
-   - `aijd` can package the stack once SPA hosting shape and OpenViking boot wiring are real.
-   - `24v4` removes SSH/deploy flows from Electron ownership.
-4. **OpenViking migration**
-   - `vce4` depends on `4a4t`.
-   - `d4qf` depends on `vce4` or at minimum the seam from `4a4t`, but should follow shadow-read validation.
-   - `ow2x` follows readable/writable OpenViking-backed note flows.
-   - `ow2c` is final cleanup after OpenViking becomes authoritative.
+## Required sequencing
+### Web / deployment ordering
+1. `rpgb` should land before `aijd` so container packaging targets the real static-asset serving path.
+2. `24v4` depends on the browser runtime boundary already landed in `h3p6`, but can proceed independently of `2744` as long as it stays focused on SSH/deploy APIs.
+3. `2744` can proceed in parallel with `rpgb`, but must target the shared browser runtime seam rather than reintroducing Electron-specific code.
 
-## Completion gate
-Epic `7izs` is complete only when all three workstreams are done:
-- `djinn-server` serves the browser UI and the Docker Compose stack runs Djinn + OpenViking cleanly.
-- Electron-owned picker and SSH/deploy flows are replaced by browser/server flows.
-- OpenViking is authoritative for reads and writes, `memory_refs` support `viking://`, and legacy memory subsystems are retired.
+### Memory migration ordering
+1. `4a4t` is the prerequisite seam for all OpenViking follow-ons.
+2. `vce4` depends on `4a4t`.
+3. `d4qf` depends on `vce4` so write cutover follows shadow-read parity work.
+4. `ow2x` depends on `d4qf` because `viking://` references only make sense once OpenViking-backed content is authoritative enough for mixed-format resolution.
+5. `ow2c` depends on `ow2x` and final cutover completion.
 
-## Notes for future planning waves
-- Do not treat the singleton [[roadmap]] note as authoritative for this epic; it currently tracks ADR-043 work and can diverge from epic `7izs` board state.
-- If `rpgb`, `2744`, and `4a4t` all land successfully, the next planning wave should focus on blocker cleanup and ensuring dependency order across `aijd`, `24v4`, `vce4`, `d4qf`, `ow2x`, and `ow2c` rather than creating duplicate tasks.
+## Planner assessment for this wave
+The epic already has a full active wave on the board, so this planning pass should **tighten roadmap/sequencing rather than add duplicate tasks**. The priority is to keep the existing tasks ordered correctly and avoid board churn while `rpgb`, `2744`, and `4a4t` are still in flight.
+
+## Exit criteria for epic closure
+Do not close epic `7izs` until all of the following are true:
+- `djinn-server` serves the SPA in production and Docker packaging is documented and working.
+- Browser UI no longer depends on Electron-only pickers or SSH/deploy IPC.
+- OpenViking is authoritative for memory reads/writes.
+- `memory_refs` support `viking://` with legacy compatibility during migration.
+- Legacy memory confidence/watcher/obsolete MCP surfaces are removed or disabled.
 
 ## Relations
 - [[decisions/adr-053-docker-based-deployment-web-ui-and-openviking-memory-backend]]
-- [[cases/recreated-missing-canonical-roadmap-note-for-docker-openviking-epic-memory]]
+- [[roadmap]]
 - [[reference/adr-043-roadmap-active-decomposition-status]]
