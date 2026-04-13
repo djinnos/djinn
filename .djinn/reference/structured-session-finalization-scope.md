@@ -67,7 +67,7 @@ tags: ["scope","reference","adr-036"]
 
 ## Relations
 
-- [[decisions/adr-036-structured-session-finalization-finalize-tools-and-forced-tool-choice|ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]]
-- [[decisions/adr-022-outcome-based-session-validation-agent-role-redesign|ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — superseded
-- [[decisions/adr-027-own-the-agent-loop-replace-goose-with-direct-llm-integration|ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]] — provider abstraction extended
+- [[ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]]
+- [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — superseded
+- [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]] — provider abstraction extended
 - [[roadmap]]

@@ -104,6 +104,6 @@
 
 ## Relations
 - [[roadmap]]
-- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+- [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
 - [[Cognitive Memory Systems Research]]
-- [[requirements/v1-requirements|V1 Requirements]]
+- [[requirements/v1-requirements]]

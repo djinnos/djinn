@@ -66,6 +66,6 @@ tags: ["scope","reference","pr-workflow"]
 - Log all status transitions with reasons for debugging
 
 ## Relations
-- [[decisions/adr-040-granular-post-review-pr-pipeline-statuses|ADR-040: Granular Post-Review PR Pipeline Statuses]]
-- [[decisions/adr-037-github-app-pr-workflow-and-ci-verification|ADR-037: GitHub App PR Workflow and CI-Based Verification]]
 - [[roadmap]]
+- [[ADR-040: Granular Post-Review PR Pipeline Statuses]]
+- [[ADR-037: GitHub App PR Workflow and CI-Based Verification]]
