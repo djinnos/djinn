@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn create_seeds_six_default_roles() {
+    async fn create_seeds_five_default_roles() {
         let db = test_db();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = repo.create("seeded", "/seeded").await.unwrap();

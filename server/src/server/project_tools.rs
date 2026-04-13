@@ -350,16 +350,16 @@ fn skills_dir(project_path: &str) -> std::path::PathBuf {
 fn read_skill_file(path: &Path) -> Option<(Option<String>, String)> {
     let content = std::fs::read_to_string(path).ok()?;
     // Parse YAML frontmatter
-    if let Some(rest) = content.strip_prefix("---") {
-        if let Some(end_idx) = rest.find("---") {
-            let frontmatter = &rest[..end_idx];
-            let body = rest[end_idx + 3..].trim_start_matches('\n');
-            let description = frontmatter
-                .lines()
-                .find(|l| l.starts_with("description:"))
-                .map(|l| l["description:".len()..].trim().to_string());
-            return Some((description, body.to_string()));
-        }
+    if let Some(rest) = content.strip_prefix("---")
+        && let Some(end_idx) = rest.find("---")
+    {
+        let frontmatter = &rest[..end_idx];
+        let body = rest[end_idx + 3..].trim_start_matches('\n');
+        let description = frontmatter
+            .lines()
+            .find(|l| l.starts_with("description:"))
+            .map(|l| l["description:".len()..].trim().to_string());
+        return Some((description, body.to_string()));
     }
     Some((None, content))
 }
@@ -386,14 +386,14 @@ async fn list_skills(
                         content,
                     });
                 }
-            } else if let Some(stem) = name_str.strip_suffix(".md") {
-                if let Some((description, content)) = read_skill_file(&entry.path()) {
-                    skills.push(SkillResponse {
-                        name: stem.to_string(),
-                        description,
-                        content,
-                    });
-                }
+            } else if let Some(stem) = name_str.strip_suffix(".md")
+                && let Some((description, content)) = read_skill_file(&entry.path())
+            {
+                skills.push(SkillResponse {
+                    name: stem.to_string(),
+                    description,
+                    content,
+                });
             }
         }
     }

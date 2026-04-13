@@ -297,11 +297,11 @@ impl CandleEmbeddingRuntime {
     }
 
     fn tensor_to_vec(tensor: Tensor) -> AnyhowResult<Vec<f32>> {
-        Ok(tensor
+        tensor
             .to_dtype(DType::F32)
             .context("convert embedding tensor to f32")?
             .to_vec1()
-            .context("extract embedding vector")?)
+            .context("extract embedding vector")
     }
 }
 
