@@ -86,6 +86,6 @@ Commands stored per-project in the project registry (DB). New MCP tools for mana
 ## Relations
 
 - [[Roadmap]] — Post-V1 enhancement
-- [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — Extends execution model with pre/post hooks
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — Extends execution model with pre/post hooks
 - [[ADR-015: Session Continuity & Resume]] — Verification failures trigger session resume
-- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose sessions are the unit being wrapped
+- [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose sessions are the unit being wrapped

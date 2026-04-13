@@ -140,4 +140,4 @@ This requires no changes to the SSE event format — just a frontend state machi
 - [[ADR-018: Djinn-Owned Session Compaction]]
 - [[ADR-015: Session Continuity & Resume]]
 - [[ADR-019: MCP as Single API and Typed Tool Schemas]]
-- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
+- [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]

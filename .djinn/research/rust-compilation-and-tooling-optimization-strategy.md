@@ -113,6 +113,6 @@ Add cargo-hakari immediately after first split.
 
 ## Relations
 
-- [[ADR-028 Module Visibility Enforcement and Deep Module Architecture]]
+- [[decisions/adr-028-module-visibility-enforcement-and-deep-module-architecture|ADR-028: Module Visibility Enforcement and Deep Module Architecture]]
 - [[Deep Modules Pattern for AI Codebases]]
 - [[reference/cognitive-memory-scope|Cognitive Memory Scope]]

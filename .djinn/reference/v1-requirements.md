@@ -256,4 +256,4 @@ Requirements derived from [[brief]], [[research/research-summary]], and the four
 ## Relations (CMEM)
 - [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
 - [[Cognitive Memory Systems Research]]
-- [[Cognitive Memory Scope]]
+- [[reference/cognitive-memory-scope|Cognitive Memory Scope]]

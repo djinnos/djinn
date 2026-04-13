@@ -80,5 +80,5 @@ Worker session starts
 
 - [[Roadmap]] — Post-V1 enhancement
 - [[ADR-014: Project Setup & Verification Commands]] — Verification failures are the primary trigger for session resume
-- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose session storage enables resume
+- [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose session storage enables resume
 - [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Token tracking spans the full logical session lifecycle

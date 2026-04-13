@@ -59,5 +59,5 @@ sessions (
 
 - [[Roadmap]] — New requirement for observability
 - [[V1 Requirements]] — Extends OBS-01, foundation for AGENT-15 (v2)
-- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose provides the raw metrics
-- [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — Sessions tracked per task, not per phase
+- [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose provides the raw metrics
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — Sessions tracked per task, not per phase

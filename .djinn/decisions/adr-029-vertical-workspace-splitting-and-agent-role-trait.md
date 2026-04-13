@@ -581,9 +581,9 @@ Steps 2-4 and 5 can proceed in parallel. The trait refactor (step 5) is independ
 
 ## References
 
-- [[ADR-028 Module Visibility Enforcement and Deep Module Architecture]]
+- [[decisions/adr-028-module-visibility-enforcement-and-deep-module-architecture|ADR-028: Module Visibility Enforcement and Deep Module Architecture]]
 - [[Deep Modules Pattern for AI Codebases]]
 - [[Vertical Slice Architecture for AI]]
 - [[Hexagonal Architecture as AI Prompt]]
-- [[Rust Compilation and Tooling Optimization Strategy]]
+- [[research/rust-compilation-and-tooling-optimization-strategy|Rust Compilation and Tooling Optimization Strategy]]
 - [[Agent Parallelism and Structural Isolation]]

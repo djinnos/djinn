@@ -105,7 +105,7 @@ properties:
   model with continuation chains
 - [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Per-segment
   token tracking via continuation_of chain
-- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] —
+- [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] —
   Goose provides the session infrastructure being wrapped
 - [[Session Compaction Scope]] — Scope boundaries for implementation
 - [[Roadmap]] — Post-V1 feature

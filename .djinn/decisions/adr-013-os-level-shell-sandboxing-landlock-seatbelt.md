@@ -105,5 +105,5 @@ writes to `~/.ssh/`, `~/.bashrc/`, and the main repo checkout.
 
 ## Relations
 
-- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
+- [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
 - [[ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]

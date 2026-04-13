@@ -47,6 +47,6 @@ The desktop webview can reach the local daemon (`127.0.0.1`) and the project alr
 - If MCP contracts change, regenerated client types are required
 
 ## Relations
-- [[ADR-003: Split Epic and Task MCP Tools with Input Validation]]
+- [[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]]
 - [[ADR-005: Project-Scoped Epics, Tasks, and Sessions]]
 - [[Roadmap]]

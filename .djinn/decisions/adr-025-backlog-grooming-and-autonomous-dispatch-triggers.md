@@ -9,7 +9,7 @@ tags: ["adr","dispatch","backlog","triggers","pm","architect"]
 
 **Status:** Accepted
 **Date:** 2026-03-06 (revised 2026-03-10)
-**Related:** [[ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline]], [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]], [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]
+**Related:** [[ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline]], [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]], [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]
 
 ---
 
@@ -126,5 +126,5 @@ ADR-025 originally proposed architect dispatch triggers (merge count threshold).
 
 - [[ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline]] — PM intervention stays separate
 - [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — circuit breaker feeds PM, not groomer
-- [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — existing dispatch model extended
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — existing dispatch model extended
 - [[Roadmap]]

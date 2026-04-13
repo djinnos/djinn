@@ -5,7 +5,7 @@
 **Date:** 2026-03-06
 **Updated:** 2026-03-08
 **Supersedes:** ADR-012 (Epic Review Batches and Structured Output Nudging), output parsing markers in `lypu` (Phase 9)
-**Related:** [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]
+**Related:** [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]
 
 ---
 
@@ -111,5 +111,5 @@ Track consecutive failed attempts per task:
 
 ## Relations
 
-- [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — execution model unchanged
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — execution model unchanged
 - [[V1 Requirements]] — extends REVIEW-01, REVIEW-03, AGENT-08 (stuck detection)

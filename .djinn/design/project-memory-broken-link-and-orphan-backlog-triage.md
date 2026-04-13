@@ -1,6 +1,6 @@
 ---
 title: Project memory broken-link and orphan backlog triage
-type: 
+type: design
 tags: ["memory","triage","broken-links","orphans","planner"]
 ---
 
@@ -94,9 +94,26 @@ When patrol sees high memory-health counts:
 - Orphan volume in `cases` and `reference/repo-maps` should be treated as **background inventory unless coupled with a canonical-note defect**.
 - Canonical singletons/current docs (`roadmap`, `brief`, active requirement notes) remain worth checking because they influence board-health interpretation.
 
-## Routed next action
 
-Created follow-up planning task [[Route actionable project-memory cleanup after backlog triage]] to own the narrow actionable cleanup without reopening project-wide triage.
+## Historical ADR/shorthand alias cleanup pass (2026-04-13)
+
+Scoped follow-up pass completed for historical `decisions/*`, `reference/*`, and `research/*` notes using legacy ADR-title or shorthand aliases.
+
+### Canonicalized in this pass
+- Replaced legacy ADR-title wikilinks with canonical permalinks in historical ADRs that referenced:
+  - `ADR-003: Split Epic and Task MCP Tools with Input Validation`
+  - `ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning`
+  - `ADR-009: Simplified Execution — No Phases, Direct Task Dispatch`
+  - `ADR-015 Session Continuity and Resume`
+  - `ADR-028 Module Visibility Enforcement and Deep Module Architecture`
+- Replaced shorthand/reference aliases in legacy reference/research notes:
+  - `Djinn Namespace Git Sync` / `ADR-007 djinn Namespace Git Sync` → `[[decisions/djinn-namespace-git-sync|Djinn Namespace Git Sync]]`
+  - `Rust Compilation and Tooling Optimization Strategy` → `[[research/rust-compilation-and-tooling-optimization-strategy|Rust Compilation and Tooling Optimization Strategy]]`
+  - `Cognitive Memory Scope` → `[[reference/cognitive-memory-scope|Cognitive Memory Scope]]`
+
+### Explicit exceptions left unresolved in this scoped pass
+- `research/rust-compilation-and-tooling-optimization-strategy` still contains `[[Deep Modules Pattern for AI Codebases]]`. A confident canonical target was not proven during this narrow alias pass, so it was left untouched instead of broadening into generic missing-target cleanup.
+- This pass intentionally did **not** touch singleton/current-note alias debt such as `[[Roadmap]]`, `[[Project Brief]]`, `[[V1 Requirements]]`, `[[brief]]`, or current-note routing defects already covered by earlier tasks.
 
 
 ## Follow-up decision: orphan-heavy folders reporting policy (2026-04-09)
@@ -124,41 +141,3 @@ Operational rule for future patrols:
 4. Do **not** open broad cleanup work solely because `cases` or `reference/repo-maps` dominate orphan counts.
 
 This closes the earlier optional question in this note: the chosen policy is **documented patrol interpretation, not tooling suppression and not mass relinking**. A future tooling enhancement is only warranted if patrol operators still misread the gross orphan count after following this guidance.
-
-
-
-## Historical ADR-title and shorthand alias cleanup pass (2026-04-13)
-
-Scoped this pass to historical `decisions/*`, `reference/*`, and `research/*` alias debt only, excluding singleton/current-note routing defects already handled elsewhere.
-
-### Canonical replacements applied in this pass
-- `reference/git-workflow-diagrams`
-  - `[[decisions/djinn-namespace-git-sync|Djinn Namespace Git Sync]]` → `[[decisions/djinn-namespace-git-sync|ADR-007 djinn Namespace Git Sync]]`
-  - `[[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity and Resume]]` → `[[decisions/adr-015-session-continuity-resume|ADR-015 Session Continuity and Resume]]`
-- `reference/session-resume-and-compaction-flow`
-  - `[[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity and Resume]]` → `[[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity and Resume]]`
-- `reference/setup-verification-and-merge-conflict-flow`
-  - `[[ADR-014: Project Setup and Verification Commands]]` → `[[decisions/adr-014-project-setup-verification-commands|ADR-014: Project Setup and Verification Commands]]`
-- `reference/task-dispatch-and-slot-pool-flow`
-  - `[[ADR-009: Simplified Execution]]` → `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution]]`
-- `research/rust-compilation-and-tooling-optimization-strategy`
-  - `[[reference/cognitive-memory-scope|Cognitive Memory Scope]]` → `[[reference/cognitive-memory-scope|Cognitive Memory Scope]]`
-- `decisions/adr-004-execution-settings-per-role-model-priority-and-per-model-session-limits`
-  - `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]` → `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]`
-- `decisions/adr-005-project-scoped-epics-tasks-and-sessions`
-  - `[[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]]` → `[[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]]`
-  - `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]` → `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]`
-- `decisions/adr-030-repo-committed-verification-and-commit-hash-caching`
-  - `[[ADR-006]]` → `[[decisions/project-.djinn-directory-—-notes-only,-git-tracked|ADR-006]]`
-  - `[[ADR-009]]` → `[[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009]]`
-  - `[[ADR-014]]` → `[[decisions/adr-014-project-setup-verification-commands|ADR-014]]`
-  - `[[ADR-022]]` → `[[decisions/adr-022-outcome-based-session-validation-agent-role-redesign|ADR-022]]`
-
-### Concrete unresolved / deferred exceptions from this narrow slice
-These remain intentionally deferred because a confident canonical target or stable permalink could not be proven within the scoped historical alias pass, or because the current backend detail output appears stale relative to branch-local note edits.
-
-- `reference/git-workflow-diagrams` still appears in `memory_broken_links()` for `ADR-007 djinn Namespace Git Sync` and `ADR-015 Session Continuity and Resume` even after canonical replacements were written in the branch-local note. Treat this as reindex/detail staleness to re-verify later, not as a reason to broaden the cleanup.
-- `decisions/adr-029-vertical-workspace-splitting-and-agent-role-trait` links `[[research/rust-compilation-and-tooling-optimization-strategy|Rust Compilation and Tooling Optimization Strategy]]`; the canonical permalink is not provable from current broken-link output because the note/backend naming currently disagrees on folder/permalink shape after edits. Leave as a concrete renamed-target exception until memory indexing is re-verified.
-- Broad historical singleton/current-note aliases (`[[Roadmap]]`, `[[Project Brief]]`, `[[V1 Requirements]]`) remain out of scope for this pass by task design.
-
-Decision: stop here rather than reopen backlog-wide historical note cleanup. Any next pass should start from freshly reindexed broken-link detail and only handle proven renamed-target exceptions.

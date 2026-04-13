@@ -94,5 +94,5 @@ A fresh clone bootstraps meaningful signals by importing all users' metric files
 ## Relations
 
 - [[ADR-023 Cognitive Memory Architecture Multi-Signal Retrieval and Associative Learning]]
-- [[Djinn Namespace Git Sync]]
+- [[decisions/djinn-namespace-git-sync|Djinn Namespace Git Sync]]
 - [[decisions/project-.djinn-directory-—-notes-only,-git-tracked|Project .djinn Directory — Notes Only, Git-Tracked]]

@@ -80,5 +80,5 @@ payload: {
 
 ## Relations
 - [[ADR-014: Project Setup & Verification Commands]]
-- [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]
 - [[ADR-018: Djinn-Owned Session Compaction]]

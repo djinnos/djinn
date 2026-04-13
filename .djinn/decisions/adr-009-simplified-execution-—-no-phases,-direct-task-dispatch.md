@@ -65,4 +65,4 @@ The 26-tool execution surface collapses to ~6 tools:
 
 - [[Roadmap]] — Eliminates Phase system from all phases
 - [[V1 Requirements]] — Simplifies AGENT-01, AGENT-07; removes implicit phase requirements
-- [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Complements in-process model
+- [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Complements in-process model
