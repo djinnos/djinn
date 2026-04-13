@@ -1,62 +1,67 @@
 ---
-title: Docker-Based Deployment, Web UI, and OpenViking Memory Backend — Roadmap
+title: Docker-Based Deployment, Web UI, and OpenViking Memory Backend Roadmap
 type: design
-tags: ["epic-roadmap","adr-053","docker","web-ui","openviking"]
+tags: ["docker","web-ui","openviking","roadmap","epic-7izs"]
 ---
 
 # Docker-Based Deployment, Web UI, and OpenViking Memory Backend — Roadmap
 
 ## Status
-Epic [[decisions/adr-053-docker-based-deployment-web-ui-and-openviking-memory-backend]] is **not complete**. No implementation tasks have landed yet; the board only contains this planning task. The codebase still ships an Electron shell, relies on Electron IPC for key UI flows, serves only API/MCP routes from `server/src/server/mod.rs`, and still uses the legacy `NoteRepository`/memory MCP surface in `server/` and `server/crates/djinn-mcp/`.
+Epic `7izs` remains **open**. The architectural direction in [[decisions/adr-053-docker-based-deployment-web-ui-and-openviking-memory-backend]] is accepted, but the codebase still contains substantial Electron-specific UI/runtime behavior and the legacy `NoteRepository`-based memory system.
 
-## Current repo facts
-- Desktop packaging is still Electron-based (`desktop/package.json`, `desktop/electron/main.ts`, `desktop/electron/ipc-handlers.ts`).
-- Frontend code still imports Electron wrappers broadly (`desktop/src/electron/commands.ts`, `desktop/src/electron/shims/*`).
-- The Rust server currently exposes health/events/MCP/project-management routes, but no SPA static-file serving or browser-oriented replacement endpoints for native pickers/window APIs (`server/src/server/mod.rs`, `server/src/server/project_tools.rs`).
-- Memory operations still center on `djinn_db::NoteRepository`, `memory_build_context`, `memory_health`, `memory_broken_links`, `memory_orphans`, task confidence, and the KB watcher (`server/crates/djinn-mcp/src/tools/memory_tools/*`, `server/src/task_confidence.rs`, `server/src/watchers/kb.rs`).
-- No Dockerfile or compose stack exists in the repo root or `server/`.
+## Current Board State
 
-## Decomposition strategy
-Sequence this epic as three waves so workers can land vertical slices without trampling each other.
+### Active / recently active wave
+- `rpgb` — serve the React web app from `djinn-server`
+- `h3p6` — introduce a browser-compatible frontend runtime boundary
+- `2744` — replace native project/file pickers with server-backed filesystem browsing
+- `4a4t` — create the OpenViking memory backend seam and bootstrap client
+- `aijd` — package `djinn-server` and OpenViking with Docker Compose
 
-### Wave 1 — Foundation and seams
-1. Add server static-asset hosting so the Rust server can serve the built web app alongside existing HTTP/MCP APIs.
-2. Extract the frontend runtime boundary away from Electron-only shims so the React app can run in a normal browser against the Rust server.
-3. Add server-side filesystem browsing/import APIs to replace the native directory/file pickers used by project onboarding and connection settings.
-4. Introduce a memory backend seam plus an OpenViking client/configuration slice without changing user-visible memory behavior yet.
-5. Add Docker packaging and a compose stack wiring Djinn + OpenViking, using the new server/web build outputs.
+### What this wave establishes
+1. Browser delivery of the SPA from the Rust server.
+2. A shared frontend runtime seam so the app can run without `window.electronAPI` for core transport/bootstrap flows.
+3. The first browser-native filesystem picker flow.
+4. An initial OpenViking integration seam so later phases can migrate incrementally instead of as a big-bang swap.
+5. Container packaging once the server/static-hosting and memory-backend seams exist.
 
-### Wave 2 — Web-only UX completion
-- Remove remaining Electron-only flows (window chrome, auth/token/local integration, SSH/remote helpers that must move server-side or be dropped).
-- Switch the shipped app/docs to browser-first usage.
-- Reduce or eliminate Electron build/package scripts once the browser path is production-ready.
+## Why the epic is not complete
+Code search confirms the repo still contains:
+- Electron main/preload/IPC shell code under `desktop/electron/*`
+- Electron-only commands still used by frontend flows such as `selectDirectory`, `selectFile`, and SSH connection management
+- Legacy memory systems including `NoteRepository`, `task_confidence`, `watchers/kb.rs`, and MCP schemas/tests for tools ADR-053 plans to retire
+- No completed transition of `memory_refs` to `viking://` URIs yet
 
-### Wave 3 — Memory migration
-- Implement dual-read shadowing against OpenViking.
-- Migrate writes and `memory_refs` URI handling to `viking://`.
-- Remove confidence-scoring and legacy knowledge-base maintenance features deprecated by ADR-053.
-- Delete legacy `NoteRepository`-specific codepaths, watchers, and surplus MCP tools.
+So the epic is in active migration, not closure.
 
-## Wave 1 tasks
-This wave creates five concrete worker tasks:
-1. Server SPA/static hosting scaffold.
-2. Frontend browser-runtime adapter replacing Electron-only transport assumptions.
-3. Filesystem browsing/import HTTP APIs plus web picker integration.
-4. Memory backend seam + OpenViking client bootstrap.
-5. Dockerfile/compose packaging for Djinn + OpenViking.
+## Sequencing
+- `2744` should stay sequenced behind `h3p6` because the browser picker depends on the shared non-Electron runtime boundary.
+- `aijd` should stay sequenced behind `rpgb` and `4a4t` because the Compose stack must package the browser-served server and the OpenViking sidecar contract it depends on.
 
-## Exit criteria for this wave
-- The server can serve a built frontend bundle.
-- The frontend has a browser-compatible runtime path for basic server communication.
-- At least one onboarding/project-selection flow works without native file dialogs.
-- OpenViking integration is represented by a real backend seam and client bootstrap instead of being only an ADR.
-- A local operator can start Djinn + OpenViking with Docker Compose.
+## Next Wave After Current Foundations
 
-## Follow-up notes
-- Keep tasks narrow and file-seamed to avoid simultaneous edits to the same Electron/server bootstrap files.
-- Do **not** attempt full memory switchover in the same wave as seam extraction; land the integration seam first, then migrate behavior in later waves.
-- Preserve MCP compatibility during the migration period; browser delivery and backend swap should not break the planner/worker toolchain mid-epic.
+### Wave 2A — Browser deployment parity
+1. **Move SSH/deployment flows to server-owned APIs**
+   - Replace Electron-managed SSH host/tunnel/deploy orchestration with server-side HTTP APIs and browser-compatible UI flows.
+   - This covers the remaining major web-migration gap after the runtime boundary and picker work.
+
+### Wave 2B — OpenViking phased migration
+2. **Dual-read shadow for read/search/list/build-context flows**
+   - Route read-oriented memory operations through the new backend seam with parity checks while preserving the legacy implementation.
+3. **Write-path migration and data switchover tooling**
+   - Add migration/bootstrap tooling, dual-write or cutover semantics, and operational docs for moving persisted memory into OpenViking.
+4. **`memory_refs` URI transition**
+   - Introduce `viking://` URI handling for tasks/epics while keeping legacy permalink resolution during migration.
+5. **Legacy memory cleanup**
+   - Remove obsolete confidence scoring, watcher/housekeeping, and MCP tools that ADR-053 explicitly replaces once the cutover is complete.
+
+## Exit Criteria for Epic Closure
+The epic can close only when all three are true:
+1. Djinn is runnable as a browser-served Docker/Compose deployment without Electron-required user flows.
+2. OpenViking is the effective memory backend for supported memory operations, with migration/compatibility handled.
+3. Legacy Electron-only packaging and legacy memory subsystems called out by ADR-053 are removed or intentionally retired.
 
 ## Relations
 - [[decisions/adr-053-docker-based-deployment-web-ui-and-openviking-memory-backend]]
-- [[brief]]
+- [[roadmap]]
+- [[reference/adr-043-roadmap-active-decomposition-status]]
