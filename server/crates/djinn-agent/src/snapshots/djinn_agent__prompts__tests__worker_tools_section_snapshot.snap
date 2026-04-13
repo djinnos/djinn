@@ -1,9 +1,6 @@
 ---
 source: crates/djinn-agent/src/prompts.rs
-<<<<<<< HEAD
 assertion_line: 783
-=======
->>>>>>> origin/main
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.

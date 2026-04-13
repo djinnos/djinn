@@ -68,29 +68,6 @@ pub struct GithubFetchFileParams {
     /// Last line to return (1-based, inclusive). Omit for end of file.
     #[serde(default)]
     pub end_line: Option<i64>,
-<<<<<<< HEAD
-}
-
-fn normalize_positive_usize(value: Option<i64>, field: &str) -> Result<Option<usize>, String> {
-    match value {
-        Some(value) if value < 1 => Err(format!("{field} must be at least 1")),
-        Some(value) => usize::try_from(value)
-            .map(Some)
-            .map_err(|_| format!("{field} is too large")),
-        None => Ok(None),
-    }
-}
-
-fn normalize_positive_u32(value: Option<i64>, field: &str) -> Result<Option<u32>, String> {
-    match value {
-        Some(value) if value < 1 => Err(format!("{field} must be at least 1")),
-        Some(value) => u32::try_from(value)
-            .map(Some)
-            .map_err(|_| format!("{field} is too large")),
-        None => Ok(None),
-    }
-=======
->>>>>>> origin/main
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -203,11 +180,6 @@ impl DjinnMcpServer {
         &self,
         Parameters(params): Parameters<GithubSearchParams>,
     ) -> Json<ErrorOr<GithubSearchResponse>> {
-        let limit = match normalize_positive_usize(params.limit, "limit") {
-            Ok(limit) => limit,
-            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
-        };
-
         let cred_repo = Arc::new(CredentialRepository::new(
             self.state.db().clone(),
             self.state.event_bus(),
@@ -245,15 +217,6 @@ impl DjinnMcpServer {
         &self,
         Parameters(params): Parameters<GithubFetchFileParams>,
     ) -> Json<ErrorOr<GithubFetchFileResponse>> {
-        let start_line = match normalize_positive_u32(params.start_line, "start_line") {
-            Ok(start_line) => start_line,
-            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
-        };
-        let end_line = match normalize_positive_u32(params.end_line, "end_line") {
-            Ok(end_line) => end_line,
-            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
-        };
-
         let cred_repo = Arc::new(CredentialRepository::new(
             self.state.db().clone(),
             self.state.event_bus(),

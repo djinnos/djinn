@@ -1,9 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-<<<<<<< HEAD
 assertion_line: 197
-=======
->>>>>>> origin/main
 expression: tool_schemas_worker()
 ---
 [
