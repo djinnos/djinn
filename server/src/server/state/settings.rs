@@ -11,13 +11,7 @@ use super::{AppState, SETTINGS_RAW_KEY};
 /// Maximum auto-detected slots per model to prevent runaway on high-memory machines.
 const AUTO_MAX_SLOTS_CAP: u32 = 8;
 
-const ALL_ROLES: &[&str] = &[
-    "worker",
-    "reviewer",
-    "lead",
-    "planner",
-    "architect",
-];
+const ALL_ROLES: &[&str] = &["worker", "reviewer", "lead", "planner", "architect"];
 
 impl AppState {
     fn slot_pool_config_for_settings(settings: &DjinnSettings) -> SlotPoolConfig {

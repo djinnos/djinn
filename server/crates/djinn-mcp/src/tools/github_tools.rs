@@ -30,7 +30,7 @@ pub struct GithubSearchParams {
     pub path: Option<String>,
     /// Maximum number of results to return (1–100, default 15).
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -44,10 +44,30 @@ pub struct GithubFetchFileParams {
     pub git_ref: Option<String>,
     /// First line to return (1-based, inclusive). Omit for start of file.
     #[serde(default)]
-    pub start_line: Option<u32>,
+    pub start_line: Option<i64>,
     /// Last line to return (1-based, inclusive). Omit for end of file.
     #[serde(default)]
-    pub end_line: Option<u32>,
+    pub end_line: Option<i64>,
+}
+
+fn normalize_positive_usize(value: Option<i64>, field: &str) -> Result<Option<usize>, String> {
+    match value {
+        Some(value) if value < 1 => Err(format!("{field} must be at least 1")),
+        Some(value) => usize::try_from(value)
+            .map(Some)
+            .map_err(|_| format!("{field} is too large")),
+        None => Ok(None),
+    }
+}
+
+fn normalize_positive_u32(value: Option<i64>, field: &str) -> Result<Option<u32>, String> {
+    match value {
+        Some(value) if value < 1 => Err(format!("{field} must be at least 1")),
+        Some(value) => u32::try_from(value)
+            .map(Some)
+            .map_err(|_| format!("{field} is too large")),
+        None => Ok(None),
+    }
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -160,6 +180,11 @@ impl DjinnMcpServer {
         &self,
         Parameters(params): Parameters<GithubSearchParams>,
     ) -> Json<ErrorOr<GithubSearchResponse>> {
+        let limit = match normalize_positive_usize(params.limit, "limit") {
+            Ok(limit) => limit,
+            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+        };
+
         let cred_repo = Arc::new(CredentialRepository::new(
             self.state.db().clone(),
             self.state.event_bus(),
@@ -172,7 +197,7 @@ impl DjinnMcpServer {
                 params.language.as_deref(),
                 params.repo.as_deref(),
                 params.path.as_deref(),
-                params.limit,
+                limit,
             )
             .await
         {
@@ -192,6 +217,15 @@ impl DjinnMcpServer {
         &self,
         Parameters(params): Parameters<GithubFetchFileParams>,
     ) -> Json<ErrorOr<GithubFetchFileResponse>> {
+        let start_line = match normalize_positive_u32(params.start_line, "start_line") {
+            Ok(start_line) => start_line,
+            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+        };
+        let end_line = match normalize_positive_u32(params.end_line, "end_line") {
+            Ok(end_line) => end_line,
+            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+        };
+
         let cred_repo = Arc::new(CredentialRepository::new(
             self.state.db().clone(),
             self.state.event_bus(),
@@ -203,8 +237,8 @@ impl DjinnMcpServer {
                 &params.repo,
                 &params.path,
                 params.git_ref.as_deref(),
-                params.start_line,
-                params.end_line,
+                start_line,
+                end_line,
             )
             .await
         {

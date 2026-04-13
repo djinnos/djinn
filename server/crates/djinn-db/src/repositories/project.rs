@@ -526,13 +526,7 @@ mod tests {
         .await
         .unwrap();
 
-        let expected_base_roles = [
-            "architect",
-            "lead",
-            "planner",
-            "reviewer",
-            "worker",
-        ];
+        let expected_base_roles = ["architect", "lead", "planner", "reviewer", "worker"];
 
         assert_eq!(
             rows.len(),
