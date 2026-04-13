@@ -16,6 +16,7 @@ expression: names
   "code_graph",
   "ci_job_log",
   "github_search",
+  "github_fetch_file",
   "output_view",
   "output_grep",
   "task_create",

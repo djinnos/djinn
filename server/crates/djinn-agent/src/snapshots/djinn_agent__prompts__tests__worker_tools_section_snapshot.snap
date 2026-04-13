@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/prompts.rs
-assertion_line: 767
+assertion_line: 783
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
@@ -13,7 +13,8 @@ expression: section
 - `read(file_path, limit?, offset?)` — Read a file with line numbers and pagination. Rejects binary files.
 - `lsp(file_path, operation, character?, depth?, kind?, line?, name_filter?, symbol?)` — Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.
 - `ci_job_log(job_id, step?)` — Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.
-- `github_search(query, language?, path?, repo?)` — Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.
+- `github_search(query, language?, path?, repo?)` — Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.
+- `github_fetch_file(path, repo, end_line?, ref?, start_line?)` — Fetch the full contents of a file from a public GitHub repository. Use after github_search to inspect a promising result. Supports optional start_line/end_line for reading specific sections of large files.
 - `output_view(tool_use_id, limit?, offset?)` — Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.
 - `output_grep(pattern, tool_use_id, context_lines?)` — Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.
 - `write(content, path)` — Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.
@@ -38,5 +39,6 @@ expression: section
 Rules: ' ' prefix = context (must match file), '-' = delete, '+' = add. The @@ line text is searched in the file to locate each chunk. Multiple @@ chunks per file are allowed. Files being updated or deleted must be read first.
 - `memory_write(content, title, type, status?, tags?)` — Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.
 - `memory_edit(content, identifier, operation, find_text?, section?, type?)` — Edit an existing note. Operations: "append" (add to end), "prepend" (add after frontmatter), "find_replace" (exact text replacement, requires find_text), "replace_section" (replace content under a markdown heading, requires section).
+- `memory_build_context(limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.
 - `request_lead(id, reason, suggested_breakdown?)` — Request Lead intervention for the current task. Use when the task is too large to complete reliably, the design is ambiguous, or you are stuck. Adds a comment with your reason and suggested breakdown, then escalates to the Lead queue. Your session will effectively end after this call.
 - `submit_work(commit_title, summary, task_id, files_changed?, remaining_concerns?)` — Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.
