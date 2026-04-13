@@ -1,4 +1,31 @@
+use std::sync::Arc;
+
 use super::*;
+use crate::EmbeddedNote;
+
+struct StubEmbeddingProvider {
+    value: f32,
+    model_version: &'static str,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl NoteEmbeddingProvider for StubEmbeddingProvider {
+    async fn embed_note(&self, _text: &str) -> std::result::Result<EmbeddedNote, String> {
+        if self.fail {
+            Err("model unavailable".to_string())
+        } else {
+            Ok(EmbeddedNote {
+                values: embedding_with_value(self.value),
+                model_version: self.model_version.to_string(),
+            })
+        }
+    }
+
+    fn model_version(&self) -> String {
+        self.model_version.to_string()
+    }
+}
 
 fn embedding_with_value(value: f32) -> Vec<f32> {
     vec![value; 768]
@@ -79,4 +106,177 @@ async fn embedding_query_gracefully_returns_empty_when_vec_disabled() {
     }
 
     crate::database::set_sqlite_vec_disabled_for_tests(false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedding_lifecycle_tracks_create_update_delete_with_provider() {
+    crate::database::set_sqlite_vec_disabled_for_tests(false);
+
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx)).with_embedding_provider(Some(Arc::new(
+        StubEmbeddingProvider {
+            value: 0.2,
+            model_version: "model-v1",
+            fail: false,
+        },
+    )));
+
+    let note = repo
+        .create(
+            &project.id,
+            tmp.path(),
+            "Lifecycle Note",
+            "original body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let created = repo
+        .get_embedding(&note.id)
+        .await
+        .unwrap()
+        .expect("created embedding");
+    assert_eq!(created.model_version, "model-v1");
+    assert_eq!(
+        created.content_hash,
+        crate::note_hash::note_content_hash(
+            "title: Lifecycle Note\ntype: reference\ntags: []\n\noriginal body"
+        )
+    );
+
+    let updated = repo
+        .update(&note.id, "Lifecycle Note", "updated body", "[]")
+        .await
+        .unwrap();
+    let updated_embedding = repo
+        .get_embedding(&updated.id)
+        .await
+        .unwrap()
+        .expect("updated embedding");
+    assert_eq!(updated_embedding.model_version, "model-v1");
+    assert_eq!(
+        updated_embedding.content_hash,
+        crate::note_hash::note_content_hash(
+            "title: Lifecycle Note\ntype: reference\ntags: []\n\nupdated body"
+        )
+    );
+    assert_ne!(created.content_hash, updated_embedding.content_hash);
+
+    repo.delete(&updated.id).await.unwrap();
+    assert!(repo.get_embedding(&updated.id).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reindex_repairs_missing_and_stale_embeddings_with_provider() {
+    crate::database::set_sqlite_vec_disabled_for_tests(false);
+
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx)).with_embedding_provider(Some(
+        Arc::new(StubEmbeddingProvider {
+            value: 0.3,
+            model_version: "model-v2",
+            fail: false,
+        }),
+    ));
+
+    let file_note = repo
+        .create(
+            &project.id,
+            tmp.path(),
+            "Indexed File Note",
+            "body on disk",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let db_note = repo
+        .create_db_note(&project.id, "Indexed Db Note", "db body", "pattern", "[]")
+        .await
+        .unwrap();
+
+    repo.delete_embedding(&file_note.id).await.unwrap();
+    repo.upsert_embedding(UpsertNoteEmbedding {
+        note_id: &db_note.id,
+        content_hash: "stale-hash",
+        model_version: "old-model",
+        embedding: &embedding_with_value(0.9),
+    })
+    .await
+    .unwrap();
+
+    let summary = repo
+        .reindex_from_disk(&project.id, tmp.path())
+        .await
+        .unwrap();
+    assert_eq!(summary.unchanged + summary.updated, 1);
+    assert_eq!(summary.created, 0);
+    assert_eq!(summary.deleted, 0);
+
+    let repaired_file = repo
+        .get_embedding(&file_note.id)
+        .await
+        .unwrap()
+        .expect("missing file embedding repaired");
+    let repaired_db = repo
+        .get_embedding(&db_note.id)
+        .await
+        .unwrap()
+        .expect("stale db embedding repaired");
+
+    assert_eq!(repaired_file.model_version, "model-v2");
+    assert_eq!(repaired_db.model_version, "model-v2");
+    assert_ne!(repaired_db.content_hash, "stale-hash");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedding_provider_failure_degrades_without_persisting_embeddings() {
+    crate::database::set_sqlite_vec_disabled_for_tests(false);
+
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx)).with_embedding_provider(Some(Arc::new(
+        StubEmbeddingProvider {
+            value: 0.0,
+            model_version: "broken-model",
+            fail: true,
+        },
+    )));
+
+    let note = repo
+        .create_db_note(
+            &project.id,
+            "Fallback Only Note",
+            "lexical-only body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    assert!(repo.get_embedding(&note.id).await.unwrap().is_none());
+
+    let updated = repo
+        .update(
+            &note.id,
+            "Fallback Only Note",
+            "lexical-only body updated",
+            "[]",
+        )
+        .await
+        .unwrap();
+    assert!(repo.get_embedding(&updated.id).await.unwrap().is_none());
 }
