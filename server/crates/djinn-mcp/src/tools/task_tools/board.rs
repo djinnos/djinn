@@ -1,4 +1,5 @@
 use super::*;
+use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 use djinn_provider::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, load_pending_orgs};
 
@@ -6,14 +7,21 @@ pub(super) async fn board_health_impl(
     server: &DjinnMcpServer,
     p: BoardHealthParams,
 ) -> Json<ErrorOr<BoardHealthResponse>> {
-    if let Err(e) = server.require_project_id(&p.project).await {
-        return Json(ErrorOr::Error(e));
-    }
+    let project_id = match server.require_project_id(&p.project).await {
+        Ok(id) => id,
+        Err(e) => return Json(ErrorOr::Error(e)),
+    };
     let stale_hours = p.stale_threshold_hours.unwrap_or(24).max(1);
     let repo = TaskRepository::new(server.state.db().clone(), server.state.event_bus());
     match repo.board_health(stale_hours).await {
         Ok(report) => match serde_json::from_value::<BoardHealthResponse>(report) {
             Ok(mut parsed) => {
+                let note_repo =
+                    NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+                if let Ok(memory_health) = note_repo.health(&project_id).await {
+                    parsed.memory_health = Some(memory_health);
+                }
+
                 // Surface any project health issues from the coordinator.
                 if let Some(coordinator) = server.state.coordinator().await
                     && let Ok(status) = coordinator.get_status()

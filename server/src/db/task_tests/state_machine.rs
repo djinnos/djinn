@@ -625,6 +625,7 @@ async fn board_health_report() {
     let epic_stats = report["epic_stats"].as_array().unwrap();
     assert_eq!(epic_stats.len(), 1);
     assert_eq!(epic_stats[0]["total"], 2);
+    assert!(report.get("memory_health").is_none());
 
     // Backdate t2's updated_at to simulate staleness.
     let t2_id = t2.id.clone();
@@ -638,6 +639,7 @@ async fn board_health_report() {
     let stale = report2["stale_tasks"].as_array().unwrap();
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0]["short_id"], t2.short_id.as_str());
+    assert!(report2.get("memory_health").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
