@@ -14,7 +14,9 @@ expression: names
   "lsp",
   "ci_job_log",
   "github_search",
+  "github_fetch_file",
   "output_view",
   "output_grep",
+  "memory_build_context",
   "submit_review"
 ]
