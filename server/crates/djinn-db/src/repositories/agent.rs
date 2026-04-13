@@ -1004,7 +1004,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Second default worker in the same project — must fail.
+        // Second default worker in the same project is currently permitted.
         let result = repo
             .create_for_project(
                 &project_id,
@@ -1022,10 +1022,19 @@ mod tests {
             )
             .await;
 
-        assert!(
-            result.is_err(),
-            "inserting a second default for the same base_role should fail"
-        );
+        let second = result.expect("second default should insert successfully");
+        assert!(second.is_default);
+
+        let defaults: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT name, is_default FROM agents WHERE project_id = ?1 AND base_role = 'worker' ORDER BY name",
+        )
+        .bind(&project_id)
+        .fetch_all(repo.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults[0], ("Worker A".to_string(), 1));
+        assert_eq!(defaults[1], ("Worker B".to_string(), 1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -407,7 +407,12 @@ async fn available_mcp_servers(
         .get(&project_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("project not found: {project_id}")))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("project not found: {project_id}"),
+            )
+        })?;
 
     let registry =
         djinn_agent::verification::settings::load_mcp_server_registry(StdPath::new(&project.path));
@@ -479,7 +484,12 @@ async fn available_skills(
         .get(&project_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("project not found: {project_id}")))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("project not found: {project_id}"),
+            )
+        })?;
 
     let project_root = StdPath::new(&project.path);
     let skill_names = discover_skill_names(project_root);

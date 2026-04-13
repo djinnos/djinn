@@ -1,13 +1,29 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use rusqlite::ffi::sqlite3_auto_extension;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};
 use tokio::sync::OnceCell;
+use tracing::warn;
 
 use crate::error::{DbError, DbResult};
 use crate::migrations;
+
+const NOTE_EMBEDDING_DIMENSIONS: usize = 768;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SqliteVecStatus {
+    pub available: bool,
+    pub version: Option<String>,
+    pub detail: Option<String>,
+}
+
+static SQLITE_VEC_REGISTRATION: OnceLock<Result<(), String>> = OnceLock::new();
+static SQLITE_VEC_DISABLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 pub struct Database {
@@ -15,6 +31,7 @@ pub struct Database {
     db_path: std::path::PathBuf,
     readonly: bool,
     initialized: Arc<OnceCell<()>>,
+    sqlite_vec_status: Arc<OnceCell<SqliteVecStatus>>,
 }
 
 impl Database {
@@ -42,6 +59,7 @@ impl Database {
             db_path: path.to_path_buf(),
             readonly: false,
             initialized: Arc::new(OnceCell::new()),
+            sqlite_vec_status: Arc::new(OnceCell::new()),
         })
     }
 
@@ -65,6 +83,7 @@ impl Database {
             db_path: path.to_path_buf(),
             readonly: true,
             initialized: Arc::new(OnceCell::new()),
+            sqlite_vec_status: Arc::new(OnceCell::new()),
         })
     }
 
@@ -94,6 +113,7 @@ impl Database {
             db_path: tmp,
             readonly: false,
             initialized: Arc::new(OnceCell::new()),
+            sqlite_vec_status: Arc::new(OnceCell::new()),
         })
     }
 
@@ -108,6 +128,7 @@ impl Database {
 
         let db_path = self.db_path.clone();
         let pool = self.pool.clone();
+        let sqlite_vec_status = self.sqlite_vec_status.clone();
         self.initialized
             .get_or_try_init(|| async {
                 tokio::task::spawn_blocking(move || migrations::run(&db_path))
@@ -116,12 +137,102 @@ impl Database {
                     .map_err(|e| DbError::InvalidData(e.to_string()))?;
 
                 backfill_missing_content_hashes(&pool).await?;
+                let status = initialize_sqlite_vec(&pool).await;
+                let _ = sqlite_vec_status.set(status);
 
                 Ok::<(), DbError>(())
             })
             .await?;
 
         Ok(())
+    }
+
+    pub async fn sqlite_vec_status(&self) -> DbResult<SqliteVecStatus> {
+        self.ensure_initialized().await?;
+        Ok(self
+            .sqlite_vec_status
+            .get()
+            .cloned()
+            .unwrap_or_else(|| SqliteVecStatus {
+                available: false,
+                version: None,
+                detail: Some("sqlite-vec initialization was not attempted".to_owned()),
+            }))
+    }
+}
+
+fn register_sqlite_vec_auto_extension() -> Result<(), String> {
+    if SQLITE_VEC_DISABLED.load(Ordering::SeqCst) {
+        return Err("sqlite-vec explicitly disabled for this process".to_owned());
+    }
+
+    SQLITE_VEC_REGISTRATION
+        .get_or_init(|| unsafe {
+            #[allow(clippy::missing_transmute_annotations)]
+            let init_fn = std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());
+            sqlite3_auto_extension(Some(init_fn));
+            Ok(())
+        })
+        .clone()
+}
+
+async fn initialize_sqlite_vec(pool: &SqlitePool) -> SqliteVecStatus {
+    if SQLITE_VEC_DISABLED.load(Ordering::SeqCst) {
+        let detail = "sqlite-vec explicitly disabled for this process".to_owned();
+        warn!(error = %detail, "sqlite-vec registration unavailable; semantic vector queries disabled");
+        return SqliteVecStatus {
+            available: false,
+            version: None,
+            detail: Some(detail),
+        };
+    }
+
+    if let Err(error) = register_sqlite_vec_auto_extension() {
+        warn!(error = %error, "sqlite-vec registration unavailable; semantic vector queries disabled");
+        return SqliteVecStatus {
+            available: false,
+            version: None,
+            detail: Some(error),
+        };
+    }
+
+    let version = match sqlx::query_scalar::<_, String>("SELECT vec_version()")
+        .fetch_one(pool)
+        .await
+    {
+        Ok(version) => version,
+        Err(error) => {
+            let detail = error.to_string();
+            warn!(error = %detail, "sqlite-vec could not be activated on this database connection");
+            return SqliteVecStatus {
+                available: false,
+                version: None,
+                detail: Some(detail),
+            };
+        }
+    };
+
+    let create_sql = format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS note_embeddings_vec USING vec0(\
+            note_id TEXT PRIMARY KEY, \
+            embedding float[{NOTE_EMBEDDING_DIMENSIONS}] distance_metric=cosine\
+        )"
+    );
+
+    if let Err(error) = sqlx::query(&create_sql).execute(pool).await {
+        let detail = error.to_string();
+        warn!(error = %detail, "sqlite-vec loaded but vec0 storage could not be initialized");
+        return SqliteVecStatus {
+            available: false,
+            version: Some(version),
+            detail: Some(detail),
+        };
+    }
+
+    SqliteVecStatus {
+        available: true,
+        version: Some(version),
+        detail: None,
     }
 }
 
@@ -297,6 +408,11 @@ pub fn default_db_path() -> std::path::PathBuf {
 }
 
 #[cfg(test)]
+pub(crate) fn set_sqlite_vec_disabled_for_tests(disabled: bool) {
+    SQLITE_VEC_DISABLED.store(disabled, Ordering::SeqCst);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sqlx::Row;
@@ -412,5 +528,44 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(index_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sqlite_vec_status_reports_available_or_graceful_fallback() {
+        set_sqlite_vec_disabled_for_tests(false);
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+
+        let status = db.sqlite_vec_status().await.unwrap();
+        if status.available {
+            let table_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'note_embeddings_vec'",
+            )
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(table_count, 1);
+            assert!(status.version.is_some());
+        } else {
+            assert!(status.detail.is_some());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sqlite_vec_can_be_policy_disabled_without_breaking_db_use() {
+        set_sqlite_vec_disabled_for_tests(true);
+
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+
+        let _status = db.sqlite_vec_status().await.unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM note_embeddings")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        set_sqlite_vec_disabled_for_tests(false);
     }
 }

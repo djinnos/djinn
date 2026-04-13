@@ -1,6 +1,6 @@
 -- Canonical SQLite schema snapshot for djinn-db.
--- This file reflects the fully migrated schema including notes cognitive columns
--- and note_associations table for Hebbian co-access learning.
+-- This file reflects the fully migrated schema including notes cognitive columns,
+-- note embedding storage/metadata, and note_associations for Hebbian co-access learning.
 
 CREATE TABLE settings (
     key        TEXT NOT NULL PRIMARY KEY,
@@ -100,6 +100,27 @@ CREATE TABLE notes (
 CREATE INDEX idx_notes_project_folder ON notes(project_id, folder);
 CREATE INDEX idx_notes_project_updated ON notes(project_id, updated_at DESC);
 CREATE INDEX idx_notes_project_last_accessed ON notes(project_id, last_accessed DESC);
+
+CREATE TABLE note_embeddings (
+    note_id        TEXT NOT NULL PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+    embedding      BLOB NOT NULL,
+    embedding_dim  INTEGER NOT NULL,
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE note_embedding_meta (
+    note_id         TEXT NOT NULL PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+    content_hash    TEXT NOT NULL,
+    embedded_at     TEXT NOT NULL,
+    model_version   TEXT NOT NULL,
+    embedding_dim   INTEGER NOT NULL,
+    extension_state TEXT NOT NULL DEFAULT 'pending'
+);
+
+CREATE INDEX idx_note_embedding_meta_model_version
+    ON note_embedding_meta(model_version);
+CREATE INDEX idx_note_embedding_meta_embedded_at
+    ON note_embedding_meta(embedded_at DESC);
 
 CREATE VIRTUAL TABLE notes_fts USING fts5(
     note_id UNINDEXED,

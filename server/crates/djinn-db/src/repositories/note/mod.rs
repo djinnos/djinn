@@ -16,6 +16,7 @@ mod association;
 pub(crate) mod consolidation;
 mod context;
 mod crud;
+mod embeddings;
 mod file_helpers;
 mod graph;
 mod housekeeping;
@@ -35,6 +36,7 @@ pub use djinn_core::models::{
     ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate, DbNoteGroup,
     NoteDedupCandidate,
 };
+pub use embeddings::{NoteEmbeddingMatch, NoteEmbeddingRecord, UpsertNoteEmbedding};
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
     USER_CONFIRM, bayesian_update,

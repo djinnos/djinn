@@ -279,7 +279,7 @@ expression: tool_schemas_reviewer()
   },
   {
     "concurrent_safe": true,
-    "description": "Search GitHub code across millions of public repositories via grep.app. Returns matching code snippets with file paths, line numbers, and repository info. Useful for finding real-world usage examples, implementation patterns, and API usage.",
+    "description": "Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.",
     "inputSchema": {
       "properties": {
         "language": {
@@ -291,7 +291,7 @@ expression: tool_schemas_reviewer()
           "type": "string"
         },
         "query": {
-          "description": "Search query. Supports regex patterns.",
+          "description": "Search query. Supports GitHub code search syntax.",
           "type": "string"
         },
         "repo": {
@@ -305,6 +305,40 @@ expression: tool_schemas_reviewer()
       "type": "object"
     },
     "name": "github_search"
+  },
+  {
+    "concurrent_safe": true,
+    "description": "Fetch the full contents of a file from a public GitHub repository. Use after github_search to inspect a promising result. Supports optional start_line/end_line for reading specific sections of large files.",
+    "inputSchema": {
+      "properties": {
+        "end_line": {
+          "description": "Last line to return (1-based, inclusive)",
+          "type": "integer"
+        },
+        "path": {
+          "description": "File path within the repository (e.g. \"src/lib.rs\")",
+          "type": "string"
+        },
+        "ref": {
+          "description": "Branch, tag, or commit SHA (default: default branch)",
+          "type": "string"
+        },
+        "repo": {
+          "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")",
+          "type": "string"
+        },
+        "start_line": {
+          "description": "First line to return (1-based, inclusive)",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repo",
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "github_fetch_file"
   },
   {
     "concurrent_safe": true,
@@ -359,6 +393,32 @@ expression: tool_schemas_reviewer()
       "type": "object"
     },
     "name": "output_grep"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Maximum notes to include (default 8)",
+          "type": "integer"
+        },
+        "min_confidence": {
+          "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded.",
+          "type": "number"
+        },
+        "query": {
+          "description": "Optional free-text query to bias retrieval",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Task ID to gather related memory for; defaults to current session task when omitted",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "memory_build_context"
   },
   {
     "concurrent_safe": false,

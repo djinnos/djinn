@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 240
 expression: names
 ---
 [
@@ -16,6 +15,7 @@ expression: names
   "code_graph",
   "ci_job_log",
   "github_search",
+  "github_fetch_file",
   "output_view",
   "output_grep",
   "task_create",

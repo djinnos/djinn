@@ -3,8 +3,8 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::github_api::transport::handle_rate_limit;
 use crate::github_api::GitHubApiClient;
+use crate::github_api::transport::handle_rate_limit;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -238,11 +238,7 @@ impl GitHubApiClient {
                     let download_url = download_url.to_string();
                     let http = self.http.clone();
                     async move {
-                        let resp = http
-                            .get(&download_url)
-                            .bearer_auth(&token)
-                            .send()
-                            .await?;
+                        let resp = http.get(&download_url).bearer_auth(&token).send().await?;
                         Ok(resp)
                     }
                 })
@@ -250,10 +246,7 @@ impl GitHubApiClient {
             resp.text().await?
         } else {
             // Decode base64 content from the contents API response.
-            let encoded = body
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let encoded = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let clean: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
             use base64::Engine;
             let bytes = base64::engine::general_purpose::STANDARD
@@ -378,22 +371,18 @@ fn extract_text_matches(item: &serde_json::Value) -> (String, Option<u32>) {
         }
         // The text_matches don't directly give line numbers, but we can
         // estimate from the fragment content.
-        if first_line.is_none() {
-            if let Some(matches) = tm.get("matches").and_then(|v| v.as_array()) {
-                if let Some(first) = matches.first() {
-                    // indices[0] is the byte offset within the fragment
-                    if let Some(indices) = first.get("indices").and_then(|v| v.as_array()) {
-                        if let Some(start) = indices.first().and_then(|v| v.as_u64()) {
-                            // Count newlines before the match to get a rough line number
-                            if let Some(fragment) = tm.get("fragment").and_then(|v| v.as_str()) {
-                                let line =
-                                    fragment[..start as usize].matches('\n').count() as u32 + 1;
-                                first_line = Some(line);
-                            }
-                        }
-                    }
-                }
-            }
+        if first_line.is_none()
+            && let Some(matches) = tm.get("matches").and_then(|v| v.as_array())
+            && let Some(first) = matches.first()
+            // indices[0] is the byte offset within the fragment
+            && let Some(indices) = first.get("indices").and_then(|v| v.as_array())
+            && let Some(start) = indices.first().and_then(|v| v.as_u64())
+            // Count newlines before the match to get a rough line number
+            && let Some(fragment) = tm.get("fragment").and_then(|v| v.as_str())
+            && let Some(prefix) = fragment.get(..start as usize)
+        {
+            let line = prefix.matches('\n').count() as u32 + 1;
+            first_line = Some(line);
         }
     }
     (fragments.join("\n---\n"), first_line)
@@ -514,7 +503,10 @@ mod tests {
 
     #[test]
     fn truncate_respects_limits() {
-        let long = (0..20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let long = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_snippet(&long);
         assert_eq!(result.lines().count(), MAX_SNIPPET_LINES);
     }

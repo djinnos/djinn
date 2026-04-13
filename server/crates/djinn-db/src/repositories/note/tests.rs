@@ -14,6 +14,7 @@ use super::*;
 
 mod consolidation_housekeeping;
 mod crud_storage;
+mod embeddings;
 mod graph_scoring;
 mod scope_paths_regressions;
 mod search_ranking;
