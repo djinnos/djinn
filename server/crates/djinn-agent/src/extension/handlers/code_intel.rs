@@ -306,7 +306,10 @@ pub(crate) async fn call_github_search(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let cred_repo = Arc::new(CredentialRepository::new(state.db.clone(), state.event_bus.clone()));
+    let cred_repo = Arc::new(CredentialRepository::new(
+        state.db.clone(),
+        state.event_bus.clone(),
+    ));
     let params: GithubSearchParams = parse_args(arguments)?;
     github_search::search(
         cred_repo,
@@ -326,7 +329,10 @@ pub(crate) async fn call_github_fetch_file(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let cred_repo = Arc::new(CredentialRepository::new(state.db.clone(), state.event_bus.clone()));
+    let cred_repo = Arc::new(CredentialRepository::new(
+        state.db.clone(),
+        state.event_bus.clone(),
+    ));
     let params: GithubFetchFileParams = parse_args(arguments)?;
     github_search::fetch_file(
         cred_repo,

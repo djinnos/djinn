@@ -526,18 +526,12 @@ mod tests {
         .await
         .unwrap();
 
-        let expected_base_roles = [
-            "architect",
-            "lead",
-            "planner",
-            "reviewer",
-            "worker",
-        ];
+        let expected_base_roles = ["architect", "lead", "planner", "reviewer", "worker"];
 
         assert_eq!(
             rows.len(),
             5,
-            "expected 6 default roles, got {}",
+            "expected 5 default roles, got {}",
             rows.len()
         );
         for ((name, base_role, is_default), expected) in rows.iter().zip(expected_base_roles.iter())
@@ -559,7 +553,7 @@ mod tests {
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(total, 12, "2 projects × 6 roles = 12 default rows");
+        assert_eq!(total, 10, "2 projects × 5 roles = 10 default rows");
     }
 
     // ── VerificationRule validation ──────────────────────────────────────────

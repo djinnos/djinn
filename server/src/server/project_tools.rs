@@ -18,10 +18,16 @@ use djinn_db::ProjectRepository;
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
-        .route("/project/mcp-servers", get(list_mcp_servers).post(create_mcp_server))
+        .route(
+            "/project/mcp-servers",
+            get(list_mcp_servers).post(create_mcp_server),
+        )
         .route("/project/mcp-servers/update", put(update_mcp_server))
         .route("/project/mcp-servers/delete", delete(delete_mcp_server))
-        .route("/project/mcp-defaults", get(get_mcp_defaults).put(set_mcp_defaults))
+        .route(
+            "/project/mcp-defaults",
+            get(get_mcp_defaults).put(set_mcp_defaults),
+        )
         .route("/project/skills", get(list_skills).post(create_skill))
         .route("/project/skills/update", put(update_skill))
         .route("/project/skills/delete", delete(delete_skill))
@@ -43,7 +49,12 @@ async fn resolve_project_path(
         .get(project_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("project not found: {project_id}")))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("project not found: {project_id}"),
+            )
+        })?;
     Ok(project.path)
 }
 
@@ -154,8 +165,7 @@ async fn create_mcp_server(
         headers: HashMap::new(),
     };
     config.mcp_servers.insert(body.name.clone(), entry);
-    write_mcp_json(&project_path, &config)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    write_mcp_json(&project_path, &config).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(McpServerResponse {
         name: body.name,
         url: body.url,
@@ -197,8 +207,7 @@ async fn update_mcp_server(
         headers: HashMap::new(),
     };
     config.mcp_servers.insert(body.name.clone(), entry);
-    write_mcp_json(&project_path, &config)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    write_mcp_json(&project_path, &config).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(McpServerResponse {
         name: body.name,
         url: body.url,
@@ -226,8 +235,7 @@ async fn delete_mcp_server(
             format!("MCP server '{}' not found", q.name),
         ));
     }
-    write_mcp_json(&project_path, &config)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    write_mcp_json(&project_path, &config).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -251,13 +259,11 @@ fn read_settings_json(project_path: &str) -> serde_json::Value {
 fn write_settings_json(project_path: &str, value: &serde_json::Value) -> Result<(), String> {
     let path = djinn_settings_path(project_path);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create .djinn dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create .djinn dir: {e}"))?;
     }
-    let content = serde_json::to_string_pretty(value)
-        .map_err(|e| format!("JSON serialize error: {e}"))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write settings.json: {e}"))
+    let content =
+        serde_json::to_string_pretty(value).map_err(|e| format!("JSON serialize error: {e}"))?;
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write settings.json: {e}"))
 }
 
 #[derive(Serialize)]
@@ -301,9 +307,12 @@ async fn set_mcp_defaults(
 ) -> Result<Json<McpDefaultsResponse>, (StatusCode, String)> {
     let project_path = resolve_project_path(&state, &body.project_id).await?;
     let mut settings = read_settings_json(&project_path);
-    let obj = settings
-        .as_object_mut()
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "settings.json is not an object".to_string()))?;
+    let obj = settings.as_object_mut().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "settings.json is not an object".to_string(),
+        )
+    })?;
     obj.insert(
         "agent_mcp_defaults".to_string(),
         serde_json::to_value(&body.agent_mcp_defaults).unwrap(),
@@ -415,12 +424,20 @@ async fn create_skill(
         ));
     }
 
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create skills dir: {e}")))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create skills dir: {e}"),
+        )
+    })?;
 
     let file_content = format_skill_file(body.description.as_deref(), &body.content);
-    std::fs::write(&file_path, &file_content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write skill: {e}")))?;
+    std::fs::write(&file_path, &file_content).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write skill: {e}"),
+        )
+    })?;
 
     Ok(Json(SkillResponse {
         name: body.name,
@@ -453,8 +470,12 @@ async fn update_skill(
     }
 
     let file_content = format_skill_file(body.description.as_deref(), &body.content);
-    std::fs::write(&file_path, &file_content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write skill: {e}")))?;
+    std::fs::write(&file_path, &file_content).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write skill: {e}"),
+        )
+    })?;
 
     Ok(Json(SkillResponse {
         name: body.name,
@@ -484,8 +505,12 @@ async fn delete_skill(
         ));
     }
 
-    std::fs::remove_file(&file_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete skill: {e}")))?;
+    std::fs::remove_file(&file_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to delete skill: {e}"),
+        )
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
