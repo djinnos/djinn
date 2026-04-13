@@ -164,6 +164,6 @@ The rewrite cost is real but bounded. AI bears most of it. The long-term payoff 
 - [Security Weaknesses of Copilot-Generated Code](https://arxiv.org/html/2310.02059v3)
 
 ## Relations
-- [[Project Brief]] — project context driving this decision
+- [[brief]] — project context driving this decision
 - [[Embedded Database Survey]] — database choice depends on language decision
 - [[Rust Agentic Ecosystem Survey]] — ecosystem viability for Rust

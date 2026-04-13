@@ -10,7 +10,7 @@ type: design
 ---
 # Epic-Task MCP Split Design
 
-Full method signatures, validation rules, and return types for the epic/task MCP tool split defined in [[ADR-003: Split Epic and Task MCP Tools with Input Validation]].
+Full method signatures, validation rules, and return types for the epic/task MCP tool split defined in [[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]].
 
 ---
 
@@ -462,5 +462,5 @@ These tools require no signature changes but gain input validation:
 | **Net new MCP methods** | **+7** |
 
 ## Relations
-- [[ADR-003: Split Epic and Task MCP Tools with Input Validation]] — decision record
+- [[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]] — decision record
 - [[V1 Requirements]] — KANBAN and ROAD views consume these tools

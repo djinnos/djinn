@@ -1,9 +1,9 @@
 ---
 title: "Sync Improvements Implementation Plan"
-type: design
+type: 
 tags: ["sync", "git", "multi-device", "multi-project", "testing"]
-related: ["ADR-008 (desktop)", "ADR-026"]
 ---
+
 
 # Sync Improvements — Implementation Plan
 
@@ -395,5 +395,5 @@ These test the full sync system working together after all items are implemented
 ## Relations
 
 - [[ADR-008 (desktop)]] — source design document
-- [[ADR-026]] — test strategy this plan follows
-- [[ADR-019]] — MCP contract (sync tools are part of the contract)
+- [[decisions/adr-026-automated-testing-strategy-three-phase-full-stack-coverage|ADR-026]] — test strategy this plan follows
+- [[decisions/adr-019-mcp-as-single-api-and-typed-tool-schemas|ADR-019]] — MCP contract (sync tools are part of the contract)

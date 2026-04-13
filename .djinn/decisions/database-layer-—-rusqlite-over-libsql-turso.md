@@ -149,7 +149,7 @@ Use `sqlite-vec` extension (asg017/sqlite-vec) loaded at runtime via `Connection
 - Stack Research section on Turso patterns — those API examples are now irrelevant
 
 ## Relations
-- [[Project Brief]] — updates database constraint
+- [[brief]] — updates database constraint
 - [[Embedded Database Survey]] — superseded by this ADR
 - [[Stack Research]] — libsql patterns replaced by rusqlite
 - [[Architecture Research]] — sqld sidecar architecture no longer needed
