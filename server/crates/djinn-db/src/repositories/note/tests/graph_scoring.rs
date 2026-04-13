@@ -1,4 +1,5 @@
 use super::*;
+use crate::repositories::note::NoteSearchParams;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_affinity_scores_task_epic_blocker_and_max() {
@@ -242,14 +243,15 @@ async fn unrelated_search_query_does_not_return_repo_map_notes() {
     .unwrap();
 
     let results = repo
-        .search(
-            &project.id,
-            "ordinary product planning",
-            None,
-            None,
-            None,
-            10,
-        )
+        .search(NoteSearchParams {
+            project_id: &project.id,
+            query: "ordinary product planning",
+            task_id: None,
+            folder: None,
+            note_type: None,
+            limit: 10,
+            semantic_scores: None,
+        })
         .await
         .unwrap();
 

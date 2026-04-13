@@ -1,3 +1,4 @@
+use djinn_db::NoteSearchParams;
 use djinn_db::{NoteRepository, ProjectRepository};
 
 use crate::server::DjinnMcpServer;
@@ -31,7 +32,15 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
     let note = match repo.get_by_permalink(&project_id, &p.identifier).await {
         Ok(Some(note)) => note,
         _ => match repo
-            .search(&project_id, &p.identifier, None, None, None, 1)
+            .search(NoteSearchParams {
+                project_id: &project_id,
+                query: &p.identifier,
+                task_id: None,
+                folder: None,
+                note_type: None,
+                limit: 1,
+                semantic_scores: None,
+            })
             .await
         {
             Ok(results) if !results.is_empty() => {
@@ -75,16 +84,30 @@ pub async fn memory_search(
 
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
     let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
+    let semantic_scores = match server.state.embed_memory_query(&p.query).await {
+        Ok(Some(embedding)) => repo
+            .semantic_candidate_scores(
+                &project_id,
+                &embedding.values,
+                p.folder.as_deref(),
+                p.note_type.as_deref(),
+                limit,
+            )
+            .await
+            .ok(),
+        Ok(None) | Err(_) => None,
+    };
 
     match repo
-        .search(
-            &project_id,
-            &p.query,
+        .search(NoteSearchParams {
+            project_id: &project_id,
+            query: &p.query,
             task_id,
-            p.folder.as_deref(),
-            p.note_type.as_deref(),
+            folder: p.folder.as_deref(),
+            note_type: p.note_type.as_deref(),
             limit,
-        )
+            semantic_scores,
+        })
         .await
     {
         Ok(results) => MemorySearchResponse {

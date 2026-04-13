@@ -1,4 +1,5 @@
 use super::*;
+use crate::repositories::note::NoteSearchParams;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consolidation_lists_db_note_groups_and_clusters_deterministically() {
@@ -759,7 +760,15 @@ async fn housekeeping_repair_broken_wikilinks_skips_ambiguous_matches() {
     assert!(!updated.content.contains("[[Rust Ownership Guide]]"));
 
     let best = repo
-        .search(&project.id, "Rust Ownership", None, None, None, 3)
+        .search(NoteSearchParams {
+            project_id: &project.id,
+            query: "Rust Ownership",
+            task_id: None,
+            folder: None,
+            note_type: None,
+            limit: 3,
+            semantic_scores: None,
+        })
         .await
         .unwrap();
     assert!(best.len() >= 2);

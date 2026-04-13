@@ -788,7 +788,15 @@ impl NoteRepository {
             return Ok(Some(n));
         }
         let results = self
-            .search(project_id, identifier, None, None, None, 1)
+            .search(NoteSearchParams {
+                project_id,
+                query: identifier,
+                task_id: None,
+                folder: None,
+                note_type: None,
+                limit: 1,
+                semantic_scores: None,
+            })
             .await?;
         if let Some(r) = results.into_iter().next() {
             return self.get(&r.id).await;

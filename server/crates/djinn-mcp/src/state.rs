@@ -7,7 +7,8 @@ use djinn_db::{Database, repositories::note::NoteEmbeddingProvider};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::bridge::{
-    CoordinatorOps, GitOps, LspOps, RepoGraphOps, RuntimeOps, SlotPoolOps, SyncOps,
+    CoordinatorOps, GitOps, LspOps, RepoGraphOps, RuntimeOps, SemanticQueryEmbedding, SlotPoolOps,
+    SyncOps,
 };
 
 /// Subset of application state consumed by the MCP layer.
@@ -120,6 +121,13 @@ impl McpState {
 
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
         self.runtime.apply_settings(settings).await
+    }
+
+    pub async fn embed_memory_query(
+        &self,
+        query: &str,
+    ) -> Result<Option<SemanticQueryEmbedding>, String> {
+        self.runtime.embed_memory_query(query).await
     }
 
     pub async fn reset_runtime_settings(&self) {
@@ -248,6 +256,12 @@ pub(crate) mod stubs {
     impl RuntimeOps for StubRuntimeOps {
         async fn apply_settings(&self, _: &DjinnSettings) -> Result<(), String> {
             Ok(())
+        }
+        async fn embed_memory_query(
+            &self,
+            _: &str,
+        ) -> Result<Option<SemanticQueryEmbedding>, String> {
+            Ok(None)
         }
         async fn reset_runtime_settings(&self) {}
         async fn persist_model_health_state(&self) {}
