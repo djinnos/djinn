@@ -40,6 +40,8 @@ const DUPLICATE_CONFIDENCE_SIGNAL: f64 = 0.65;
 const EXTRACTION_SYSTEM_PROMPT: &str = SYSTEM_PROMPT;
 const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extracted knowledge notes. Compare a proposed note summary against an existing note summary. Respond with valid JSON only.";
 
+const MIN_DURABLE_WORDS: usize = 16;
+
 // ── JSON response shape ───────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Default)]
@@ -70,6 +72,39 @@ enum NoveltyDecisionKind {
 #[derive(Debug, Deserialize)]
 struct NoveltyDecision {
     decision: NoveltyDecisionKind,
+    existing_note_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+enum ExtractionOutcome {
+    DurableWrite,
+    MergeIntoExisting,
+    DowngradeToWorkingSpec,
+    Discard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoveltyAssessment {
+    Novel,
+    Duplicate,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct QualityAssessment {
+    specificity: bool,
+    generality: bool,
+    durability: bool,
+    novelty: NoveltyAssessment,
+    type_fit: bool,
+    outcome: ExtractionOutcome,
+    reasons: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+struct NoveltyCheckResult {
+    assessment: NoveltyAssessment,
     existing_note_id: Option<String>,
 }
 
@@ -466,41 +501,78 @@ async fn process_extracted_note(
     note: &ExtractedNote,
     extraction_quality: &mut super::session_extraction::ExtractionQuality,
 ) {
-    match novelty_decision(extraction_context, note_type, note).await {
-        Ok(Some(candidate_id)) => {
-            match extraction_context
-                .note_repo
-                .update_confidence(&candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
-                .await
-            {
-                Ok(updated_confidence) => tracing::debug!(
-                    session_id = %extraction_context.session_id,
-                    note_type = %note_type,
-                    title = %note.title,
-                    existing_note_id = %candidate_id,
-                    updated_confidence,
-                    "llm_extraction: semantic duplicate detected; boosted existing note confidence"
-                ),
-                Err(e) => tracing::warn!(
-                    session_id = %extraction_context.session_id,
-                    note_type = %note_type,
-                    title = %note.title,
-                    existing_note_id = %candidate_id,
-                    error = %e,
-                    "llm_extraction: semantic duplicate detected but failed to update existing confidence"
-                ),
+    let novelty = match novelty_decision(extraction_context, note_type, note).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::debug!(
+                session_id = %extraction_context.session_id,
+                note_type = %note_type,
+                title = %note.title,
+                error = %e,
+                "llm_extraction: novelty check failed; evaluating with unknown novelty"
+            );
+            NoveltyCheckResult {
+                assessment: NoveltyAssessment::Unknown,
+                existing_note_id: None,
             }
-            extraction_quality.novelty_skipped += 1;
+        }
+    };
+
+    let assessment = assess_quality_gate(note_type, note, &novelty);
+
+    tracing::debug!(
+        session_id = %extraction_context.session_id,
+        note_type = %note_type,
+        title = %note.title,
+        outcome = ?assessment.outcome,
+        specificity = assessment.specificity,
+        generality = assessment.generality,
+        durability = assessment.durability,
+        novelty = ?assessment.novelty,
+        type_fit = assessment.type_fit,
+        reasons = ?assessment.reasons,
+        "llm_extraction: evaluated extraction quality gate"
+    );
+
+    match assessment.outcome {
+        ExtractionOutcome::MergeIntoExisting => {
+            if let Some(candidate_id) = novelty.existing_note_id.as_deref() {
+                match extraction_context
+                    .note_repo
+                    .update_confidence(candidate_id, DUPLICATE_CONFIDENCE_SIGNAL)
+                    .await
+                {
+                    Ok(updated_confidence) => tracing::debug!(
+                        session_id = %extraction_context.session_id,
+                        note_type = %note_type,
+                        title = %note.title,
+                        existing_note_id = %candidate_id,
+                        updated_confidence,
+                        "llm_extraction: merged extraction into existing note via confidence boost"
+                    ),
+                    Err(e) => tracing::warn!(
+                        session_id = %extraction_context.session_id,
+                        note_type = %note_type,
+                        title = %note.title,
+                        existing_note_id = %candidate_id,
+                        error = %e,
+                        "llm_extraction: merge outcome failed to update existing confidence"
+                    ),
+                }
+                extraction_quality.novelty_skipped += 1;
+                extraction_quality.merged += 1;
+            }
             return;
         }
-        Ok(None) => {}
-        Err(e) => tracing::debug!(
-            session_id = %extraction_context.session_id,
-            note_type = %note_type,
-            title = %note.title,
-            error = %e,
-            "llm_extraction: novelty check failed; falling back to create"
-        ),
+        ExtractionOutcome::DowngradeToWorkingSpec => {
+            extraction_quality.downgraded += 1;
+            return;
+        }
+        ExtractionOutcome::Discard => {
+            extraction_quality.discarded += 1;
+            return;
+        }
+        ExtractionOutcome::DurableWrite => {}
     }
 
     let content_with_provenance = format!("{}{}", note.content, extraction_context.provenance);
@@ -560,7 +632,7 @@ async fn novelty_decision(
     extraction_context: &ExtractionContext<'_>,
     note_type: &str,
     note: &ExtractedNote,
-) -> Result<Option<String>, String> {
+) -> Result<NoveltyCheckResult, String> {
     let candidate_abstract = summarize_candidate_note(note);
     let folder = folder_for_type(note_type);
     let candidates = lookup_candidates(extraction_context, folder, note_type, &candidate_abstract)
@@ -568,7 +640,10 @@ async fn novelty_decision(
         .map_err(|e| format!("candidate lookup failed: {e}"))?;
 
     if candidates.is_empty() {
-        return Ok(None);
+        return Ok(NoveltyCheckResult {
+            assessment: NoveltyAssessment::Novel,
+            existing_note_id: None,
+        });
     }
 
     let response = complete(
@@ -586,7 +661,10 @@ async fn novelty_decision(
         .map_err(|e| format!("invalid novelty decision json: {e}"))?;
 
     match decision.decision {
-        NoveltyDecisionKind::Novel => Ok(None),
+        NoveltyDecisionKind::Novel => Ok(NoveltyCheckResult {
+            assessment: NoveltyAssessment::Novel,
+            existing_note_id: None,
+        }),
         NoveltyDecisionKind::AlreadyKnown => {
             let existing_note_id = decision
                 .existing_note_id
@@ -601,9 +679,182 @@ async fn novelty_decision(
                 existing_note_id = %existing_note_id,
                 "llm_extraction: semantic duplicate decision returned already_known"
             );
-            Ok(Some(existing_note_id))
+            Ok(NoveltyCheckResult {
+                assessment: NoveltyAssessment::Duplicate,
+                existing_note_id: Some(existing_note_id),
+            })
         }
     }
+}
+
+fn assess_quality_gate(
+    note_type: &str,
+    note: &ExtractedNote,
+    novelty: &NoveltyCheckResult,
+) -> QualityAssessment {
+    let specificity = has_specificity(note);
+    let generality = has_generality(note);
+    let durability = has_durability(note);
+    let type_fit = matches_type_semantics(note_type, note);
+    let novelty_assessment = novelty.assessment;
+
+    let mut reasons = Vec::new();
+    if !specificity {
+        reasons.push("insufficient_specificity");
+    }
+    if !generality {
+        reasons.push("task_local_or_overly_narrow");
+    }
+    if !durability {
+        reasons.push("not_durable_beyond_current_task");
+    }
+    if !type_fit {
+        reasons.push("type_fit_mismatch");
+    }
+    if novelty_assessment == NoveltyAssessment::Duplicate {
+        reasons.push("semantic_duplicate_of_existing_note");
+    }
+
+    let outcome = if novelty_assessment == NoveltyAssessment::Duplicate {
+        ExtractionOutcome::MergeIntoExisting
+    } else if !specificity || !type_fit {
+        ExtractionOutcome::Discard
+    } else if !generality || !durability {
+        ExtractionOutcome::DowngradeToWorkingSpec
+    } else {
+        ExtractionOutcome::DurableWrite
+    };
+
+    QualityAssessment {
+        specificity,
+        generality,
+        durability,
+        novelty: novelty_assessment,
+        type_fit,
+        outcome,
+        reasons,
+    }
+}
+
+fn has_specificity(note: &ExtractedNote) -> bool {
+    let text = normalized_text(note);
+    if text.split_whitespace().count() < 8 {
+        return false;
+    }
+    let signals = [
+        text.contains("situation"),
+        text.contains("constraint"),
+        text.contains("result"),
+        text.contains("lesson"),
+        text.contains("approach"),
+        text.contains("recommended"),
+        text.contains("why it works"),
+        text.contains("prevention"),
+        text.contains("recovery"),
+        text.contains('/'),
+        text.contains("`"),
+        !note.scope_paths.is_empty(),
+    ];
+    signals.into_iter().filter(|flag| *flag).count() >= 2
+}
+
+fn has_generality(note: &ExtractedNote) -> bool {
+    let text = normalized_text(note);
+    let positive = [
+        "reusable", "future", "across", "multiple", "general", "whenever", "teams", "tasks",
+        "pattern", "lesson", "prevent",
+    ];
+    let negative = [
+        "this task",
+        "current task",
+        "temporary",
+        "for now",
+        "wip",
+        "working spec",
+        "session-only",
+        "local experiment",
+    ];
+    positive.iter().any(|token| text.contains(token))
+        && !negative.iter().any(|token| text.contains(token))
+}
+
+fn has_durability(note: &ExtractedNote) -> bool {
+    let text = normalized_text(note);
+    if text.split_whitespace().count() < MIN_DURABLE_WORDS {
+        return false;
+    }
+    let durable_markers = [
+        "guideline",
+        "recommend",
+        "use when",
+        "avoid",
+        "prevention",
+        "tradeoff",
+        "lesson",
+        "result",
+        "constraint",
+    ];
+    let transient_markers = [
+        "todo",
+        "next step",
+        "open question",
+        "hypothesis",
+        "investigate",
+        "maybe",
+        "might",
+        "could",
+    ];
+    durable_markers.iter().any(|token| text.contains(token))
+        && !transient_markers.iter().any(|token| text.contains(token))
+}
+
+fn matches_type_semantics(note_type: &str, note: &ExtractedNote) -> bool {
+    let text = normalized_text(note);
+    match note_type {
+        "pattern" => {
+            contains_any(
+                &text,
+                &[
+                    "reusable",
+                    "recommended",
+                    "approach",
+                    "use when",
+                    "when to use",
+                ],
+            ) && contains_any(&text, &["because", "why", "tradeoff", "works"])
+        }
+        "pitfall" => {
+            contains_any(
+                &text,
+                &["pitfall", "failure", "error", "smell", "trigger", "symptom"],
+            ) && contains_any(&text, &["prevent", "recovery", "resolve", "avoid"])
+        }
+        "case" => {
+            contains_any(
+                &text,
+                &[
+                    "situation",
+                    "constraint",
+                    "result",
+                    "lesson",
+                    "worked",
+                    "failed",
+                ],
+            ) && contains_any(
+                &text,
+                &["approach", "did", "implemented", "fixed", "resolved"],
+            )
+        }
+        _ => false,
+    }
+}
+
+fn contains_any(text: &str, tokens: &[&str]) -> bool {
+    tokens.iter().any(|token| text.contains(token))
+}
+
+fn normalized_text(note: &ExtractedNote) -> String {
+    format!("{}\n{}", note.title, note.content).to_lowercase()
 }
 
 async fn lookup_candidates(

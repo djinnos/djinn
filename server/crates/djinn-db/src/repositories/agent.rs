@@ -71,6 +71,9 @@ pub struct ExtractionQualityMetrics {
     pub dedup_skipped: i64,
     pub novelty_skipped: i64,
     pub written: i64,
+    pub merged: i64,
+    pub downgraded: i64,
+    pub discarded: i64,
 }
 
 /// A pending amendment in `learned_prompt_history` that has not yet been
@@ -449,7 +452,7 @@ impl AgentRepository {
         .unwrap_or((0.0, 0.0, 0.0, 0));
 
         // Session-level metrics: completed sessions within the lookback window.
-        let session_row: (f64, f64, f64, f64, i64, i64, i64, i64) = sqlx::query_as(
+        let session_row: (f64, f64, f64, f64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
                 COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS REAL)), 0.0),
                 COALESCE(AVG(CAST(s.tokens_in AS REAL)), 0.0),
@@ -462,7 +465,10 @@ impl AgentRepository {
                 COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.extracted') AS INTEGER)), 0),
                 COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.dedup_skipped') AS INTEGER)), 0),
                 COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.novelty_skipped') AS INTEGER)), 0),
-                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.written') AS INTEGER)), 0)
+                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.written') AS INTEGER)), 0),
+                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.merged') AS INTEGER)), 0),
+                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.downgraded') AS INTEGER)), 0),
+                COALESCE(SUM(CAST(json_extract(s.event_taxonomy, '$.extraction_quality.discarded') AS INTEGER)), 0)
              FROM sessions s
              JOIN tasks t ON t.id = s.task_id
              WHERE t.project_id = ?1
@@ -475,7 +481,7 @@ impl AgentRepository {
         .bind(window_days)
         .fetch_one(self.db.pool())
         .await
-        .unwrap_or((0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0));
+        .unwrap_or((0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0));
 
         Ok(AgentMetrics {
             success_rate: task_row.0,
@@ -491,6 +497,9 @@ impl AgentRepository {
                 dedup_skipped: session_row.5,
                 novelty_skipped: session_row.6,
                 written: session_row.7,
+                merged: session_row.8,
+                downgraded: session_row.9,
+                discarded: session_row.10,
             },
         })
     }
