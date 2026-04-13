@@ -627,6 +627,70 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_requirement_edit_from_worktree_updates_canonical_path() {
+        let project_tmp = workspace_tempdir();
+        let worktree_tmp = project_tmp
+            .path()
+            .join(".djinn/worktrees/test-current-requirement");
+        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, project_tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        repo.create(
+            &project.id,
+            project_tmp.path(),
+            "V1 Requirements",
+            "References [[Cognitive Memory Scope]].",
+            "requirement",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let Json(edited) = server
+            .memory_edit_with_worktree(
+                Parameters(EditParams {
+                    project: worktree_tmp.to_string_lossy().to_string(),
+                    identifier: "requirements/v1-requirements".to_string(),
+                    operation: "find_replace".to_string(),
+                    content: "[[reference/cognitive-memory-scope]]".to_string(),
+                    find_text: Some("[[Cognitive Memory Scope]]".to_string()),
+                    section: None,
+                    note_type: None,
+                }),
+                Some(PathBuf::from(&worktree_tmp)),
+            )
+            .await;
+        assert!(edited.error.is_none(), "{:?}", edited.error);
+
+        let canonical_path = project_tmp
+            .path()
+            .join(".djinn/requirements/v1-requirements.md");
+        let worktree_path = worktree_tmp.join(".djinn/requirements/v1-requirements.md");
+        assert!(canonical_path.exists());
+        assert!(worktree_path.exists());
+        let canonical_contents = std::fs::read_to_string(&canonical_path).unwrap();
+        let worktree_contents = std::fs::read_to_string(&worktree_path).unwrap();
+        assert!(canonical_contents.contains("[[reference/cognitive-memory-scope]]"));
+        assert_eq!(canonical_contents, worktree_contents);
+        assert!(
+            repo.get_by_permalink(&project.id, "reference/v1-requirements")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !project_tmp
+                .path()
+                .join(".djinn/reference/v1-requirements.md")
+                .exists()
+        );
+    }
+
     // ── scope_paths routing regression tests ────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

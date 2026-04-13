@@ -466,6 +466,11 @@ impl NoteRepository {
         }
     }
 
+    fn should_write_canonical_with_mirror(&self, current: &Note) -> bool {
+        self.worktree_root.is_some()
+            && (is_singleton(&current.note_type) || Path::new(&current.file_path).exists())
+    }
+
     fn write_note_files(
         &self,
         primary_file_path: &Path,
@@ -860,7 +865,7 @@ impl NoteRepository {
                 self.existing_note_file_path(&current)
             };
             let (primary_file_path, mirror_file_path) =
-                if is_singleton(&current.note_type) && self.worktree_root.is_some() {
+                if self.should_write_canonical_with_mirror(&current) {
                     (
                         canonical_file_path.as_path(),
                         Some(worktree_file_path.as_path()),
@@ -994,7 +999,7 @@ impl NoteRepository {
             let canonical_file_path = PathBuf::from(&current.file_path);
             let worktree_file_path = self.existing_note_file_path(&current);
             let (primary_file_path, mirror_file_path) =
-                if is_singleton(&current.note_type) && self.worktree_root.is_some() {
+                if self.should_write_canonical_with_mirror(&current) {
                     (
                         canonical_file_path.as_path(),
                         Some(worktree_file_path.as_path()),
