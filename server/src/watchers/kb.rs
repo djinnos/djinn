@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::DjinnEventEnvelope;
+use crate::semantic_memory::{EmbeddingService, default_embedding_cache_dir};
 use djinn_db::{Database, NoteRepository, ProjectRepository};
 
 /// Debounce window — reindex fires this long after the last file change.
@@ -140,11 +141,13 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
                     let events_tx = events_tx.clone();
                     let project_id = project_id.clone();
                     let project_path = project_path_owned.clone();
+                    let embedding_service = EmbeddingService::new(default_embedding_cache_dir());
 
                     // Spawn reindex on the captured runtime handle — safe to call
                     // from non-Tokio threads (notify's debouncer thread).
                     rt_handle.spawn(async move {
-                        let note_repo = NoteRepository::new(db, events_tx);
+                        let note_repo = NoteRepository::new(db, events_tx)
+                            .with_embedding_provider(Some(Arc::new(embedding_service)));
                         match note_repo
                             .reindex_from_disk(&project_id, &project_path)
                             .await

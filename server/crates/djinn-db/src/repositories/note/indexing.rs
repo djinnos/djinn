@@ -109,6 +109,10 @@ impl NoteRepository {
             summary.deleted += 1;
         }
 
+        if let Err(error) = self.repair_project_embeddings(project_id).await {
+            tracing::warn!(project_id, %error, "failed to repair stale or missing note embeddings after reindex");
+        }
+
         Ok(summary)
     }
 
@@ -155,6 +159,14 @@ impl NoteRepository {
             .await?;
 
         tx.commit().await?;
+        self.sync_note_embedding(
+            &note.id,
+            &note.title,
+            &note.note_type,
+            &note.tags,
+            &note.content,
+        )
+        .await;
         Ok(note)
     }
 
@@ -205,6 +217,14 @@ impl NoteRepository {
             .await?;
 
         tx.commit().await?;
+        self.sync_note_embedding(
+            &note.id,
+            &note.title,
+            &note.note_type,
+            &note.tags,
+            &note.content,
+        )
+        .await;
         Ok(note)
     }
 }

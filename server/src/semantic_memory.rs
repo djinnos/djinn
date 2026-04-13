@@ -10,6 +10,8 @@ use serde::Serialize;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer};
 use tokio::sync::{Mutex, OnceCell};
 
+use djinn_db::{EmbeddedNote, NoteEmbeddingProvider};
+
 const DEFAULT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
 const DEFAULT_MODEL_REVISION: &str = "main";
 pub const DEFAULT_EMBEDDING_DIMENSION: usize = 768;
@@ -22,6 +24,24 @@ pub struct EmbeddingModelDescriptor {
     pub model_id: String,
     pub revision: String,
     pub dimension: usize,
+}
+
+#[async_trait::async_trait]
+impl NoteEmbeddingProvider for EmbeddingService {
+    fn model_version(&self) -> String {
+        let model = self.model_descriptor();
+        format!("{}@{}", model.model_id, model.revision)
+    }
+
+    async fn embed_note(&self, text: &str) -> Result<EmbeddedNote, String> {
+        match self.embed_document(text).await {
+            EmbeddingOutcome::Ready(vector) => Ok(EmbeddedNote {
+                values: vector.values,
+                model_version: format!("{}@{}", vector.model.model_id, vector.model.revision),
+            }),
+            EmbeddingOutcome::Degraded(degraded) => Err(degraded.reason),
+        }
+    }
 }
 
 impl Default for EmbeddingModelDescriptor {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use djinn_core::events::EventBus;
 use djinn_core::models::DjinnSettings;
-use djinn_db::Database;
+use djinn_db::{Database, repositories::note::NoteEmbeddingProvider};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::bridge::{
@@ -25,6 +25,7 @@ pub struct McpState {
     sync_user_id: String,
     coordinator: Option<Arc<dyn CoordinatorOps>>,
     pool: Option<Arc<dyn SlotPoolOps>>,
+    embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
     lsp: Arc<dyn LspOps>,
     sync: Arc<dyn SyncOps>,
     runtime: Arc<dyn RuntimeOps>,
@@ -42,6 +43,7 @@ impl McpState {
         sync_user_id: String,
         coordinator: Option<Arc<dyn CoordinatorOps>>,
         pool: Option<Arc<dyn SlotPoolOps>>,
+        embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
         lsp: Arc<dyn LspOps>,
         sync: Arc<dyn SyncOps>,
         runtime: Arc<dyn RuntimeOps>,
@@ -56,6 +58,7 @@ impl McpState {
             sync_user_id,
             coordinator,
             pool,
+            embedding_provider,
             lsp,
             sync,
             runtime,
@@ -90,6 +93,10 @@ impl McpState {
 
     pub async fn pool(&self) -> Option<Arc<dyn SlotPoolOps>> {
         self.pool.clone()
+    }
+
+    pub fn embedding_provider(&self) -> Option<Arc<dyn NoteEmbeddingProvider>> {
+        self.embedding_provider.clone()
     }
 
     pub fn lsp(&self) -> &Arc<dyn LspOps> {
@@ -373,6 +380,7 @@ pub(crate) mod stubs {
             CatalogService::new(),
             HealthTracker::new(),
             "test-user".into(),
+            None,
             None,
             None,
             Arc::new(StubLspOps),

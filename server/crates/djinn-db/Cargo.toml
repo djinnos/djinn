@@ -10,6 +10,7 @@ doctest = false
 test-support = []
 
 [dependencies]
+async-trait = "0.1"
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
 dirs = "6"
 globset = "0.4"

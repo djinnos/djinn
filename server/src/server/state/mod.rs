@@ -462,7 +462,8 @@ impl AppState {
 
     async fn reindex_all_projects_on_startup(&self) {
         let project_repo = ProjectRepository::new(self.db().clone(), self.event_bus());
-        let note_repo = NoteRepository::new(self.db().clone(), self.event_bus());
+        let note_repo = NoteRepository::new(self.db().clone(), self.event_bus())
+            .with_embedding_provider(Some(Arc::new(self.embedding_service().clone())));
         let projects = match project_repo.list().await {
             Ok(projects) => projects,
             Err(e) => {
