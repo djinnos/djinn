@@ -103,7 +103,7 @@
 - All LLM calls use the cheapest adequate model (haiku-class for L0/L1/dedup/contradiction, not opus-class)
 
 ## Relations
-- [[Roadmap]]
-- [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+- [[roadmap]]
+- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
 - [[Cognitive Memory Systems Research]]
-- [[V1 Requirements]]
+- [[requirements/v1-requirements|V1 Requirements]]

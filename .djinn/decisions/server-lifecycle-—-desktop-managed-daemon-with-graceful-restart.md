@@ -104,6 +104,6 @@ The desktop is the supervisor:
 - Should the desktop pre-extract the new binary before signaling shutdown to minimize downtime?
 
 ## Relations
-- [[Project Brief]] — server lifecycle not previously specified
+- [[brief]] — server lifecycle not previously specified
 - [[V1 Requirements]] — adds LIFE-* requirements
 - [[Database Layer — rusqlite over libsql/Turso]] — ADR-002, state survival via DB

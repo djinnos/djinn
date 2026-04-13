@@ -1,8 +1,9 @@
 ---
 title: Memory Sync and Worktree-Aware Knowledge Base
-type: adr
+type: 
 tags: ["sync","memory","cognitive","worktree"]
 ---
+
 
 # Memory Sync and Worktree-Aware Knowledge Base
 
@@ -11,7 +12,7 @@ Proposed
 
 ## Context
 
-[[ADR-023 Cognitive Memory Architecture Multi-Signal Retrieval and Associative Learning]] introduces per-note cognitive metadata: `access_count`, `last_accessed`, `confidence`, and `note_associations` (Hebbian co-access weights). Today this data lives exclusively in `~/.djinn/djinn.db` and is lost when:
+[[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023 Cognitive Memory Architecture Multi-Signal Retrieval and Associative Learning]] introduces per-note cognitive metadata: `access_count`, `last_accessed`, `confidence`, and `note_associations` (Hebbian co-access weights). Today this data lives exclusively in `~/.djinn/djinn.db` and is lost when:
 
 - A colleague clones a project that uses Djinn
 - The DB is rebuilt or re-registered
@@ -23,7 +24,7 @@ Additionally, memory tools (`memory_write`, `memory_edit`, `memory_delete`) curr
 - Note changes aren't reviewable on the task branch PR
 - Notes can't be discarded with a failed task
 
-[[Djinn Namespace Git Sync]] (ADR-007) already reserves the `djinn/memory` branch but has no implementation.
+[[decisions/djinn-namespace-git-sync|Djinn Namespace Git Sync]] (ADR-007) already reserves the `djinn/memory` branch but has no implementation.
 
 ## Decision
 
@@ -94,4 +95,4 @@ A fresh clone bootstraps meaningful signals by importing all users' metric files
 
 - [[ADR-023 Cognitive Memory Architecture Multi-Signal Retrieval and Associative Learning]]
 - [[Djinn Namespace Git Sync]]
-- [[Project .djinn Directory — Notes Only, Git-Tracked]]
+- [[decisions/project-.djinn-directory-—-notes-only,-git-tracked|Project .djinn Directory — Notes Only, Git-Tracked]]

@@ -13,9 +13,9 @@ Date: 2026-04-08
 
 Originating spike: `ih6u` — *"Finish ADR-051 Epic C: Pulse surfaces + proposed epic lane"*
 
-Extends: [["ADR-051: Planner-as-Patrol, Architect-as-Consultant, ADR-to-Epic Pipeline, and Auto-Dispatch Reentrance Guards"]]
+Extends: [[decisions/adr-051-planner-as-patrol-and-architect-as-consultant|ADR-051: Planner-as-Patrol, Architect-as-Consultant, ADR-to-Epic Pipeline, and Auto-Dispatch Reentrance Guards]]
 
-Related: [[ADR-050: Architect/Chat Code-Graph Consolidation]], [[ADR-046: Chat-Driven Planning]]
+Related: [[decisions/adr-050-architect-chat-code-graph-consolidation|ADR-050: Architect/Chat Code-Graph Consolidation]], [[decisions/adr-046-chat-driven-planning-drafting-epics-research-agent-deliverables-and-memory-write-access|ADR-046: Chat-Driven Planning]]
 
 ## ⚠️ Reconstruction notice
 
