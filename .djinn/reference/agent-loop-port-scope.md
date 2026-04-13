@@ -6,7 +6,7 @@ tags: ["scope","reference","agent-loop"]
 
 # Agent Loop Port Scope
 
-Scope boundaries for Phase 12: Replace Goose with Djinn-owned agent loop. See [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]].
+Scope boundaries for Phase 12: Replace Goose with Djinn-owned agent loop. See [[decisions/adr-027-own-the-agent-loop-replace-goose-with-direct-llm-integration|ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]].
 
 ## In Scope
 
@@ -126,9 +126,9 @@ Scope boundaries for Phase 12: Replace Goose with Djinn-owned agent loop. See [[
 
 ## Relations
 
-- [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]]
+- [[decisions/adr-027-own-the-agent-loop-replace-goose-with-direct-llm-integration|ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]]
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — superseded
-- [[ADR-018: Djinn-Owned Session Compaction]] — compaction now fully owned
+- [[decisions/adr-018-djinn-owned-session-compaction|ADR-018: Djinn-Owned Session Compaction]] — compaction now fully owned
 - [[Roadmap]] — Phase 12
 
 

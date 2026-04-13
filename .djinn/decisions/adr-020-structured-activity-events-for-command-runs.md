@@ -6,7 +6,7 @@ tags: ["adr","activity-log","commands","session-viewer"]
 
 ## Context
 
-The server runs user-configured setup and verification commands during task execution (see [[ADR-014: Project Setup & Verification Commands]]). Currently:
+The server runs user-configured setup and verification commands during task execution (see [[decisions/adr-014-project-setup-verification-commands|ADR-014: Project Setup & Verification Commands]]). Currently:
 
 - **Failures**: Logged as `event_type: "comment"` with `actor_role: "verification"` — the payload is unstructured text containing the failed command name, exit code, and truncated stdout/stderr
 - **Successes**: Not logged at all — completely invisible in the activity timeline
@@ -79,6 +79,6 @@ payload: {
 - stdout/stderr for failures is duplicated if we keep the old comment events alongside
 
 ## Relations
-- [[ADR-014: Project Setup & Verification Commands]]
+- [[decisions/adr-014-project-setup-verification-commands|ADR-014: Project Setup & Verification Commands]]
 - [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]]
-- [[ADR-018: Djinn-Owned Session Compaction]]
+- [[decisions/adr-018-djinn-owned-session-compaction|ADR-018: Djinn-Owned Session Compaction]]

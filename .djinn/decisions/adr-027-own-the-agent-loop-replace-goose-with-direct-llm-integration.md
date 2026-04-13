@@ -140,9 +140,9 @@ Use the same primitives Goose uses internally:
 ## Relations
 
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — SUPERSEDED by this ADR
-- [[ADR-018: Djinn-Owned Session Compaction]] — Compaction strategy now fully owned, not wrapping Goose
-- [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Token metrics now sourced directly from API responses
-- [[ADR-015: Session Continuity & Resume]] — Session storage moves to single DB
+- [[decisions/adr-018-djinn-owned-session-compaction|ADR-018: Djinn-Owned Session Compaction]] — Compaction strategy now fully owned, not wrapping Goose
+- [[decisions/adr-010-session-cost-tracking-—-per-task-token-metrics|ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Token metrics now sourced directly from API responses
+- [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity & Resume]] — Session storage moves to single DB
 - [[Roadmap]] — New phase for this work
 
 

@@ -9,7 +9,7 @@ tags: ["adr","testing","ci","playwright","mcp","contract","e2e"]
 
 **Status:** Accepted (Phase 1 complete, 2026-03-12)
 **Date:** 2026-03-08
-**Related:** [[ADR-019: MCP as Single API and Typed Tool Schemas]]
+**Related:** [[decisions/adr-019-mcp-as-single-api-and-typed-tool-schemas|ADR-019: MCP as Single API and Typed Tool Schemas]]
 
 ---
 
@@ -450,5 +450,5 @@ test-all:        cargo test && cd desktop && pnpm vitest run && pnpm playwright 
 
 ## Relations
 
-- [[ADR-019: MCP as Single API and Typed Tool Schemas]] — MCP is the contract being tested
+- [[decisions/adr-019-mcp-as-single-api-and-typed-tool-schemas|ADR-019: MCP as Single API and Typed Tool Schemas]] — MCP is the contract being tested
 - [[Roadmap]] — testing infrastructure supports all future phases

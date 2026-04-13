@@ -56,7 +56,7 @@ When `execution_start` is called, for each project with configured commands:
 
 - **Pre-dispatch**: Setup commands run in the task worktree after git preparation, before the agent session starts
 - **Post-session**: Verification commands run in the task worktree after the agent signals completion, before status transition
-- **Failure handling**: Verification failures are fed back to the same session (see [[ADR-015: Session Continuity & Resume]]). The agent fixes the issue, then verification re-runs. Unlimited retries — the agent can self-block via `WORKER_RESULT: BLOCKED` if it can't resolve the issue.
+- **Failure handling**: Verification failures are fed back to the same session (see [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity & Resume]]). The agent fixes the issue, then verification re-runs. Unlimited retries — the agent can self-block via `WORKER_RESULT: BLOCKED` if it can't resolve the issue.
 
 ### Agent Prompt Integration
 
@@ -87,5 +87,5 @@ Commands stored per-project in the project registry (DB). New MCP tools for mana
 
 - [[Roadmap]] — Post-V1 enhancement
 - [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — Extends execution model with pre/post hooks
-- [[ADR-015: Session Continuity & Resume]] — Verification failures trigger session resume
+- [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity & Resume]] — Verification failures trigger session resume
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose sessions are the unit being wrapped

@@ -12,7 +12,7 @@ tags: ["adr","agent-loop","session","tool-choice","roles"]
 **Status:** Complete
 **Date:** 2026-03-18
 **Supersedes:** ADR-022 (Outcome-Based Session Validation & Agent Role Redesign)
-**Related:** [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]], [[Roadmap]]
+**Related:** [[decisions/adr-027-own-the-agent-loop-replace-goose-with-direct-llm-integration|ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]], [[Roadmap]]
 
 ---
 
@@ -228,8 +228,8 @@ Add `tool_choice: Option<ToolChoice>` as a parameter to `LlmProvider::stream()`.
 
 ## Relations
 
-- [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — SUPERSEDED
-- [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]] — provider abstraction extended
+- [[decisions/adr-022-outcome-based-session-validation-agent-role-redesign|ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — SUPERSEDED
+- [[decisions/adr-027-own-the-agent-loop-replace-goose-with-direct-llm-integration|ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]] — provider abstraction extended
 - [[Roadmap]] — new roles will also need finalize tools
 - [[Roadmap]] — new phase or integrated into Phase 16 (Operational Reliability)
 

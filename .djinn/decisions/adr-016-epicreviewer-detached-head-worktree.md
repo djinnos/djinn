@@ -9,7 +9,7 @@ tags: ["adr","epic-review","worktree","sandbox"]
 
 Status: Accepted
 Date: 2026-03-04
-Related: [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
+Related: [[decisions/adr-013-os-level-shell-sandboxing-landlock-seatbelt|ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
 
 ## Context
 
@@ -64,5 +64,5 @@ The dispatch flow branches on `agent_type == EpicReviewer` before calling
 
 ## Relations
 
-- [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
+- [[decisions/adr-013-os-level-shell-sandboxing-landlock-seatbelt|ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
 - [[OS Shell Hardening Scope]]

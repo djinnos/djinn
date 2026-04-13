@@ -45,8 +45,8 @@ tags: ["scope","reference","setup","verification"]
 ## Relations
 
 - [[Roadmap]] — Post-V1 enhancement
-- [[ADR-014: Project Setup & Verification Commands]] — Primary design decision
-- [[ADR-015: Session Continuity & Resume]] — Session lifecycle redesign enabling verification feedback loop
+- [[decisions/adr-014-project-setup-verification-commands|ADR-014: Project Setup & Verification Commands]] — Primary design decision
+- [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity & Resume]] — Session lifecycle redesign enabling verification feedback loop
 - [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — Execution model being extended
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose session storage enables resume
 - [[V1 Requirements]] — Extends AGENT-03 (dispatch flow) and REVIEW-01 (task review)

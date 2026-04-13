@@ -5,7 +5,7 @@ tags: ["adr","session","api","session-viewer"]
 ---
 
 ## Context
-The desktop session viewer (see desktop [[ADR-007: Session Viewer — Unified Chat UI for Task Execution]]) needs to display actual agent conversation content: LLM messages, tool calls, tool results, and subagent activity.
+The desktop session viewer (see desktop [[decisions/adr-007-session-viewer-unified-chat-ui-for-task-execution|ADR-007: Session Viewer — Unified Chat UI for Task Execution]]) needs to display actual agent conversation content: LLM messages, tool calls, tool results, and subagent activity.
 
 **Current state:**
 - Djinn's `sessions` table stores **metadata only** (id, task_id, model_id, agent_type, status, tokens, timestamps, continuation_of)
@@ -137,7 +137,7 @@ The SSE session event stream is designed to support a future "virtual office" vi
 This requires no changes to the SSE event format — just a frontend state machine that maps current session activity to visual state. All active sessions should be streamed to the desktop (not just the one being viewed), which is why we broadcast all session events on the shared channel rather than requiring per-session subscriptions.
 
 ## Relations
-- [[ADR-018: Djinn-Owned Session Compaction]]
-- [[ADR-015: Session Continuity & Resume]]
-- [[ADR-019: MCP as Single API and Typed Tool Schemas]]
+- [[decisions/adr-018-djinn-owned-session-compaction|ADR-018: Djinn-Owned Session Compaction]]
+- [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity & Resume]]
+- [[decisions/adr-019-mcp-as-single-api-and-typed-tool-schemas|ADR-019: MCP as Single API and Typed Tool Schemas]]
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]

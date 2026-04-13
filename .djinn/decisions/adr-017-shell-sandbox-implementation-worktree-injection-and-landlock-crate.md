@@ -9,7 +9,7 @@ tags: ["adr","sandbox","landlock","shell","implementation"]
 
 Status: Accepted
 Date: 2026-03-04
-Related: [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
+Related: [[decisions/adr-013-os-level-shell-sandboxing-landlock-seatbelt|ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
 
 ## Context
 
@@ -71,6 +71,6 @@ is raw `libc` syscalls, which would require reimplementing the crate.
 
 ## Relations
 
-- [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
-- [[ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]
+- [[decisions/adr-013-os-level-shell-sandboxing-landlock-seatbelt|ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
+- [[decisions/adr-011-workspace-guarded-shell-for-goose-frontend-tools|ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]
 - [[OS Shell Hardening Scope]]

@@ -111,4 +111,4 @@ Steps:
 ## Relations
 
 - [["ADR-029: Vertical Workspace Splitting and Agent Role Trait"]] — superseded (workspace portion)
-- [[ADR-028: Module Visibility Enforcement and Deep Module Architecture]] — complementary
+- [[decisions/adr-028-module-visibility-enforcement-and-deep-module-architecture|ADR-028: Module Visibility Enforcement and Deep Module Architecture]] — complementary

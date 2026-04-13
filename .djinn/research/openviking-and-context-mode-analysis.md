@@ -152,6 +152,6 @@ Both reference implementations use LLM calls in the write path. The key insight 
 The mitigation: use the cheapest adequate model (haiku-class), send minimal context (L0 abstracts, not full content), and gate LLM calls behind structural pre-filters (BM25 similarity, type compatibility) so most operations never reach the LLM.
 
 ## Relations
-- [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
 - [[Cognitive Memory Systems Research]]
 - [[Cognitive Memory Infrastructure Scope]]

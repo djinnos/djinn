@@ -14,7 +14,7 @@ tags: ["adr","architecture","agent","lsp","scip","repo-graph","code-intelligence
 
 Date: 2026-03-27
 
-Related: [["ADR-043: Repository Map — SCIP-Powered Structural Context for Agent Sessions"]], [[ADR-041: Unified Tool Service Layer in djinn-mcp]]
+Related: [["ADR-043: Repository Map — SCIP-Powered Structural Context for Agent Sessions"]], [[decisions/adr-041-unified-tool-service-layer-in-djinn-mcp|ADR-041: Unified Tool Service Layer in djinn-mcp]]
 
 ## Context
 
@@ -103,4 +103,4 @@ Phases 1 and 3 can be parallelized. Phase 2 builds on Phase 1's document symbol 
 ## Relations
 
 - [["ADR-043: Repository Map — SCIP-Powered Structural Context for Agent Sessions"]]
-- [[ADR-041: Unified Tool Service Layer in djinn-mcp]]
+- [[decisions/adr-041-unified-tool-service-layer-in-djinn-mcp|ADR-041: Unified Tool Service Layer in djinn-mcp]]

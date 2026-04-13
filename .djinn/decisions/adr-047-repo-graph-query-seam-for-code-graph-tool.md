@@ -92,5 +92,5 @@ Response types (`GraphNeighbor`, `RankedNode`) are defined in `djinn-mcp` as ser
 
 ## Relations
 
-- [[ADR-044: Interactive Code Intelligence — LSP Enhancements, NamePath Addressing, and Repo Graph Queries]]
-- [[ADR-041 MCP tool bridge architecture]]
+- [[decisions/adr-044-interactive-code-intelligence-lsp-enhancements-namepath-addressing-and-repo-graph-queries|ADR-044: Interactive Code Intelligence — LSP Enhancements, NamePath Addressing, and Repo Graph Queries]]
+- [[decisions/adr-041-unified-tool-service-layer-in-djinn-mcp|ADR-041 MCP tool bridge architecture]]

@@ -236,5 +236,5 @@ Two options for receiving GitHub webhooks when running locally:
 
 ## Relations
 
-- [[ADR-030: Repo-Committed Verification and Commit Hash Caching]] — current verification model being extended
+- [[decisions/adr-030-repo-committed-verification-and-commit-hash-caching|ADR-030: Repo-Committed Verification and Commit Hash Caching]] — current verification model being extended
 - [['ADR-009: Simplified Execution — No Phases, Direct Task Dispatch']] — task branches merge to target; PR is the merge mechanism now

@@ -8,7 +8,7 @@ tags: ["security","sandboxing","landlock","seatbelt","shell"]
 
 Status: Accepted
 Date: 2026-03-04
-Supersedes: [[ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]
+Supersedes: [[decisions/adr-011-workspace-guarded-shell-for-goose-frontend-tools|ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]
 
 ## Context
 
@@ -106,4 +106,4 @@ writes to `~/.ssh/`, `~/.bashrc/`, and the main repo checkout.
 ## Relations
 
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
-- [[ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]
+- [[decisions/adr-011-workspace-guarded-shell-for-goose-frontend-tools|ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]

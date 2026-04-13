@@ -11,7 +11,7 @@ tags: ["adr","architecture","agent","architect","chat","scip","code-graph","repo
 
 Date: 2026-04-07
 
-Related: [[ADR-043 Repository Map — SCIP-Powered Structural Context]], [[ADR-044 Interactive Code Intelligence]], [[ADR-046: Chat-Driven Planning — Drafting Epics, Research Agent Deliverables, and Memory Write Access]], [[ADR-047 Repo-Graph Query Seam]], [[ADR-034 Agent Role Hierarchy]]
+Related: [[decisions/adr-043-repository-map-scip-powered-structural-context-for-agent-sessions|ADR-043 Repository Map — SCIP-Powered Structural Context]], [[decisions/adr-044-interactive-code-intelligence-lsp-enhancements-namepath-addressing-and-repo-graph-queries|ADR-044 Interactive Code Intelligence]], [[decisions/adr-046-chat-driven-planning-drafting-epics-research-agent-deliverables-and-memory-write-access|ADR-046: Chat-Driven Planning — Drafting Epics, Research Agent Deliverables, and Memory Write Access]], [[decisions/adr-047-repo-graph-query-seam-for-code-graph-tool|ADR-047 Repo-Graph Query Seam]], [[decisions/adr-034-agent-role-hierarchy-architect-patrol-scrum-master-rules-and-task-types|ADR-034 Agent Role Hierarchy]]
 
 ## Context
 

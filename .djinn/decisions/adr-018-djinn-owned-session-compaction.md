@@ -101,9 +101,9 @@ properties:
   later, we'd need to evaluate re-enabling
 
 ## Relations
-- [[ADR-015: Session Continuity & Resume]] — Compaction extends the resume
+- [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity & Resume]] — Compaction extends the resume
   model with continuation chains
-- [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Per-segment
+- [[decisions/adr-010-session-cost-tracking-—-per-task-token-metrics|ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Per-segment
   token tracking via continuation_of chain
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] —
   Goose provides the session infrastructure being wrapped

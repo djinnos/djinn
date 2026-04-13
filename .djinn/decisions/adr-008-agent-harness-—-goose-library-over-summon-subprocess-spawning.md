@@ -6,7 +6,7 @@ tags: []
 
 # ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning
 
-## Status: Superseded by [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]]
+## Status: Superseded by [[decisions/adr-027-own-the-agent-loop-replace-goose-with-direct-llm-integration|ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]]
 
 ## Context
 

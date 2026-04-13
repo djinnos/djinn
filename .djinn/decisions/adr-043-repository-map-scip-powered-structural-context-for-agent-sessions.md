@@ -12,7 +12,7 @@ Date: 2026-03-25
 
 Supersedes: ADR-035 (Tree-Sitter approach, withdrawn)
 
-Related: [[ADR-023 Cognitive Memory Architecture]], [[ADR-029 Vertical Workspace Split]], [[ADR-034 Agent Role Hierarchy]]
+Related: [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023 Cognitive Memory Architecture]], [[decisions/adr-029-vertical-workspace-splitting-and-agent-role-trait|ADR-029 Vertical Workspace Split]], [[decisions/adr-034-agent-role-hierarchy-architect-patrol-scrum-master-rules-and-task-types|ADR-034 Agent Role Hierarchy]]
 
 ## Context
 
@@ -343,6 +343,6 @@ Suffixes: `/` namespace, `#` type, `.` term, `()` method, `!` macro. Locals: `lo
 
 ## Relations
 
-- [[ADR-023 Cognitive Memory Architecture]] -- repo map integrates as note type + file affinity RRF signal
-- [[ADR-029 Vertical Workspace Split]] -- crate structure is a natural unit for repo map sections
-- [[ADR-034 Agent Role Hierarchy]] -- Architect/PM roles benefit most from broad repo maps; Workers need focused maps
+- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023 Cognitive Memory Architecture]] -- repo map integrates as note type + file affinity RRF signal
+- [[decisions/adr-029-vertical-workspace-splitting-and-agent-role-trait|ADR-029 Vertical Workspace Split]] -- crate structure is a natural unit for repo map sections
+- [[decisions/adr-034-agent-role-hierarchy-architect-patrol-scrum-master-rules-and-task-types|ADR-034 Agent Role Hierarchy]] -- Architect/PM roles benefit most from broad repo maps; Workers need focused maps

@@ -1,14 +1,15 @@
 ---
 title: ADR-042: DB-Only Knowledge Extraction, Consolidation, and Task Routing Fixes
-type: adr
+type: 
 tags: ["knowledge-extraction","consolidation","db-storage","task-routing","session-reflection"]
 ---
+
 
 **Status:** Draft
 **Date:** 2026-03-24
 **Authors:** Fernando, Claude
 
-Extends: [[ADR-023: Cognitive Memory Architecture]], [[ADR-038: Configurable Agent Roles]]
+Extends: [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023: Cognitive Memory Architecture]], [[ADR-038: Configurable Agent Roles]]
 
 ## Context
 
@@ -270,5 +271,5 @@ This is a lightweight version of Ruflo's Q-Learning Router — not learned routi
 
 - [[ADR-023: Cognitive Memory Architecture]] — extended (DB-only storage for machine-generated notes, consolidation as missing CONSOLIDATE step, access_count fix)
 - [[ADR-038: Configurable Agent Roles]] — complementary (extraction metrics feed into agent effectiveness monitoring, routing fixes improve dispatch)
-- [[ADR-034]] — extended (`decomposition` renamed to `planning`, architect prompt update)
+- [[decisions/adr-034-agent-role-hierarchy-architect-patrol-scrum-master-rules-and-task-types|ADR-034]] — extended (`decomposition` renamed to `planning`, architect prompt update)
 - [[Ruflo Comparison Analysis]] — inspiration for consolidation loop, dispatch failure memory, tool metrics

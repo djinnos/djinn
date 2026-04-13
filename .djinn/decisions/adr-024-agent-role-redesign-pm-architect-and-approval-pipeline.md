@@ -10,7 +10,7 @@ tags: ["adr","agents","pm","architect","approval"]
 **Status:** Proposed
 **Date:** 2026-03-06
 **Supersedes:** Partially supersedes ADR-012 (epic review batches), ADR-016 (epic reviewer worktree)
-**Related:** [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]], [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+**Related:** [[decisions/adr-022-outcome-based-session-validation-agent-role-redesign|ADR-022: Outcome-Based Session Validation & Agent Role Redesign]], [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
 
 ---
 
@@ -262,8 +262,8 @@ The reviewer correctly marked these unmet (no Docker in the worktree to verify),
 
 ## Relations
 
-- [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — circuit breaker escalation target
-- [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]] — KB hygiene signals
-- [[ADR-012 Epic Review Batches and Structured Output Nudging]] — superseded (epic review eliminated)
-- [[ADR-016: EpicReviewer Detached HEAD Worktree]] — superseded (epic reviewer eliminated)
+- [[decisions/adr-022-outcome-based-session-validation-agent-role-redesign|ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — circuit breaker escalation target
+- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]] — KB hygiene signals
+- [[decisions/adr-012-epic-review-batches-and-structured-output-nudging|ADR-012 Epic Review Batches and Structured Output Nudging]] — superseded (epic review eliminated)
+- [[decisions/adr-016-epicreviewer-detached-head-worktree|ADR-016: EpicReviewer Detached HEAD Worktree]] — superseded (epic reviewer eliminated)
 - [[Roadmap]] — adds to Phase 10

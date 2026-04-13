@@ -266,9 +266,9 @@ The Architect is the escalation ceiling. If it can't resolve, it leaves a commen
 
 ## Relations
 
-- [[ADR-024: Agent Role Redesign]] — superseded
-- [[ADR-025: Backlog Grooming and Autonomous Dispatch Triggers]] — extended (Groomer gets epic trigger)
-- [[ADR-022: Outcome-Based Session Validation and Agent Role Redesign]] — complementary
+- [[decisions/adr-024-agent-role-redesign-pm-architect-and-approval-pipeline|ADR-024: Agent Role Redesign]] — superseded
+- [[decisions/adr-025-backlog-grooming-and-autonomous-dispatch-triggers|ADR-025: Backlog Grooming and Autonomous Dispatch Triggers]] — extended (Groomer gets epic trigger)
+- [[decisions/adr-022-outcome-based-session-validation-agent-role-redesign|ADR-022: Outcome-Based Session Validation and Agent Role Redesign]] — complementary
 - [[ADR-033: Incremental Crate Extraction]] — motivated this ADR (past failure analysis)
 - [[ADR-023: Cognitive Memory Architecture]] — wave/batch flow integrates with session reflection (§7), confidence scoring (§4), implicit associations (§3), and contradiction detection (§5)
-- [[ADR-038: Configurable Agent Roles]] — extends this ADR with data-driven roles, domain specialists, and auto-improvement
+- [[decisions/adr-038-configurable-agent-roles-domain-specialists-and-auto-improvement|ADR-038: Configurable Agent Roles]] — extends this ADR with data-driven roles, domain specialists, and auto-improvement

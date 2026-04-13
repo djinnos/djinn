@@ -37,7 +37,7 @@ tags: ["scope","sandbox","shell","reference"]
 
 ## Relations
 
-- [[ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
-- [[ADR-016: EpicReviewer Detached HEAD Worktree]]
-- [[ADR-017: Shell Sandbox Implementation — Worktree Injection and Landlock Crate]]
-- [[ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]
+- [[decisions/adr-013-os-level-shell-sandboxing-landlock-seatbelt|ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt]]
+- [[decisions/adr-016-epicreviewer-detached-head-worktree|ADR-016: EpicReviewer Detached HEAD Worktree]]
+- [[decisions/adr-017-shell-sandbox-implementation-worktree-injection-and-landlock-crate|ADR-017: Shell Sandbox Implementation — Worktree Injection and Landlock Crate]]
+- [[decisions/adr-011-workspace-guarded-shell-for-goose-frontend-tools|ADR-011: Workspace-Guarded Shell for Goose Frontend Tools]]

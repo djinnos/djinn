@@ -18,7 +18,7 @@ Accepted
 Currently, every session is a one-shot: worker finishes → session ends → worktree cleaned up. When a task needs rework (reviewer rejection, merge conflict, verification failure), a **fresh session** is dispatched. The new agent must rediscover the codebase, re-read files, and rebuild context from scratch. This wastes tokens and time — the original agent already had full context.
 
 Three scenarios trigger rework today:
-1. **Verification failure** (new with [[ADR-014: Project Setup & Verification Commands]]): post-session build/test fails
+1. **Verification failure** (new with [[decisions/adr-014-project-setup-verification-commands|ADR-014: Project Setup & Verification Commands]]): post-session build/test fails
 2. **Task reviewer rejection**: reviewer sends feedback, task reopens, new worker session dispatched
 3. **Merge conflict**: conflict detected after merge attempt, ConflictResolver session dispatched
 
@@ -79,6 +79,6 @@ Worker session starts
 ## Relations
 
 - [[Roadmap]] — Post-V1 enhancement
-- [[ADR-014: Project Setup & Verification Commands]] — Verification failures are the primary trigger for session resume
+- [[decisions/adr-014-project-setup-verification-commands|ADR-014: Project Setup & Verification Commands]] — Verification failures are the primary trigger for session resume
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose session storage enables resume
-- [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Token tracking spans the full logical session lifecycle
+- [[decisions/adr-010-session-cost-tracking-—-per-task-token-metrics|ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Token tracking spans the full logical session lifecycle

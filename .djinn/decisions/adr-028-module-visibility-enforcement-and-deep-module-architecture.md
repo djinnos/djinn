@@ -92,4 +92,4 @@ Move `merge_and_transition` and `PM_MERGE_ACTIONS` out of `actors::slot::task_re
 - [[Pit of Success Pattern for AI]]
 - [[Rust Architecture and Boundary Enforcement Tools]]
 - [[Type Systems as AI Architecture Guidance]]
-- [[ADR-026: Automated Testing Strategy]]
+- [[decisions/adr-026-automated-testing-strategy-three-phase-full-stack-coverage|ADR-026: Automated Testing Strategy]]

@@ -141,4 +141,4 @@ LLM-summarized commits co-embedded with code. Enables pattern reuse ("show me a 
 - [[V1 Requirements]]
 - [["ADR-030: Repo-Committed Verification and Commit-Hash Caching"]]
 - [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning|ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
-- [[ADR-015: Session Continuity & Resume]]
+- [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity & Resume]]
