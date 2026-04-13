@@ -12,7 +12,7 @@ pub mod test_support {
     };
 }
 
-pub use database::{Database, default_db_path};
+pub use database::{Database, SqliteVecStatus, default_db_path};
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
     agent::{
@@ -32,10 +32,10 @@ pub use repositories::{
         ConsolidationCluster, ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate,
         CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
         CreatedCanonicalConsolidatedNote, DbNoteGroup, NoteAssociationEntry,
-        NoteConsolidationRepository, NoteDedupCandidate, NoteRepository, STALE_CITATION,
-        UpdateNoteIndexParams, file_path_for, file_path_for_with_status, folder_for_type,
-        folder_for_type_with_status, is_singleton, permalink_for, permalink_for_with_status,
-        slugify,
+        NoteConsolidationRepository, NoteDedupCandidate, NoteEmbeddingMatch, NoteEmbeddingRecord,
+        NoteRepository, STALE_CITATION, UpdateNoteIndexParams, UpsertNoteEmbedding, file_path_for,
+        file_path_for_with_status, folder_for_type, folder_for_type_with_status, is_singleton,
+        permalink_for, permalink_for_with_status, slugify,
     },
     project::{ProjectConfig, ProjectRepository, VerificationRule, validate_verification_rules},
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
