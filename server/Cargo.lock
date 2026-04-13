@@ -6012,10 +6012,15 @@ dependencies = [
 name = "workspace-hack"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "aho-corasick",
  "base64 0.22.1",
+ "bit-set",
+ "bit-vec",
  "bitflags 2.11.0",
  "cc",
+ "console",
+ "crossbeam-utils",
  "crypto-common",
  "deranged",
  "digest",
@@ -6025,8 +6030,10 @@ dependencies = [
  "futures-channel",
  "futures-sink",
  "futures-util",
+ "getrandom 0.3.4",
  "getrandom 0.4.2",
  "git2",
+ "hashbrown 0.16.1",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -6036,10 +6043,13 @@ dependencies = [
  "log",
  "memchr",
  "mio",
+ "num-traits",
  "openssl-sys",
  "percent-encoding",
+ "rand 0.9.2",
  "refinery-core",
  "regex-automata",
+ "reqwest 0.12.28",
  "reqwest 0.13.2",
  "rmcp",
  "rusqlite",
@@ -6054,6 +6064,7 @@ dependencies = [
  "smallvec",
  "sqlx-core",
  "sqlx-sqlite",
+ "stable_deref_trait",
  "syn",
  "time",
  "tokio",
@@ -6065,6 +6076,9 @@ dependencies = [
  "tracing",
  "tracing-core",
  "uuid",
+ "yoke",
+ "zerocopy",
+ "zerofrom",
 ]
 
 [[package]]
