@@ -191,7 +191,7 @@ impl ProjectRepository {
         Ok(project)
     }
 
-    /// Insert 6 default agent roles (one per base_role) for a newly created project.
+    /// Insert 5 default agent roles (one per base_role) for a newly created project.
     /// Uses INSERT OR IGNORE so re-seeding is safe if called on an existing project.
     async fn seed_default_roles(&self, project_id: &str) -> Result<()> {
         const DEFAULT_ROLES: &[(&str, &str)] = &[
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn create_seeds_six_default_roles() {
+    async fn create_seeds_five_default_roles() {
         let db = test_db();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = repo.create("seeded", "/seeded").await.unwrap();

@@ -6,6 +6,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::events::DjinnEventEnvelope;
+use crate::semantic_memory::{EmbeddingService, default_embedding_cache_dir};
 use crate::sync::SyncManager;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
@@ -63,6 +64,7 @@ struct Inner {
     pub file_time: Arc<FileTime>,
     pub lsp: LspManager,
     pub active_tasks: djinn_agent::context::ActivityTracker,
+    pub embedding_service: EmbeddingService,
     /// ADR-050 §3 single-flight gate for SCIP indexer subprocess
     /// invocations.  At most one `run_indexers` call is allowed to spawn
     /// a child process server-wide; additional callers queue on this
@@ -113,6 +115,7 @@ impl AppState {
                 file_time: Arc::new(FileTime::new()),
                 lsp: LspManager::new(),
                 active_tasks: djinn_agent::context::ActivityTracker::default(),
+                embedding_service: EmbeddingService::new(default_embedding_cache_dir()),
                 indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
                 chat_warmed_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
@@ -219,6 +222,10 @@ impl AppState {
 
     pub fn sync_manager(&self) -> &SyncManager {
         &self.inner.sync
+    }
+
+    pub fn embedding_service(&self) -> &EmbeddingService {
+        &self.inner.embedding_service
     }
 
     /// Register a task as having an in-flight verification pipeline.

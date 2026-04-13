@@ -1004,7 +1004,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Second default worker in the same project is currently permitted.
+        // A second default worker in the same project/base_role should be rejected by the
+        // unique partial index.
         let result = repo
             .create_for_project(
                 &project_id,
@@ -1022,8 +1023,9 @@ mod tests {
             )
             .await;
 
-        let second = result.expect("second default should insert successfully");
-        assert!(second.is_default);
+        let error = result.expect_err("second default should violate unique partial index");
+        let message = error.to_string();
+        assert!(message.contains("UNIQUE constraint failed: agents.project_id, agents.base_role"));
 
         let defaults: Vec<(String, i64)> = sqlx::query_as(
             "SELECT name, is_default FROM agents WHERE project_id = ?1 AND base_role = 'worker' ORDER BY name",
@@ -1032,9 +1034,8 @@ mod tests {
         .fetch_all(repo.db.pool())
         .await
         .unwrap();
-        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0], ("Worker A".to_string(), 1));
-        assert_eq!(defaults[1], ("Worker B".to_string(), 1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -31,3 +31,9 @@ DROP TABLE agents;
 ALTER TABLE agents_new RENAME TO agents;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_project_name ON agents(project_id, name);
+CREATE INDEX IF NOT EXISTS agents_project_id ON agents(project_id);
+CREATE INDEX IF NOT EXISTS agents_base_role ON agents(project_id, base_role);
+CREATE INDEX IF NOT EXISTS agents_is_default ON agents(project_id, is_default);
+CREATE UNIQUE INDEX IF NOT EXISTS agents_one_default_per_base_role
+    ON agents(project_id, base_role)
+    WHERE is_default = 1;

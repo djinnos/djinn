@@ -15,6 +15,7 @@ pub mod repo_graph;
 pub mod repo_map;
 pub mod repo_map_personalization;
 pub(crate) mod scip_parser;
+pub mod semantic_memory;
 pub mod server;
 pub mod sse;
 pub mod sync;
