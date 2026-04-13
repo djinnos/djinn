@@ -126,15 +126,23 @@ Operational rule for future patrols:
 This closes the earlier optional question in this note: the chosen policy is **documented patrol interpretation, not tooling suppression and not mass relinking**. A future tooling enhancement is only warranted if patrol operators still misread the gross orphan count after following this guidance.
 
 
-### 4. Residual current-note/case cognitive-memory slice (2026-04-13) — **mixed: one true content defect plus recent-case wording drift, not backend normalization noise**
-Direct reads of the residual slice showed two different conditions:
 
-- `requirements/v1-requirements` contained a live broken wikilink to `[[Cognitive Memory Scope]]`. This was a **true note-content defect** because the existing canonical target is the current note [[reference/cognitive-memory-scope]] (title: "Cognitive Memory Infrastructure Scope"). The requirement note has been normalized to the canonical permalink.
-- The recent case notes did **not** require canonical wikilinks to the scope note in their preserved lesson text. Two notes were describing earlier cleanup work and used broken wikilink syntax only inside inline-code examples / quoted references (`[[reference/cognitive-memory-scope]]` and `[[Cognitive Memory Scope]]`). Those should be treated as **content wording drift in recent case-note prose**, not evidence of memory backend normalization/indexing drift.
-- One recent case note (`cases/normalize-planner-authored-maintenance-note-wikilinks-to-canonical-targets`) still intentionally contains `[[reference/cognitive-memory-scope]]` as a literal example inside explanatory prose and still appears in `memory_broken_links()`. This is best classified as **indexing/parser noise caused by literal example text being parsed as a live wikilink**, not a missing canonical target.
+## First actionable orphan batch: semantic-memory case cluster (2026-04-13)
 
-Decision:
-- Treat this residual slice primarily as **narrow content debt in current canonical notes**, plus a small amount of **case-note prose/parser noise** where literal example text is written with live wikilink syntax.
-- Future patrols should repair current-note findings like `requirements/v1-requirements` when the canonical permalink is known.
-- Future patrols should treat recent case-note findings that merely quote `[[...]]` examples as **indexing noise / prose-formatting debt**, unless the sentence is actually intended to create a navigable link.
-- Do **not** broaden this slice into the older ADR-title/singleton alias backlog; that remains separate historical cleanup work.
+Follow-up task `snhd` reconciled the first active-epic orphan slice against [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]] and [[design/semantic-memory-search-candle-embeddings-with-sqlite-vec-roadmap]]. Outcome:
+
+- **Keep and link:**
+  - [[cases/add-note-embedding-storage-schema-alongside-sqlite-vec-virtual-table-support]]
+  - [[cases/create-a-database-initialization-seam-for-optional-sqlite-vec-enablement]]
+  - [[cases/embedding-runtime-seam-added-for-semantic-memory]]
+  - [[cases/keep-note-embeddings-synchronized-during-write-update-and-delete-flows]]
+  - [[cases/repair-stale-note-embeddings-during-reindex-and-background-maintenance]]
+  - [[cases/merged-semantic-retrieval-into-note-memory-search-without-changing-the-mcp-interface]]
+  - [[cases/memory-search-tests-extended-for-semantic-retrieval-without-changing-the-public-contract]]
+- **Merge / consolidate:** `cases/blend-semantic-retrieval-into-existing-note-search-without-changing-the-mcp-interface`, `cases/blend-semantic-vector-search-into-existing-memory-search-ranking`, `cases/added-vector-aware-ranking-to-the-existing-note-search-pipeline`, `cases/thread-semantic-search-context-through-bridge-and-state-layers`, and `cases/propagate-embedding-aware-memory-behavior-through-mcp-and-bridge-layers`
+- **De-emphasize / historical only:** `cases/restore-task-verification-by-preserving-embedding-runtime-and-updating-downstream-schema-artifacts`, `cases/restore-task-scoped-verification-without-disturbing-embedding-runtime-changes`
+
+Operational guidance:
+- Future orphan patrols should treat the keep-and-link set as the canonical semantic-memory case slice because the roadmap now links that cluster directly.
+- The consolidation/de-emphasis set should not be re-prioritized as active orphan debt unless later edits add unique guidance not already captured by the roadmap or surviving notes.
+- Continue handling the broader `cases/*` orphan backlog separately from this active semantic-memory cluster.

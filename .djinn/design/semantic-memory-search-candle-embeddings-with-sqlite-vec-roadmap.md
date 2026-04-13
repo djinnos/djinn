@@ -11,12 +11,12 @@ tags: ["semantic-search","memory","candle","sqlite-vec","roadmap"]
 Implement semantic memory search for Djinn by adding in-process embedding inference via candle and vector storage/search via sqlite-vec, while preserving the existing cognitive-memory behavior and graceful fallback to today's FTS-driven retrieval.
 
 ## Current State
-- Epic `h1yj` is still in progress; it is **not** ready for closure yet.
-- Wave 1 foundation work is complete: DB/vector storage + sqlite-vec initialization (`3tvp`) and the candle embedding runtime/degradation seam (`sljn`) are closed.
-- Wave 2 integration work is in verification: embedding lifecycle/reindex sync (`z6yv`) and semantic retrieval merge (`tn0f`) have both submitted work and reported focused server test passes on their task branches.
-- Wave 3 hardening remains the last clear epic gate: verification coverage task `l8q4` is still open and should consolidate migration/init, lifecycle, merged-search, and FTS-only fallback assertions after the two integration branches land.
-- An unrelated planner-maintenance PR draft (`e0r1`) is still attached to this epic, so epic closure should wait for board cleanup in addition to semantic-memory verification completion.
-- The acceptance gate remains unchanged: close only after the integration branches land, semantic + fallback behavior is verified, and the remaining board noise is resolved.
+- Epic `h1yj` is not complete yet.
+- The current memory search path is still FTS-only plus existing RRF fusion signals in `server/crates/djinn-db/src/repositories/note/search.rs`.
+- MCP `memory_search` still advertises and dispatches an FTS/BM25-only contract in `server/crates/djinn-mcp/src/tools/memory_tools/search.rs` and `server/crates/djinn-mcp/src/tools/memory_tools/ops.rs`.
+- The note schema currently has `notes` + `notes_fts` but no vector table or embedding metadata in `server/crates/djinn-db/schema.sql`.
+- Note writes and reindexing currently update only the lexical index in `server/crates/djinn-db/src/repositories/note/crud.rs` and `server/crates/djinn-db/src/repositories/note/indexing.rs`.
+- DB initialization/migrations currently use embedded refinery migrations and WAL pragmas in `server/crates/djinn-db/src/database.rs` and `server/crates/djinn-db/src/migrations.rs`.
 
 ## Wave Plan
 
@@ -62,6 +62,26 @@ The epic can close only when all of the following are true:
 ## Maintenance Note
 This roadmap note was re-written through `memory_write` after patrol found artifact drift: the markdown file already existed under `design/semantic-memory-search-candle-embeddings-with-sqlite-vec-roadmap`, but `memory_read` could not resolve it. The canonical permalink remains `design/semantic-memory-search-candle-embeddings-with-sqlite-vec-roadmap`; references should keep using this permalink rather than creating a duplicate note.
 
-## Relations
-- [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
-- [[brief]]
+
+## Semantic-memory orphan cleanup batch (2026-04-13)
+
+This roadmap now serves as the canonical planning surface for the active semantic-memory case cluster identified during orphan triage. The high-value implementation cases that should remain as searchable supporting notes and be linked from active planning are:
+
+- [[cases/add-note-embedding-storage-schema-alongside-sqlite-vec-virtual-table-support]] — keep and link
+- [[cases/create-a-database-initialization-seam-for-optional-sqlite-vec-enablement]] — keep and link
+- [[cases/embedding-runtime-seam-added-for-semantic-memory]] — keep and link
+- [[cases/keep-note-embeddings-synchronized-during-write-update-and-delete-flows]] — keep and link
+- [[cases/repair-stale-note-embeddings-during-reindex-and-background-maintenance]] — keep and link
+- [[cases/merged-semantic-retrieval-into-note-memory-search-without-changing-the-mcp-interface]] — keep and link
+- [[cases/memory-search-tests-extended-for-semantic-retrieval-without-changing-the-public-contract]] — keep and link
+
+The following nearby orphan cases are treated as consolidation/deprecation candidates rather than separate canonical references because their guidance is now absorbed by the survivors above or by this roadmap/[[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]:
+
+- `cases/blend-semantic-retrieval-into-existing-note-search-without-changing-the-mcp-interface` → consolidate into `cases/merged-semantic-retrieval-into-note-memory-search-without-changing-the-mcp-interface`
+- `cases/blend-semantic-vector-search-into-existing-memory-search-ranking` → consolidate into `cases/merged-semantic-retrieval-into-note-memory-search-without-changing-the-mcp-interface`
+- `cases/added-vector-aware-ranking-to-the-existing-note-search-pipeline` → consolidate into `cases/merged-semantic-retrieval-into-note-memory-search-without-changing-the-mcp-interface`
+- `cases/thread-semantic-search-context-through-bridge-and-state-layers` → consolidate into `cases/merged-semantic-retrieval-into-note-memory-search-without-changing-the-mcp-interface`
+- `cases/propagate-embedding-aware-memory-behavior-through-mcp-and-bridge-layers` → consolidate into the write/reindex survivors above
+- `cases/restore-task-verification-by-preserving-embedding-runtime-and-updating-downstream-schema-artifacts` and `cases/restore-task-scoped-verification-without-disturbing-embedding-runtime-changes` → de-emphasize as task-local verification repair notes, not canonical semantic-memory references
+
+Patrol guidance: future orphan review should treat the survivor set above as the active semantic-memory knowledge slice. The consolidation candidates should not be prioritized again unless their content diverges from the surviving notes.
