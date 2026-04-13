@@ -51,6 +51,17 @@ pub use file_helpers::{
 };
 use indexing::{index_links_for_note, resolve_links_for_note};
 
+#[derive(Debug, Clone)]
+pub struct NoteSearchParams<'a> {
+    pub project_id: &'a str,
+    pub query: &'a str,
+    pub task_id: Option<&'a str>,
+    pub folder: Option<&'a str>,
+    pub note_type: Option<&'a str>,
+    pub limit: usize,
+    pub semantic_scores: Option<Vec<(String, f64)>>,
+}
+
 // ── SQL constant ─────────────────────────────────────────────────────────────
 
 const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, file_path,

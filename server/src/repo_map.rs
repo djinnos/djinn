@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::Result;
-use djinn_db::NoteRepository;
+use djinn_db::{NoteRepository, NoteSearchParams};
 use serde::{Deserialize, Serialize};
 
 use petgraph::visit::EdgeRef;
@@ -334,7 +334,19 @@ impl RepoMapNoteSearcher for NoteRepository {
         task_id: Option<&'a str>,
         limit: usize,
     ) -> Result<Vec<djinn_core::models::NoteSearchResult>, Self::Error> {
-        NoteRepository::search(self, project_id, query, task_id, None, None, limit, None).await
+        NoteRepository::search(
+            self,
+            NoteSearchParams {
+                project_id,
+                query,
+                task_id,
+                folder: None,
+                note_type: None,
+                limit,
+                semantic_scores: None,
+            },
+        )
+        .await
     }
 }
 

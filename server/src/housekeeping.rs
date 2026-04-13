@@ -326,15 +326,15 @@ mod tests {
 
             if project_report.repaired_broken_wikilinks == 0 {
                 let search_results = NoteRepository::new(db.clone(), state.event_bus())
-                    .search(
-                        &fixture_project.project.id,
-                        &repaired_target_title,
-                        None,
-                        None,
-                        None,
-                        3,
-                        None,
-                    )
+                    .search(djinn_db::NoteSearchParams {
+                        project_id: &fixture_project.project.id,
+                        query: &repaired_target_title,
+                        task_id: None,
+                        folder: None,
+                        note_type: None,
+                        limit: 3,
+                        semantic_scores: None,
+                    })
                     .await
                     .unwrap();
                 panic!(

@@ -158,7 +158,15 @@ impl NoteRepository {
         }
 
         let results: Vec<_> = self
-            .search(project_id, target_raw, None, None, None, 5, None)
+            .search(NoteSearchParams {
+                project_id,
+                query: target_raw,
+                task_id: None,
+                folder: None,
+                note_type: None,
+                limit: 5,
+                semantic_scores: None,
+            })
             .await?
             .into_iter()
             .filter(|r| r.id != source_id)

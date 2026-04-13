@@ -177,17 +177,18 @@ impl NoteRepository {
     /// `query` is a natural-language search string. It is sanitized into safe
     /// FTS5 syntax before execution.
     /// Results are ordered by relevance (best match first).
-    pub async fn search(
-        &self,
-        project_id: &str,
-        query: &str,
-        task_id: Option<&str>,
-        folder: Option<&str>,
-        note_type: Option<&str>,
-        limit: usize,
-        semantic_scores: Option<Vec<(String, f64)>>,
-    ) -> Result<Vec<NoteSearchResult>> {
+    pub async fn search(&self, params: NoteSearchParams<'_>) -> Result<Vec<NoteSearchResult>> {
         self.db.ensure_initialized().await?;
+
+        let NoteSearchParams {
+            project_id,
+            query,
+            task_id,
+            folder,
+            note_type,
+            limit,
+            semantic_scores,
+        } = params;
 
         let folder = folder.unwrap_or("");
         let note_type = note_type.unwrap_or("");
