@@ -451,4 +451,4 @@ test-all:        cargo test && cd desktop && pnpm vitest run && pnpm playwright 
 ## Relations
 
 - [[ADR-019: MCP as Single API and Typed Tool Schemas]] — MCP is the contract being tested
-- [[Roadmap]] — testing infrastructure supports all future phases
+- [[roadmap]] — testing infrastructure supports all future phases

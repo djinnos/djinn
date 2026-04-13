@@ -167,3 +167,9 @@ The orphan backlog is still dominated by intentionally orphan-heavy or retrieval
 - **Create one narrow follow-up task** for historical singleton alias cleanup (`Roadmap` / `Project Brief` / `V1 Requirements`) on legacy ADR/reference/research notes.
 - **Do not create a mass backlog task** for all historical ADR title/shorthand aliases yet.
 - **Do not create orphan cleanup work** for `cases/*` or `reference/repo-maps/*`; treat them as tolerated inventory unless a future patrol finds a concrete canonical-note defect there.
+
+#### Outcome after the narrow singleton-alias cleanup pass
+
+- **2026-04-13 singleton-alias cleanup outcome:** historical `decisions/*`, plus matching `reference/*` and `research/*` notes in the scoped slice, were normalized from backticked legacy aliases (`Roadmap`, `Project Brief`, `V1 Requirements`) to canonical permalinks `[[roadmap]]`, `[[brief]]`, and `[[requirements/v1-requirements]]` where those canonical notes already exist.
+- **Remaining broken-link follow-up after this pass:** treat only concrete renamed/missing-target exceptions such as `Autoresearch Reference`, `wikilinks`, `Djinn Namespace Git Sync`, and `Cognitive Memory Scope`.
+- **Do not reopen mass backlog triage:** broader historical ADR title/shorthand alias cleanup remains deferred, and tolerated orphan-heavy folders (`cases/*`, `reference/repo-maps/*`) still do not justify separate cleanup work by themselves.

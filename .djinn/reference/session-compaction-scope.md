@@ -39,9 +39,9 @@ tags: ["scope","session-compaction","reference"]
 
 ## Relations
 
-- [[Roadmap]] — Post-V1 feature
+- [[roadmap]] — Post-V1 feature
 - [[ADR-018: Djinn-Owned Session Compaction]] — Design decision driving this scope
 - [[ADR-015: Session Continuity & Resume]] — Existing resume model being extended
 - [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Token tracking infrastructure reused
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — Goose session infrastructure
-- [[V1 Requirements]] — Extends AGENT-19 (session persistence)
+- [[requirements/v1-requirements]] — Extends AGENT-19 (session persistence)

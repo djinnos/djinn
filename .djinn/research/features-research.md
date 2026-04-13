@@ -60,7 +60,7 @@ type: research
 - Google DORA 2025: 90% AI adoption = 9% more bugs, 154% larger PRs without quality controls
 
 ## Relations
-- [[Project Brief]] — project context
+- [[brief]] — project context
 - [[Stack Research]] — technical stack for implementing features
 - [[Architecture Research]] — patterns for building these features
 - [[Pitfalls Research]] — risks in implementation

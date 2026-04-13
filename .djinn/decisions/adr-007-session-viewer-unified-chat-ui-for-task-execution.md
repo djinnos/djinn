@@ -41,7 +41,7 @@ Render task execution as a **single unified chat thread** — not segmented by s
 - Tasks without sessions: current slide-over modal (TaskDetailPanel)
 
 ### Data Sources
-- Agent chat content: new Goose session messages API (see [[Roadmap]])
+- Agent chat content: new Goose session messages API (see [[roadmap]])
 - Setup/verification results: new structured activity events (see [[ADR-020: Structured Activity Events for Command Runs]])
 - Status transitions, reviewer comments, compaction events: existing `task_activity_list` MCP tool
 - Session metadata and continuation chains: existing `session_list(chain_ordered=true)` MCP tool
@@ -67,6 +67,6 @@ The UI fetches all data sources, then interleaves them chronologically into a si
 - No real-time streaming yet (SSE doesn't push session events) — initial version will be read-after-completion
 
 ## Relations
-- [[Roadmap]]
+- [[roadmap]]
 - [[ADR-006: Desktop Uses MCP SDK Directly from Frontend]]
-- [[V1 Requirements]]
+- [[requirements/v1-requirements]]

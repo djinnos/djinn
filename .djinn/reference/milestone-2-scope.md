@@ -42,7 +42,7 @@ tags: []
 
 ## Relations
 - [[roadmap]] — Phase 2 (Auth & Onboarding)
-- [[V1 Requirements]] — AUTH and ONBOARD requirements
+- [[requirements/v1-requirements]] — AUTH and ONBOARD requirements
 - [['ADR-001: Desktop-Only Clerk Authentication via System Browser PKCE']] — auth architecture
 - [[decisions/feature-licensing-—-metabase-style-open-core|ADR-002: Feature Licensing Deferred — Metabase-Style Open Core]] — licensing out of scope
 - [[Architecture Research]] — original auth design (superseded by ADR-001)

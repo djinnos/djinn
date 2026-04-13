@@ -129,7 +129,7 @@ Scope boundaries for Phase 12: Replace Goose with Djinn-owned agent loop. See [[
 - [[ADR-027: Own the Agent Loop — Replace Goose with Direct LLM Integration]]
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] — superseded
 - [[ADR-018: Djinn-Owned Session Compaction]] — compaction now fully owned
-- [[Roadmap]] — Phase 12
+- [[roadmap]] — Phase 12
 
 
 - Task lctb: Djinn-native message types (~200-300 LOC)

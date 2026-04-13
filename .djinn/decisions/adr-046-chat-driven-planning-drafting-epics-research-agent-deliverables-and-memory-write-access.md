@@ -151,4 +151,4 @@ Detect that a chat session is working on the epic and suppress Planner dispatch.
 - [[ADR-038: Configurable Agent Roles, Domain Specialists, and Auto-Improvement]] — specialist agents gain MCP server tools
 - [[ADR-045: SSE Event Batching and Knowledge Base Housekeeping]] — handles increased note volume from memory_write access
 - [[ADR-042: DB-Only Knowledge Extraction, Consolidation, and Task Routing Fixes]] — extraction pipeline extended
-- [[Roadmap]] — replaces roadmap as primary planning artifact
+- [[roadmap]] — replaces roadmap as primary planning artifact

@@ -68,5 +68,5 @@ The `int8-versions` feature allows i64 version numbers, which fits full timestam
 
 ## Relations
 - [[Database Layer — rusqlite over libsql/Turso]] — ADR-002 enabled this by switching to rusqlite
-- [[V1 Requirements]] — updates DB-04
+- [[requirements/v1-requirements]] — updates DB-04
 - [[Stack Research]] — original migration recommendation superseded

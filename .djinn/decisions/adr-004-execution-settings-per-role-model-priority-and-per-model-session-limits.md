@@ -93,5 +93,5 @@ Circuit breaker state (consecutive failures, cooldown, auto-disabled) written to
 
 ## Relations
 - [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — execution model this builds on
-- [[V1 Requirements]] — SETTINGS-10 covers the desktop UI for this
-- [[Roadmap]] — server-side work, desktop settings UI in Phase 5
+- [[requirements/v1-requirements]] — SETTINGS-10 covers the desktop UI for this
+- [[roadmap]] — server-side work, desktop settings UI in Phase 5

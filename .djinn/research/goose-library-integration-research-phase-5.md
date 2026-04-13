@@ -79,7 +79,7 @@ Explored the Goose codebase at `/home/fernando/git/references/goose` and the exi
 
 ## Relations
 
-- [[Roadmap]] — Phase 5 (Agent Orchestration)
-- [[V1 Requirements]] — AGENT-01 through AGENT-11, AGENT-16/17/18
+- [[roadmap]] — Phase 5 (Agent Orchestration)
+- [[requirements/v1-requirements]] — AGENT-01 through AGENT-11, AGENT-16/17/18
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
 - [[Agent Harness Scope]] — scope boundaries

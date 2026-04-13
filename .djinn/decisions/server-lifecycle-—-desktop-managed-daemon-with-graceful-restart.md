@@ -105,5 +105,5 @@ The desktop is the supervisor:
 
 ## Relations
 - [[brief]] — server lifecycle not previously specified
-- [[V1 Requirements]] — adds LIFE-* requirements
+- [[requirements/v1-requirements]] — adds LIFE-* requirements
 - [[Database Layer — rusqlite over libsql/Turso]] — ADR-002, state survival via DB

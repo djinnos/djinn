@@ -11,7 +11,7 @@ tags: ["adr","memory","embeddings","candle","sqlite-vec","nomic","semantic-searc
 
 Date: 2026-04-13
 
-Related: [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]], [[decisions/adr-042-db-only-knowledge-extraction-consolidation-and-task-routing-fixes|ADR-042: DB-Only Knowledge Extraction, Consolidation, and Task-Routing Fixes]]
+Related: [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]], [[ADR-042: DB-Only Knowledge Extraction, Consolidation, and Task-Routing Fixes]]
 
 ## Context
 

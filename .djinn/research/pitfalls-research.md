@@ -97,7 +97,7 @@ type: research
 - Block features not in the Go server for first 6 months
 
 ## Relations
-- [[Project Brief]] — project context
+- [[brief]] — project context
 - [[Stack Research]] — stack decisions informed by these pitfalls
 - [[Architecture Research]] — architecture designed to avoid these pitfalls
 - [[Features Research]] — feature scope risks

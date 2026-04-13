@@ -12,9 +12,9 @@ tags: ["adr","architecture","agents","roles","planner","architect","patrol","aut
 
 Date: 2026-04-08
 
-Supersedes (partially): [[decisions/adr-034-agent-role-hierarchy-architect-patrol-scrum-master-rules-and-task-types|ADR-034 Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation]]
-Extends: [[decisions/adr-050-architect-chat-code-graph-consolidation|ADR-050: Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions]], [[decisions/adr-046-chat-driven-planning-drafting-epics-research-agent-deliverables-and-memory-write-access|ADR-046 Chat-Driven Planning]]
-Related: [[decisions/adr-025-backlog-grooming-and-autonomous-dispatch-triggers|ADR-025 Backlog Grooming and Autonomous Dispatch Triggers]], [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023 Cognitive Memory Architecture]], [[decisions/adr-043-repository-map-scip-powered-structural-context-for-agent-sessions|ADR-043 Repository Map — SCIP-Powered Structural Context]], [[decisions/adr-047-repo-graph-query-seam-for-code-graph-tool|ADR-047 Repo-Graph Query Seam]]
+Supersedes (partially): [[ADR-034 Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation]]
+Extends: [["ADR-050: Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions"]], [[ADR-046 Chat-Driven Planning]]
+Related: [[ADR-025 Backlog Grooming and Autonomous Dispatch Triggers]], [[ADR-023 Cognitive Memory Architecture]], [[ADR-043 Repository Map — SCIP-Powered Structural Context]], [[ADR-047 Repo-Graph Query Seam]]
 
 ## Implementation Status (2026-04-08 — handoff to next session)
 
@@ -414,10 +414,10 @@ Prerequisites (1, 2) gate everything. Role redistribution (3–6) and reentrance
 
 ## Relations
 
-- [[decisions/adr-034-agent-role-hierarchy-architect-patrol-scrum-master-rules-and-task-types|ADR-034 Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation]] — partially superseded. The patrol role, escalation ceiling, and architect dispatch triggers move. Wave-based decomposition, self-task creation, task types, and coordinator rules 1–2 (excluding the auto-dispatch guard changes) are preserved.
-- [[decisions/adr-050-architect-chat-code-graph-consolidation|ADR-050: Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions]] — extended. This ADR consumes ADR-050's tool surface and formalizes Architect as the sole producer of code-reasoning findings. The parity contract between Architect and Chat is preserved unchanged.
+- [[ADR-034 Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation]] — partially superseded. The patrol role, escalation ceiling, and architect dispatch triggers move. Wave-based decomposition, self-task creation, task types, and coordinator rules 1–2 (excluding the auto-dispatch guard changes) are preserved.
+- [["ADR-050: Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions"]] — extended. This ADR consumes ADR-050's tool surface and formalizes Architect as the sole producer of code-reasoning findings. The parity contract between Architect and Chat is preserved unchanged.
 - [[ADR-046 Chat-Driven Planning — Drafting Epics, Research Agent Deliverables, and Memory Write Access]] — extended. Chat is the interactive form of Architect (per ADR-050); this ADR makes the symmetric consultant contract explicit.
-- [[decisions/adr-025-backlog-grooming-and-autonomous-dispatch-triggers|ADR-025 Backlog Grooming and Autonomous Dispatch Triggers]] — extended. Auto-dispatch rules gain reentrance guards.
-- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning|ADR-023 Cognitive Memory Architecture]] — complementary. Proposals are memory writes with an acceptance lifecycle; confidence scoring applies to adopted ADRs once they leave the `proposed/` lane.
+- [[ADR-025 Backlog Grooming and Autonomous Dispatch Triggers]] — extended. Auto-dispatch rules gain reentrance guards.
+- [[ADR-023 Cognitive Memory Architecture]] — complementary. Proposals are memory writes with an acceptance lifecycle; confidence scoring applies to adopted ADRs once they leave the `proposed/` lane.
 - [[ADR-047 Repo-Graph Query Seam for code_graph tool]] — related. The bridge surface being fixed in Migration step 1 is the seam defined by this ADR.
 - [[ADR-043 Repository Map — SCIP-Powered Structural Context for Agent Sessions]] — related. The canonical graph lifecycle is the infrastructure ADR-050 built on, which this ADR formalizes as "not an agent task."

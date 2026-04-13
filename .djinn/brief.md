@@ -4,7 +4,6 @@ type: brief
 tags: []
 ---
 
-
 # Djinn Server — Rust Rewrite
 
 ## Vision

@@ -16,7 +16,7 @@ Accepted
 Djinn needs to sync state across machines for the same user (e.g. two laptops, WSL + Windows desktop). The initial requirement is task state, but other data — knowledge base notes, per-user settings — will need the same treatment. We want a single sync mechanism that can grow without redesign.
 
 Requirements driving this decision:
-- SYNC-01 through SYNC-05 (see [[V1 Requirements]])
+- SYNC-01 through SYNC-05 (see [[requirements/v1-requirements]])
 - No central server dependency (local-first, git is the transport)
 - Conflict resolution must be automatic and deterministic
 - One channel failing must not block others
@@ -72,6 +72,6 @@ Exponential: 30s → 60s → 120s → … → 15min cap. Applied per-channel ind
 
 ## Relations
 
-- [[V1 Requirements]] — SYNC-01 through SYNC-05
+- [[requirements/v1-requirements]] — SYNC-01 through SYNC-05
 - [[Database Layer — rusqlite over libsql/Turso]] — ADR-002, establishes local-first constraint
 - [[Server Lifecycle — Desktop-Managed Daemon with Graceful Restart]] — ADR-005, server owns SyncManager lifecycle

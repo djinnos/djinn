@@ -47,4 +47,4 @@ Per-project config overrides are stored in the global DB, keyed by project path.
 
 - [[Database Layer — rusqlite over libsql/Turso]] — single DB architecture
 - [[Server Lifecycle — Desktop-Managed Daemon with Graceful Restart]] — global daemon reads from global DB
-- [[V1 Requirements]] — DB-01 (single DB at ~/.djinn/)
+- [[requirements/v1-requirements]] — DB-01 (single DB at ~/.djinn/)

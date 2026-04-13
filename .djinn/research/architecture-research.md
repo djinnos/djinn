@@ -193,7 +193,7 @@ Enables `localhost` to work bidirectionally. Electron on Windows connects to ser
 - `CancellationToken` + `TaskTracker` from `tokio-util` for coordinated shutdown
 
 ## Relations
-- [[Project Brief]] — project context
+- [[brief]] — project context
 - [[Stack Research]] — crate versions and API patterns
 - [[Embedded Database Survey]] — database selection rationale
 - [[Features Research]] — feature needs inform architecture

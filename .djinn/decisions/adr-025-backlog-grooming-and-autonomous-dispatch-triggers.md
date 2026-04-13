@@ -127,4 +127,4 @@ ADR-025 originally proposed architect dispatch triggers (merge count threshold).
 - [[ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline]] — PM intervention stays separate
 - [[ADR-022: Outcome-Based Session Validation & Agent Role Redesign]] — circuit breaker feeds PM, not groomer
 - [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — existing dispatch model extended
-- [[Roadmap]]
+- [[roadmap]]

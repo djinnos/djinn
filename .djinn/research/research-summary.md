@@ -111,7 +111,7 @@ Switching to rusqlite + WAL ([[Database Layer — rusqlite over libsql/Turso]]) 
 5. **Include a "Go parity checklist"** requirement — enumerate which Go server behaviors v1 must replicate and which are intentionally dropped (phases, stacked branches, CDC)
 
 ## Relations
-- [[Project Brief]] — project vision and constraints
+- [[brief]] — project vision and constraints
 - [[Stack Research]] — crate versions and API patterns
 - [[Features Research]] — market landscape and feature prioritization
 - [[Architecture Research]] — system design patterns
