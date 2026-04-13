@@ -158,7 +158,7 @@ impl NoteRepository {
         }
 
         let results: Vec<_> = self
-            .search(project_id, target_raw, None, None, None, 5)
+            .search(project_id, target_raw, None, None, None, 5, None)
             .await?
             .into_iter()
             .filter(|r| r.id != source_id)

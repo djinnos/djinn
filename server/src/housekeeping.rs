@@ -333,6 +333,7 @@ mod tests {
                         None,
                         None,
                         3,
+                        None,
                     )
                     .await
                     .unwrap();

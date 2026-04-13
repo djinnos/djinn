@@ -2,6 +2,19 @@ use super::*;
 use crate::repositories::note::rrf::rrf_fuse;
 use djinn_core::models::{ContradictionCandidate, TypeRisk};
 
+fn merge_candidate_ids(lists: &[&[(String, f64)]]) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for list in lists {
+        for (id, _) in *list {
+            if seen.insert(id.clone()) {
+                ids.push(id.clone());
+            }
+        }
+    }
+    ids
+}
+
 /// Sanitize a user query into valid FTS5 syntax.
 ///
 /// Strips FTS5 operators and special characters, then wraps each remaining
@@ -172,45 +185,46 @@ impl NoteRepository {
         folder: Option<&str>,
         note_type: Option<&str>,
         limit: usize,
+        semantic_scores: Option<Vec<(String, f64)>>,
     ) -> Result<Vec<NoteSearchResult>> {
         self.db.ensure_initialized().await?;
-
-        let Some(safe_query) = sanitize_fts5_query(query) else {
-            return Ok(vec![]);
-        };
 
         let folder = folder.unwrap_or("");
         let note_type = note_type.unwrap_or("");
         let limit = limit as i64;
 
-        let candidate_rows = sqlx::query_as::<_, (String, f64)>(
-            "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score
-             FROM notes_fts
-             JOIN notes n ON notes_fts.rowid = n.rowid
-             WHERE notes_fts MATCH ?1
-               AND n.project_id = ?2
-               AND (?3 = '' OR n.folder = ?3)
-               AND (?4 = '' OR n.note_type = ?4)
-             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
-             LIMIT ?5",
-        )
-        .bind(&safe_query)
-        .bind(project_id)
-        .bind(folder)
-        .bind(note_type)
-        .bind(limit)
-        .fetch_all(self.db.pool())
-        .await?;
+        let lexical_scores: Vec<(String, f64)> =
+            if let Some(safe_query) = sanitize_fts5_query(query) {
+                sqlx::query_as::<_, (String, f64)>(
+                    "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score
+                 FROM notes_fts
+                 JOIN notes n ON notes_fts.rowid = n.rowid
+                 WHERE notes_fts MATCH ?1
+                   AND n.project_id = ?2
+                   AND (?3 = '' OR n.folder = ?3)
+                   AND (?4 = '' OR n.note_type = ?4)
+                 ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
+                 LIMIT ?5",
+                )
+                .bind(&safe_query)
+                .bind(project_id)
+                .bind(folder)
+                .bind(note_type)
+                .bind(limit)
+                .fetch_all(self.db.pool())
+                .await?
+                .into_iter()
+                .map(|(id, bm25_score)| (id, -bm25_score))
+                .collect()
+            } else {
+                vec![]
+            };
+        let semantic_scores = semantic_scores.unwrap_or_default();
+        let candidate_ids = merge_candidate_ids(&[&lexical_scores, &semantic_scores]);
 
-        if candidate_rows.is_empty() {
+        if candidate_ids.is_empty() {
             return Ok(vec![]);
         }
-
-        let candidate_ids: Vec<String> = candidate_rows.iter().map(|(id, _)| id.clone()).collect();
-        let lexical_scores: Vec<(String, f64)> = candidate_rows
-            .into_iter()
-            .map(|(id, bm25_score)| (id, -bm25_score))
-            .collect();
 
         let temporal_scores = self.temporal_scores(project_id, &candidate_ids).await?;
         let graph_scores = self.graph_proximity_scores(&candidate_ids, 2).await?;
@@ -220,6 +234,7 @@ impl NoteRepository {
 
         let signals = vec![
             (lexical_scores, 60.0),
+            (semantic_scores, 60.0),
             (temporal_scores, 60.0),
             (graph_scores, 60.0),
             (task_scores, 60.0),
@@ -278,6 +293,56 @@ impl NoteRepository {
                     )
             })
             .collect())
+    }
+
+    pub async fn semantic_candidate_scores(
+        &self,
+        project_id: &str,
+        query_embedding: &[f32],
+        folder: Option<&str>,
+        note_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>> {
+        self.db.ensure_initialized().await?;
+
+        let raw_matches = self
+            .query_similar_embeddings(query_embedding, limit.saturating_mul(5).max(limit))
+            .await?;
+        if raw_matches.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let note_ids: Vec<String> = raw_matches.iter().map(|row| row.note_id.clone()).collect();
+        let placeholders = std::iter::repeat_n("?", note_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id FROM notes
+             WHERE project_id = ?1
+               AND (?2 = '' OR folder = ?2)
+               AND (?3 = '' OR note_type = ?3)
+               AND id IN ({})",
+            placeholders
+        );
+
+        let mut query = sqlx::query_scalar::<_, String>(&sql)
+            .bind(project_id)
+            .bind(folder.unwrap_or(""))
+            .bind(note_type.unwrap_or(""));
+        for note_id in &note_ids {
+            query = query.bind(note_id);
+        }
+
+        let allowed_ids: HashSet<String> =
+            query.fetch_all(self.db.pool()).await?.into_iter().collect();
+        let mut scores: Vec<(String, f64)> = raw_matches
+            .into_iter()
+            .filter(|row| allowed_ids.contains(&row.note_id))
+            .map(|row| (row.note_id, -row.distance))
+            .collect();
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scores.truncate(limit);
+        Ok(scores)
     }
 
     /// Generate a markdown catalog (table of contents) for all notes in a

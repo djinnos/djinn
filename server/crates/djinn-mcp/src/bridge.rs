@@ -10,6 +10,11 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Serialize;
 
+#[derive(Debug, Clone)]
+pub struct SemanticQueryEmbedding {
+    pub values: Vec<f32>,
+}
+
 // ── Data types ─────────────────────────────────────────────────────────────────
 // Plain data returned by the bridge traits. Defined here so they can be used
 // by both djinn-mcp tool handlers and the server bridge implementations.
@@ -135,6 +140,10 @@ pub trait RuntimeOps: Send + Sync {
         &self,
         settings: &djinn_core::models::DjinnSettings,
     ) -> Result<(), String>;
+    async fn embed_memory_query(
+        &self,
+        query: &str,
+    ) -> Result<Option<SemanticQueryEmbedding>, String>;
     async fn reset_runtime_settings(&self);
     async fn persist_model_health_state(&self);
     /// Purge stale worktrees from all registered projects.

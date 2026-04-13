@@ -772,7 +772,7 @@ impl NoteRepository {
             return Ok(Some(n));
         }
         let results = self
-            .search(project_id, identifier, None, None, None, 1)
+            .search(project_id, identifier, None, None, None, 1, None)
             .await?;
         if let Some(r) = results.into_iter().next() {
             return self.get(&r.id).await;

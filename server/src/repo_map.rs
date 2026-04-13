@@ -334,7 +334,7 @@ impl RepoMapNoteSearcher for NoteRepository {
         task_id: Option<&'a str>,
         limit: usize,
     ) -> Result<Vec<djinn_core::models::NoteSearchResult>, Self::Error> {
-        NoteRepository::search(self, project_id, query, task_id, None, None, limit).await
+        NoteRepository::search(self, project_id, query, task_id, None, None, limit, None).await
     }
 }
 

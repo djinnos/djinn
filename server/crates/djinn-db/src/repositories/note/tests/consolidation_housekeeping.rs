@@ -759,7 +759,7 @@ async fn housekeeping_repair_broken_wikilinks_skips_ambiguous_matches() {
     assert!(!updated.content.contains("[[Rust Ownership Guide]]"));
 
     let best = repo
-        .search(&project.id, "Rust Ownership", None, None, None, 3)
+        .search(&project.id, "Rust Ownership", None, None, None, 3, None)
         .await
         .unwrap();
     assert!(best.len() >= 2);

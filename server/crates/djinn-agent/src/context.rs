@@ -174,6 +174,13 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         Ok(())
     }
 
+    async fn embed_memory_query(
+        &self,
+        _: &str,
+    ) -> Result<Option<bridge::SemanticQueryEmbedding>, String> {
+        Ok(None)
+    }
+
     async fn reset_runtime_settings(&self) {}
 
     async fn persist_model_health_state(&self) {

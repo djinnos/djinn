@@ -31,7 +31,7 @@ async fn fts5_search() {
 
     // Search for "rusqlite" — should hit only the first note.
     let results = repo
-        .search(&project.id, "rusqlite", None, None, None, 10)
+        .search(&project.id, "rusqlite", None, None, None, 10, None)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -69,7 +69,7 @@ async fn fts5_search_folder_filter() {
     .unwrap();
 
     let results = repo
-        .search(&project.id, "common", None, Some("design"), None, 10)
+        .search(&project.id, "common", None, Some("design"), None, 10, None)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -106,7 +106,7 @@ async fn fts5_search_prefers_title_over_content() {
     .unwrap();
 
     let results = repo
-        .search(&project.id, "rankneedle", None, None, None, 10)
+        .search(&project.id, "rankneedle", None, None, None, 10, None)
         .await
         .unwrap();
 
@@ -144,7 +144,7 @@ async fn fts5_search_prefers_tags_over_content() {
     .unwrap();
 
     let results = repo
-        .search(&project.id, "ranktag", None, None, None, 10)
+        .search(&project.id, "ranktag", None, None, None, 10, None)
         .await
         .unwrap();
 
@@ -307,7 +307,7 @@ async fn search_rrf_prefers_higher_access_count_for_equivalent_matches() {
         .unwrap();
 
     let results = repo
-        .search(&project.id, "sharedterm", None, None, None, 10)
+        .search(&project.id, "sharedterm", None, None, None, 10, None)
         .await
         .unwrap();
 
@@ -398,7 +398,7 @@ async fn search_rrf_confidence_lowers_equivalent_match_ranking() {
         .unwrap();
 
     let results = repo
-        .search(&project.id, "sharedconfidence", None, None, None, 10)
+        .search(&project.id, "sharedconfidence", None, None, None, 10, None)
         .await
         .unwrap();
 

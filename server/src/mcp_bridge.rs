@@ -14,8 +14,8 @@ use djinn_mcp::bridge::{
     ChannelStatus, CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry, GitOps,
     GraphDiff, GraphNeighbor, GraphStatus, ImpactEntry, ImpactResult, LspOps, LspWarning,
     ModelPoolStatus, NeighborsResult, OrphanEntry, PathHop, PathResult, PoolStatus, RankedNode,
-    RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit, SlotPoolOps, SymbolDescription, SyncOps,
-    SyncResult,
+    RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps,
+    SymbolDescription, SyncOps, SyncResult,
 };
 use petgraph::visit::EdgeRef;
 
@@ -289,6 +289,20 @@ impl RuntimeOps for AppState {
         settings: &djinn_core::models::DjinnSettings,
     ) -> Result<(), String> {
         AppState::apply_settings(self, settings).await
+    }
+
+    async fn embed_memory_query(
+        &self,
+        query: &str,
+    ) -> Result<Option<SemanticQueryEmbedding>, String> {
+        match self.embedding_service().embed_query(query).await {
+            crate::semantic_memory::EmbeddingOutcome::Ready(vector) => {
+                Ok(Some(SemanticQueryEmbedding {
+                    values: vector.values,
+                }))
+            }
+            crate::semantic_memory::EmbeddingOutcome::Degraded(_) => Ok(None),
+        }
     }
 
     async fn reset_runtime_settings(&self) {

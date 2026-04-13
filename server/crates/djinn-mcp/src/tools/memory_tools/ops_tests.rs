@@ -8,6 +8,7 @@ mod tests {
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use tokio::sync::broadcast;
 
+    use crate::bridge::{RuntimeOps, SemanticQueryEmbedding};
     use crate::server::DjinnMcpServer;
     use crate::state::McpState;
     use crate::state::stubs::{
@@ -18,6 +19,33 @@ mod tests {
     use crate::tools::memory_tools::{
         BrokenLinksParams, BuildContextParams, ListParams, OrphansParams, ReadParams, SearchParams,
     };
+
+    struct SemanticRuntimeOps {
+        embedding: Vec<f32>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeOps for SemanticRuntimeOps {
+        async fn apply_settings(
+            &self,
+            _: &djinn_core::models::DjinnSettings,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn embed_memory_query(
+            &self,
+            _: &str,
+        ) -> Result<Option<SemanticQueryEmbedding>, String> {
+            Ok(Some(SemanticQueryEmbedding {
+                values: self.embedding.clone(),
+            }))
+        }
+
+        async fn reset_runtime_settings(&self) {}
+        async fn persist_model_health_state(&self) {}
+        async fn purge_worktrees(&self) {}
+    }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
         let tx = tx.clone();
@@ -256,6 +284,104 @@ mod tests {
             response.error
         );
         assert!(!response.results.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_ops_merges_semantic_candidates_with_lexical_results() {
+        let tmp = workspace_tempdir();
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let event_bus = event_bus_for(&tx);
+        let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
+        let project = project_repo
+            .create("test-project", tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let repo = NoteRepository::new(db.clone(), event_bus.clone());
+
+        let lexical = repo
+            .create(
+                &project.id,
+                tmp.path(),
+                "Lexical Match",
+                "architecture planning context",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let semantic = repo
+            .create_db_note(
+                &project.id,
+                "Semantic Match",
+                "dispatch slot registry",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let embedding = vec![0.25_f32; 768];
+        repo.upsert_embedding(djinn_db::UpsertNoteEmbedding {
+            note_id: &semantic.id,
+            content_hash: "semantic-hash",
+            model_version: "nomic-embed-text-v1.5",
+            embedding: &embedding,
+        })
+        .await
+        .unwrap();
+
+        let server = DjinnMcpServer::new(McpState::new(
+            db,
+            event_bus_for(&tx),
+            djinn_provider::catalog::CatalogService::new(),
+            djinn_provider::catalog::HealthTracker::new(),
+            "test-user".into(),
+            Some(Arc::new(StubCoordinatorOps)),
+            Some(Arc::new(StubSlotPoolOps)),
+            Arc::new(StubLspOps),
+            Arc::new(StubSyncOps),
+            Arc::new(SemanticRuntimeOps {
+                embedding: embedding.clone(),
+            }),
+            Arc::new(StubGitOps),
+            Arc::new(StubRepoGraphOps),
+        ));
+
+        let semantic_candidates = repo
+            .semantic_candidate_scores(&project.id, &embedding, None, None, 10)
+            .await
+            .unwrap();
+
+        let response = ops::memory_search(
+            &server,
+            SearchParams {
+                project: project.path.clone(),
+                query: "architecture".to_string(),
+                folder: None,
+                note_type: None,
+                limit: Some(10),
+            },
+            None,
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let ids: Vec<&str> = response
+            .results
+            .iter()
+            .map(|result| result.id.as_str())
+            .collect();
+        assert!(ids.contains(&lexical.id.as_str()));
+
+        if semantic_candidates.iter().any(|(id, _)| id == &semantic.id) {
+            assert!(ids.contains(&semantic.id.as_str()));
+        } else {
+            assert!(
+                !ids.contains(&semantic.id.as_str()),
+                "semantic-only match should be absent when semantic candidate retrieval returns no match"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
