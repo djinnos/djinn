@@ -2294,6 +2294,102 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "end_line": {
+          "default": null,
+          "description": "Last line to return (1-based, inclusive). Omit for end of file.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "path": {
+          "description": "File path within the repository (e.g. \"src/lib.rs\").",
+          "type": "string"
+        },
+        "ref": {
+          "default": null,
+          "description": "Branch, tag, or commit SHA (default: HEAD / default branch).",
+          "nullable": true,
+          "type": "string"
+        },
+        "repo": {
+          "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\").",
+          "type": "string"
+        },
+        "start_line": {
+          "default": null,
+          "description": "First line to return (1-based, inclusive). Omit for start of file.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repo",
+        "path"
+      ],
+      "title": "GithubFetchFileParams",
+      "type": "object"
+    },
+    "name": "github_fetch_file",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrGithubFetchFileResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "language": {
+          "default": null,
+          "description": "Programming language filter (e.g. \"Rust\", \"Python\", \"TypeScript\").",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "default": null,
+          "description": "Maximum number of results to return (1–100, default 15).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "path": {
+          "default": null,
+          "description": "Path filter to search within specific directories (e.g. \"src/\").",
+          "nullable": true,
+          "type": "string"
+        },
+        "query": {
+          "description": "Search query string. Supports GitHub code search syntax.",
+          "type": "string"
+        },
+        "repo": {
+          "default": null,
+          "description": "Repository filter in \"owner/repo\" format (e.g. \"tokio-rs/tokio\").",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "GithubSearchParams",
+      "type": "object"
+    },
+    "name": "github_search",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrGithubSearchResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
         "identifier": {
           "description": "Note ID or permalink (e.g. \"decisions/my-adr\").",
           "type": "string"

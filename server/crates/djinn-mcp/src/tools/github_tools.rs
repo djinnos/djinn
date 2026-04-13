@@ -13,6 +13,26 @@ use djinn_provider::repos::CredentialRepository;
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::{ErrorOr, ErrorResponse};
 
+fn parse_optional_positive_usize(value: Option<i64>, field: &str) -> Result<Option<usize>, String> {
+    match value {
+        None => Ok(None),
+        Some(value) if value <= 0 => Err(format!("{field} must be greater than 0")),
+        Some(value) => usize::try_from(value)
+            .map(Some)
+            .map_err(|_| format!("{field} is too large")),
+    }
+}
+
+fn parse_optional_positive_u32(value: Option<i64>, field: &str) -> Result<Option<u32>, String> {
+    match value {
+        None => Ok(None),
+        Some(value) if value <= 0 => Err(format!("{field} must be greater than 0")),
+        Some(value) => u32::try_from(value)
+            .map(Some)
+            .map_err(|_| format!("{field} is too large")),
+    }
+}
+
 // ── Request types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -30,7 +50,7 @@ pub struct GithubSearchParams {
     pub path: Option<String>,
     /// Maximum number of results to return (1–100, default 15).
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -44,10 +64,10 @@ pub struct GithubFetchFileParams {
     pub git_ref: Option<String>,
     /// First line to return (1-based, inclusive). Omit for start of file.
     #[serde(default)]
-    pub start_line: Option<u32>,
+    pub start_line: Option<i64>,
     /// Last line to return (1-based, inclusive). Omit for end of file.
     #[serde(default)]
-    pub end_line: Option<u32>,
+    pub end_line: Option<i64>,
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -166,13 +186,18 @@ impl DjinnMcpServer {
         ));
         let client = GitHubApiClient::new(cred_repo);
 
+        let limit = match parse_optional_positive_usize(params.limit, "limit") {
+            Ok(limit) => limit,
+            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+        };
+
         match client
             .search_code(
                 &params.query,
                 params.language.as_deref(),
                 params.repo.as_deref(),
                 params.path.as_deref(),
-                params.limit,
+                limit,
             )
             .await
         {
@@ -198,13 +223,22 @@ impl DjinnMcpServer {
         ));
         let client = GitHubApiClient::new(cred_repo);
 
+        let start_line = match parse_optional_positive_u32(params.start_line, "start_line") {
+            Ok(start_line) => start_line,
+            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+        };
+        let end_line = match parse_optional_positive_u32(params.end_line, "end_line") {
+            Ok(end_line) => end_line,
+            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+        };
+
         match client
             .fetch_file(
                 &params.repo,
                 &params.path,
                 params.git_ref.as_deref(),
-                params.start_line,
-                params.end_line,
+                start_line,
+                end_line,
             )
             .await
         {
