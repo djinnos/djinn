@@ -4,6 +4,12 @@ type: design
 tags: ["semantic-search","memory","candle","sqlite-vec","roadmap"]
 ---
 
+---
+title: Semantic Memory Search — Candle Embeddings with sqlite-vec Roadmap
+type: design
+tags: ["semantic-search","memory","candle","sqlite-vec","roadmap"]
+---
+
 # Semantic Memory Search — Candle Embeddings with sqlite-vec Roadmap
 
 ## Goal
@@ -44,11 +50,17 @@ Implement semantic memory search for Djinn by adding in-process embedding infere
    - repository tests for vector upsert/query/delete and fallback behavior
    - end-to-end search/write tests proving FTS+semantic merge and graceful degradation
 
-## Task Shape for This Wave
-This wave creates five tasks matching the implementation seams above. The dependency chain should be:
-- DB/vector foundation and embedder runtime can start first.
-- Write-path integration and retrieval integration depend on both foundations.
-- Hardening/tests depend on the integration tasks landing.
+## Active Wave Status
+- `3tvp` — DB/vector storage and initialization seam (in progress)
+- `sljn` — candle embedder runtime and degraded-service contract (in progress)
+- `z6yv` — note write/reindex embedding lifecycle integration (ready after both foundations)
+- `tn0f` — semantic query retrieval merged into `memory_search` (ready after both foundations)
+- `l8q4` — focused verification for init, lifecycle, retrieval, and fallback behavior (after integration tasks)
+
+## Dependency Shape
+- `3tvp` and `sljn` are the foundation tasks and can proceed in parallel.
+- `z6yv` and `tn0f` should wait on both foundation tasks because they consume both the DB/vector seam and the embedder contract.
+- `l8q4` should wait on `z6yv` and `tn0f` so verification targets the landed integration behavior instead of speculative seams.
 
 ## Acceptance Gate for Epic Closure
 The epic can close only when all of the following are true:
