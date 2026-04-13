@@ -1,8 +1,7 @@
-import { getServerPort } from "@/electron/commands";
+import { getServerUrl } from "@/electron/commands";
 
 async function getBaseUrl(): Promise<string> {
-  const port = await getServerPort();
-  return `http://127.0.0.1:${port}`;
+  return getServerUrl();
 }
 
 export type BaseRole = "worker" | "reviewer" | "lead" | "planner";

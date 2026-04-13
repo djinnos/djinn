@@ -1,6 +1,6 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput, ProjectListOutputSchema } from "@/api/generated/mcp-tools.gen";
-import { getServerPort } from "@/electron/commands";
+import { getServerUrl } from "@/electron/commands";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
 
@@ -18,8 +18,7 @@ export async function setUserIdentity(email: string, userId: string): Promise<vo
 }
 
 async function getBaseUrl(): Promise<string> {
-  const port = await getServerPort();
-  return `http://127.0.0.1:${port}`;
+  return getServerUrl();
 }
 
 function providerDescription(provider: ProviderCatalogItem): string {
@@ -193,7 +192,7 @@ export type Project = ProjectListOutputSchema.ProjectInfo & {
 export async function fetchProjects(): Promise<Project[]> {
   const data = await callMcpTool("project_list");
   const projects: Project[] = await Promise.all(
-    data.projects.map(async (p) => {
+    data.projects.map(async (p: Project) => {
       try {
         const config = await callMcpTool("project_config_get", { project: p.path });
         return { ...p, branch: config.target_branch, auto_merge: config.auto_merge };
@@ -430,7 +429,7 @@ export async function fetchKanbanSnapshot(
   }
 
   // Stamp each task with the project it belongs to (needed for all-projects view)
-  const projectId = projectStore.getState().projects.find((p) => p.path === resolvedProjectPath)?.id ?? null;
+  const projectId = projectStore.getState().projects.find((p: Project) => p.path === resolvedProjectPath)?.id ?? null;
   const tasks = allTasks.map((t) => ({ ...t, project_id: projectId }));
 
   return {

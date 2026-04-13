@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const commandMocks = vi.hoisted(() => ({
   getServerStatus: vi.fn(),
-  retryServerDiscovery: vi.fn(),
+  retryServerConnection: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -12,7 +12,7 @@ const eventMocks = vi.hoisted(() => ({
 
 vi.mock('@/electron/commands', () => ({
   getServerStatus: commandMocks.getServerStatus,
-  retryServerDiscovery: commandMocks.retryServerDiscovery,
+  retryServerConnection: commandMocks.retryServerConnection,
 }));
 vi.mock('@/electron/shims/event', () => ({ listen: eventMocks.listen }));
 
