@@ -15,7 +15,8 @@ pub(super) async fn memory_edit_with_worktree(
     };
 
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
-        .with_worktree_root(worktree_root);
+        .with_worktree_root(worktree_root)
+        .with_embedding_provider(server.state.embedding_provider());
 
     let note = match resolve_note_by_identifier(&repo, &project_id, &p.identifier).await {
         Some(n) => n,

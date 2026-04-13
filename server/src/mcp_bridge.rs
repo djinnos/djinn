@@ -954,6 +954,7 @@ impl AppState {
             self.sync_user_id().to_string(),
             coordinator,
             pool,
+            Some(Arc::new(self.embedding_service().clone())),
             Arc::new(LspBridge(self.lsp().clone())),
             Arc::new(SyncBridge(self.sync_manager().clone())),
             Arc::new(self.clone()),

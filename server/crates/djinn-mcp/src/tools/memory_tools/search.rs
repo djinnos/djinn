@@ -31,7 +31,8 @@ impl DjinnMcpServer {
                 error: Some(format!("project not found: {}", params.project)),
             });
         };
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus());
+        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
+            .with_embedding_provider(self.state.embedding_provider());
         let graph = repo.graph(&project_id).await.unwrap_or_default();
         Json(MemoryGraphResponse {
             nodes: graph.nodes,
