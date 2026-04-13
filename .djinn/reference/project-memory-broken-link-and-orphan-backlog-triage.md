@@ -1,6 +1,6 @@
 ---
 title: Project memory broken-link and orphan backlog triage
-type: design
+type: 
 tags: ["memory","triage","broken-links","orphans","planner"]
 ---
 
@@ -126,3 +126,70 @@ Operational rule for future patrols:
 This closes the earlier optional question in this note: the chosen policy is **documented patrol interpretation, not tooling suppression and not mass relinking**. A future tooling enhancement is only warranted if patrol operators still misread the gross orphan count after following this guidance.
 
 
+
+
+## Follow-up triage refresh (2026-04-13)
+
+Re-ran `memory_health`, `memory_broken_links`, and `memory_orphans` after the semantic-memory roadmap repair. Current counts are **138 broken links** and **726 orphans**.
+
+### Broken-link classification refresh
+
+#### 1. Singleton alias links (`[[Roadmap]]`, `[[Project Brief]]`) — **real legacy-content debt, defer broad fix / repair selectively**
+These remain one of the most common raw-text targets in the broken-link report. Canonical singleton notes do exist as `[[roadmap]]` and `[[brief]]`, so this bucket is not a missing-note defect. It is legacy note content still linking by display title rather than canonical permalink.
+
+Decision:
+- Treat as **real cleanup debt in note bodies**, not a tooling bug.
+- Do **not** mass-edit every historical note in patrol work.
+- Focus any repair pass on canonical/current notes first; older archival notes can remain deferred.
+
+#### 2. Legacy ADR title/shorthand variants — **real cleanup debt, highest-value focused follow-up**
+The dominant remaining population is still ADR title drift: full old titles, shortened titles, shorthand `ADR-006`/`ADR-019`, punctuation variants, and pre-permalink display labels. Examples seen again in this refresh include:
+- `ADR-009: Simplified Execution — No Phases, Direct Task Dispatch`
+- `ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning`
+- `ADR-023 Cognitive Memory Architecture`
+- `ADR-034 Agent Role Hierarchy`
+- `ADR-043 Repository Map — SCIP-Powered Structural Context`
+
+Canonical ADR notes exist for many of these targets; the breakage comes from old wikilink text that no longer matches canonical permalinks/titles exactly.
+
+Decision:
+- This is the **highest-value actionable defect** remaining.
+- Route one focused cleanup task for canonical/current notes that still use legacy ADR/singleton aliases, instead of opening another broad backlog-triage pass.
+
+#### 3. Small genuinely missing/renamed-target subset — **repair opportunistically during focused cleanup**
+A much smaller subset still looks like true missing or renamed targets rather than simple alias drift. Examples from the current report include:
+- `Autoresearch Reference`
+- `wikilinks`
+- `Djinn Namespace Git Sync`
+- `Cognitive Memory Scope`
+- a few design-title variants that may need relinking to canonical permalinks
+
+Spot checks show some of these already have nearby canonical notes under different permalinks/titles (for example `decisions/djinn-namespace-git-sync`, `reference/cognitive-memory-scope`). Others may simply be prose that was mistakenly written as a wikilink.
+
+Decision:
+- Treat this as a **small subset to verify during the focused cleanup pass**.
+- Do not open a separate tool/reporting defect unless the repair pass finds a target that truly has no valid canonical replacement.
+
+#### 4. False-positive/tooling bucket — **no new evidence of a fresh reporting bug**
+The earlier aggregate/detail mismatch has not reappeared. Detail output is populated and consistent with the gross counts.
+
+Decision:
+- Broken-link noise is still best understood as content debt plus a small renamed-target subset.
+- Do **not** reopen the earlier memory-health detail bug.
+
+### Orphan refresh
+
+#### `pitfalls/*` orphan concentration — **expected curation debt / retrieval-oriented inventory**
+The orphan count remains heavily dominated by `pitfalls/*` inventory, similar to the earlier tolerated-orphan findings for `cases/*` and `reference/repo-maps/*`. The current detail output shows a wide spread of narrowly scoped pitfall notes rather than one obvious canonical note missing backlinks.
+
+Decision:
+- Treat the large `pitfalls` orphan block as **expected curation debt / retrieval-oriented inventory**, not an acute memory-tool defect.
+- No evidence in this patrol pass suggests `memory_orphans()` is misreporting the folder.
+- Only escalate future orphan work if a smaller subset of active canonical notes emerges that clearly should be linked now.
+
+### Canonical outcome of this refresh
+
+- **Actionable now:** one focused cleanup task for canonical/current notes with legacy ADR and singleton alias wikilinks; verify the small renamed-target subset while there.
+- **Deferred as backlog:** broad historical-note replacement for all alias-style links.
+- **Deferred as curation debt:** the large `pitfalls/*` orphan inventory.
+- **Not a current tooling bug:** aggregate/detail reporting for memory health.
