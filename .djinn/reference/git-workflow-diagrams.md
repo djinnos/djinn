@@ -269,5 +269,5 @@ A remote `origin` is required because the squash-merge flow pushes directly to i
 ## Relations
 
 - [[ADR-007 djinn Namespace Git Sync]]
-- [[ADR-009 Simplified Execution]]
+- [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009 Simplified Execution]]
 - [[ADR-015 Session Continuity and Resume]]

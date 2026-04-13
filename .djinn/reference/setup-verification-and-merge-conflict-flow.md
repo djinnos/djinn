@@ -193,7 +193,7 @@ sequenceDiagram
 
 ## Relations
 - [[Task Lifecycle and Session Flow]]
-- [[Reply Loop Nudge and Marker System]]
+- [[decisions/adr-036-structured-session-finalization-finalize-tools-and-forced-tool-choice|ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]]
 - [[Task Dispatch and Slot Pool Flow]]
-- [[ADR-012: Epic Review Batches and Structured Output Nudging]]
+- [[decisions/adr-024-agent-role-redesign-pm-architect-and-approval-pipeline|ADR-024: Agent Role Redesign — PM, Architect, and Approval Pipeline]]
 - [[ADR-014: Project Setup and Verification Commands]]

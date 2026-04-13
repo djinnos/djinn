@@ -137,5 +137,5 @@ sequenceDiagram
 ## Relations
 - [[Task Dispatch and Slot Pool Flow]]
 - [[Session Resume and Compaction Flow]]
-- [[Reply Loop Nudge and Marker System]]
+- [[decisions/adr-036-structured-session-finalization-finalize-tools-and-forced-tool-choice|ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]]
 - [[Setup Verification and Merge Conflict Flow]]
