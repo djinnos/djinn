@@ -194,3 +194,102 @@ For future orphan patrols:
 - do **not** open broad cleanup work because the `cases/*` bucket is large
 - prefer narrow follow-up tasks only when orphan findings cluster around active epics or clearly redundant canonical-adjacent notes
 - use the semantic-memory case cluster above as the current named first cleanup batch
+
+## Residual historical ADR-title / shorthand alias classification (2026-04-13)
+
+Latest sampling of `memory_broken_links()` confirms that the remaining broken-link backlog is now dominated by a **legacy historical alias slice** concentrated in `decisions/*` and `reference/*`, not by fresh canonical-note regressions.
+
+### Sampled residual patterns
+
+#### A. Generic singleton shorthand: `Roadmap`
+Representative sources:
+- `decisions/adr-001-desktop-only-clerk-authentication-via-system-browser-pkce`
+- `decisions/adr-004-execution-settings-per-role-model-priority-and-per-model-session-limits`
+- `decisions/adr-045-sse-event-batching-and-knowledge-base-housekeeping`
+- `reference/agent-harness-scope`
+- `reference/session-compaction-scope`
+- `reference/structured-session-finalization-scope`
+
+Classification: **mixed historical debt, mostly tolerable rather than urgent content defect**.
+
+Rationale:
+- In older ADR/reference notes, `[[Roadmap]]` was often used as generic shorthand for “the roadmap note/current plan” rather than a stable permalink contract.
+- There is now a canonical singleton `[[roadmap]]`, but mass-normalizing every historical `[[Roadmap]]` occurrence across legacy notes would be broad editorial churn with low operational value.
+- Recent/current canonical notes were already cleaned up in prior tasks; what remains is mostly archival language in historical notes.
+
+Recommended action:
+- **Do not treat this slice as parser/index noise**; these are real unresolved links in note content.
+- **Do not reopen a project-wide mass cleanup** just for `Roadmap`.
+- Allow `Roadmap` to remain as **tolerated historical debt** except when it appears in a currently maintained canonical note whose navigation quality matters for patrols.
+
+#### B. Full ADR-title aliases and title-cased variants
+Representative sources:
+- `ADR-009: Simplified Execution — No Phases, Direct Task Dispatch`
+- `ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning`
+- `ADR-042: DB-Only Knowledge Extraction, Consolidation, and Task-Routing Fixes`
+- `ADR-043 Repository Map — SCIP-Powered Structural Context for Agent Sessions`
+- `ADR-053 Semantic Memory Search — Candle Embeddings with sqlite-vec`
+- title-case variants such as `ADR-023 Cognitive Memory Architecture`, `ADR-029 Vertical Workspace Split`, `ADR-034 Agent Role Hierarchy`
+- shorthand forms such as `ADR-006`, `ADR-009`, `ADR-014`, `ADR-022`
+
+Classification: **real content debt, but split into two sub-buckets**.
+
+1. **Historical archival references in older ADR/reference notes** → **tolerated historical debt unless touched for another reason**.
+   - These links were authored before canonical permalink conventions stabilized.
+   - They are numerous and repetitive, especially inside old ADR relation sections.
+   - Fixing them all is content normalization work, not tooling repair.
+
+2. **Recent/high-value canonical notes that are still actively used** → **narrow actionable cleanup**.
+   Representative current notes from the sample:
+   - `decisions/adr-045-sse-event-batching-and-knowledge-base-housekeeping`
+   - `decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec`
+   - `reference/repository-understanding-and-memory-freshness-upgrade-path`
+
+   These notes are recent, cross-link-rich, and likely to be reused during active planning/patrol work. In these cases the broken ADR-title links are better treated as **content normalization targets** rather than tolerated archival debt.
+
+Recommended action:
+- Treat the broad historical tail as **content debt to tolerate**, not as parser/index noise.
+- Prefer **targeted content normalization** in a very small current-note subset instead of alias/index support or broad historical editing.
+- Do **not** add generalized alias support for title-case ADR labels right now; doing so would encode unstable historical titles/typography into memory resolution rules.
+
+#### C. Non-note prose accidentally parsed as wikilinks or unresolved placeholders
+Representative examples from sampled output:
+- `wikilinks` in `decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning`
+- `target` in `decisions/adr-045-sse-event-batching-and-knowledge-base-housekeeping`
+- `Autoresearch Reference`, `Paperclip Reference`, `Ruflo Comparison Analysis`, `Djinn Namespace Git Sync`
+
+Classification: **parser/index noise or genuine unresolved placeholder text, depending on source context**.
+
+Rationale:
+- Some of these are clearly not intended canonical note permalinks and likely originate from prose examples or placeholders wrapped in wikilink syntax.
+- They are a minority compared with the ADR-title / `Roadmap` backlog and should not drive broad policy.
+
+Recommended action:
+- Handle only when encountered in a narrow current-note cleanup pass.
+- Do not open a dedicated tooling task unless these placeholder-style targets become a substantial share of the backlog.
+
+### Decision summary for patrols
+
+The residual `decisions/*` and `reference/*` broken-link slice should be interpreted in three buckets:
+
+1. **Narrow actionable cleanup**
+   - recent/high-value canonical notes still in active use
+   - recommended fix: replace broken title-style links with canonical permalinks
+
+2. **Tolerated historical alias debt**
+   - legacy ADR/reference notes whose broken links are mostly old title-case aliases or generic `Roadmap`
+   - recommended fix: leave in place unless a note is otherwise being updated
+
+3. **Minor parser/placeholder noise**
+   - accidental non-note targets such as `wikilinks` or `target`
+   - recommended fix: opportunistic cleanup only; no alias support and no separate broad tooling work
+
+### Recommended next action
+
+If follow-up cleanup is scheduled, keep it **narrow and current-facing**:
+- normalize broken ADR-title/title-case links only in a tiny subset of high-value active notes (for example `decisions/adr-045-sse-event-batching-and-knowledge-base-housekeeping`, `decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec`, and `reference/repository-understanding-and-memory-freshness-upgrade-path`)
+- do **not** reopen project-wide historical ADR/research/reference cleanup
+- do **not** add alias-resolution support for generic `Roadmap` or historical ADR titles at the memory-tool layer
+
+This classification makes future patrols cheaper: elevated counts from old `decisions/*` / `reference/*` notes should not be interpreted as fresh regressions unless the broken links are concentrated in currently maintained canonical notes.
+
