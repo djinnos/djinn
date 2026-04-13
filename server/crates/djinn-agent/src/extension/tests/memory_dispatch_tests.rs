@@ -602,6 +602,98 @@ async fn call_tool_dispatches_registered_mcp_tool_success() {
 }
 
 #[tokio::test]
+async fn call_tool_memory_current_requirement_targets_canonical_project_root_from_worktree() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    std::fs::create_dir_all(&project.path).expect("create project dir");
+    let worktree =
+        Path::new(&project.path).join(".djinn/worktrees/test-current-requirement-worktree");
+    std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
+
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    note_repo
+        .create(
+            &project.id,
+            Path::new(&project.path),
+            "V1 Requirements",
+            "tracks [[Cognitive Memory Scope]]",
+            "requirement",
+            "[]",
+        )
+        .await
+        .expect("seed requirements note");
+
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+    let edited = call_tool(
+        &state,
+        "memory_edit",
+        Some(
+            serde_json::json!({
+                "project": worktree.display().to_string(),
+                "identifier": "requirements/v1-requirements",
+                "operation": "find_replace",
+                "find_text": "[[Cognitive Memory Scope]]",
+                "content": "[[reference/cognitive-memory-scope]]"
+            })
+            .as_object()
+            .expect("memory_edit args object")
+            .clone(),
+        ),
+        &worktree,
+        None,
+        Some("planner"),
+        None,
+    )
+    .await
+    .expect("memory_edit dispatch should succeed");
+
+    assert!(
+        edited
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("[[reference/cognitive-memory-scope]]")
+    );
+
+    let note = note_repo
+        .get_by_permalink(&project.id, "requirements/v1-requirements")
+        .await
+        .expect("load requirements")
+        .expect("requirements note exists");
+
+    assert_eq!(note.note_type, "requirement");
+    assert_eq!(note.permalink, "requirements/v1-requirements");
+    assert_eq!(
+        Path::new(&note.file_path),
+        Path::new(&project.path).join(".djinn/requirements/v1-requirements.md")
+    );
+
+    let canonical_contents = std::fs::read_to_string(
+        Path::new(&project.path).join(".djinn/requirements/v1-requirements.md"),
+    )
+    .expect("read canonical requirements");
+    let worktree_contents =
+        std::fs::read_to_string(worktree.join(".djinn/requirements/v1-requirements.md"))
+            .expect("read worktree requirements");
+    assert!(canonical_contents.contains("[[reference/cognitive-memory-scope]]"));
+    assert_eq!(canonical_contents, worktree_contents);
+
+    assert!(
+        note_repo
+            .get_by_permalink(&project.id, "reference/v1-requirements")
+            .await
+            .expect("check duplicate requirements note")
+            .is_none()
+    );
+    assert!(
+        !Path::new(&project.path)
+            .join(".djinn/reference/v1-requirements.md")
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn call_tool_dispatches_registered_mcp_tool_error() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
