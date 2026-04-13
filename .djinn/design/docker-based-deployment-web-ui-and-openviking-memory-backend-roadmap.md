@@ -7,7 +7,7 @@ tags: ["docker","web-ui","openviking","roadmap","epic-7izs"]
 # Docker-Based Deployment, Web UI, and OpenViking Memory Backend Roadmap
 
 ## Status
-In progress. Epic `7izs` is not complete: foundational browser-runtime work has landed (`h3p6`), roadmap-reference repair landed (`sgs2`), and the next execution wave is already represented by active worker tasks. No epic closure is warranted.
+In progress. Epic `7izs` is not complete: foundational browser-runtime work has landed (`h3p6`), roadmap-reference repair landed (`sgs2`), static frontend serving (`rpgb`) is implemented but waiting on repo-green remediation (`wpe0`), and the OpenViking seam/bootstrap work (`4a4t`) plus filesystem picker migration (`2744`) remain in flight. No epic closure is warranted.
 
 ## Architecture anchor
 - [[decisions/adr-053-docker-based-deployment-web-ui-and-openviking-memory-backend]] defines the target shape: Docker Compose deployment, browser-delivered UI, and phased OpenViking migration.
@@ -22,7 +22,8 @@ In progress. Epic `7izs` is not complete: foundational browser-runtime work has 
 
 ## Active wave
 ### Web / deployment track
-- `rpgb` — Serve the React web app from `djinn-server`
+- `rpgb` — Serve the React web app from `djinn-server` (implemented; blocked on `wpe0` repo-green verification fix before closure)
+- `wpe0` — Fix unrelated `djinn-db` test failures blocking epic verification
 - `2744` — Replace native project/file pickers with server-backed filesystem browsing
 - `24v4` — Move SSH connection and deployment flows behind server-owned browser APIs
 - `aijd` — Package `djinn-server` and OpenViking with Docker Compose
@@ -36,9 +37,10 @@ In progress. Epic `7izs` is not complete: foundational browser-runtime work has 
 
 ## Required sequencing
 ### Web / deployment ordering
-1. `rpgb` should land before `aijd` so container packaging targets the real static-asset serving path.
-2. `24v4` depends on the browser runtime boundary already landed in `h3p6`, but can proceed independently of `2744` as long as it stays focused on SSH/deploy APIs.
-3. `2744` can proceed in parallel with `rpgb`, but must target the shared browser runtime seam rather than reintroducing Electron-specific code.
+1. `wpe0` must land before `rpgb` can close, because the remaining failing verification is now isolated to unrelated `djinn-db` tests on the current base branch.
+2. `rpgb` should land before `aijd` so container packaging targets the real static-asset serving path.
+3. `24v4` depends on the browser runtime boundary already landed in `h3p6`, but can proceed independently of `2744` as long as it stays focused on SSH/deploy APIs.
+4. `2744` can proceed in parallel with `rpgb`, but must target the shared browser runtime seam rather than reintroducing Electron-specific code.
 
 ### Memory migration ordering
 1. `4a4t` is the prerequisite seam for all OpenViking follow-ons.
@@ -48,7 +50,7 @@ In progress. Epic `7izs` is not complete: foundational browser-runtime work has 
 5. `ow2c` depends on `ow2x` and final cutover completion.
 
 ## Planner assessment for this wave
-The epic already has a full active wave on the board, so this planning pass should **tighten roadmap/sequencing rather than add duplicate tasks**. The priority is to keep the existing tasks ordered correctly and avoid board churn while `rpgb`, `2744`, and `4a4t` are still in flight.
+The epic already has a full active wave on the board, so this planning pass should **tighten roadmap/sequencing rather than add duplicate tasks**. The priority is to keep the existing tasks ordered correctly, isolate repo-green verification fixes (`wpe0`) from feature slices, and avoid board churn while `rpgb`, `2744`, and `4a4t` are still in flight.
 
 ## Exit criteria for epic closure
 Do not close epic `7izs` until all of the following are true:
