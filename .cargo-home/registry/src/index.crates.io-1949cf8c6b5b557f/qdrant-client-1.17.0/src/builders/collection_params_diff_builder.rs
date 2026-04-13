@@ -1,0 +1,113 @@
+use crate::qdrant::*;
+
+#[derive(Clone)]
+pub struct CollectionParamsDiffBuilder {
+    /// Number of replicas of each shard that network tries to maintain
+    pub(crate) replication_factor: Option<Option<u32>>,
+    /// How many replicas should apply the operation for us to consider it successful
+    pub(crate) write_consistency_factor: Option<Option<u32>>,
+    /// If true - point's payload will not be stored in memory
+    pub(crate) on_disk_payload: Option<Option<bool>>,
+    /// Fan-out every read request to these many additional remote nodes (and return first available response)
+    pub(crate) read_fan_out_factor: Option<Option<u32>>,
+    /// Fan-out delay in milliseconds. If set, the fan-out request will be delayed by this amount.
+    pub(crate) read_fan_out_delay_ms: Option<Option<u64>>,
+}
+#[allow(clippy::all)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+impl CollectionParamsDiffBuilder {
+    /// Number of replicas of each shard that network tries to maintain
+    pub fn replication_factor(self, value: u32) -> Self {
+        let mut new = self;
+        new.replication_factor = Option::Some(Option::Some(value));
+        new
+    }
+    /// How many replicas should apply the operation for us to consider it successful
+    pub fn write_consistency_factor(self, value: u32) -> Self {
+        let mut new = self;
+        new.write_consistency_factor = Option::Some(Option::Some(value));
+        new
+    }
+    /// If true - point's payload will not be stored in memory
+    pub fn on_disk_payload(self, value: bool) -> Self {
+        let mut new = self;
+        new.on_disk_payload = Option::Some(Option::Some(value));
+        new
+    }
+    /// Fan-out every read request to these many additional remote nodes (and return first available response)
+    pub fn read_fan_out_factor(self, value: u32) -> Self {
+        let mut new = self;
+        new.read_fan_out_factor = Option::Some(Option::Some(value));
+        new
+    }
+    /// Fan-out delay in milliseconds. If set, the fan-out request will be delayed by this amount.
+    pub fn read_fan_out_delay_ms(self, value: u64) -> Self {
+        let mut new = self;
+        new.read_fan_out_delay_ms = Option::Some(Option::Some(value));
+        new
+    }
+
+    fn build_inner(self) -> Result<CollectionParamsDiff, std::convert::Infallible> {
+        Ok(CollectionParamsDiff {
+            replication_factor: match self.replication_factor {
+                Some(value) => value,
+                None => core::default::Default::default(),
+            },
+            write_consistency_factor: match self.write_consistency_factor {
+                Some(value) => value,
+                None => core::default::Default::default(),
+            },
+            on_disk_payload: match self.on_disk_payload {
+                Some(value) => value,
+                None => core::default::Default::default(),
+            },
+            read_fan_out_factor: match self.read_fan_out_factor {
+                Some(value) => value,
+                None => core::default::Default::default(),
+            },
+            read_fan_out_delay_ms: match self.read_fan_out_delay_ms {
+                Some(value) => value,
+                None => core::default::Default::default(),
+            },
+        })
+    }
+    /// Create an empty builder, with all fields set to `None` or `PhantomData`.
+    fn create_empty() -> Self {
+        Self {
+            replication_factor: core::default::Default::default(),
+            write_consistency_factor: core::default::Default::default(),
+            on_disk_payload: core::default::Default::default(),
+            read_fan_out_factor: core::default::Default::default(),
+            read_fan_out_delay_ms: core::default::Default::default(),
+        }
+    }
+}
+
+impl From<CollectionParamsDiffBuilder> for CollectionParamsDiff {
+    fn from(value: CollectionParamsDiffBuilder) -> Self {
+        value.build_inner().unwrap_or_else(|_| {
+            panic!(
+                "Failed to convert {0} to {1}",
+                "CollectionParamsDiffBuilder", "CollectionParamsDiff"
+            )
+        })
+    }
+}
+
+impl CollectionParamsDiffBuilder {
+    /// Builds the desired type. Can often be omitted.
+    pub fn build(self) -> CollectionParamsDiff {
+        self.build_inner().unwrap_or_else(|_| {
+            panic!(
+                "Failed to build {0} into {1}",
+                "CollectionParamsDiffBuilder", "CollectionParamsDiff"
+            )
+        })
+    }
+}
+
+impl Default for CollectionParamsDiffBuilder {
+    fn default() -> Self {
+        Self::create_empty()
+    }
+}

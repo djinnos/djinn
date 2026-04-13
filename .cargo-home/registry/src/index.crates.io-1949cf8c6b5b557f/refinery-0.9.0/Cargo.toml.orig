@@ -1,0 +1,41 @@
+[package]
+name = "refinery"
+version = "0.9.0"
+authors = ["Katharina Fey <kookie@spacekookie.de>", "João Oliveira <hello@jxs.pt>"]
+license = "MIT"
+description = "Powerful SQL migration toolkit for Rust"
+readme = "README.md"
+documentation = "https://docs.rs/refinery/"
+repository = "https://github.com/rust-db/refinery"
+keywords = ["database", "sql", "migrations", "orm"]
+categories = ["database"]
+edition = "2018"
+
+[features]
+default = ["toml"]
+rusqlite-bundled = ["refinery-core/rusqlite-bundled"]
+rusqlite = ["refinery-core/rusqlite"]
+postgres = ["refinery-core/postgres"]
+mysql = ["refinery-core/mysql"]
+tokio-postgres = ["refinery-core/tokio-postgres"]
+mysql_async = ["refinery-core/mysql_async"]
+tiberius = ["refinery-core/tiberius"]
+tiberius-config = ["refinery-core/tiberius", "refinery-core/tiberius-config"]
+serde = ["refinery-core/serde"]
+toml = ["refinery-core/toml"]
+enums = ["refinery-macros/enums"]
+int8-versions = ["refinery-core/int8-versions", "refinery-macros/int8-versions"]
+
+[dependencies]
+refinery-core = { version = "0.9.0", path = "../refinery_core" }
+refinery-macros = { version = "0.9.0", path = "../refinery_macros" }
+
+[dev-dependencies]
+barrel = { git = "https://github.com/jxs/barrel", features = ["sqlite3", "pg", "mysql", "mssql"] }
+futures = "0.3"
+assert_cmd = "2.0"
+predicates = "3"
+tempfile = "3"
+time = "0.3.5"
+tokio-util = { version = "0.7.7", features = ["compat"] }
+tokio = { version = "1.9.0", features = ["full"] }

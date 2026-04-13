@@ -109,7 +109,7 @@ impl QdrantNoteVectorStore {
     pub fn client(&self) -> std::result::Result<qdrant_client::Qdrant, String> {
         let builder = qdrant_client::Qdrant::from_url(&self.config.url);
         let builder = match &self.config.api_key {
-            Some(api_key) => builder.api_key(api_key),
+            Some(api_key) => builder.api_key(api_key.clone()),
             None => builder,
         };
         builder.build().map_err(|error| error.to_string())
