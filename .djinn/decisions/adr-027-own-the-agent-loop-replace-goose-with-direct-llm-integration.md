@@ -143,7 +143,7 @@ Use the same primitives Goose uses internally:
 - [[ADR-018: Djinn-Owned Session Compaction]] — Compaction strategy now fully owned, not wrapping Goose
 - [[ADR-010: Session Cost Tracking — Per-Task Token Metrics]] — Token metrics now sourced directly from API responses
 - [[ADR-015: Session Continuity & Resume]] — Session storage moves to single DB
-- [[Roadmap]] — New phase for this work
+- [[roadmap]] — New phase for this work
 
 
 - Task lctb: Djinn-native message types and conversation model

@@ -70,4 +70,4 @@ Resolution: MCP tools accept project path (string), resolve to project_id via pr
 ## Relations
 - [[ADR-003: Split Epic and Task MCP Tools with Input Validation]] — tool signatures affected
 - [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — phase_review rename
-- [[V1 Requirements]] — KANBAN-08 project selector depends on this
+- [[requirements/v1-requirements]] — KANBAN-08 project selector depends on this

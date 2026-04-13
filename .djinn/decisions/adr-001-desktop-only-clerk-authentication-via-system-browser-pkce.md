@@ -115,7 +115,7 @@ Returning users never see a browser:
 - Desktop AUTH-01 through AUTH-08 requirements rewritten (server token passing removed)
 
 ## Relations
-- [[Roadmap]] — Phase 2 (Auth & Onboarding)
-- [[V1 Requirements]] — AUTH requirements revised
+- [[roadmap]] — Phase 2 (Auth & Onboarding)
+- [[requirements/v1-requirements]] — AUTH requirements revised
 - [[Milestone 2 Scope]] — scope boundaries for this phase
 - [[Architecture Research]] — original auth design (superseded)

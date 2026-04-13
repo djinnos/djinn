@@ -141,7 +141,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
 - **[MEDIUM]** DiskANN pure-Rust rewrite — may have landed by March 2026
 
 ## Relations
-- [[Project Brief]] — project context
+- [[brief]] — project context
 - [[Language Selection — Compiler as AI Code Reviewer]] — language decision
 - [[Embedded Database Survey]] — database selection rationale
 - [[Rust Agentic Ecosystem Survey]] — broader ecosystem context

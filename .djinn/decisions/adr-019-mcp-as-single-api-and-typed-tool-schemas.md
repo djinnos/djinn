@@ -50,4 +50,4 @@ At the same time, strong type safety is required across desktop and server. MCP 
 ## Relations
 - [[ADR-003: Split Epic and Task MCP Tools with Input Validation]]
 - [[ADR-018: Djinn-Owned Session Compaction]]
-- [[Roadmap]]
+- [[roadmap]]

@@ -79,5 +79,5 @@ See [[Epic-Task MCP Split Design]] for full method signatures and validation rul
 
 ## Relations
 - [[Epic-Task MCP Split Design]] — full method signatures and validation rules
-- [[Project Brief]] — desktop communicates with server via MCP tools
-- [[V1 Requirements]] — KANBAN and ROAD views consume these tools
+- [[brief]] — desktop communicates with server via MCP tools
+- [[requirements/v1-requirements]] — KANBAN and ROAD views consume these tools

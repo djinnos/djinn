@@ -146,4 +146,4 @@ Use cosine similarity on embeddings instead of BM25 for duplicate detection. Def
 - [[ADR-034: Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation]] — Architect patrol extension point
 - [[ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]] — session extraction pipeline extended
 - [[ADR-042: DB-Only Knowledge Extraction, Consolidation, and Task Routing Fixes]] — consolidation logic reused
-- [[Roadmap]] — new phase for this work
+- [[roadmap]] — new phase for this work

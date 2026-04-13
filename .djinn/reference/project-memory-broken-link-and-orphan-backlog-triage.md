@@ -134,7 +134,7 @@ Re-ran `memory_health`, `memory_broken_links`, and `memory_orphans` after the se
 
 ### Broken-link classification refresh
 
-#### 1. Singleton alias links (`[[Roadmap]]`, `[[Project Brief]]`) — **real legacy-content debt, defer broad fix / repair selectively**
+#### 1. Singleton alias links (`[[roadmap]]`, `[[brief]]`) — **real legacy-content debt, defer broad fix / repair selectively**
 These remain one of the most common raw-text targets in the broken-link report. Canonical singleton notes do exist as `[[roadmap]]` and `[[brief]]`, so this bucket is not a missing-note defect. It is legacy note content still linking by display title rather than canonical permalink.
 
 Decision:
@@ -190,6 +190,8 @@ Decision:
 ### Canonical outcome of this refresh
 
 - **Actionable now:** one focused cleanup task for canonical/current notes with legacy ADR and singleton alias wikilinks; verify the small renamed-target subset while there.
+- **2026-04-13 singleton-alias cleanup outcome:** historical `decisions/*`, plus matching `reference/*` and `research/*` notes in the scoped slice, were normalized from backticked legacy aliases (`Roadmap`, `Project Brief`, `V1 Requirements`) to canonical permalinks `[[roadmap]]`, `[[brief]]`, and `[[requirements/v1-requirements]]` where those canonical notes already exist.
+- **Remaining broken-link follow-up after this pass:** treat only concrete renamed/missing-target exceptions such as `Autoresearch Reference`, `wikilinks`, `Djinn Namespace Git Sync`, and `Cognitive Memory Scope`; do not reopen broad singleton-alias triage.
 - **Deferred as backlog:** broad historical-note replacement for all alias-style links.
 - **Deferred as curation debt:** the large `pitfalls/*` orphan inventory.
 - **Not a current tooling bug:** aggregate/detail reporting for memory health.

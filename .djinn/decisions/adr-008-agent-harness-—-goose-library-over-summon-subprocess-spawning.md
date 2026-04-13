@@ -126,8 +126,8 @@ Goose's per-session extension system supports custom agent types with custom MCP
 
 ## Relations
 
-- [[Roadmap]] — Phase 5 (Agent Orchestration) and Phase 6 (Review)
-- [[V1 Requirements]] — AGENT-01 through AGENT-12, MCP-03
+- [[roadmap]] — Phase 5 (Agent Orchestration) and Phase 6 (Review)
+- [[requirements/v1-requirements]] — AGENT-01 through AGENT-12, MCP-03
 - [[Language Selection — Compiler as AI Code Reviewer]] — ADR-001, Rust ecosystem choice enables Goose integration
 - [[Server Lifecycle — Desktop-Managed Daemon with Graceful Restart]] — ADR-005, credential vault supplements desktop-managed lifecycle for VPS/WSL
 - [[Agent Harness Scope]] — scope note for this discussion

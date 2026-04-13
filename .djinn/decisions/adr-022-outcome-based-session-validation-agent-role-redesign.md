@@ -112,4 +112,4 @@ Track consecutive failed attempts per task:
 ## Relations
 
 - [[ADR-009: Simplified Execution — No Phases, Direct Task Dispatch]] — execution model unchanged
-- [[V1 Requirements]] — extends REVIEW-01, REVIEW-03, AGENT-08 (stuck detection)
+- [[requirements/v1-requirements]] — extends REVIEW-01, REVIEW-03, AGENT-08 (stuck detection)

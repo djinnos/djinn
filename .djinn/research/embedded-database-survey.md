@@ -146,4 +146,4 @@ Pure in-memory vector store with file persistence. Can run alongside SQLite/libS
 ## Relations
 - [[Language Selection — Compiler as AI Code Reviewer]] — language choice enables libSQL as native dependency
 - [[Rust Agentic Ecosystem Survey]] — stack context
-- [[Project Brief]] — project requirements driving database selection
+- [[brief]] — project requirements driving database selection

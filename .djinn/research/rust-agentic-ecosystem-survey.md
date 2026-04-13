@@ -102,4 +102,4 @@ Testing:       cargo test + tokio::test for async
 ## Relations
 - [[Language Selection — Compiler as AI Code Reviewer]] — language decision context
 - [[Embedded Database Survey]] — database layer of the stack
-- [[Project Brief]] — project requirements driving stack choices
+- [[brief]] — project requirements driving stack choices

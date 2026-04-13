@@ -275,6 +275,6 @@ Inspired by context-mode's core insight: **raw tool output should never enter th
 ## Relations
 - [[Cognitive Memory Systems Research]] — research driving this decision
 - [[OpenViking and Context-Mode Analysis]] — reference implementations informing v2 revision
-- [[Project Brief]]
-- [[Roadmap]]
-- [[V1 Requirements]]
+- [[brief]]
+- [[roadmap]]
+- [[requirements/v1-requirements]]

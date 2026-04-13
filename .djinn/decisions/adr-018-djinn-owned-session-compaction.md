@@ -108,4 +108,4 @@ properties:
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]] —
   Goose provides the session infrastructure being wrapped
 - [[Session Compaction Scope]] — Scope boundaries for implementation
-- [[Roadmap]] — Post-V1 feature
+- [[roadmap]] — Post-V1 feature

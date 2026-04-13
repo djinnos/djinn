@@ -136,9 +136,9 @@ LLM-summarized commits co-embedded with code. Enables pattern reuse ("show me a 
 10. **No session reflection** — completed sessions don't automatically produce knowledge
 
 ## Relations
-- [[Project Brief]]
-- [[Roadmap]]
-- [[V1 Requirements]]
+- [[brief]]
+- [[roadmap]]
+- [[requirements/v1-requirements]]
 - [["ADR-030: Repo-Committed Verification and Commit-Hash Caching"]]
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
 - [[ADR-015: Session Continuity & Resume]]

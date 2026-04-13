@@ -72,7 +72,7 @@ type: reference
 
 ## Relations
 
-- [[Roadmap]] — Phase 5, Phase 6
-- [[V1 Requirements]] — AGENT-*, MCP-03, CFG-04
+- [[roadmap]] — Phase 5, Phase 6
+- [[requirements/v1-requirements]] — AGENT-*, MCP-03, CFG-04
 - [[ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning]]
 - [[Server Lifecycle — Desktop-Managed Daemon with Graceful Restart]] — ADR-005, credential management supplements lifecycle

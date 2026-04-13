@@ -266,4 +266,4 @@ The reviewer correctly marked these unmet (no Docker in the worktree to verify),
 - [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]] — KB hygiene signals
 - [[ADR-012 Epic Review Batches and Structured Output Nudging]] — superseded (epic review eliminated)
 - [[ADR-016: EpicReviewer Detached HEAD Worktree]] — superseded (epic reviewer eliminated)
-- [[Roadmap]] — adds to Phase 10
+- [[roadmap]] — adds to Phase 10
