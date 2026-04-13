@@ -574,6 +574,90 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
 }
 
 #[tokio::test]
+async fn mcp_current_requirement_edits_use_canonical_project_root_and_mirror_worktree() {
+    let db = create_test_db();
+    let (proj, _dir) = create_test_project_with_dir(&db).await;
+    let project = &proj.path;
+    let worktree = workspace_tempdir("mcp-current-requirement-worktree-");
+    std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
+    let app = create_test_app_with_db(db.clone());
+    let worktree_header = worktree.path().to_string_lossy().to_string();
+    let session_id = initialize_mcp_session_with_headers(
+        &app,
+        &[("x-djinn-worktree-root", &worktree_header)],
+    )
+    .await;
+
+    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+    let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+    note_repo
+        .create(
+            &project_id,
+            Path::new(project),
+            "V1 Requirements",
+            "alpha [[Cognitive Memory Scope]]",
+            "requirement",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let edited = mcp_call_tool_with_headers(
+        &app,
+        &session_id,
+        "memory_edit",
+        json!({
+            "project": project,
+            "identifier": "requirements/v1-requirements",
+            "operation": "find_replace",
+            "find_text": "[[Cognitive Memory Scope]]",
+            "content": "[[reference/cognitive-memory-scope]]"
+        }),
+        &[("x-djinn-worktree-root", &worktree_header)],
+    )
+    .await;
+    assert!(edited["content"].as_str().unwrap().contains("[[reference/cognitive-memory-scope]]"));
+
+    let note = note_repo
+        .get_by_permalink(&project_id, "requirements/v1-requirements")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let canonical_path = Path::new(&note.file_path).to_path_buf();
+    let worktree_path = worktree.path().join(".djinn/requirements/v1-requirements.md");
+    assert_eq!(
+        canonical_path,
+        Path::new(project).join(".djinn/requirements/v1-requirements.md")
+    );
+    assert!(canonical_path.exists(), "current-note canonical file should exist");
+    assert!(worktree_path.exists(), "current-note worktree mirror should exist");
+
+    let canonical_contents =
+        std::fs::read_to_string(&canonical_path).expect("read canonical requirements");
+    let worktree_contents =
+        std::fs::read_to_string(&worktree_path).expect("read worktree requirements");
+    assert!(canonical_contents.contains("[[reference/cognitive-memory-scope]]"));
+    assert_eq!(canonical_contents, worktree_contents);
+
+    assert!(
+        note_repo
+            .get_by_permalink(&project_id, "reference/v1-requirements")
+            .await
+            .unwrap()
+            .is_none(),
+        "current-note edit should not retarget to reference note"
+    );
+    assert!(
+        !Path::new(project)
+            .join(".djinn/reference/v1-requirements.md")
+            .exists(),
+        "current-note edit should not create duplicate typed note"
+    );
+}
+
+#[tokio::test]
 async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;

@@ -131,7 +131,7 @@ The current Go server has accumulated significant complexity:
 - [[decisions/language-selection-—-compiler-as-ai-code-reviewer]] — ADR driving language choice
 - [[research/embedded-database-survey]] — ADR driving database choice
 - [[research/rust-agentic-ecosystem-survey]] — stack ecosystem research
-- [[v1-requirements]] — detailed requirement breakdown
+- [[requirements/v1-requirements]] — detailed requirement breakdown
 - [[roadmap]] — phased delivery plan
 - [[research/stack-research]] — Rust server stack deep dive
 - [[research/features-research]] — feature analysis for task orchestration systems
