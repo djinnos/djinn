@@ -142,8 +142,8 @@ Use cosine similarity on embeddings instead of BM25 for duplicate detection. Def
 
 ## Relations
 
-- [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]] — confidence scoring and association learning foundations
-- [[ADR-034: Agent Role Hierarchy — Architect Patrol, Task Types, and Escalation]] — Architect patrol extension point
-- [[ADR-036: Structured Session Finalization — Finalize Tools and Forced Tool Choice]] — session extraction pipeline extended
-- [[ADR-042: DB-Only Knowledge Extraction, Consolidation, and Task Routing Fixes]] — consolidation logic reused
+- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]] — confidence scoring and association learning foundations
+- [[decisions/adr-034-agent-role-hierarchy-architect-patrol-scrum-master-rules-and-task-types]] — Architect patrol extension point
+- [[decisions/adr-036-structured-session-finalization-finalize-tools-and-forced-tool-choice]] — session extraction pipeline extended
+- [[decisions/adr-042-db-only-knowledge-extraction-consolidation-and-task-routing-fixes]] — consolidation logic reused
 - [[roadmap]] — new phase for this work
