@@ -4,6 +4,7 @@ type: reference
 tags: ["architecture","diagrams","dispatch","slots"]
 ---
 
+
 # Task Dispatch and Slot Pool Flow
 
 How the coordinator picks up ready tasks and assigns them to execution slots.

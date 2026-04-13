@@ -1,6 +1,6 @@
 ---
 title: Git Workflow Diagrams
-type: 
+type: reference
 tags: ["git","workflow","diagrams","worktree","merge","architecture"]
 ---
 
@@ -269,6 +269,6 @@ A remote `origin` is required because the squash-merge flow pushes directly to i
 
 ## Relations
 
-- [[decisions/djinn-namespace-git-sync|ADR-007 djinn Namespace Git Sync]]
+- [[decisions/djinn-namespace-git-sync|ADR-007: djinn/ Namespace Git Sync]]
 - [[decisions/adr-009-simplified-execution-—-no-phases,-direct-task-dispatch|ADR-009 Simplified Execution]]
-- [[decisions/adr-015-session-continuity-resume|ADR-015 Session Continuity and Resume]]
+- [[decisions/adr-015-session-continuity-resume|ADR-015: Session Continuity and Resume]]

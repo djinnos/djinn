@@ -4,6 +4,7 @@ type: reference
 tags: ["architecture","diagrams","sessions","compaction","resume"]
 ---
 
+
 # Session Resume and Compaction Flow
 
 How sessions are resumed from paused state and how context compaction works.
