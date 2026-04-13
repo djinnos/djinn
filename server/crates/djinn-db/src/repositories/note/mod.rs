@@ -22,6 +22,7 @@ mod file_helpers;
 mod graph;
 mod housekeeping;
 mod indexing;
+mod lexical_search;
 pub(crate) mod rrf;
 mod scoring;
 mod search;
@@ -40,6 +41,10 @@ pub use djinn_core::models::{
 pub use embeddings::{
     EmbeddedNote, NoteEmbeddingMatch, NoteEmbeddingProvider, NoteEmbeddingRecord,
     UpsertNoteEmbedding,
+};
+pub use lexical_search::{
+    LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
+    sanitize_mysql_boolean_query, sanitize_sqlite_fts5_query, validate_mysql_fulltext_threshold,
 };
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
