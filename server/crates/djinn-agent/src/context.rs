@@ -332,6 +332,7 @@ impl AgentContext {
             "agent".to_owned(),
             None,
             None,
+            None,
             Arc::new(self.lsp.clone()),
             Arc::new(AgentSyncOps),
             Arc::new(AgentRuntimeOps {

@@ -443,6 +443,14 @@ impl NoteRepository {
             .await?;
 
         tx.commit().await?;
+        self.sync_note_embedding(
+            &note.id,
+            &note.title,
+            &note.note_type,
+            &note.tags,
+            &note.content,
+        )
+        .await;
         self.events.send(DjinnEventEnvelope::note_created(&note));
         Ok(note)
     }
@@ -699,6 +707,14 @@ impl NoteRepository {
             }
         })?;
 
+        self.sync_note_embedding(
+            &note.id,
+            &note.title,
+            &note.note_type,
+            &note.tags,
+            &note.content,
+        )
+        .await;
         self.events.send(DjinnEventEnvelope::note_created(&note));
         Ok(note)
     }
@@ -950,6 +966,14 @@ impl NoteRepository {
 
         tx.commit().await?;
 
+        self.sync_note_embedding(
+            &note.id,
+            &note.title,
+            &note.note_type,
+            &note.tags,
+            &note.content,
+        )
+        .await;
         self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
     }
@@ -1002,6 +1026,10 @@ impl NoteRepository {
             .bind(&id_owned)
             .execute(self.db.pool())
             .await?;
+
+        if let Err(error) = self.delete_embedding(&id_owned).await {
+            tracing::warn!(note_id = %id_owned, %error, "failed to delete note embedding during note removal");
+        }
 
         if current.storage == "file" {
             let canonical_file_path = PathBuf::from(&current.file_path);
@@ -1127,6 +1155,14 @@ impl NoteRepository {
 
         tx.commit().await?;
 
+        self.sync_note_embedding(
+            &note.id,
+            &note.title,
+            &note.note_type,
+            &note.tags,
+            &note.content,
+        )
+        .await;
         self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
     }

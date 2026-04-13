@@ -31,9 +31,15 @@ pub use repositories::{
         CONTRADICTION, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
         ConsolidationCluster, ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate,
         CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
+<<<<<<< HEAD
         CreatedCanonicalConsolidatedNote, DbNoteGroup, NoteAssociationEntry,
         NoteConsolidationRepository, NoteDedupCandidate, NoteEmbeddingMatch, NoteEmbeddingRecord,
         NoteRepository, NoteSearchParams, STALE_CITATION, UpdateNoteIndexParams,
+=======
+        CreatedCanonicalConsolidatedNote, DbNoteGroup, EmbeddedNote, NoteAssociationEntry,
+        NoteConsolidationRepository, NoteDedupCandidate, NoteEmbeddingMatch, NoteEmbeddingProvider,
+        NoteEmbeddingRecord, NoteRepository, STALE_CITATION, UpdateNoteIndexParams,
+>>>>>>> origin/main
         UpsertNoteEmbedding, file_path_for, file_path_for_with_status, folder_for_type,
         folder_for_type_with_status, is_singleton, permalink_for, permalink_for_with_status,
         slugify,

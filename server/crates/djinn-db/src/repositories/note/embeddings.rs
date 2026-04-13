@@ -1,6 +1,18 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct EmbeddedNote {
+    pub values: Vec<f32>,
+    pub model_version: String,
+}
+
+#[async_trait::async_trait]
+pub trait NoteEmbeddingProvider: Send + Sync {
+    fn model_version(&self) -> String;
+    async fn embed_note(&self, text: &str) -> std::result::Result<EmbeddedNote, String>;
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct UpsertNoteEmbedding<'a> {
     pub note_id: &'a str,
     pub content_hash: &'a str,
@@ -25,6 +37,16 @@ pub struct NoteEmbeddingMatch {
     pub distance: f64,
 }
 
+type EmbeddingRepairRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
     embedding
         .iter()
@@ -32,7 +54,118 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
         .collect()
 }
 
+pub(super) fn embedding_document_text(
+    title: &str,
+    note_type: &str,
+    tags: &str,
+    content: &str,
+) -> String {
+    format!("title: {title}\ntype: {note_type}\ntags: {tags}\n\n{content}")
+}
+
+pub(super) fn embedding_content_hash(
+    title: &str,
+    note_type: &str,
+    tags: &str,
+    content: &str,
+) -> String {
+    crate::note_hash::note_content_hash(&embedding_document_text(title, note_type, tags, content))
+}
+
 impl NoteRepository {
+    pub(super) async fn sync_note_embedding(
+        &self,
+        note_id: &str,
+        title: &str,
+        note_type: &str,
+        tags: &str,
+        content: &str,
+    ) {
+        let Some(provider) = self.embedding_provider() else {
+            return;
+        };
+
+        let semantic_text = embedding_document_text(title, note_type, tags, content);
+        let content_hash = embedding_content_hash(title, note_type, tags, content);
+
+        match provider.embed_note(&semantic_text).await {
+            Ok(embedded) => {
+                if let Err(error) = self
+                    .upsert_embedding(UpsertNoteEmbedding {
+                        note_id,
+                        content_hash: &content_hash,
+                        model_version: &embedded.model_version,
+                        embedding: &embedded.values,
+                    })
+                    .await
+                {
+                    tracing::warn!(note_id, %error, "failed to upsert note embedding");
+                }
+            }
+            Err(reason) => {
+                tracing::debug!(note_id, %reason, "semantic embedding unavailable; continuing with lexical indexing only");
+            }
+        }
+    }
+
+    pub(super) async fn purge_orphan_embeddings(&self) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+
+        let orphan_ids: Vec<(String,)> = sqlx::query_as(
+            "SELECT m.note_id
+             FROM note_embedding_meta m
+             LEFT JOIN notes n ON n.id = m.note_id
+             WHERE n.id IS NULL",
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let mut deleted = 0u64;
+        for (note_id,) in orphan_ids {
+            self.delete_embedding(&note_id).await?;
+            deleted += 1;
+        }
+
+        Ok(deleted)
+    }
+
+    pub(super) async fn repair_project_embeddings(&self, project_id: &str) -> Result<u64> {
+        let Some(provider) = self.embedding_provider() else {
+            return Ok(0);
+        };
+
+        self.db.ensure_initialized().await?;
+        self.purge_orphan_embeddings().await?;
+
+        let current_model_version = provider.model_version();
+        let rows: Vec<EmbeddingRepairRow> = sqlx::query_as(
+            "SELECT n.id, n.title, n.note_type, n.tags, n.content,
+                        m.content_hash, m.model_version
+                 FROM notes n
+                 LEFT JOIN note_embedding_meta m ON m.note_id = n.id
+                 WHERE n.project_id = ?1",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let mut repaired = 0u64;
+        for (note_id, title, note_type, tags, content, embedded_hash, embedded_model_version) in
+            rows
+        {
+            let expected_hash = embedding_content_hash(&title, &note_type, &tags, &content);
+            let needs_refresh = embedded_hash.as_deref() != Some(expected_hash.as_str())
+                || embedded_model_version.as_deref() != Some(current_model_version.as_str());
+            if needs_refresh {
+                repaired += 1;
+                self.sync_note_embedding(&note_id, &title, &note_type, &tags, &content)
+                    .await;
+            }
+        }
+
+        Ok(repaired)
+    }
+
     pub async fn upsert_embedding(
         &self,
         input: UpsertNoteEmbedding<'_>,

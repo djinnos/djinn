@@ -8,6 +8,7 @@ use djinn_core::models::{
     BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
     NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
 };
+use std::sync::Arc;
 
 use crate::database::Database;
 use crate::error::{DbError as Error, DbResult as Result};
@@ -36,7 +37,10 @@ pub use djinn_core::models::{
     ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate, DbNoteGroup,
     NoteDedupCandidate,
 };
-pub use embeddings::{NoteEmbeddingMatch, NoteEmbeddingRecord, UpsertNoteEmbedding};
+pub use embeddings::{
+    EmbeddedNote, NoteEmbeddingMatch, NoteEmbeddingProvider, NoteEmbeddingRecord,
+    UpsertNoteEmbedding,
+};
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
     USER_CONFIRM, bayesian_update,
@@ -77,6 +81,7 @@ pub struct NoteRepository {
     db: Database,
     events: EventBus,
     worktree_root: Option<PathBuf>,
+    embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
 }
 
 impl NoteRepository {
@@ -85,6 +90,7 @@ impl NoteRepository {
             db,
             events,
             worktree_root: None,
+            embedding_provider: None,
         }
     }
 
@@ -93,8 +99,20 @@ impl NoteRepository {
         self
     }
 
+    pub fn with_embedding_provider(
+        mut self,
+        embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
+    ) -> Self {
+        self.embedding_provider = embedding_provider;
+        self
+    }
+
     pub fn worktree_root(&self) -> Option<&Path> {
         self.worktree_root.as_deref()
+    }
+
+    pub fn embedding_provider(&self) -> Option<Arc<dyn NoteEmbeddingProvider>> {
+        self.embedding_provider.clone()
     }
 }
 
