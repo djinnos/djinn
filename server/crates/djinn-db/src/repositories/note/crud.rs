@@ -905,8 +905,21 @@ impl NoteRepository {
     /// human-supplied identifier that could be either a permalink slug or a
     /// (partial) title.
     pub async fn resolve(&self, project_id: &str, identifier: &str) -> Result<Option<Note>> {
-        if let Some(n) = self.get_by_permalink(project_id, identifier).await? {
-            return Ok(Some(n));
+        let trimmed = identifier.trim();
+        if !trimmed.is_empty() {
+            let without_scheme = trimmed.strip_prefix("memory://").unwrap_or(trimmed);
+            let normalized = normalize_virtual_note_path(without_scheme);
+            if !normalized.is_empty() {
+                if let Some(n) = self.get_by_permalink(project_id, &normalized).await? {
+                    return Ok(Some(n));
+                }
+                if let Some(permalink) = permalink_from_virtual_note_path(&normalized)
+                    && permalink != normalized
+                    && let Some(n) = self.get_by_permalink(project_id, &permalink).await?
+                {
+                    return Ok(Some(n));
+                }
+            }
         }
         let results = self
             .search(NoteSearchParams {

@@ -291,6 +291,53 @@ async fn fts5_search_prefers_tags_over_content() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_prefers_exact_permalink_before_title_search_fallback() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let design = repo
+        .create_db_note_with_permalink(
+            &project.id,
+            "design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy",
+            "ADR-054 Roadmap Memory Extraction Quality Gates and Note Taxonomy",
+            "Canonical design note wins exact permalink resolution.",
+            "design",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    repo.create(
+        &project.id,
+        tmp.path(),
+        "ADR-054 Roadmap Memory Extraction Quality Gates and Note Taxonomy",
+        "Archived case note that would otherwise rank via title/content fallback.",
+        "case",
+        "[]",
+    )
+    .await
+    .unwrap();
+
+    let resolved = repo
+        .resolve(
+            &project.id,
+            "memory://design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy.md",
+        )
+        .await
+        .unwrap()
+        .expect("exact permalink should resolve");
+
+    assert_eq!(resolved.id, design.id);
+    assert_eq!(
+        resolved.permalink,
+        "design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dedup_candidates_returns_empty_for_empty_project() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
