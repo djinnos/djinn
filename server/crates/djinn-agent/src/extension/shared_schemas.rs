@@ -10,7 +10,7 @@ pub(crate) fn serialize_tool_schema(tool: RmcpTool, concurrent_safe: bool) -> se
 pub(crate) fn tool_memory_move() -> RmcpTool {
     RmcpTool::new(
         "memory_move".to_string(),
-        "Compatibility fallback for note moves when filesystem rename semantics are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into .djinn/decisions/proposed/ without raw shell relocation.".to_string(),
+        "Compatibility fallback for note moves when filesystem rename semantics are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. When mounted, `.djinn/memory/` reflects the current session-selected task/worktree view and falls back to canonical `main` when no task view is available; no explicit branch directories are exposed in this slice. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into .djinn/decisions/proposed/ without raw shell relocation.".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "type"],

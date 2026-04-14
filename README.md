@@ -244,7 +244,8 @@ Filesystem-first usage guidance:
 - prefer normal file reads/writes/edits under `.djinn/memory/` when the mount is enabled
 - keep MCP memory tools for analytical flows such as context assembly, search/health, and compatibility-only cases
 - if you need a guaranteed canonical view, use the checked-in `.djinn/` tree or analytical MCP reads rather than assuming the mount stayed on `main`
-- if you are unsure what view the mount is serving, inspect runtime status surfaces before making broad note edits
+- if you are unsure what view the mount is serving, inspect the server runtime status surface (`GET /health` → `memory_mount`) before making broad note edits; it reports whether the mount is merely configured, actively mounted, or degraded
+- treat a mounted `.djinn/memory/` tree as the live session-selected view for the current task/worktree, not as an isolated branch checkout with its own branch-named directories
 
 ### What's Available Over MCP
 
