@@ -15,6 +15,21 @@ fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
     folder.filter(|value| !value.is_empty())
 }
 
+async fn record_retrieved_notes(
+    server: &DjinnMcpServer,
+    repo: &NoteRepository,
+    note_ids: &[String],
+) {
+    // ADR-054 retrieval boundary: notes returned to the MCP client count as accessed,
+    // even if the client does not issue a follow-up `memory_read`. This keeps search
+    // result retrieval flows visible to temporal/co-access scoring without touching
+    // notes that were only considered internally during ranking.
+    for note_id in note_ids {
+        let _ = repo.touch_accessed(note_id).await;
+        server.record_memory_read(note_id).await;
+    }
+}
+
 pub async fn memory_extracted_audit(
     server: &DjinnMcpServer,
     p: ExtractedAuditParams,
@@ -156,21 +171,27 @@ pub async fn memory_search(
         })
         .await
     {
-        Ok(results) => MemorySearchResponse {
-            results: results
-                .into_iter()
-                .map(|r| MemorySearchResultItem {
-                    id: r.id,
-                    permalink: r.permalink,
-                    title: r.title,
-                    folder: r.folder,
-                    note_type: r.note_type,
-                    snippet: r.snippet,
-                    score: r.score,
-                })
-                .collect(),
-            error: None,
-        },
+        Ok(results) => {
+            let retrieved_note_ids: Vec<String> =
+                results.iter().map(|result| result.id.clone()).collect();
+            record_retrieved_notes(server, &repo, &retrieved_note_ids).await;
+
+            MemorySearchResponse {
+                results: results
+                    .into_iter()
+                    .map(|r| MemorySearchResultItem {
+                        id: r.id,
+                        permalink: r.permalink,
+                        title: r.title,
+                        folder: r.folder,
+                        note_type: r.note_type,
+                        snippet: r.snippet,
+                        score: r.score,
+                    })
+                    .collect(),
+                error: None,
+            }
+        }
         Err(e) => MemorySearchResponse {
             results: vec![],
             error: Some(format!("search failed: {e}")),
