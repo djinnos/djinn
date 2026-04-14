@@ -194,7 +194,7 @@ pub(super) fn build_catalog(notes: &[(String, String, String, String)]) -> Strin
 
 // ── Title/type inference helpers ─────────────────────────────────────────────
 
-pub(super) fn title_from_permalink(permalink: &str) -> String {
+pub fn title_from_permalink(permalink: &str) -> String {
     let slug = permalink.rsplit('/').next().unwrap_or(permalink);
     slug.split('-')
         .filter(|part| !part.is_empty())
@@ -211,7 +211,7 @@ pub(super) fn capitalize_first(s: &str) -> String {
     }
 }
 
-pub(super) fn infer_note_type(permalink: &str) -> String {
+pub fn infer_note_type(permalink: &str) -> String {
     if permalink == "brief" {
         return "brief".to_string();
     }

@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use djinn_core::models::Note;
 use djinn_db::{
-    NoteRepository, folder_for_type, normalize_virtual_note_path, permalink_from_virtual_note_path,
-    render_note_markdown, virtual_note_path_for_permalink,
+    NoteRepository, folder_for_type, infer_note_type, normalize_virtual_note_path, permalink_for,
+    permalink_from_virtual_note_path, render_note_markdown, title_from_permalink,
+    virtual_note_path_for_permalink,
 };
 use thiserror::Error;
 
@@ -54,6 +56,14 @@ pub enum MemoryFsError {
 }
 
 pub type Result<T> = std::result::Result<T, MemoryFsError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedMemoryNoteWrite {
+    title: String,
+    note_type: String,
+    tags: String,
+    content: String,
+}
 
 #[derive(Debug, Default)]
 struct MemoryTree {
@@ -233,6 +243,104 @@ impl MemoryFilesystemCore {
         })
     }
 
+    pub async fn write_file(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+        path: &str,
+        content: &str,
+    ) -> Result<MemoryFile> {
+        let normalized = normalize_virtual_note_path(path);
+        let target_permalink = permalink_from_virtual_note_path(&normalized).ok_or_else(|| {
+            MemoryFsError::NotFile {
+                path: normalized.clone(),
+            }
+        })?;
+        let parsed = parse_note_write(&target_permalink, content);
+
+        let note = match self
+            .repo
+            .get_by_permalink(project_id, &target_permalink)
+            .await?
+        {
+            Some(existing) => {
+                let desired_permalink = permalink_for(&parsed.note_type, &parsed.title);
+                let note = if desired_permalink != existing.permalink {
+                    self.repo
+                        .move_note(&existing.id, project_path, &parsed.title, &parsed.note_type)
+                        .await?
+                } else {
+                    existing
+                };
+
+                self.repo
+                    .update(&note.id, &parsed.title, &parsed.content, &parsed.tags)
+                    .await?
+            }
+            None => {
+                self.repo
+                    .create(
+                        project_id,
+                        project_path,
+                        &parsed.title,
+                        &parsed.content,
+                        &parsed.note_type,
+                        &parsed.tags,
+                    )
+                    .await?
+            }
+        };
+
+        Ok(self.memory_file_from_note(&note))
+    }
+
+    pub async fn delete_file(&self, project_id: &str, path: &str) -> Result<()> {
+        let resolved = self.resolve_note_path(project_id, path).await?;
+        self.repo.delete(&resolved.note_id).await?;
+        Ok(())
+    }
+
+    pub async fn rename_file(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<ResolvedNotePath> {
+        let source = self.resolve_note_path(project_id, from_path).await?;
+        let normalized_target = normalize_virtual_note_path(to_path);
+        let target_permalink =
+            permalink_from_virtual_note_path(&normalized_target).ok_or_else(|| {
+                MemoryFsError::NotFile {
+                    path: normalized_target.clone(),
+                }
+            })?;
+
+        if let Some(existing) = self
+            .repo
+            .get_by_permalink(project_id, &target_permalink)
+            .await?
+            && existing.id != source.note_id
+        {
+            return Err(MemoryFsError::Repository(djinn_db::Error::InvalidData(
+                format!("path already exists: {normalized_target}"),
+            )));
+        }
+
+        let title = title_from_permalink(&target_permalink);
+        let note_type = infer_note_type(&target_permalink);
+        let moved = self
+            .repo
+            .move_note(&source.note_id, project_path, &title, &note_type)
+            .await?;
+
+        Ok(ResolvedNotePath {
+            logical_path: virtual_note_path_for_permalink(&moved.permalink),
+            permalink: moved.permalink,
+            note_id: moved.id,
+        })
+    }
+
     async fn build_tree(&self, project_id: &str) -> Result<MemoryTree> {
         let notes = self.repo.list(project_id, None).await?;
         let mut tree = MemoryTree::default();
@@ -262,6 +370,65 @@ impl MemoryFilesystemCore {
     fn render_note_content(&self, note: &Note) -> String {
         render_note_markdown(&note.title, &note.note_type, &note.tags, &note.content)
     }
+
+    fn memory_file_from_note(&self, note: &Note) -> MemoryFile {
+        let content = self.render_note_content(note);
+        MemoryFile {
+            metadata: MemoryEntryMetadata {
+                path: virtual_note_path_for_permalink(&note.permalink),
+                kind: MemoryEntryKind::File,
+                size: content.len() as u64,
+            },
+            content,
+            note_id: note.id.clone(),
+            permalink: note.permalink.clone(),
+        }
+    }
+}
+
+fn parse_note_write(target_permalink: &str, raw: &str) -> ParsedMemoryNoteWrite {
+    let (frontmatter, body) = split_frontmatter(raw);
+    let note_type = frontmatter
+        .and_then(|fm| frontmatter_value(fm, "type"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| infer_note_type(target_permalink));
+    let title = frontmatter
+        .and_then(|fm| frontmatter_value(fm, "title"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| title_from_permalink(target_permalink));
+    let tags = frontmatter
+        .and_then(|fm| frontmatter_value(fm, "tags"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "[]".to_string());
+
+    ParsedMemoryNoteWrite {
+        title,
+        note_type,
+        tags,
+        content: body.to_string(),
+    }
+}
+
+fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
+    if let Some(rest) = raw.strip_prefix("---\n")
+        && let Some(end) = rest.find("\n---\n")
+    {
+        let frontmatter = &rest[..end];
+        let body = rest[end + 5..]
+            .strip_prefix('\n')
+            .unwrap_or(&rest[end + 5..]);
+        return (Some(frontmatter), body);
+    }
+
+    (None, raw)
+}
+
+fn frontmatter_value(frontmatter: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}: ");
+    frontmatter.lines().find_map(|line| {
+        line.strip_prefix(&prefix)
+            .map(|value| value.trim().to_string())
+    })
 }
 
 fn known_note_folders() -> Vec<String> {
@@ -441,5 +608,128 @@ mod tests {
             missing_dir,
             Err(MemoryFsError::NotFound { path }) if path == "patterns/missing"
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_file_create_update_rename_and_delete_flow_stays_indexed() {
+        let (core, db, project_id, project_root) = make_core().await;
+        let repo = NoteRepository::new(db, EventBus::noop());
+
+        repo.create(
+            &project_id,
+            project_root.path(),
+            "Target Note",
+            "Target body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let created = core
+            .write_file(
+                &project_id,
+                project_root.path(),
+                "patterns/source-note.md",
+                "---\ntitle: Source Note\ntype: pattern\ntags: [\"fs\"]\n---\n\nLinks to [[Target Note]].",
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.permalink, "patterns/source-note");
+        assert!(created.content.contains("title: Source Note"));
+
+        let created_note = repo
+            .get_by_permalink(&project_id, "patterns/source-note")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(created_note.note_type, "pattern");
+        assert_eq!(created_note.tags, "[\"fs\"]");
+        assert_eq!(repo.broken_links(&project_id, None).await.unwrap().len(), 0);
+        assert_eq!(repo.graph(&project_id).await.unwrap().edges.len(), 1);
+
+        let updated = core
+            .write_file(
+                &project_id,
+                project_root.path(),
+                "patterns/source-note.md",
+                "---\ntitle: Source Note\ntype: pattern\ntags: [\"fs\",\"updated\"]\n---\n\nNow links to [[Missing Note]].",
+            )
+            .await
+            .unwrap();
+        assert!(updated.content.contains("updated"));
+
+        let updated_note = repo
+            .get_by_permalink(&project_id, "patterns/source-note")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_note.tags, "[\"fs\",\"updated\"]");
+        assert_eq!(repo.graph(&project_id).await.unwrap().edges.len(), 0);
+        assert_eq!(repo.broken_links(&project_id, None).await.unwrap().len(), 1);
+
+        let renamed = core
+            .rename_file(
+                &project_id,
+                project_root.path(),
+                "patterns/source-note.md",
+                "research/renamed-note.md",
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.logical_path, "research/renamed-note.md");
+        assert!(
+            core.read_file(&project_id, "patterns/source-note.md")
+                .await
+                .is_err()
+        );
+
+        let renamed_note = repo
+            .get_by_permalink(&project_id, "research/renamed-note")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed_note.title, "Renamed Note");
+        assert_eq!(renamed_note.note_type, "research");
+        assert_eq!(renamed_note.folder, "research");
+        assert_eq!(repo.broken_links(&project_id, None).await.unwrap().len(), 1);
+
+        core.delete_file(&project_id, "research/renamed-note.md")
+            .await
+            .unwrap();
+        assert!(
+            repo.get_by_permalink(&project_id, "research/renamed-note")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(repo.broken_links(&project_id, None).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_file_uses_frontmatter_metadata_consistently() {
+        let (core, db, project_id, project_root) = make_core().await;
+        let repo = NoteRepository::new(db, EventBus::noop());
+
+        let file = core
+            .write_file(
+                &project_id,
+                project_root.path(),
+                "design/frontmatter-title.md",
+                "---\ntitle: Frontmatter Title\ntype: design\ntags: [\"meta\",\"frontmatter\"]\n---\n\nDesign body",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(file.permalink, "design/frontmatter-title");
+        let note = repo
+            .get_by_permalink(&project_id, "design/frontmatter-title")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(note.title, "Frontmatter Title");
+        assert_eq!(note.note_type, "design");
+        assert_eq!(note.tags, "[\"meta\",\"frontmatter\"]");
+        assert_eq!(note.content, "Design body");
     }
 }
