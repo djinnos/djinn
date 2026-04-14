@@ -733,3 +733,6 @@ mod tests {
         assert_eq!(note.content, "Design body");
     }
 }
+
+#[cfg(test)]
+mod integration_tests;
