@@ -71,18 +71,23 @@ pub(super) async fn create_note(
     params: &WriteParams,
     tags_json: &str,
 ) -> MemoryNoteResponse {
-    let canonical_project_path = if is_singleton(&params.note_type) {
-        let project_repo =
-            ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
-        project_repo
-            .get_path(project_id)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| params.project.clone())
-    } else {
-        params.project.clone()
-    };
+    // ADR-054 closure regression: when memory_write is called from a task worktree,
+    // `params.project` may be the worktree root instead of the canonical project
+    // root. Passing that directly into the note repository caused non-singleton
+    // file-backed notes to be indexed with the worktree path as their canonical
+    // `file_path`, which left the new note attached to the right project_id but
+    // the wrong on-disk identity. Exact permalink reads/lists then observed a
+    // mismatch between the canonical note repository view and the worktree-authored
+    // file. Always resolve the canonical project root from the projects table
+    // before creating the note; the repository still uses `worktree_root` to write
+    // the editable worktree copy when present.
+    let project_repo = ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
+    let canonical_project_path = project_repo
+        .get_path(project_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| params.project.clone());
 
     let scope_paths_json = params
         .scope_paths
