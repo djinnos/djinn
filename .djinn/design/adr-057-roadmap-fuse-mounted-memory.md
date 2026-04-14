@@ -7,6 +7,7 @@ tags: ["adr-057","roadmap","memory","filesystem","fuse"]
 
 
 
+
 # ADR-057 Roadmap — FUSE-Mounted Memory
 
 ## Status
@@ -72,3 +73,9 @@ Goal: complete the transition from CRUD-heavy MCP habits to an explicit filesyst
 - [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]
 - [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
 - [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
+
+
+## Completion update (2026-04-14 final close)
+Replacement task `98vz` landed the last remaining runtime/status slice after the earlier `u5qe` reshape. With that re-landing closed, ADR-057 is complete: mounted-memory `/health` now reports canonical vs task-scoped view selection plus fallback context, and the previously planned filesystem-first contraction, migration-boundary documentation, guardrails, batching coverage, and branch-aware runtime work are all closed.
+
+No further worker wave is planned for epic `tcet`. Any future changes should be treated as new follow-up work rather than continuation of this roadmap.
