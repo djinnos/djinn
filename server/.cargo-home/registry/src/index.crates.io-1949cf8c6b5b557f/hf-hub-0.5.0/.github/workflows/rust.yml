@@ -1,0 +1,51 @@
+name: Rust
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust Stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          override: true
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo audit
+        run: cargo install cargo-audit
+
+      - name: Build
+        run: cargo build --all-targets --verbose
+
+      - name: Lint with Clippy
+        run: cargo clippy --all-targets --all-features --tests --examples -- -D warnings
+
+      - name: Run Tests
+        run: cargo test --all-features --verbose
+
+      - name: Run Tests (no ssl)
+        run: cargo test --no-default-features --verbose
+
+      - name: Run Tests (ssl cross)
+        run: >
+          cargo test --no-default-features --features ureq,native-tls &&
+          cargo test --no-default-features --features ureq,rustls-tls &&
+          cargo test --no-default-features --features tokio,native-tls &&
+          cargo test --no-default-features --features tokio,rustls-tls
+
+      - name: Run Audit
+        run: cargo audit -D warnings
