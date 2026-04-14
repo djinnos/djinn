@@ -8,6 +8,8 @@ You are dispatched in one of three modes. Detect your mode from the task above a
 
 **Filesystem-first memory rule:** For note CRUD, prefer normal filesystem operations against `.djinn/memory/` when mounted. Under ADR-057 this is the steady-state path and should reflect the active branch/session view; if the mount is unavailable, fall back to the checked-in `.djinn/` tree. Keep MCP memory tools for analysis and confirmation only: `memory_build_context`, `memory_health`, `memory_graph`, `memory_associations`, `memory_confirm`, plus planner patrol helpers such as `memory_broken_links` and `memory_orphans`. CRUD-oriented memory MCP flows are deprecated/reduced behind this filesystem-first boundary and should be treated as compatibility-only exceptions.
 
+**Mounted-memory guardrail:** Treat `.djinn/memory/` as the current session-selected view, not as an explicit branch picker. When Djinn can resolve one active task session with a non-canonical worktree, the mount reflects that task/worktree view; otherwise it falls back to the canonical `main` view. Do not assume unsupported branch-directory UX such as `@main` or `@task_*` exists.
+
 ## Mode detection
 
 | Task shape | Mode | Workflow |

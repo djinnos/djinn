@@ -29,9 +29,9 @@ pub struct DjinnSettings {
     pub langfuse_secret_key: Option<String>,
     /// Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).
     pub langfuse_endpoint: Option<String>,
-    /// Enable the ADR-057 Linux memory mount. Disabled by default.
+    /// Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
     pub memory_mount_enabled: Option<bool>,
-    /// Absolute filesystem path where the Linux FUSE mount should be attached.
+    /// Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.
     pub memory_mount_path: Option<String>,
 }
 

@@ -206,9 +206,9 @@ cat ~/.djinn/server.json
 # { "port": 4440, "url": "http://localhost:4440/mcp", ... }
 ```
 
-### Linux memory mount (ADR-057 wave 1)
+### Linux memory mount (ADR-057 wave 3 guidance)
 
-Djinn now includes an initial Linux-only FUSE mount adapter for the repository-backed memory filesystem behind an explicit build and settings gate. It is **disabled by default** and only covers the first ADR-057 plumbing slice.
+Djinn ships a Linux-only FUSE mount for repository-backed memory behind an explicit build and settings gate. It is **disabled by default** and is intended for filesystem-first note workflows once agents no longer rely on broad MCP CRUD affordances.
 
 Enable it by building `djinn-server` with the cargo feature and then setting:
 
@@ -219,14 +219,33 @@ Enable it by building `djinn-server` with the cargo feature and then setting:
 }
 ```
 
-Current wave-1 constraints:
+Example startup flow:
+
+```bash
+cd server
+cargo run --features memory-mount --bin djinn-server
+```
+
+Current supported constraints and guardrails:
 - Linux only
 - requires FUSE host support (`/dev/fuse`, kernel/userspace FUSE tooling, and permission to mount)
 - `memory_mount_path` must already exist, be absolute, and be empty at startup
 - only a single registered project is supported by this initial mount slice
-- macOS fallback transport, branch-aware mounting, and broader operational hardening are deferred to later ADR-057 waves
+- the mounted tree exposes the **current session view**, not explicit branch directories
+- when Djinn can resolve one active task with a non-canonical worktree for the mounted project, `.djinn/memory/` reflects that task/worktree view
+- if no active task/session/worktree can be resolved, or the active session is still on the canonical project root, the mount **falls back to the canonical `main` view**
+- agents/operators should therefore treat `.djinn/memory/` as a branch-aware live view of the current session, not as proof that they are writing to an isolated branch
+- no additional branch directory UX (`@main`, `@task_*`, symlink switching, etc.) is supported in this slice
+- macOS fallback transport and broader multi-project operational hardening remain deferred to later ADR-057 waves
 
 If the configuration is invalid, server startup fails early with a clear error instead of silently serving without the mount.
+
+Filesystem-first usage guidance:
+- prefer normal file reads/writes/edits under `.djinn/memory/` when the mount is enabled
+- keep MCP memory tools for analytical flows such as context assembly, search/health, and compatibility-only cases
+- if you need a guaranteed canonical view, use the checked-in `.djinn/` tree or analytical MCP reads rather than assuming the mount stayed on `main`
+- if you are unsure what view the mount is serving, inspect the server runtime status surface (`GET /health` → `memory_mount`) before making broad note edits; it reports whether the mount is merely configured, actively mounted, or degraded
+- treat a mounted `.djinn/memory/` tree as the live session-selected view for the current task/worktree, not as an isolated branch checkout with its own branch-named directories
 
 ### What's Available Over MCP
 

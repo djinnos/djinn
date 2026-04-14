@@ -5588,12 +5588,12 @@ expression: signatures
               "type": "object"
             },
             "memory_mount_enabled": {
-              "description": "Enable the ADR-057 Linux memory mount. Disabled by default.",
+              "description": "Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
               "nullable": true,
               "type": "boolean"
             },
             "memory_mount_path": {
-              "description": "Absolute filesystem path where the Linux FUSE mount should be attached.",
+              "description": "Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.",
               "nullable": true,
               "type": "string"
             },
@@ -5702,12 +5702,12 @@ expression: signatures
           "type": "object"
         },
         "memory_mount_enabled": {
-          "description": "Enable the Linux-only ADR-057 memory FUSE mount. Disabled by default; requires a Linux build with the `memory-mount` cargo feature.",
+          "description": "Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
           "nullable": true,
           "type": "boolean"
         },
         "memory_mount_path": {
-          "description": "Absolute path for the Linux memory mount. The directory must already exist and be empty at startup.",
+          "description": "Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.",
           "nullable": true,
           "type": "string"
         },
