@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod dolt_branch;
 pub mod epic;
 pub mod events;
 pub mod git_settings;

@@ -1,11 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use serde::Serialize;
 
 use djinn_db::{
     Database, DatabaseBackendKind, DatabaseBootstrapInfo, DatabaseConnectConfig,
     MysqlBackendFlavor, MysqlDatabaseConfig, SqliteDatabaseConfig,
+};
+
+use crate::db::dolt::{
+    DoltRuntimeError, DoltSqlServerAvailability, ensure_dolt_runtime_for_connect_config,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,12 +81,14 @@ impl DatabaseRuntimeConfig {
 #[derive(Clone)]
 pub struct DatabaseRuntimeManager {
     config: Arc<DatabaseRuntimeConfig>,
+    dolt_runtime: Arc<Mutex<Option<DoltSqlServerAvailability>>>,
 }
 
 impl DatabaseRuntimeManager {
     pub fn new(config: DatabaseRuntimeConfig) -> Self {
         Self {
             config: Arc::new(config),
+            dolt_runtime: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -91,6 +98,17 @@ impl DatabaseRuntimeManager {
 
     pub fn bootstrap(&self) -> Result<Database, DatabaseRuntimeError> {
         Database::open_with_config(self.config.connect.clone()).map_err(DatabaseRuntimeError::Open)
+    }
+
+    pub fn ensure_runtime_available(
+        &self,
+    ) -> Result<Option<DoltSqlServerAvailability>, DatabaseRuntimeError> {
+        let availability = ensure_dolt_runtime_for_connect_config(&self.config.connect)?;
+        *self
+            .dolt_runtime
+            .lock()
+            .expect("poisoned dolt runtime state") = availability.clone();
+        Ok(availability)
     }
 
     pub fn startup_mode(&self) -> DatabaseRuntimeMode {
@@ -112,7 +130,13 @@ impl DatabaseRuntimeManager {
 
     pub fn health_snapshot(&self, db: &Database) -> DatabaseRuntimeHealth {
         let bootstrap = db.bootstrap_info().clone();
-        let detail = runtime_detail_for_bootstrap(&bootstrap);
+        let detail = runtime_detail_for_bootstrap(
+            &bootstrap,
+            self.dolt_runtime
+                .lock()
+                .expect("poisoned dolt runtime state")
+                .as_ref(),
+        );
         let DatabaseBootstrapInfo {
             backend_kind,
             backend_label,
@@ -191,6 +215,8 @@ pub enum DatabaseRuntimeError {
     MissingMysqlUrl { backend: String },
     #[error("unknown mysql/dolt flavor `{0}`; expected mysql or dolt")]
     InvalidMysqlFlavor(String),
+    #[error("dolt runtime bootstrap failed: {0}")]
+    DoltRuntime(#[from] DoltRuntimeError),
     #[error("database bootstrap failed: {0}")]
     Open(#[from] djinn_db::Error),
 }
@@ -202,7 +228,10 @@ fn redact_mysql_target(url: &str) -> String {
     }
 }
 
-fn runtime_detail_for_bootstrap(bootstrap: &DatabaseBootstrapInfo) -> String {
+fn runtime_detail_for_bootstrap(
+    bootstrap: &DatabaseBootstrapInfo,
+    dolt_runtime: Option<&DoltSqlServerAvailability>,
+) -> String {
     match bootstrap.backend_kind {
         DatabaseBackendKind::Sqlite => {
             if bootstrap.readonly {
@@ -213,6 +242,21 @@ fn runtime_detail_for_bootstrap(bootstrap: &DatabaseBootstrapInfo) -> String {
             }
         }
         DatabaseBackendKind::Mysql => {
+            if bootstrap.backend_label == "dolt"
+                && let Some(availability) = dolt_runtime
+            {
+                let runtime_detail = match availability {
+                    DoltSqlServerAvailability::AlreadyHealthy { endpoint } => {
+                        format!("dolt sql-server already healthy at {endpoint}")
+                    }
+                    DoltSqlServerAvailability::Spawned { endpoint } => {
+                        format!("dolt sql-server started and became healthy at {endpoint}")
+                    }
+                };
+                return format!(
+                    "dolt backend ready via mysql-compatible sqlx pool; {runtime_detail}"
+                );
+            }
             format!(
                 "{} backend ready via mysql-compatible sqlx pool",
                 bootstrap.backend_label

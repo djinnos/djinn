@@ -25,6 +25,7 @@ qdrant-client = { version = "1", optional = true, default-features = false, feat
 sqlite-vec = "0.1"
 sqlx = { version = "0.8", features = ["sqlite", "mysql", "runtime-tokio-rustls", "macros"] }
 tempfile = "3"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v7"] }
