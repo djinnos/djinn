@@ -391,6 +391,32 @@ impl NoteRepository {
         Ok(note)
     }
 
+    pub async fn update_tags(&self, id: &str, tags: &str) -> Result<Note> {
+        self.db.ensure_initialized().await?;
+
+        let id = id.to_owned();
+        let tags = tags.to_owned();
+
+        sqlx::query(
+            "UPDATE notes SET
+                tags = ?2,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+        )
+        .bind(&id)
+        .bind(&tags)
+        .execute(self.db.pool())
+        .await?;
+
+        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
+            .bind(&id)
+            .fetch_one(self.db.pool())
+            .await?;
+
+        self.events.send(DjinnEventEnvelope::note_updated(&note));
+        Ok(note)
+    }
+
     pub async fn create_db_note_with_permalink(
         &self,
         project_id: &str,

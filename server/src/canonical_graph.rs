@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
 use crate::server::AppState;
+
+const REVIEW_NEEDED_TAG: &str = "review_needed";
 
 /// Output bundle of the CPU-bound canonical graph build pipeline,
 /// produced on a `spawn_blocking` thread and consumed by the async tail that
@@ -131,6 +134,8 @@ pub(crate) async fn ensure_canonical_graph(
         match load_cached_artifact(row.graph_blob).await {
             Ok((graph, pagerank, sccs)) => {
                 install_as_canonical(
+                    state,
+                    project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
                     graph.clone(),
@@ -167,6 +172,8 @@ pub(crate) async fn ensure_canonical_graph(
         match load_cached_artifact(row.graph_blob).await {
             Ok((graph, pagerank, sccs)) => {
                 install_as_canonical(
+                    state,
+                    project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
                     graph.clone(),
@@ -299,6 +306,8 @@ pub(crate) async fn ensure_canonical_graph(
     }
 
     install_as_canonical(
+        state,
+        project_id,
         handle.path().to_path_buf(),
         commit_sha.clone(),
         graph.clone(),
@@ -382,6 +391,8 @@ pub(crate) async fn canonical_graph_count_commits_since(
 }
 
 async fn install_as_canonical(
+    state: &AppState,
+    project_id: &str,
     project_path: PathBuf,
     git_head: String,
     graph: crate::repo_graph::RepoDependencyGraph,
@@ -390,6 +401,10 @@ async fn install_as_canonical(
 ) {
     let mut cache = GRAPH_CACHE.write().await;
     let old = cache.take();
+    let changed_paths = old
+        .as_ref()
+        .map(|prior| changed_code_paths(&prior.graph, &graph))
+        .unwrap_or_default();
     if let Some(prior) = old {
         let mut previous = PREVIOUS_GRAPH_CACHE.write().await;
         *previous = Some(prior);
@@ -402,6 +417,172 @@ async fn install_as_canonical(
         pagerank,
         sccs,
     });
+    drop(cache);
+
+    apply_scope_path_freshness_decay(state, project_id, &changed_paths).await;
+}
+
+fn changed_code_paths(
+    previous: &crate::repo_graph::RepoDependencyGraph,
+    current: &crate::repo_graph::RepoDependencyGraph,
+) -> Vec<String> {
+    fn collect_node_paths(graph: &crate::repo_graph::RepoDependencyGraph) -> BTreeSet<String> {
+        graph
+            .graph()
+            .node_indices()
+            .filter_map(|idx| graph.node(idx).file_path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn collect_changed_node_paths(
+        base: &crate::repo_graph::RepoDependencyGraph,
+        other: &crate::repo_graph::RepoDependencyGraph,
+    ) -> BTreeSet<String> {
+        base.graph()
+            .node_indices()
+            .filter_map(|idx| {
+                let node = base.node(idx);
+                let key = node.id.clone();
+                (!other
+                    .graph()
+                    .node_indices()
+                    .any(|other_idx| other.node(other_idx).id == key))
+                .then(|| {
+                    node.file_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                })
+                .flatten()
+            })
+            .collect()
+    }
+
+    fn collect_edge_keys(
+        graph: &crate::repo_graph::RepoDependencyGraph,
+    ) -> BTreeSet<(
+        crate::repo_graph::RepoNodeKey,
+        crate::repo_graph::RepoNodeKey,
+        crate::repo_graph::RepoGraphEdgeKind,
+    )> {
+        use petgraph::visit::EdgeRef;
+
+        graph
+            .graph()
+            .edge_references()
+            .map(|edge| {
+                (
+                    graph.node(edge.source()).id.clone(),
+                    graph.node(edge.target()).id.clone(),
+                    edge.weight().kind,
+                )
+            })
+            .collect()
+    }
+
+    fn node_path_for_key(
+        graph: &crate::repo_graph::RepoDependencyGraph,
+        key: &crate::repo_graph::RepoNodeKey,
+    ) -> Option<String> {
+        graph.graph().node_indices().find_map(|idx| {
+            let node = graph.node(idx);
+            (&node.id == key)
+                .then(|| {
+                    node.file_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                })
+                .flatten()
+        })
+    }
+
+    let mut changed = collect_node_paths(previous)
+        .symmetric_difference(&collect_node_paths(current))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    changed.extend(collect_changed_node_paths(previous, current));
+    changed.extend(collect_changed_node_paths(current, previous));
+
+    let previous_edges = collect_edge_keys(previous);
+    let current_edges = collect_edge_keys(current);
+    for (source, target, _) in previous_edges.symmetric_difference(&current_edges) {
+        if let Some(path) =
+            node_path_for_key(previous, source).or_else(|| node_path_for_key(current, source))
+        {
+            changed.insert(path);
+        }
+        if let Some(path) =
+            node_path_for_key(previous, target).or_else(|| node_path_for_key(current, target))
+        {
+            changed.insert(path);
+        }
+    }
+
+    changed.into_iter().collect()
+}
+
+async fn apply_scope_path_freshness_decay(
+    state: &AppState,
+    project_id: &str,
+    changed_paths: &[String],
+) {
+    use djinn_db::{NoteRepository, STALE_CITATION};
+
+    if changed_paths.is_empty() {
+        return;
+    }
+
+    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    let notes = match note_repo
+        .query_scoped_by_path_overlap(project_id, changed_paths, 1_000)
+        .await
+    {
+        Ok(notes) => notes,
+        Err(error) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %error,
+                "apply_scope_path_freshness_decay: failed to query overlapping scoped notes"
+            );
+            return;
+        }
+    };
+
+    for note in notes {
+        if let Err(error) = note_repo.update_confidence(&note.id, STALE_CITATION).await {
+            tracing::warn!(
+                project_id = %project_id,
+                note_id = %note.id,
+                error = %error,
+                "apply_scope_path_freshness_decay: failed to decay note confidence"
+            );
+            continue;
+        }
+
+        let mut tags = note.parsed_tags();
+        if tags.iter().any(|tag| tag == REVIEW_NEEDED_TAG) {
+            continue;
+        }
+        tags.push(REVIEW_NEEDED_TAG.to_string());
+        match serde_json::to_string(&tags) {
+            Ok(tags_json) => {
+                if let Err(error) = note_repo.update_tags(&note.id, &tags_json).await {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        note_id = %note.id,
+                        error = %error,
+                        "apply_scope_path_freshness_decay: failed to tag note for review"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                project_id = %project_id,
+                note_id = %note.id,
+                error = %error,
+                "apply_scope_path_freshness_decay: failed to serialize review_needed tag set"
+            ),
+        }
+    }
 }
 
 async fn load_cached_artifact(
@@ -758,7 +939,8 @@ mod tests {
     use crate::test_helpers::create_test_db;
     use crate::test_helpers::workspace_tempdir;
     use djinn_db::{
-        ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository, RepoMapCacheRepository,
+        NoteRepository, ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository,
+        RepoMapCacheRepository, STALE_CITATION,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -976,5 +1158,187 @@ mod tests {
             .expect("repo_map_cache row inserted");
         assert_eq!(row.commit_sha, head_sha);
         assert_eq!(row.rendered_map, rendered.content);
+    }
+
+    #[tokio::test]
+    async fn apply_scope_path_freshness_decay_marks_overlapping_notes_for_review() {
+        let tmp = workspace_tempdir("canonical-graph-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let project = ProjectRepository::new(db.clone(), state.event_bus())
+            .create(
+                "test-freshness-decay",
+                project_root.to_string_lossy().as_ref(),
+            )
+            .await
+            .expect("create project");
+        let note_repo = NoteRepository::new(db.clone(), state.event_bus());
+
+        let overlapping = note_repo
+            .create_with_scope(
+                &project.id,
+                &project_root,
+                "Overlapping Note",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["server/src/server/state"]"#,
+            )
+            .await
+            .expect("create overlapping note");
+        let unrelated = note_repo
+            .create_with_scope(
+                &project.id,
+                &project_root,
+                "Unrelated Note",
+                "content",
+                "pattern",
+                None,
+                r#"["existing_tag"]"#,
+                r#"["desktop/src"]"#,
+            )
+            .await
+            .expect("create unrelated note");
+        let global = note_repo
+            .create(
+                &project.id,
+                &project_root,
+                "Global Note",
+                "content",
+                "pattern",
+                "[]",
+            )
+            .await
+            .expect("create global note");
+
+        note_repo
+            .set_confidence(&overlapping.id, 0.8)
+            .await
+            .expect("seed overlapping confidence");
+        note_repo
+            .set_confidence(&unrelated.id, 0.8)
+            .await
+            .expect("seed unrelated confidence");
+        note_repo
+            .set_confidence(&global.id, 0.8)
+            .await
+            .expect("seed global confidence");
+
+        apply_scope_path_freshness_decay(
+            &state,
+            &project.id,
+            &["server/src/server/state/mod.rs".to_string()],
+        )
+        .await;
+
+        let overlapping = note_repo
+            .get(&overlapping.id)
+            .await
+            .expect("load overlapping note")
+            .expect("overlapping note exists");
+        let unrelated = note_repo
+            .get(&unrelated.id)
+            .await
+            .expect("load unrelated note")
+            .expect("unrelated note exists");
+        let global = note_repo
+            .get(&global.id)
+            .await
+            .expect("load global note")
+            .expect("global note exists");
+
+        assert_eq!(
+            overlapping.confidence,
+            (0.8 * STALE_CITATION / (0.8 * STALE_CITATION + (1.0 - 0.8) * (1.0 - STALE_CITATION)))
+                .clamp(0.025, 0.975),
+            "overlapping scoped note should receive STALE_CITATION decay"
+        );
+        assert!(
+            overlapping
+                .parsed_tags()
+                .iter()
+                .any(|tag| tag == REVIEW_NEEDED_TAG),
+            "overlapping scoped note should be marked review_needed"
+        );
+
+        assert_eq!(
+            unrelated.confidence, 0.8,
+            "unrelated scoped note confidence should not change"
+        );
+        assert_eq!(
+            unrelated.parsed_tags(),
+            vec!["existing_tag".to_string()],
+            "unrelated scoped note tags should remain unchanged"
+        );
+
+        assert_eq!(
+            global.confidence, 0.8,
+            "global note confidence should not change"
+        );
+        assert!(
+            !global
+                .parsed_tags()
+                .iter()
+                .any(|tag| tag == REVIEW_NEEDED_TAG),
+            "global note should not be marked review_needed"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_scope_path_freshness_decay_is_noop_for_unrelated_or_empty_changes() {
+        let tmp = workspace_tempdir("canonical-graph-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let project = ProjectRepository::new(db.clone(), state.event_bus())
+            .create(
+                "test-freshness-decay-noop",
+                project_root.to_string_lossy().as_ref(),
+            )
+            .await
+            .expect("create project");
+        let note_repo = NoteRepository::new(db.clone(), state.event_bus());
+
+        let scoped = note_repo
+            .create_with_scope(
+                &project.id,
+                &project_root,
+                "Scoped Note",
+                "content",
+                "pattern",
+                None,
+                r#"["keep_me"]"#,
+                r#"["server/src/server/state"]"#,
+            )
+            .await
+            .expect("create scoped note");
+        note_repo
+            .set_confidence(&scoped.id, 0.8)
+            .await
+            .expect("seed scoped confidence");
+
+        apply_scope_path_freshness_decay(&state, &project.id, &[]).await;
+        apply_scope_path_freshness_decay(&state, &project.id, &["desktop/src/main.ts".to_string()])
+            .await;
+
+        let scoped = note_repo
+            .get(&scoped.id)
+            .await
+            .expect("load scoped note")
+            .expect("scoped note exists");
+
+        assert_eq!(
+            scoped.confidence, 0.8,
+            "non-overlapping or empty path changes should not decay note confidence"
+        );
+        assert_eq!(
+            scoped.parsed_tags(),
+            vec!["keep_me".to_string()],
+            "non-overlapping or empty path changes should not add review tags"
+        );
     }
 }

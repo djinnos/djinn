@@ -44,6 +44,36 @@ const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extrac
 
 const MIN_DURABLE_WORDS: usize = 16;
 
+const PATTERN_REQUIRED_SECTIONS: &[&str] = &[
+    "## Context",
+    "## Problem shape",
+    "## Recommended approach",
+    "## Why it works",
+    "## Tradeoffs / limits",
+    "## When to use",
+    "## When not to use",
+    "## Related",
+];
+
+const PITFALL_REQUIRED_SECTIONS: &[&str] = &[
+    "## Trigger / smell",
+    "## Failure mode",
+    "## Observable symptoms",
+    "## Prevention",
+    "## Recovery",
+    "## Related",
+];
+
+const CASE_REQUIRED_SECTIONS: &[&str] = &[
+    "## Situation",
+    "## Constraint",
+    "## Approach taken",
+    "## Result",
+    "## Why it worked / failed",
+    "## Reusable lesson",
+    "## Related",
+];
+
 // ── JSON response shape ───────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Default)]
@@ -100,6 +130,7 @@ struct QualityAssessment {
     durability: bool,
     novelty: NoveltyAssessment,
     type_fit: bool,
+    required_structure: bool,
     outcome: ExtractionOutcome,
     reasons: Vec<&'static str>,
 }
@@ -360,10 +391,18 @@ async fn run_llm_extraction_inner(
          Include a \"scope_paths\" array per note with relevant path prefixes from the list above.\n\n\
          Extract knowledge from this session. Return JSON:\n\
          {{\n\
-           \"cases\": [{{\"title\": \"...\", \"content\": \"Brief problem and solution description\", \"scope_paths\": [\"...\"]}}],\n\
-           \"patterns\": [{{\"title\": \"...\", \"content\": \"Reusable process or method discovered\", \"scope_paths\": [\"...\"]}}],\n\
-           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Error encountered and how it was resolved\", \"scope_paths\": [\"...\"]}}]\n\
+           \"cases\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required case headings\", \"scope_paths\": [\"...\"]}}],\n\
+           \"patterns\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pattern headings\", \"scope_paths\": [\"...\"]}}],\n\
+           \"pitfalls\": [{{\"title\": \"...\", \"content\": \"Markdown note using the exact required pitfall headings\", \"scope_paths\": [\"...\"]}}]\n\
          }}\n\
+         Required durable templates:\n\
+         Pattern content must contain exactly these markdown headings in order:\n\
+         ## Context\n## Problem shape\n## Recommended approach\n## Why it works\n## Tradeoffs / limits\n## When to use\n## When not to use\n## Related\n\
+         Pitfall content must contain exactly these markdown headings in order:\n\
+         ## Trigger / smell\n## Failure mode\n## Observable symptoms\n## Prevention\n## Recovery\n## Related\n\
+         Case content must contain exactly these markdown headings in order:\n\
+         ## Situation\n## Constraint\n## Approach taken\n## Result\n## Why it worked / failed\n## Reusable lesson\n## Related\n\
+         If you cannot fill every required section for a note type, omit that note instead of returning a shorter paragraph.\n\
          Return empty arrays if nothing significant was learned. \
          Maximum 3 cases, 3 patterns, 2 pitfalls.\n\
          Only extract if there is clear signal (high errors+files_changed suggests pitfalls; \
@@ -540,6 +579,7 @@ async fn process_extracted_note(
         durability = assessment.durability,
         novelty = ?assessment.novelty,
         type_fit = assessment.type_fit,
+        required_structure = assessment.required_structure,
         reasons = ?assessment.reasons,
         "llm_extraction: evaluated extraction quality gate"
     );
@@ -865,6 +905,7 @@ fn assess_quality_gate(
     let generality = has_generality(note);
     let durability = has_durability(note);
     let type_fit = matches_type_semantics(note_type, note);
+    let required_structure = has_required_structure(note_type, note);
     let novelty_assessment = novelty.assessment;
 
     let mut reasons = Vec::new();
@@ -880,12 +921,17 @@ fn assess_quality_gate(
     if !type_fit {
         reasons.push("type_fit_mismatch");
     }
+    if !required_structure {
+        reasons.push("missing_required_adr_054_sections");
+    }
     if novelty_assessment == NoveltyAssessment::Duplicate {
         reasons.push("semantic_duplicate_of_existing_note");
     }
 
     let outcome = if novelty_assessment == NoveltyAssessment::Duplicate {
         ExtractionOutcome::MergeIntoExisting
+    } else if !required_structure {
+        ExtractionOutcome::DowngradeToWorkingSpec
     } else if !specificity || !type_fit {
         ExtractionOutcome::Discard
     } else if !generality || !durability {
@@ -900,9 +946,36 @@ fn assess_quality_gate(
         durability,
         novelty: novelty_assessment,
         type_fit,
+        required_structure,
         outcome,
         reasons,
     }
+}
+
+fn has_required_structure(note_type: &str, note: &ExtractedNote) -> bool {
+    required_sections(note_type)
+        .map(|sections| note_contains_sections_in_order(&note.content, sections))
+        .unwrap_or(false)
+}
+
+fn required_sections(note_type: &str) -> Option<&'static [&'static str]> {
+    match note_type {
+        "pattern" => Some(PATTERN_REQUIRED_SECTIONS),
+        "pitfall" => Some(PITFALL_REQUIRED_SECTIONS),
+        "case" => Some(CASE_REQUIRED_SECTIONS),
+        _ => None,
+    }
+}
+
+fn note_contains_sections_in_order(content: &str, sections: &[&str]) -> bool {
+    let mut cursor = 0;
+    for section in sections {
+        let Some(found_at) = content[cursor..].find(section) else {
+            return false;
+        };
+        cursor += found_at + section.len();
+    }
+    true
 }
 
 fn has_specificity(note: &ExtractedNote) -> bool {
