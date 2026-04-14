@@ -410,6 +410,22 @@ fn stage_pending_content(
 }
 
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
+fn remove_pending_if_generation(
+    pending_writes: &mut HashMap<String, PendingWrite>,
+    path: &str,
+    generation: u64,
+) -> usize {
+    if pending_writes
+        .get(path)
+        .is_some_and(|candidate| candidate.generation == generation)
+    {
+        pending_writes.remove(path);
+    }
+
+    pending_writes.len()
+}
+
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
 impl LinuxMemoryFilesystem {
     fn new(
         repo: NoteRepository,
@@ -609,15 +625,10 @@ impl LinuxMemoryFilesystem {
                 )
                 .await;
 
-            let mut guard = pending_writes.lock().expect("poisoned pending_writes");
-            if guard
-                .get(&path)
-                .is_some_and(|candidate| candidate.generation == generation)
-            {
-                guard.remove(&path);
-            }
-            let pending_count = guard.len();
-            drop(guard);
+            let pending_count = {
+                let mut guard = pending_writes.lock().expect("poisoned pending_writes");
+                remove_pending_if_generation(&mut guard, &path, generation)
+            };
 
             let mut status = runtime_status.lock().await;
             status.set_pending_writes(pending_count);
