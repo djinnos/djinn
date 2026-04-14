@@ -287,6 +287,118 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_read_ops_prefers_exact_design_permalink_over_competing_case_search_match() {
+        let setup = setup_server().await;
+        let project_id = ProjectRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        )
+        .resolve(&setup.project)
+        .await
+        .unwrap()
+        .expect("project id");
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+
+        let design_permalink =
+            "design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy";
+        let design = repo
+            .create_db_note_with_permalink(
+                &project_id,
+                design_permalink,
+                "ADR-054 Roadmap Memory Extraction Quality Gates and Note Taxonomy",
+                "Canonical design note for ADR-054 closure reconciliation.",
+                "design",
+                "[]",
+            )
+            .await
+            .unwrap();
+        let stale_case = repo
+            .create(
+                &project_id,
+                setup._tmp.path(),
+                "ADR-054 roadmap memory extraction quality gates and note taxonomy",
+                "Superseded case note mentioning ADR-054 roadmap extraction quality gates taxonomy.",
+                "case",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let response = ops::memory_read(
+            &setup.server,
+            ReadParams {
+                project: setup.project.clone(),
+                identifier: format!("memory://{design_permalink}.md"),
+            },
+        )
+        .await;
+
+        assert!(
+            response.error.is_none(),
+            "unexpected error: {:?}",
+            response.error
+        );
+        assert_eq!(response.id.as_deref(), Some(design.id.as_str()));
+        assert_eq!(response.permalink.as_deref(), Some(design_permalink));
+        assert_ne!(response.id.as_deref(), Some(stale_case.id.as_str()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_list_ops_normalizes_design_folder_filter_before_listing() {
+        let setup = setup_server().await;
+        let project_id = ProjectRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        )
+        .resolve(&setup.project)
+        .await
+        .unwrap()
+        .expect("project id");
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+
+        let design = repo
+            .create_db_note_with_permalink(
+                &project_id,
+                "design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy",
+                "ADR-054 Roadmap Memory Extraction Quality Gates and Note Taxonomy",
+                "Canonical design note visible to folder listing.",
+                "design",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let listed = ops::memory_list(
+            &setup.server,
+            ListParams {
+                project: setup.project.clone(),
+                folder: Some("memory://design/".to_string()),
+                note_type: Some("design".to_string()),
+                depth: Some(1),
+            },
+        )
+        .await;
+
+        assert!(
+            listed.error.is_none(),
+            "unexpected error: {:?}",
+            listed.error
+        );
+        assert!(
+            listed
+                .notes
+                .iter()
+                .any(|note| note.id == design.id && note.permalink == design.permalink)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_search_ops_applies_task_fallback_and_success_shape() {
         let setup = setup_server().await;
 

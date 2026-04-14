@@ -1,5 +1,8 @@
 use djinn_db::NoteSearchParams;
-use djinn_db::{NoteRepository, ProjectRepository};
+use djinn_db::{
+    NoteRepository, ProjectRepository, normalize_virtual_note_path,
+    permalink_from_virtual_note_path,
+};
 
 use crate::server::DjinnMcpServer;
 
@@ -12,7 +15,33 @@ use super::{
 };
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
-    folder.filter(|value| !value.is_empty())
+    folder.and_then(|value| {
+        let trimmed = value.trim();
+        let without_scheme = trimmed.strip_prefix("memory://").unwrap_or(trimmed);
+        let normalized = normalize_virtual_note_path(without_scheme);
+        (!normalized.is_empty()).then_some(normalized)
+    })
+}
+
+fn permalink_candidates(identifier: &str) -> Vec<String> {
+    let trimmed = identifier.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let without_scheme = trimmed.strip_prefix("memory://").unwrap_or(trimmed);
+    let normalized = normalize_virtual_note_path(without_scheme);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = vec![normalized.clone()];
+    if let Some(permalink) = permalink_from_virtual_note_path(&normalized)
+        && permalink != normalized
+    {
+        candidates.push(permalink);
+    }
+    candidates
 }
 
 async fn record_retrieved_notes(
@@ -89,9 +118,19 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
 
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_vector_store(server.state.vector_store());
-    let note = match repo.get_by_permalink(&project_id, &p.identifier).await {
-        Ok(Some(note)) => note,
-        _ => match repo
+    let note = if let Some(note) = {
+        let mut exact = None;
+        for candidate in permalink_candidates(&p.identifier) {
+            if let Ok(Some(note)) = repo.get_by_permalink(&project_id, &candidate).await {
+                exact = Some(note);
+                break;
+            }
+        }
+        exact
+    } {
+        note
+    } else {
+        match repo
             .search(NoteSearchParams {
                 project_id: &project_id,
                 query: &p.identifier,
@@ -115,7 +154,7 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
                 }
             }
             _ => return MemoryNoteResponse::error(format!("note not found: {}", p.identifier)),
-        },
+        }
     };
 
     let _ = repo.touch_accessed(&note.id).await;
@@ -214,10 +253,11 @@ pub async fn memory_list(server: &DjinnMcpServer, p: ListParams) -> MemoryListRe
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_vector_store(server.state.vector_store());
     let depth = p.depth.unwrap_or(1);
+    let folder = normalize_folder_filter(p.folder);
     let notes = repo
         .list_compact(
             &project_id,
-            p.folder.as_deref(),
+            folder.as_deref(),
             p.note_type.as_deref(),
             depth,
         )
