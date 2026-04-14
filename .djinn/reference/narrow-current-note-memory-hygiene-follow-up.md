@@ -1,74 +1,52 @@
 ---
 title: Narrow current-note memory hygiene follow-up
 type: reference
-tags: ["memory","triage","hygiene","planner","broken-links","orphans"]
+tags: ["memory","triage","planner","adr-057"]
 ---
 
-# Narrow current-note memory hygiene follow-up (2026-04-14 refresh)
+# Narrow current-note memory hygiene follow-up
 
-Context: `memory_health()` currently reports **124 broken links** and **1042 orphans**. Current patrol evidence still shows that these elevated counts are **not** primarily fresh canonical-note regressions. They are dominated by two long-classified backlog shapes:
+This note records the intentionally narrow follow-up slice after project memory backlog triage.
 
-1. **Tolerated historical broken-link debt** in older `decisions/*` and `reference/*` notes
-   - repeated legacy ADR title aliases
-   - shorthand ADR numbers/forms
-   - generic singleton shorthand such as `[[Roadmap]]`
-   - occasional placeholder/prose targets like `[[wikilinks]]`, `[[target]]`, or old draft labels
-2. **Orphan-heavy inventory folders** whose volume should be monitored separately from actionable canonical-note defects
-   - `cases/*`
-   - `reference/repo-maps/*`
+## Purpose
 
-## Refreshed classification boundary
+When memory-health counts stay elevated due mostly to known historical alias debt and orphan-heavy inventory, document a small explicitly owned cleanup slice for current canonical notes instead of reopening the full backlog.
 
-### Broken-link backlog: mostly tolerated historical alias debt
-Current `memory_broken_links()` sampling still concentrates on:
-- full ADR-title aliases in historical ADR/reference notes
-- short ADR forms like `ADR-006`, `ADR-009`, `ADR-014`, `ADR-022`
-- generic `Roadmap` shorthand in older notes
-- a small minority of placeholder/prose wikilinks
+## Scope boundary
 
-Interpretation for future patrols:
-- Treat this as **real note-content debt**, but mostly **historical and tolerated** rather than an active tooling defect.
-- Do **not** reopen broad historical alias normalization just because gross broken-link counts stay high.
-- Only escalate when broken links appear in a **current canonical note** whose navigation quality matters right now.
+Treat this as **narrow active-memory maintenance**, not a broad cleanup campaign.
 
-### Orphan backlog: mostly inventory, not emergency cleanup
-Current `memory_orphans()` output remains dominated by:
-- large `cases/*` inventory
-- large `reference/repo-maps/*` inventory
+In scope:
+- verify and preserve the canonical follow-up surface for the current-note cleanup decision
+- maintain stable memory refs used by active planning/epic context
+- keep the documented cleanup slice limited to a tiny set of current canonical notes
 
-Interpretation for future patrols:
-- `cases/*` remains a **retrieval-oriented historical inventory bucket**. Count growth alone is not a cleanup trigger.
-- `reference/repo-maps/*` remains **intentional artifact inventory**. Count growth alone is not a cleanup trigger.
-- Patrol should only escalate orphan findings when they cluster in **current canonical docs** such as active roadmap/requirement/reference/design notes whose value depends on navigational linkage.
+Out of scope:
+- mass historical ADR-title alias normalization
+- broad `[[Roadmap]]` shorthand cleanup across archival notes
+- mass relinking of `cases/*`
+- mass relinking or suppression of `reference/repo-maps/*`
+- reopening broken-link/orphan backlog work beyond the explicitly named current canonical-note slice
 
-## Current actionable slice
+## Follow-up slice
 
-The previously identified narrow current-note cleanup slice has already been handled by [[nwg2]]. That work normalized the small set of named current canonical notes that were worth fixing immediately without reopening historical cleanup.
+The earlier actionable slice was intentionally tiny:
+- `decisions/adr-057-proposal-fuse-mounted-memory-filesystem-as-the-primary-agent-interface`
+- `decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec`
+- `reference/repository-understanding-and-memory-freshness-upgrade-path`
+- `reference/project-memory-broken-link-and-orphan-backlog-triage`
 
-As of this refresh, the actionable slice is therefore:
-- **no broad standing cleanup batch**
-- only **opportunistic narrow cleanup** if future patrols find newly broken links or orphan defects in active canonical notes
-- continue to leave historical `Roadmap` shorthand and ADR-title alias debt untouched unless a note is being edited for another reason
+That slice was chosen because these are current canonical notes whose broken title-style links affected active planning and patrol interpretation more than the broader historical backlog.
 
-## Patrol operating rule
+## Patrol interpretation
 
-When counts are elevated:
-1. Check whether broken links are still dominated by historical ADR-title aliases / `Roadmap` shorthand.
-2. Check whether orphans are still dominated by `cases/*` and `reference/repo-maps/*`.
-3. If yes, classify the backlog as **known inventory + tolerated historical debt**, not as a new hygiene incident.
-4. Only open follow-up work for a **tiny current-note subset** with clear canonical-value defects.
-5. Do **not** open mass relinking, alias-support, or broad historical editorial cleanup from these counts alone.
+Current elevated counts remain dominated by two tolerated buckets unless they surface an active canonical-note defect:
+- historical ADR-title / `Roadmap` alias debt in older notes
+- orphan-heavy inventory in `cases/*` and `reference/repo-maps/*`
 
-## Relationship to the broader backlog triage
+Future patrols should escalate only when defects are concentrated in active canonical notes or when an active epic/task depends on a memory ref that does not resolve canonically.
 
-This note is the narrow patrol-facing companion to [[reference/project-memory-broken-link-and-orphan-backlog-triage]].
-
-Use the broader triage note for:
-- rationale on why raw counts remain high
-- background on tolerated orphan-heavy folders
-- classification of historical alias debt
-
-Use this note for:
-- the current patrol rule of thumb
-- the boundary that the earlier narrow cleanup is already complete
-- deciding whether a new finding is genuinely actionable or just more of the same classified backlog
+## Relations
+- [[reference/project-memory-broken-link-and-orphan-backlog-triage]]
+- [[decisions/adr-057-proposal-fuse-mounted-memory-filesystem-as-the-primary-agent-interface]]
+- [[cases/narrow-current-note-memory-hygiene-follow-up-amid-tolerated-backlog-debt]]
