@@ -68,7 +68,7 @@ When the MySQL backend lands, the repository cutover should:
    - contradiction still returns top 3 before `TypeRisk` filtering
    - context discovery still returns lexical candidates only
 
-## Included reference artifact
+## Included reference artifacts
 
 `sql/mysql_notes_fulltext_prototype.sql` contains executable reference SQL for:
 
@@ -77,5 +77,25 @@ When the MySQL backend lands, the repository cutover should:
 - contradiction candidates
 - build-context lexical discovery
 
-This is intentionally stored outside refinery migrations so the current SQLite test/runtime path
-remains unaffected while the Dolt/MySQL backend is still in progress.
+`sql/mysql_schema.sql` now accompanies that prototype with a concrete MySQL/Dolt schema snapshot for
+the ADR-055 note/task/session tables. The schema explicitly:
+
+- keeps `tasks`, `notes`, `sessions`, `task_memory_refs`, and adjacent relational tables in a
+  MySQL-compatible layout
+- replaces SQLite FTS5 shadow tables and triggers with `ALTER TABLE notes ADD FULLTEXT KEY`
+- keeps embedding bytes in ordinary relational tables instead of depending on `sqlite-vec`
+
+Both artifacts are intentionally stored outside refinery migrations so the current SQLite
+test/runtime path remains unaffected while the Dolt/MySQL backend is still in progress.
+
+## Backend selection and migration path
+
+The repository now exposes both schema snapshots in Rust via `djinn_db::sqlite_schema_snapshot()`
+and `djinn_db::mysql_schema_snapshot()`. Tests in `src/migrations.rs` verify the split:
+
+- the SQLite snapshot still contains `notes_fts` and trigger-driven sync
+- the MySQL snapshot contains `FULLTEXT` indexing and omits SQLite-only virtual tables/triggers
+
+This matches the runtime seam introduced in `server/src/db/runtime.rs`: SQLite remains the default
+selectable backend today, while `mysql`/`dolt` selection is explicit and can be paired with the
+staged MySQL schema artifact without ambiguity.

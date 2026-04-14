@@ -18,6 +18,9 @@ pub use database::{
     default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
+pub use migrations::{
+    mysql_notes_fulltext_prototype, mysql_schema_snapshot, sqlite_schema_snapshot,
+};
 pub use repositories::{
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
