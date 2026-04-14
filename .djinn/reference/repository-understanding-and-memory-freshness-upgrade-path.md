@@ -1,6 +1,6 @@
 ---
 title: Repository Understanding and Memory Freshness Upgrade Path
-type: 
+type: reference
 tags: ["adr","memory","code-graph","scip","state-of-the-art","proposal"]
 ---
 
