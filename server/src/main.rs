@@ -142,6 +142,13 @@ async fn async_main() {
     let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
     djinn_server::housekeeping::spawn(state.clone());
     state.initialize().await;
+    state
+        .initialize_memory_mount_from_db()
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "failed to initialize memory mount");
+            std::process::exit(1);
+        });
     state.initialize_agents().await;
     let router = server::router(state);
 

@@ -34,6 +34,13 @@ struct HealthResponse {
     status: &'static str,
     version: &'static str,
     database: crate::db::runtime::DatabaseRuntimeHealth,
+    memory_mount: MemoryMountHealth,
+}
+
+#[derive(Serialize)]
+pub(crate) struct MemoryMountHealth {
+    enabled: bool,
+    active: bool,
 }
 
 async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
@@ -41,6 +48,7 @@ async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         database: state.database_health(),
+        memory_mount: state.memory_mount_health().await,
     })
 }
 

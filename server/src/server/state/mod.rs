@@ -24,6 +24,7 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 mod canonical_graph_refresh_planner;
 mod settings;
 
+use crate::memory_mount::MountedMemoryFilesystem;
 use canonical_graph_refresh_planner::{
     CanonicalGraphRefreshPlanner, CanonicalGraphRefreshProbe, RefreshPlan, WarmPlan, WarmPlanInputs,
 };
@@ -91,6 +92,7 @@ struct Inner {
     /// immediately without spawning a duplicate task).  The entry is removed
     /// by the spawned task in its completion branch.
     pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
+    pub memory_mount: Mutex<Option<MountedMemoryFilesystem>>,
 }
 
 impl AppState {
@@ -141,6 +143,7 @@ impl AppState {
                 indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
                 chat_warmed_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
+                memory_mount: Mutex::new(None),
             }),
         }
     }
@@ -218,6 +221,15 @@ impl AppState {
 
     pub fn database_health(&self) -> DatabaseRuntimeHealth {
         self.inner.db_runtime.health_snapshot(self.db())
+    }
+
+    pub(crate) async fn memory_mount_health(&self) -> crate::server::MemoryMountHealth {
+        let mount = self.inner.memory_mount.lock().await;
+        let active = mount.as_ref().is_some_and(|mount| mount.is_active());
+        crate::server::MemoryMountHealth {
+            enabled: mount.is_some(),
+            active,
+        }
     }
 
     pub fn cancel(&self) -> &CancellationToken {

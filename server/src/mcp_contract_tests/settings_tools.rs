@@ -59,3 +59,28 @@ async fn settings_set_rejects_unconnected_model_provider() {
             .contains("disconnected")
     );
 }
+
+#[tokio::test]
+async fn settings_set_rejects_invalid_memory_mount_configuration() {
+    let app = create_test_app();
+    let session_id = initialize_mcp_session(&app).await;
+
+    let res = mcp_call_tool(
+        &app,
+        &session_id,
+        "settings_set",
+        json!({
+            "memory_mount_enabled": true,
+            "memory_mount_path": "relative/memory"
+        }),
+    )
+    .await;
+
+    assert_eq!(res["ok"], false);
+    assert!(
+        res["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid memory mount configuration")
+    );
+}

@@ -17,6 +17,7 @@ doctest = false
 default = []
 qdrant = ["djinn-db/qdrant"]
 vendored = ["git2/vendored-libgit2", "git2/vendored-openssl"]
+memory-mount = ["dep:fuser"]
 
 [dependencies]
 djinn-agent = { path = "crates/djinn-agent" }
@@ -82,6 +83,7 @@ workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
+fuser = { version = "0.15", optional = true }
 
 [dev-dependencies]
 insta = { version = "1", features = ["json", "redactions"] }
