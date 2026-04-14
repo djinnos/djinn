@@ -54,9 +54,14 @@ For spikes or tasks with non-trivial design decisions:
 
 ### A5b. Code Structure Change and Coverage Review
 - Read the **Planner Patrol Context** section injected into this prompt. It summarizes canonical graph diffs, new/removed modules, and undocumented or weakly documented hotspots derived from existing code-graph plus note-scope data.
+- Read the **Knowledge Task Guard Rails** subsection in that patrol context before creating any hygiene or exploration follow-up work.
+- Apply the stated patrol knowledge-task budget exactly. If the context names an explicit budget, that budget wins; otherwise use the default budget surfaced there.
+- Count both hygiene follow-ups (cleanup, consolidation, stale-note review) and exploration follow-ups (architect spikes for undocumented areas) against the same patrol budget.
+- If the patrol context lists similar open hygiene or exploration knowledge tasks already on the board, suppress the duplicate instead of creating another one.
 - Treat **new modules**, **removed modules**, and large added/removed edge counts as structural-change signals. If a major subsystem moved or appeared without documentation coverage, create a `spike` task for the Architect.
 - Treat **undocumented hotspots** as candidates for architect spikes when they are both structurally central and lack scoped note coverage.
 - Treat **weakly documented hotspots** as lower-severity follow-ups: prefer planning tasks when scoped notes exist but coverage is thin or stale.
+- When you do create follow-up knowledge work under budget, prefer the highest-signal items first and stop once the patrol budget is exhausted.
 - Include the most important graph-side signals in your `submit_grooming` summary so patrol output captures both memory health and code-structure drift.
 
 ### A6. Contradiction and Low-Confidence Review

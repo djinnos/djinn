@@ -725,6 +725,18 @@ mod tests {
             prompt.contains("planning task"),
             "planner prompt should direct memory-health follow-ups through planning tasks"
         );
+        assert!(
+            prompt.contains("Knowledge Task Guard Rails"),
+            "planner prompt should explicitly mention patrol knowledge-task guard rails"
+        );
+        assert!(
+            prompt.contains("suppress the duplicate instead of creating another one"),
+            "planner prompt should tell patrol to suppress similar open knowledge tasks"
+        );
+        assert!(
+            prompt.contains("stop once the patrol budget is exhausted"),
+            "planner prompt should enforce the knowledge-task budget"
+        );
     }
 
     /// Per ADR-051 §1 the contradiction review moved from Architect to Planner
