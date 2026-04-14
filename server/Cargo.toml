@@ -82,7 +82,7 @@ tokenizers = "0.22.2"
 workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.15", optional = true }
+fuser = { version = "0.15", optional = true, default-features = false }
 landlock = "0.4"
 
 [dev-dependencies]

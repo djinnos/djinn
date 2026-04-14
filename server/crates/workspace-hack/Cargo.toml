@@ -124,6 +124,7 @@ bitflags = { version = "2.11.0", default-features = false, features = ["std"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4.2", default-features = false, features = ["std", "sys_rng"] }
 hyper-rustls = { version = "0.27.7", default-features = false, features = ["aws-lc-rs", "http1", "http2", "native-tokio", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+libc = { version = "0.2.184", features = ["extra_traits"] }
 mio = { version = "1.2.0", features = ["net", "os-ext"] }
 openssl-sys = { version = "0.9.112", default-features = false, features = ["vendored"] }
 rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
@@ -134,6 +135,7 @@ tower-http = { version = "0.6.8", features = ["cors", "follow-redirect"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 bitflags = { version = "2.11.0", default-features = false, features = ["std"] }
+libc = { version = "0.2.184", features = ["extra_traits"] }
 mio = { version = "1.2.0", features = ["net", "os-ext"] }
 rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103.10", default-features = false, features = ["aws-lc-rs", "ring", "std"] }

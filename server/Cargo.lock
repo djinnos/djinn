@@ -1517,7 +1517,6 @@ dependencies = [
  "memchr",
  "nix",
  "page_size",
- "pkg-config",
  "smallvec",
  "zerocopy",
 ]
@@ -6288,6 +6287,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "insta",
+ "libc",
  "libgit2-sys",
  "libsqlite3-sys",
  "log",
