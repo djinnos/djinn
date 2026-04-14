@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
 use crate::server::AppState;
+
+const REVIEW_NEEDED_TAG: &str = "review_needed";
 
 /// Output bundle of the CPU-bound canonical graph build pipeline,
 /// produced on a `spawn_blocking` thread and consumed by the async tail that
@@ -131,6 +134,8 @@ pub(crate) async fn ensure_canonical_graph(
         match load_cached_artifact(row.graph_blob).await {
             Ok((graph, pagerank, sccs)) => {
                 install_as_canonical(
+                    state,
+                    project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
                     graph.clone(),
@@ -167,6 +172,8 @@ pub(crate) async fn ensure_canonical_graph(
         match load_cached_artifact(row.graph_blob).await {
             Ok((graph, pagerank, sccs)) => {
                 install_as_canonical(
+                    state,
+                    project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
                     graph.clone(),
@@ -299,6 +306,8 @@ pub(crate) async fn ensure_canonical_graph(
     }
 
     install_as_canonical(
+        state,
+        project_id,
         handle.path().to_path_buf(),
         commit_sha.clone(),
         graph.clone(),
@@ -382,6 +391,8 @@ pub(crate) async fn canonical_graph_count_commits_since(
 }
 
 async fn install_as_canonical(
+    state: &AppState,
+    project_id: &str,
     project_path: PathBuf,
     git_head: String,
     graph: crate::repo_graph::RepoDependencyGraph,
@@ -390,6 +401,10 @@ async fn install_as_canonical(
 ) {
     let mut cache = GRAPH_CACHE.write().await;
     let old = cache.take();
+    let changed_paths = old
+        .as_ref()
+        .map(|prior| changed_code_paths(&prior.graph, &graph))
+        .unwrap_or_default();
     if let Some(prior) = old {
         let mut previous = PREVIOUS_GRAPH_CACHE.write().await;
         *previous = Some(prior);
@@ -402,6 +417,172 @@ async fn install_as_canonical(
         pagerank,
         sccs,
     });
+    drop(cache);
+
+    apply_scope_path_freshness_decay(state, project_id, &changed_paths).await;
+}
+
+fn changed_code_paths(
+    previous: &crate::repo_graph::RepoDependencyGraph,
+    current: &crate::repo_graph::RepoDependencyGraph,
+) -> Vec<String> {
+    fn collect_node_paths(graph: &crate::repo_graph::RepoDependencyGraph) -> BTreeSet<String> {
+        graph
+            .graph()
+            .node_indices()
+            .filter_map(|idx| graph.node(idx).file_path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn collect_changed_node_paths(
+        base: &crate::repo_graph::RepoDependencyGraph,
+        other: &crate::repo_graph::RepoDependencyGraph,
+    ) -> BTreeSet<String> {
+        base.graph()
+            .node_indices()
+            .filter_map(|idx| {
+                let node = base.node(idx);
+                let key = node.id.clone();
+                (!other
+                    .graph()
+                    .node_indices()
+                    .any(|other_idx| other.node(other_idx).id == key))
+                .then(|| {
+                    node.file_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                })
+                .flatten()
+            })
+            .collect()
+    }
+
+    fn collect_edge_keys(
+        graph: &crate::repo_graph::RepoDependencyGraph,
+    ) -> BTreeSet<(
+        crate::repo_graph::RepoNodeKey,
+        crate::repo_graph::RepoNodeKey,
+        crate::repo_graph::RepoGraphEdgeKind,
+    )> {
+        use petgraph::visit::EdgeRef;
+
+        graph
+            .graph()
+            .edge_references()
+            .map(|edge| {
+                (
+                    graph.node(edge.source()).id.clone(),
+                    graph.node(edge.target()).id.clone(),
+                    edge.weight().kind,
+                )
+            })
+            .collect()
+    }
+
+    fn node_path_for_key(
+        graph: &crate::repo_graph::RepoDependencyGraph,
+        key: &crate::repo_graph::RepoNodeKey,
+    ) -> Option<String> {
+        graph.graph().node_indices().find_map(|idx| {
+            let node = graph.node(idx);
+            (&node.id == key)
+                .then(|| {
+                    node.file_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                })
+                .flatten()
+        })
+    }
+
+    let mut changed = collect_node_paths(previous)
+        .symmetric_difference(&collect_node_paths(current))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    changed.extend(collect_changed_node_paths(previous, current));
+    changed.extend(collect_changed_node_paths(current, previous));
+
+    let previous_edges = collect_edge_keys(previous);
+    let current_edges = collect_edge_keys(current);
+    for (source, target, _) in previous_edges.symmetric_difference(&current_edges) {
+        if let Some(path) =
+            node_path_for_key(previous, source).or_else(|| node_path_for_key(current, source))
+        {
+            changed.insert(path);
+        }
+        if let Some(path) =
+            node_path_for_key(previous, target).or_else(|| node_path_for_key(current, target))
+        {
+            changed.insert(path);
+        }
+    }
+
+    changed.into_iter().collect()
+}
+
+async fn apply_scope_path_freshness_decay(
+    state: &AppState,
+    project_id: &str,
+    changed_paths: &[String],
+) {
+    use djinn_db::{NoteRepository, STALE_CITATION};
+
+    if changed_paths.is_empty() {
+        return;
+    }
+
+    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    let notes = match note_repo
+        .query_scoped_by_path_overlap(project_id, changed_paths, 1_000)
+        .await
+    {
+        Ok(notes) => notes,
+        Err(error) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %error,
+                "apply_scope_path_freshness_decay: failed to query overlapping scoped notes"
+            );
+            return;
+        }
+    };
+
+    for note in notes {
+        if let Err(error) = note_repo.update_confidence(&note.id, STALE_CITATION).await {
+            tracing::warn!(
+                project_id = %project_id,
+                note_id = %note.id,
+                error = %error,
+                "apply_scope_path_freshness_decay: failed to decay note confidence"
+            );
+            continue;
+        }
+
+        let mut tags = note.parsed_tags();
+        if tags.iter().any(|tag| tag == REVIEW_NEEDED_TAG) {
+            continue;
+        }
+        tags.push(REVIEW_NEEDED_TAG.to_string());
+        match serde_json::to_string(&tags) {
+            Ok(tags_json) => {
+                if let Err(error) = note_repo.update_tags(&note.id, &tags_json).await {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        note_id = %note.id,
+                        error = %error,
+                        "apply_scope_path_freshness_decay: failed to tag note for review"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                project_id = %project_id,
+                note_id = %note.id,
+                error = %error,
+                "apply_scope_path_freshness_decay: failed to serialize review_needed tag set"
+            ),
+        }
+    }
 }
 
 async fn load_cached_artifact(
