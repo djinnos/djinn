@@ -41,6 +41,6 @@ Satisfied. Planner patrol has first-class visibility into memory health and code
 
 ## Relations
 - [[decisions/adr-056-proposal-planner-driven-codebase-learning-and-memory-hygiene]]
-- [[ADR-051: Planner as Patrol and Architect as Consultant]]
-- [[ADR-054 Proposal: Memory Extraction Quality Gates and Note Taxonomy]]
-- [[ADR-055 Proposal: Dolt Migration and Per-Task Knowledge Branching]]
+- [[decisions/adr-051-planner-as-patrol-and-architect-as-consultant]]
+- [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
+- [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]

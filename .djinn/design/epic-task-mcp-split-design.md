@@ -463,4 +463,4 @@ These tools require no signature changes but gain input validation:
 
 ## Relations
 - [[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]] — decision record
-- [[V1 Requirements]] — KANBAN and ROAD views consume these tools
+- [[requirements/v1-requirements]] — KANBAN and ROAD views consume these tools

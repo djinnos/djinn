@@ -64,5 +64,9 @@ Create focused worker tasks for:
 
 ## Relations
 - [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
-- [[decisions/adr-053-semantic-memory-search-—-candle-embeddings-with-sqlite-vec]]
+- [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
 - [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]
+
+## Link cleanup note
+- Repaired the stale ADR-053 permalink alias above to the canonical target `[[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]`.
+- Residual legacy title-alias debt in adjacent design notes was left to the narrower current-note cleanup pass unless a canonical target was unambiguous.
