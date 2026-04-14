@@ -27,6 +27,10 @@ pub use repositories::{
         AgentUpdateInput, LearnedPromptHistoryEntry, PendingAmendmentEvaluation, VALID_BASE_ROLES,
         WindowedRoleMetrics,
     },
+    dolt_branch::{
+        DoltBranchError, DoltBranchLifecycle, DoltBranchLifecycleAction, DoltBranchLifecycleResult,
+        DoltBranchSqlHelper,
+    },
     epic::{
         EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult, EpicRepository,
         EpicTaskCounts, EpicUpdateInput,

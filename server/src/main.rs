@@ -127,6 +127,10 @@ async fn async_main() {
         managed_process = startup_mode.managed_process,
         "opening database runtime"
     );
+    db_runtime.ensure_runtime_available().unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to ensure database runtime availability");
+        std::process::exit(1);
+    });
     let db = db_runtime.bootstrap().unwrap_or_else(|e| {
         tracing::error!(error = %e, "failed to open database runtime");
         std::process::exit(1);

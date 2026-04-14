@@ -1,5 +1,5 @@
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -155,7 +155,10 @@ impl DoltSqlServerManager {
             if let Some(data_dir) = &self.config.data_dir {
                 command.arg("--data-dir").arg(data_dir);
             }
-            let child = command.spawn().map_err(DoltRuntimeError::Spawn)?;
+            let child = command.spawn().map_err(|source| DoltRuntimeError::Spawn {
+                endpoint: self.config.endpoint(),
+                source,
+            })?;
             *guard = Some(ManagedDoltSqlServer { child });
         }
         drop(guard);
@@ -215,11 +218,10 @@ pub enum DoltRuntimeError {
     #[error("managed dolt sql-server at {endpoint} exited before becoming healthy ({status})")]
     ManagedProcessExited { endpoint: String, status: String },
     #[error("timed out after {timeout:?} waiting for dolt sql-server at {endpoint}")]
-    StartupTimeout {
-        endpoint: String,
-        timeout: Duration,
-    },
-    #[error("dolt runtime unavailable at {endpoint}; start `dolt sql-server` manually or set DJINN_DOLT_SQL_SERVER_REPO so djinn can manage it")]
+    StartupTimeout { endpoint: String, timeout: Duration },
+    #[error(
+        "dolt runtime unavailable at {endpoint}; start `dolt sql-server` manually or set DJINN_DOLT_SQL_SERVER_REPO so djinn can manage it"
+    )]
     Unavailable { endpoint: String },
     #[error("dolt sql-server process io error: {0}")]
     ProcessIo(#[source] std::io::Error),
@@ -231,7 +233,7 @@ struct MysqlEndpoint {
     port: u16,
 }
 
-pub fn mysql_endpoint_from_url(url: &str) -> Result<MysqlEndpoint, DoltRuntimeError> {
+fn mysql_endpoint_from_url(url: &str) -> Result<MysqlEndpoint, DoltRuntimeError> {
     let trimmed = url.trim();
     let without_scheme = trimmed
         .strip_prefix("mysql://")
@@ -261,7 +263,11 @@ pub fn mysql_endpoint_from_url(url: &str) -> Result<MysqlEndpoint, DoltRuntimeEr
     } else {
         let mut segments = host_port.splitn(2, ':');
         let host = segments.next().unwrap_or(DEFAULT_DOLT_HOST).trim();
-        let port = segments.next().map(parse_port).transpose()?.unwrap_or(DEFAULT_DOLT_PORT);
+        let port = segments
+            .next()
+            .map(parse_port)
+            .transpose()?
+            .unwrap_or(DEFAULT_DOLT_PORT);
         MysqlEndpoint {
             host: if host.is_empty() {
                 DEFAULT_DOLT_HOST.to_owned()
@@ -353,7 +359,7 @@ fn format_status(status: std::process::ExitStatus) -> String {
 mod tests {
     use super::*;
     use std::fs;
-    use std::net::TcpListener;
+    use std::net::{SocketAddr, TcpListener};
     use tempfile::tempdir;
 
     #[test]
@@ -412,8 +418,15 @@ mod tests {
         });
 
         let availability = manager.ensure_available().unwrap();
-        assert!(matches!(availability, DoltSqlServerAvailability::Spawned { .. }));
-        assert!(probe_tcp_endpoint("127.0.0.1", port, Duration::from_millis(100)));
+        assert!(matches!(
+            availability,
+            DoltSqlServerAvailability::Spawned { .. }
+        ));
+        assert!(probe_tcp_endpoint(
+            "127.0.0.1",
+            port,
+            Duration::from_millis(100)
+        ));
     }
 
     fn free_port() -> u16 {
