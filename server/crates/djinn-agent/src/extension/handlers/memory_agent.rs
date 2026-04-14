@@ -126,6 +126,26 @@ pub(super) async fn call_memory_health(
     ))
 }
 
+pub(super) async fn call_memory_extracted_audit(
+    state: &AgentContext,
+    _arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    Ok(serde_json::to_value(
+        djinn_mcp::tools::memory_tools::ops::memory_extracted_audit(
+            &server,
+            SharedMemoryExtractedAuditParams {
+                project: project_path.to_owned(),
+            },
+        )
+        .await,
+    )
+    .unwrap_or_else(
+        |_| serde_json::json!({ "error": "failed to serialize memory_extracted_audit response" }),
+    ))
+}
+
 pub(super) async fn call_memory_write(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,

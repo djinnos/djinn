@@ -112,6 +112,19 @@ impl DjinnMcpServer {
         }
     }
 
+    /// Audit existing extracted case/pattern/pitfall notes against ADR-054
+    /// taxonomy and template expectations. Output is grouped into merge,
+    /// strengthening, demotion, and archive backlogs so cleanup can be rerun.
+    #[tool(
+        description = "Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and template expectations. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance."
+    )]
+    pub async fn memory_extracted_audit(
+        &self,
+        Parameters(params): Parameters<ExtractedAuditParams>,
+    ) -> Json<MemoryExtractedAuditResponse> {
+        Json(ops::memory_extracted_audit(self, params).await)
+    }
+
     /// List recently updated notes by timeframe (e.g., '7d', '24h', 'today').
     /// Returns compact summaries.
     #[tool(

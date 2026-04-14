@@ -22,7 +22,8 @@ pub use credential::Credential;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
 pub use note::{
-    BrokenLink, BrokenLinkRepair, BuildContextResponse, ContradictionCandidate, GitLogEntry,
+    BrokenLink, BrokenLinkRepair, BuildContextResponse, ContradictionCandidate,
+    ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, ExtractedNoteAuditReport, GitLogEntry,
     GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteAbstract, NoteCompact,
     NoteDedupCandidate, NoteOverview, NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
     TypeRisk,

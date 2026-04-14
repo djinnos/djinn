@@ -31,6 +31,7 @@ expression: names
   "memory_edit",
   "memory_build_context",
   "memory_health",
+  "memory_extracted_audit",
   "memory_broken_links",
   "memory_orphans",
   "agent_metrics",

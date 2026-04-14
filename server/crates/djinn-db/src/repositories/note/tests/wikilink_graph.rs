@@ -220,6 +220,110 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extracted_note_audit_groups_merge_strengthen_demote_and_archive_backlogs() {
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let merge_a = repo
+        .create_db_note(
+            &project.id,
+            "Schema seam prerequisite check",
+            "Verify the prerequisite seam exists before wiring the schema seam. prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+    let merge_b = repo
+        .create_db_note(
+            &project.id,
+            "Verify prerequisite seam before schema wiring",
+            "Always verify the prerequisite seam exists before wiring the schema seam. prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    for note in [&merge_a, &merge_b] {
+        let abstract_text = format!(
+            "{} prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
+            note.title
+        );
+        sqlx::query(
+            "UPDATE notes
+             SET abstract = ?2,
+                 overview = ?3
+             WHERE id = ?1",
+        )
+        .bind(&note.id)
+        .bind(&abstract_text)
+        .bind(&abstract_text)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    let underspecified = repo
+        .create_db_note(
+            &project.id,
+            "Underspecified pattern note",
+            "A short note with no template sections.",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let demote = repo
+        .create_db_note(
+            &project.id,
+            "Current task roadmap note",
+            "This session captured the current task status and drafted locally what to do next session if follow-up work remains.",
+            "case",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let archive = repo
+        .create_db_note(
+            &project.id,
+            "Footer-only extracted note",
+            "Single paragraph extracted note.\n\n---\n*Extracted from session 123. Confidence: 0.2 (session-extracted).*",
+            "pitfall",
+            "[]",
+        )
+        .await
+        .unwrap();
+    repo.set_confidence(&archive.id, 0.2).await.unwrap();
+
+    let report = repo.extracted_note_audit(&project.id).await.unwrap();
+
+    assert_eq!(report.scanned_note_count, 5);
+    assert!(report.rerun_hint.contains("Rerun `memory_extracted_audit()`"));
+    assert!(report
+        .merge_candidates
+        .iter()
+        .any(|finding| finding.note_id == merge_a.id && finding.related_note_ids.contains(&merge_b.id)));
+    assert!(report
+        .underspecified
+        .iter()
+        .any(|finding| finding.note_id == underspecified.id));
+    assert!(report
+        .demote_to_working_spec
+        .iter()
+        .any(|finding| finding.note_id == demote.id));
+    assert!(report
+        .archive_candidates
+        .iter()
+        .any(|finding| finding.note_id == archive.id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resolve_previously_broken_links_on_create() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
