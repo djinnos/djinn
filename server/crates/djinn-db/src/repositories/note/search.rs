@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::NoteSearchBackend as DatabaseNoteSearchBackend;
 use crate::repositories::note::embeddings::embedding_branch_filter_sql;
 use crate::repositories::note::rrf::rrf_fuse;
 use djinn_core::models::{ContradictionCandidate, TypeRisk};
@@ -16,32 +17,203 @@ fn merge_candidate_ids(lists: &[&[(String, f64)]]) -> Vec<String> {
     ids
 }
 
-/// Sanitize a user query into valid FTS5 syntax.
-///
-/// Strips FTS5 operators and special characters, then wraps each remaining
-/// token in double-quotes so they are treated as literal terms joined by
-/// implicit AND.  Returns `None` if the query contains no usable tokens.
-fn sanitize_fts5_query(raw: &str) -> Option<String> {
-    let tokens: Vec<&str> = raw
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| {
-            let t = t.to_uppercase();
-            !t.is_empty() && t != "AND" && t != "OR" && t != "NOT" && t != "NEAR"
-        })
-        .collect();
-    if tokens.is_empty() {
-        return None;
-    }
-    Some(
-        tokens
-            .into_iter()
-            .map(|t| format!("\"{t}\""))
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
-}
-
 impl NoteRepository {
+    pub(crate) fn lexical_search_backend(&self) -> LexicalSearchBackend {
+        match self.db.backend_capabilities().lexical_search {
+            DatabaseNoteSearchBackend::SqliteFts5 => LexicalSearchBackend::SqliteFts5,
+            DatabaseNoteSearchBackend::MysqlFulltext => LexicalSearchBackend::MysqlFulltext,
+        }
+    }
+
+    fn lexical_search_plan(
+        &self,
+        mode: LexicalSearchMode,
+        raw_query: &str,
+    ) -> Result<Option<LexicalSearchPlan>> {
+        build_lexical_search_plan(self.lexical_search_backend(), mode, raw_query)
+    }
+
+    async fn ranked_lexical_scores(
+        &self,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, f64)>> {
+        let Some(plan) = self.lexical_search_plan(LexicalSearchMode::Ranked, query)? else {
+            return Ok(vec![]);
+        };
+        let sql = executable_lexical_search_sql(&plan);
+
+        let rows = match self.db.pool_kind() {
+            crate::database::DatabasePool::Sqlite(pool) => {
+                sqlx::query_as::<_, (String, f64)>(&sql)
+                    .bind(&plan.query)
+                    .bind(project_id)
+                    .bind(folder)
+                    .bind(note_type)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await?
+            }
+            crate::database::DatabasePool::Mysql(pool) => {
+                sqlx::query_as::<sqlx::MySql, (String, f64)>(&sql)
+                    .bind(&plan.query)
+                    .bind(project_id)
+                    .bind(folder)
+                    .bind(note_type)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await?
+            }
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, score)| (id, normalize_lexical_score(&plan, score)))
+            .collect())
+    }
+
+    async fn dedup_lexical_candidates(
+        &self,
+        project_id: &str,
+        folder: &str,
+        note_type: &str,
+        text: &str,
+        limit: i64,
+    ) -> Result<Vec<NoteDedupCandidate>> {
+        let Some(plan) = self.lexical_search_plan(LexicalSearchMode::Dedup, text)? else {
+            return Ok(vec![]);
+        };
+        let threshold = lexical_search_threshold(plan.backend, LexicalSearchMode::Dedup)?
+            .expect("dedup threshold is defined for all lexical backends");
+        let sql = executable_lexical_search_sql(&plan);
+
+        let rows = match self.db.pool_kind() {
+            crate::database::DatabasePool::Sqlite(pool) => {
+                sqlx::query_as::<
+                    _,
+                    (
+                        String,
+                        String,
+                        String,
+                        String,
+                        String,
+                        Option<String>,
+                        Option<String>,
+                        f64,
+                    ),
+                >(&sql)
+                .bind(&plan.query)
+                .bind(project_id)
+                .bind(folder)
+                .bind(note_type)
+                .bind(threshold)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?
+            }
+            crate::database::DatabasePool::Mysql(pool) => {
+                sqlx::query_as::<
+                    sqlx::MySql,
+                    (
+                        String,
+                        String,
+                        String,
+                        String,
+                        String,
+                        Option<String>,
+                        Option<String>,
+                        f64,
+                    ),
+                >(&sql)
+                .bind(&plan.query)
+                .bind(project_id)
+                .bind(folder)
+                .bind(note_type)
+                .bind(threshold)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?
+            }
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, permalink, title, folder, note_type, abstract_, overview, score)| {
+                    NoteDedupCandidate {
+                        id,
+                        permalink,
+                        title,
+                        folder,
+                        note_type,
+                        abstract_,
+                        overview,
+                        score: normalize_lexical_score(&plan, score),
+                    }
+                },
+            )
+            .collect())
+    }
+
+    async fn contradiction_lexical_candidates(
+        &self,
+        note_id: &str,
+        note_type: &str,
+        folder: &str,
+        text: &str,
+    ) -> Result<Vec<ContradictionCandidate>> {
+        let Some(plan) = self.lexical_search_plan(LexicalSearchMode::Contradiction, text)? else {
+            return Ok(vec![]);
+        };
+        let threshold = lexical_search_threshold(plan.backend, LexicalSearchMode::Contradiction)?
+            .expect("contradiction threshold is defined for all lexical backends");
+        let sql = executable_lexical_search_sql(&plan);
+
+        let rows = match self.db.pool_kind() {
+            crate::database::DatabasePool::Sqlite(pool) => {
+                sqlx::query_as::<_, (String, String, String, String, String, f64)>(&sql)
+                    .bind(&plan.query)
+                    .bind(note_id)
+                    .bind(threshold)
+                    .fetch_all(pool)
+                    .await?
+            }
+            crate::database::DatabasePool::Mysql(pool) => {
+                sqlx::query_as::<sqlx::MySql, (String, String, String, String, String, f64)>(&sql)
+                    .bind(&plan.query)
+                    .bind(note_id)
+                    .bind(threshold)
+                    .fetch_all(pool)
+                    .await?
+            }
+        };
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, permalink, title, cand_folder, cand_type, score)| {
+                let risk = if cand_type == note_type && cand_folder == folder {
+                    TypeRisk::High
+                } else if cand_type == note_type {
+                    TypeRisk::Medium
+                } else {
+                    return None;
+                };
+                Some(ContradictionCandidate {
+                    id,
+                    permalink,
+                    title,
+                    folder: cand_folder,
+                    note_type: cand_type,
+                    score: normalize_lexical_score(&plan, score),
+                    risk,
+                })
+            })
+            .collect())
+    }
+
     /// Find same-folder, same-type near-duplicate candidates for a note before write.
     ///
     /// The lookup stays repository-local so callers do not need direct SQLx access.
@@ -56,62 +228,8 @@ impl NoteRepository {
     ) -> Result<Vec<NoteDedupCandidate>> {
         self.db.ensure_initialized().await?;
 
-        let Some(safe_query) = sanitize_fts5_query(text) else {
-            return Ok(vec![]);
-        };
-
-        let limit = limit as i64;
-        let rows = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                f64,
-            ),
-        >(
-            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,
-                    -bm25(notes_fts, 3.0, 1.0, 2.0) as score
-             FROM notes_fts
-             JOIN notes n ON notes_fts.rowid = n.rowid
-             WHERE notes_fts MATCH ?1
-               AND n.project_id = ?2
-               AND n.folder = ?3
-               AND n.note_type = ?4
-               AND -bm25(notes_fts, 3.0, 1.0, 2.0) > ?5
-             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
-             LIMIT ?6",
-        )
-        .bind(&safe_query)
-        .bind(project_id)
-        .bind(folder)
-        .bind(note_type)
-        .bind(-3.0_f64)
-        .bind(limit)
-        .fetch_all(self.db.pool())
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(id, permalink, title, folder, note_type, abstract_, overview, score)| {
-                    NoteDedupCandidate {
-                        id,
-                        permalink,
-                        title,
-                        folder,
-                        note_type,
-                        abstract_,
-                        overview,
-                        score,
-                    }
-                },
-            )
-            .collect())
+        self.dedup_lexical_candidates(project_id, folder, note_type, text, limit as i64)
+            .await
     }
 
     /// Find notes that may structurally contradict a newly written note.
@@ -128,49 +246,8 @@ impl NoteRepository {
     ) -> Result<Vec<ContradictionCandidate>> {
         self.db.ensure_initialized().await?;
 
-        let Some(safe_query) = sanitize_fts5_query(text) else {
-            return Ok(vec![]);
-        };
-
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, f64)>(
-            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,
-                    -bm25(notes_fts, 3.0, 1.0, 2.0) as score
-             FROM notes_fts
-             JOIN notes n ON notes_fts.rowid = n.rowid
-             WHERE notes_fts MATCH ?1
-               AND n.id != ?2
-               AND -bm25(notes_fts, 3.0, 1.0, 2.0) > 5.0
-             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
-             LIMIT 3",
-        )
-        .bind(&safe_query)
-        .bind(note_id)
-        .fetch_all(self.db.pool())
-        .await?;
-
-        let candidates = rows
-            .into_iter()
-            .filter_map(|(id, permalink, title, cand_folder, cand_type, score)| {
-                let risk = if cand_type == note_type && cand_folder == folder {
-                    TypeRisk::High
-                } else if cand_type == note_type {
-                    TypeRisk::Medium
-                } else {
-                    return None; // Low risk — filter out
-                };
-                Some(ContradictionCandidate {
-                    id,
-                    permalink,
-                    title,
-                    folder: cand_folder,
-                    note_type: cand_type,
-                    score,
-                    risk,
-                })
-            })
-            .collect();
-
-        Ok(candidates)
+        self.contradiction_lexical_candidates(note_id, note_type, folder, text)
+            .await
     }
 
     /// Full-text search with FTS candidate generation and RRF-fused ranking.
@@ -195,32 +272,9 @@ impl NoteRepository {
         let note_type = note_type.unwrap_or("");
         let limit = limit as i64;
 
-        let lexical_scores: Vec<(String, f64)> =
-            if let Some(safe_query) = sanitize_fts5_query(query) {
-                sqlx::query_as::<_, (String, f64)>(
-                    "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score
-                 FROM notes_fts
-                 JOIN notes n ON notes_fts.rowid = n.rowid
-                 WHERE notes_fts MATCH ?1
-                   AND n.project_id = ?2
-                   AND (?3 = '' OR n.folder = ?3)
-                   AND (?4 = '' OR n.note_type = ?4)
-                 ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
-                 LIMIT ?5",
-                )
-                .bind(&safe_query)
-                .bind(project_id)
-                .bind(folder)
-                .bind(note_type)
-                .bind(limit)
-                .fetch_all(self.db.pool())
-                .await?
-                .into_iter()
-                .map(|(id, bm25_score)| (id, -bm25_score))
-                .collect()
-            } else {
-                vec![]
-            };
+        let lexical_scores = self
+            .ranked_lexical_scores(project_id, folder, note_type, query, limit)
+            .await?;
         let semantic_scores = semantic_scores.unwrap_or_default();
         let candidate_ids = merge_candidate_ids(&[&lexical_scores, &semantic_scores]);
 
