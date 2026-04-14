@@ -309,6 +309,99 @@ mod tests {
             response.error
         );
         assert!(!response.results.is_empty());
+
+        for result in &response.results {
+            let access_count =
+                access_count_for(&setup.server, &setup.project, &result.permalink).await;
+            assert_eq!(
+                access_count, 1,
+                "returned search results should count as accessed retrievals"
+            );
+        }
+
+        let recorded = setup.server.recorded_note_ids().await;
+        let returned_ids: Vec<String> = response
+            .results
+            .iter()
+            .map(|result| result.id.clone())
+            .collect();
+        assert_eq!(recorded, returned_ids);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_search_ops_flushes_co_access_for_returned_results_only() {
+        let setup = setup_server().await;
+        let project_id = ProjectRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        )
+        .resolve(&setup.project)
+        .await
+        .unwrap()
+        .expect("project id");
+        let repo = NoteRepository::new(
+            setup.server.state.db().clone(),
+            setup.server.state.event_bus(),
+        );
+        let hidden = repo
+            .create(
+                &project_id,
+                setup._tmp.path(),
+                "Hidden Note",
+                "completely unrelated content",
+                "reference",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let response = ops::memory_search(
+            &setup.server,
+            SearchParams {
+                project: setup.project.clone(),
+                query: "architecture".to_string(),
+                folder: None,
+                note_type: None,
+                limit: Some(10),
+            },
+            None,
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(
+            response.results.len() >= 2,
+            "seed setup should return multiple results"
+        );
+
+        setup.server.flush_co_access_batch().await;
+
+        let associations = repo
+            .get_associations_for_note(&response.results[0].id)
+            .await
+            .unwrap();
+        assert!(
+            associations.iter().any(|association| {
+                let pair = [
+                    association.note_a_id.as_str(),
+                    association.note_b_id.as_str(),
+                ];
+                pair.contains(&response.results[0].id.as_str())
+                    && pair.contains(&response.results[1].id.as_str())
+            }),
+            "returned search results should become co-access associated"
+        );
+
+        assert_eq!(
+            access_count_for(&setup.server, &setup.project, &hidden.permalink).await,
+            0,
+            "notes not returned from search should not be touched"
+        );
+        let hidden_associations = repo.get_associations_for_note(&hidden.id).await.unwrap();
+        assert!(
+            hidden_associations.is_empty(),
+            "notes excluded from search results should not be co-access associated"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

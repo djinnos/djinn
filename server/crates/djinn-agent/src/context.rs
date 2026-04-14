@@ -121,6 +121,28 @@ pub struct AgentContext {
     pub repo_graph_ops: Option<Arc<dyn RepoGraphOps>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeBranchTarget {
+    Main,
+    TaskScoped { worktree_root: PathBuf },
+}
+
+impl KnowledgeBranchTarget {
+    pub fn worktree_root(&self) -> Option<&Path> {
+        match self {
+            Self::Main => None,
+            Self::TaskScoped { worktree_root } => Some(worktree_root.as_path()),
+        }
+    }
+
+    pub fn intent_label(&self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::TaskScoped { .. } => "task",
+        }
+    }
+}
+
 impl AgentContext {
     /// Returns the working root for code-reading tool dispatch (read, shell,
     /// lsp, code_graph).  When `working_root` is `Some` it takes precedence
@@ -130,6 +152,44 @@ impl AgentContext {
             Some(p) => p.to_path_buf(),
             None => fallback.to_path_buf(),
         }
+    }
+
+    /// Resolve the knowledge-write target for a session.
+    ///
+    /// Task sessions with a preserved worktree route note writes into that
+    /// task-scoped tree so extracted notes participate in the same promotion /
+    /// discard lifecycle as agent-authored memory mutations. Sessions without a
+    /// usable worktree fall back to canonical-main writes, preserving the
+    /// default SQLite-backed behavior for contexts that do not opt into
+    /// task-branch routing.
+    pub fn knowledge_branch_target_for(
+        &self,
+        project_root: &Path,
+        session_worktree_path: Option<&str>,
+    ) -> KnowledgeBranchTarget {
+        let Some(worktree_path) = session_worktree_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            return KnowledgeBranchTarget::Main;
+        };
+
+        let worktree_root = PathBuf::from(worktree_path);
+        if worktree_root == project_root {
+            KnowledgeBranchTarget::Main
+        } else {
+            KnowledgeBranchTarget::TaskScoped { worktree_root }
+        }
+    }
+
+    pub fn knowledge_worktree_root_for(
+        &self,
+        project_root: &Path,
+        session_worktree_path: Option<&str>,
+    ) -> Option<PathBuf> {
+        self.knowledge_branch_target_for(project_root, session_worktree_path)
+            .worktree_root()
+            .map(Path::to_path_buf)
     }
 }
 
