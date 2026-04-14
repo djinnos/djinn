@@ -939,7 +939,8 @@ mod tests {
     use crate::test_helpers::create_test_db;
     use crate::test_helpers::workspace_tempdir;
     use djinn_db::{
-        ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository, RepoMapCacheRepository,
+        NoteRepository, ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository,
+        RepoMapCacheRepository, STALE_CITATION,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -1157,5 +1158,187 @@ mod tests {
             .expect("repo_map_cache row inserted");
         assert_eq!(row.commit_sha, head_sha);
         assert_eq!(row.rendered_map, rendered.content);
+    }
+
+    #[tokio::test]
+    async fn apply_scope_path_freshness_decay_marks_overlapping_notes_for_review() {
+        let tmp = workspace_tempdir("canonical-graph-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let project = ProjectRepository::new(db.clone(), state.event_bus())
+            .create(
+                "test-freshness-decay",
+                project_root.to_string_lossy().as_ref(),
+            )
+            .await
+            .expect("create project");
+        let note_repo = NoteRepository::new(db.clone(), state.event_bus());
+
+        let overlapping = note_repo
+            .create_with_scope(
+                &project.id,
+                &project_root,
+                "Overlapping Note",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["server/src/server/state"]"#,
+            )
+            .await
+            .expect("create overlapping note");
+        let unrelated = note_repo
+            .create_with_scope(
+                &project.id,
+                &project_root,
+                "Unrelated Note",
+                "content",
+                "pattern",
+                None,
+                r#"["existing_tag"]"#,
+                r#"["desktop/src"]"#,
+            )
+            .await
+            .expect("create unrelated note");
+        let global = note_repo
+            .create(
+                &project.id,
+                &project_root,
+                "Global Note",
+                "content",
+                "pattern",
+                "[]",
+            )
+            .await
+            .expect("create global note");
+
+        note_repo
+            .set_confidence(&overlapping.id, 0.8)
+            .await
+            .expect("seed overlapping confidence");
+        note_repo
+            .set_confidence(&unrelated.id, 0.8)
+            .await
+            .expect("seed unrelated confidence");
+        note_repo
+            .set_confidence(&global.id, 0.8)
+            .await
+            .expect("seed global confidence");
+
+        apply_scope_path_freshness_decay(
+            &state,
+            &project.id,
+            &["server/src/server/state/mod.rs".to_string()],
+        )
+        .await;
+
+        let overlapping = note_repo
+            .get(&overlapping.id)
+            .await
+            .expect("load overlapping note")
+            .expect("overlapping note exists");
+        let unrelated = note_repo
+            .get(&unrelated.id)
+            .await
+            .expect("load unrelated note")
+            .expect("unrelated note exists");
+        let global = note_repo
+            .get(&global.id)
+            .await
+            .expect("load global note")
+            .expect("global note exists");
+
+        assert_eq!(
+            overlapping.confidence,
+            (0.8 * STALE_CITATION / (0.8 * STALE_CITATION + (1.0 - 0.8) * (1.0 - STALE_CITATION)))
+                .clamp(0.025, 0.975),
+            "overlapping scoped note should receive STALE_CITATION decay"
+        );
+        assert!(
+            overlapping
+                .parsed_tags()
+                .iter()
+                .any(|tag| tag == REVIEW_NEEDED_TAG),
+            "overlapping scoped note should be marked review_needed"
+        );
+
+        assert_eq!(
+            unrelated.confidence, 0.8,
+            "unrelated scoped note confidence should not change"
+        );
+        assert_eq!(
+            unrelated.parsed_tags(),
+            vec!["existing_tag".to_string()],
+            "unrelated scoped note tags should remain unchanged"
+        );
+
+        assert_eq!(
+            global.confidence, 0.8,
+            "global note confidence should not change"
+        );
+        assert!(
+            !global
+                .parsed_tags()
+                .iter()
+                .any(|tag| tag == REVIEW_NEEDED_TAG),
+            "global note should not be marked review_needed"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_scope_path_freshness_decay_is_noop_for_unrelated_or_empty_changes() {
+        let tmp = workspace_tempdir("canonical-graph-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let project = ProjectRepository::new(db.clone(), state.event_bus())
+            .create(
+                "test-freshness-decay-noop",
+                project_root.to_string_lossy().as_ref(),
+            )
+            .await
+            .expect("create project");
+        let note_repo = NoteRepository::new(db.clone(), state.event_bus());
+
+        let scoped = note_repo
+            .create_with_scope(
+                &project.id,
+                &project_root,
+                "Scoped Note",
+                "content",
+                "pattern",
+                None,
+                r#"["keep_me"]"#,
+                r#"["server/src/server/state"]"#,
+            )
+            .await
+            .expect("create scoped note");
+        note_repo
+            .set_confidence(&scoped.id, 0.8)
+            .await
+            .expect("seed scoped confidence");
+
+        apply_scope_path_freshness_decay(&state, &project.id, &[]).await;
+        apply_scope_path_freshness_decay(&state, &project.id, &["desktop/src/main.ts".to_string()])
+            .await;
+
+        let scoped = note_repo
+            .get(&scoped.id)
+            .await
+            .expect("load scoped note")
+            .expect("scoped note exists");
+
+        assert_eq!(
+            scoped.confidence, 0.8,
+            "non-overlapping or empty path changes should not decay note confidence"
+        );
+        assert_eq!(
+            scoped.parsed_tags(),
+            vec!["keep_me".to_string()],
+            "non-overlapping or empty path changes should not add review tags"
+        );
     }
 }
