@@ -45,6 +45,11 @@ fn permalink_candidates(identifier: &str) -> Vec<String> {
     candidates
 }
 
+fn is_exact_permalink_identifier(identifier: &str) -> bool {
+    let trimmed = identifier.trim();
+    trimmed.starts_with("memory://") || trimmed.contains('/') || trimmed.ends_with(".md")
+}
+
 fn inferred_worktree_roots(project_ref: &str) -> Option<(PathBuf, PathBuf)> {
     let normalized = project_ref.trim_end_matches('/').replace('\\', "/");
     let marker = "/.djinn/worktrees/";
@@ -156,6 +161,7 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
 
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_vector_store(server.state.vector_store());
+    let exact_identifier = is_exact_permalink_identifier(&p.identifier);
     let note = if let Some(note) = {
         let mut exact = None;
         for candidate in permalink_candidates(&p.identifier) {
@@ -168,7 +174,9 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
     } {
         note
     } else {
-        sync_worktree_notes_for_project_ref(server, &project_id, &p.project).await;
+        if exact_identifier {
+            sync_worktree_notes_for_project_ref(server, &project_id, &p.project).await;
+        }
 
         if let Some(note) = {
             let mut exact = None;
@@ -181,6 +189,8 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
             exact
         } {
             note
+        } else if exact_identifier {
+            return MemoryNoteResponse::error(format!("note not found: {}", p.identifier));
         } else {
             match repo
                 .search(NoteSearchParams {
