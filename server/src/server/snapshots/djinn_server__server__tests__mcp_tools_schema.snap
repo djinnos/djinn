@@ -5587,6 +5587,16 @@ expression: signatures
               "nullable": true,
               "type": "object"
             },
+            "memory_mount_enabled": {
+              "description": "Enable the ADR-057 Linux memory mount. Disabled by default.",
+              "nullable": true,
+              "type": "boolean"
+            },
+            "memory_mount_path": {
+              "description": "Absolute filesystem path where the Linux FUSE mount should be attached.",
+              "nullable": true,
+              "type": "string"
+            },
             "models": {
               "description": "Ordered list of models available to agents, e.g. `[\"openai/gpt-4o\"]`.",
               "items": {
@@ -5690,6 +5700,16 @@ expression: signatures
           "description": "Per-model concurrent session caps (e.g. {\"openai/gpt-4o\": 4}). Omit to keep current value.",
           "nullable": true,
           "type": "object"
+        },
+        "memory_mount_enabled": {
+          "description": "Enable the Linux-only ADR-057 memory FUSE mount. Disabled by default; requires a Linux build with the `memory-mount` cargo feature.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "memory_mount_path": {
+          "description": "Absolute path for the Linux memory mount. The directory must already exist and be empty at startup.",
+          "nullable": true,
+          "type": "string"
         },
         "models": {
           "description": "Ordered list of models available to all agents (e.g. [\"openai/gpt-4o\"]). Omit to keep current value.",

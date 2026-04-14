@@ -7,6 +7,7 @@ use djinn_db::SettingsRepository;
 use djinn_provider::repos::CredentialRepository;
 
 use super::{AppState, SETTINGS_RAW_KEY};
+use crate::memory_mount;
 
 /// Maximum auto-detected slots per model to prevent runaway on high-memory machines.
 const AUTO_MAX_SLOTS_CAP: u32 = 8;
@@ -102,6 +103,9 @@ impl AppState {
 
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
         self.validate_models_providers_connected(settings).await?;
+        memory_mount::validate_mount_config(settings, self.db().clone(), self.event_bus())
+            .await
+            .map_err(|e| format!("invalid memory mount configuration: {e}"))?;
         let raw =
             serde_json::to_string(settings).map_err(|e| format!("serialize settings: {e}"))?;
         let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
@@ -159,6 +163,7 @@ impl AppState {
     }
 
     pub async fn reset_runtime_settings(&self) {
+        *self.inner.memory_mount.lock().await = None;
         if let Some(coordinator) = self.coordinator().await {
             let _ = coordinator.update_dispatch_limit(50).await;
             let _ = coordinator
@@ -199,6 +204,28 @@ impl AppState {
         }
 
         self.apply_runtime_settings(&settings).await;
+    }
+
+    pub async fn initialize_memory_mount_from_db(&self) -> Result<(), String> {
+        let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
+        let raw = repo
+            .get(SETTINGS_RAW_KEY)
+            .await
+            .map_err(|e| format!("read settings for memory mount: {e}"))?
+            .map(|s| s.value);
+
+        let Some(raw) = raw else {
+            *self.inner.memory_mount.lock().await = None;
+            return Ok(());
+        };
+
+        let settings = DjinnSettings::from_db_value(&raw);
+        let mount =
+            memory_mount::start_memory_mount(&settings, self.db().clone(), self.event_bus())
+                .await
+                .map_err(|e| e.to_string())?;
+        *self.inner.memory_mount.lock().await = mount;
+        Ok(())
     }
 
     async fn apply_runtime_settings(&self, settings: &DjinnSettings) {

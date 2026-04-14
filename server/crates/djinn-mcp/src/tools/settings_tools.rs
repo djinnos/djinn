@@ -42,6 +42,10 @@ pub struct SettingsSetParams {
     pub langfuse_secret_key: Option<String>,
     /// Langfuse OTLP endpoint URL (defaults to "http://localhost:3000/api/public/otel"). Set to "" to disable. Omit to keep current value.
     pub langfuse_endpoint: Option<String>,
+    /// Enable the Linux-only ADR-057 memory FUSE mount. Disabled by default; requires a Linux build with the `memory-mount` cargo feature.
+    pub memory_mount_enabled: Option<bool>,
+    /// Absolute path for the Linux memory mount. The directory must already exist and be empty at startup.
+    pub memory_mount_path: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -141,6 +145,12 @@ impl DjinnMcpServer {
         }
         if let Some(v) = p.langfuse_endpoint {
             settings.langfuse_endpoint = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = p.memory_mount_enabled {
+            settings.memory_mount_enabled = Some(v);
+        }
+        if let Some(v) = p.memory_mount_path {
+            settings.memory_mount_path = if v.is_empty() { None } else { Some(v) };
         }
 
         match self.state.apply_settings(&settings).await {

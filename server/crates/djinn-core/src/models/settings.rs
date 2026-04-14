@@ -29,6 +29,10 @@ pub struct DjinnSettings {
     pub langfuse_secret_key: Option<String>,
     /// Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).
     pub langfuse_endpoint: Option<String>,
+    /// Enable the ADR-057 Linux memory mount. Disabled by default.
+    pub memory_mount_enabled: Option<bool>,
+    /// Absolute filesystem path where the Linux FUSE mount should be attached.
+    pub memory_mount_path: Option<String>,
 }
 
 impl DjinnSettings {
@@ -75,6 +79,8 @@ impl DjinnSettings {
             langfuse_public_key: None,
             langfuse_secret_key: None,
             langfuse_endpoint: None,
+            memory_mount_enabled: None,
+            memory_mount_path: None,
         }
     }
 
@@ -160,11 +166,13 @@ mod tests {
 
     #[test]
     fn from_db_value_parses_typed_format() {
-        let raw = r#"{"dispatch_limit":100,"models":["openai/gpt-4o"]}"#;
+        let raw = r#"{"dispatch_limit":100,"models":["openai/gpt-4o"],"memory_mount_enabled":true,"memory_mount_path":"/tmp/djinn-memory"}"#;
         let s = DjinnSettings::from_db_value(raw);
         assert_eq!(s.dispatch_limit, Some(100));
         assert_eq!(s.models.as_ref().unwrap(), &vec!["openai/gpt-4o"]);
         assert!(s.max_sessions.is_none());
+        assert_eq!(s.memory_mount_enabled, Some(true));
+        assert_eq!(s.memory_mount_path.as_deref(), Some("/tmp/djinn-memory"));
     }
 
     #[test]

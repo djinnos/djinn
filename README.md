@@ -206,6 +206,28 @@ cat ~/.djinn/server.json
 # { "port": 4440, "url": "http://localhost:4440/mcp", ... }
 ```
 
+### Linux memory mount (ADR-057 wave 1)
+
+Djinn now includes an initial Linux-only FUSE mount adapter for the repository-backed memory filesystem behind an explicit build and settings gate. It is **disabled by default** and only covers the first ADR-057 plumbing slice.
+
+Enable it by building `djinn-server` with the cargo feature and then setting:
+
+```json
+{
+  "memory_mount_enabled": true,
+  "memory_mount_path": "/absolute/empty/mountpoint"
+}
+```
+
+Current wave-1 constraints:
+- Linux only
+- requires FUSE host support (`/dev/fuse`, kernel/userspace FUSE tooling, and permission to mount)
+- `memory_mount_path` must already exist, be absolute, and be empty at startup
+- only a single registered project is supported by this initial mount slice
+- macOS fallback transport, branch-aware mounting, and broader operational hardening are deferred to later ADR-057 waves
+
+If the configuration is invalid, server startup fails early with a clear error instead of silently serving without the mount.
+
 ### What's Available Over MCP
 
 | Tool Group | Examples | Description |
