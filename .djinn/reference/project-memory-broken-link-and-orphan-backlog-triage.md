@@ -1,6 +1,6 @@
 ---
 title: Project memory broken-link and orphan backlog triage
-type: 
+type: reference
 tags: ["memory","triage","broken-links","orphans","planner"]
 ---
 

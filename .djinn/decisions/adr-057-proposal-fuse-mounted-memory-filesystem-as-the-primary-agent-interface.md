@@ -14,7 +14,7 @@ Proposed
 
 Date: 2026-04-13
 
-Related: [[ADR-055 Proposal: Dolt Migration and Per-Task Knowledge Branching]], [[ADR-054 Proposal: Memory Extraction Quality Gates and Note Taxonomy]], [[ADR-056 Proposal: Planner-Driven Codebase Learning and Memory Hygiene]], [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]]
+Related: [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]], [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]], [[decisions/adr-056-proposal-planner-driven-codebase-learning-and-memory-hygiene]], [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]]
 
 ## Context
 
@@ -22,7 +22,7 @@ Djinn currently exposes ~20 MCP tools for memory operations: `memory_write`, `me
 
 Most of these are CRUD operations that duplicate what a filesystem already provides. Every LLM coding agent — Claude Code, Cursor, Windsurf, Copilot — already knows how to `Read`, `Write`, `Edit`, `Grep`, and `Glob` files. Teaching agents a custom MCP API for basic note operations is unnecessary friction. Agents invoke the wrong tool, pass wrong parameters, and waste tokens on tool discovery when they could just read and write files.
 
-Meanwhile, [[ADR-055 Proposal: Dolt Migration and Per-Task Knowledge Branching]] introduces per-task knowledge branches in Dolt. The branch isolation model maps naturally to a filesystem: each branch is a directory, each note is a file, switching branches is changing directories.
+Meanwhile, [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]] introduces per-task knowledge branches in Dolt. The branch isolation model maps naturally to a filesystem: each branch is a directory, each note is a file, switching branches is changing directories.
 
 ### What already exists
 
@@ -280,8 +280,8 @@ Half-measure. The power of this approach is that agents can write notes by creat
 
 ## Relations
 
-- [[ADR-055 Proposal: Dolt Migration and Per-Task Knowledge Branching]]
-- [[ADR-054 Proposal: Memory Extraction Quality Gates and Note Taxonomy]]
-- [[ADR-056 Proposal: Planner-Driven Codebase Learning and Memory Hygiene]]
+- [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]
+- [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
+- [[decisions/adr-056-proposal-planner-driven-codebase-learning-and-memory-hygiene]]
 - [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]]
-- [[ADR-053: Semantic Memory Search — Candle Embeddings with sqlite-vec]]
+- [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
