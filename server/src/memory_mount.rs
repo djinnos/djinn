@@ -317,6 +317,8 @@ pub async fn start_memory_mount(
                 resolved.project_id.clone(),
             ),
         ));
+        let project_id = resolved.project_id.clone();
+        let project_path = resolved.project_path.clone();
         let fs = LinuxMemoryFilesystem::new(
             repo,
             resolved.project_id,
@@ -342,7 +344,7 @@ pub async fn start_memory_mount(
         Ok(Some(MountedMemoryFilesystem::from_session(
             session,
             runtime_status,
-            (state, resolved.project_id, resolved.project_path),
+            (state, project_id, project_path),
         )))
     }
 
