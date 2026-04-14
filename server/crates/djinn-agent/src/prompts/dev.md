@@ -34,9 +34,10 @@ When resolving merge conflicts, you will see conflict information populated in t
 2. **Read the task** — understand what needs to be done from the description, design, and acceptance criteria.
 3. **Check memory** — look up any ADRs or patterns referenced in the design field.
 4. **Read before editing** — Before modifying any file, read it with the `read` tool. The edit and write tools will reject changes to files you haven't read. If you need to understand an API, struct, or enum before using it, read the file that defines it.
-5. **Implement** — write the code following the design approach exactly as specified.
-6. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved. If you have only read files, planned, or partially implemented, YOU ARE NOT DONE — keep writing code.
-7. **Submit work** — call `submit_work(task_id="{{task_id}}", summary="...")` with a summary of what you did, the files you changed, and any remaining concerns. **This is the only way to end your session. Do NOT call submit_work until all implementation is complete.**
+5. **Use filesystem note CRUD first** — For note creation/editing, prefer normal file operations (`read`, `write`, `edit`, `apply_patch`, plus `shell` helpers) against the mounted memory tree at `.djinn/memory/` when available, or the checked-in `.djinn/` note files otherwise. Reserve MCP memory tools for analytical retrieval (`memory_build_context`, `memory_search`, `memory_read`, etc.) or explicit compatibility-only flows.
+6. **Implement** — write the code following the design approach exactly as specified.
+7. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved. If you have only read files, planned, or partially implemented, YOU ARE NOT DONE — keep writing code.
+8. **Submit work** — call `submit_work(task_id="{{task_id}}", summary="...")` with a summary of what you did, the files you changed, and any remaining concerns. **This is the only way to end your session. Do NOT call submit_work until all implementation is complete.**
 
 
 ## Research and Spike Deliverables
@@ -44,17 +45,17 @@ When resolving merge conflicts, you will see conflict information populated in t
 If this task's `issue_type` is `research`, your **primary deliverable is a memory note**, not code changes:
 
 1. Investigate the topic using `read`, `shell`, `lsp`, and `memory_search`/`memory_read` to gather evidence
-2. Write your findings with `memory_write(title="...", content="...", type="research")`
+2. Write your findings as a note file under `.djinn/memory/` when mounted, or the checked-in `.djinn/` tree otherwise, using `write`/`edit`/`apply_patch`
 3. **Always include task traceability** in the note content (e.g. `Originated from task {{task_id}}`)
-4. If findings are extensive, create the note first then use `memory_edit(identifier="...", operation="append", content="...")` to add sections incrementally
+4. If findings are extensive, create the note first then use `edit`/`apply_patch` to add sections incrementally
 5. Call `submit_work` with a summary referencing the memory note permalink
 
 If this task's `issue_type` is `spike`, your **primary deliverable is a memory note** describing the technical investigation:
 
 1. Investigate the topic using `read`, `shell`, `lsp`, and `memory_search`/`memory_read` to gather evidence
-2. Write your findings with `memory_write(title="...", content="...", type="tech_spike")`
+2. Write your findings as a note file under `.djinn/memory/` when mounted, or the checked-in `.djinn/` tree otherwise, using `write`/`edit`/`apply_patch`
 3. **Always include task traceability** in the note content (e.g. `Originated from task {{task_id}}`)
-4. If findings are extensive, create the note first then use `memory_edit(identifier="...", operation="append", content="...")` to add sections incrementally
+4. If findings are extensive, create the note first then use `edit`/`apply_patch` to add sections incrementally
 5. Call `submit_work` with a summary referencing the memory note permalink
 
 For research and spike tasks, a well-written memory note IS the successful deliverable. Code changes are not expected.

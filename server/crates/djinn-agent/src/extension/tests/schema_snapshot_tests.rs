@@ -44,8 +44,9 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(worker.iter().any(|n| n == "shell"));
     assert!(worker.iter().any(|n| n == "write"));
     assert!(worker.iter().any(|n| n == "edit"));
-    assert!(worker.iter().any(|n| n == "memory_write"));
-    assert!(worker.iter().any(|n| n == "memory_edit"));
+    assert!(!worker.iter().any(|n| n == "memory_write"));
+    assert!(!worker.iter().any(|n| n == "memory_edit"));
+    assert!(worker.iter().any(|n| n == "memory_build_context"));
     assert!(worker.iter().any(|n| n == "submit_work"));
     assert!(!worker.iter().any(|n| n == "task_comment_add"));
 
@@ -61,11 +62,13 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(!lead.iter().any(|n| n == "task_comment_add"));
 
     let planner = schema_names(tool_schemas_planner());
+    assert!(planner.iter().any(|n| n == "write"));
+    assert!(planner.iter().any(|n| n == "edit"));
     assert!(planner.iter().any(|n| n == "task_create"));
     assert!(planner.iter().any(|n| n == "task_transition"));
     assert!(planner.iter().any(|n| n == "submit_grooming"));
-    assert!(planner.iter().any(|n| n == "memory_write"));
-    assert!(planner.iter().any(|n| n == "memory_edit"));
+    assert!(!planner.iter().any(|n| n == "memory_write"));
+    assert!(!planner.iter().any(|n| n == "memory_edit"));
     // Per ADR-051 §1 the Planner now runs patrol mode, which needs to leave
     // diagnostic comments on stuck tasks and mutate learned_prompts for
     // specialist agents during the effectiveness review.

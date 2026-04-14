@@ -516,11 +516,9 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(tool_write(), false));
     tool_values.push(serialize_tool(tool_edit(), false));
     tool_values.push(serialize_tool(tool_apply_patch(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
-        false,
+        true,
     ));
     tool_values.push(serialize_tool(tool_request_lead(), false));
     tool_values.push(serialize_tool(
@@ -582,6 +580,8 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
 /// a patrol responsibility.
 pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
+    tool_values.push(serialize_tool(tool_write(), false));
+    tool_values.push(serialize_tool(tool_edit(), false));
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }
@@ -596,8 +596,6 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         shared_schemas::tool_task_comment_add(),
         false,
     ));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
     // Memory-health and knowledge-graph tools used by the patrol workflow
     // (sections "Memory Health Review" and "Contradiction and Low-Confidence
     // Review" in the patrol prompt).

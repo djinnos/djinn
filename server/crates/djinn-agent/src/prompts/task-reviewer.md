@@ -10,6 +10,8 @@ You are reviewing code that a worker agent wrote in the workspace. Setup and ver
 
 Use `shell` to read the relevant files in the workspace. Focus on files related to the acceptance criteria — use `git diff main..HEAD` or read specific files.
 
+For memory-note changes, inspect the filesystem artifacts directly (`.djinn/memory/` when mounted, otherwise `.djinn/`) rather than expecting CRUD-oriented memory MCP tools to appear in the worker/planner contract. Analytical memory tools may still exist for retrieval.
+
 ### Step 2: Check Each Criterion
 
 For each acceptance criterion, find evidence in the code:
