@@ -22,9 +22,9 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use djinn_db::{Database, default_db_path};
 use djinn_server::daemon;
 use djinn_server::db::checkpoint;
+use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
 
@@ -52,6 +52,18 @@ struct Cli {
     /// Database path (default: ~/.djinn/djinn.db)
     #[arg(long, env = "DJINN_DB_PATH")]
     db_path: Option<PathBuf>,
+
+    /// Database backend selection seam for staged SQLite -> Dolt/MySQL migration.
+    #[arg(long, env = "DJINN_DB_BACKEND")]
+    db_backend: Option<String>,
+
+    /// MySQL-compatible DSN for future Dolt/MySQL runtime bootstrap.
+    #[arg(long, env = "DJINN_MYSQL_URL")]
+    mysql_url: Option<String>,
+
+    /// Flavor of the MySQL-compatible backend: mysql or dolt.
+    #[arg(long, env = "DJINN_MYSQL_FLAVOR")]
+    mysql_flavor: Option<String>,
 }
 
 fn main() {
@@ -96,12 +108,34 @@ async fn async_main() {
         shutdown_cancel.cancel();
     });
 
-    let db_path = cli.db_path.unwrap_or_else(default_db_path);
-    tracing::info!(path = %db_path.display(), "opening database");
-    let db = Database::open(&db_path).expect("failed to open database");
-    checkpoint::spawn(db.clone(), cancel.clone());
+    let db_runtime = DatabaseRuntimeManager::new(
+        DatabaseRuntimeConfig::from_cli_and_env(
+            cli.db_path.clone(),
+            cli.db_backend.clone(),
+            cli.mysql_url.clone(),
+            cli.mysql_flavor.clone(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "invalid database runtime configuration");
+            std::process::exit(1);
+        }),
+    );
+    let startup_mode = db_runtime.startup_mode();
+    tracing::info!(
+        backend = %startup_mode.backend_label,
+        target = %startup_mode.target,
+        managed_process = startup_mode.managed_process,
+        "opening database runtime"
+    );
+    let db = db_runtime.bootstrap().unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to open database runtime");
+        std::process::exit(1);
+    });
+    if db_runtime.should_spawn_sqlite_checkpoint() {
+        checkpoint::spawn(db.clone(), cancel.clone());
+    }
 
-    let state = AppState::new(db, cancel.clone());
+    let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
     djinn_server::housekeeping::spawn(state.clone());
     state.initialize().await;
     state.initialize_agents().await;

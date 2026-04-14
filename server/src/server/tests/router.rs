@@ -22,6 +22,24 @@ async fn health_returns_ok() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
+    assert_eq!(json["database"]["backend_label"], "sqlite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn db_info_reports_selected_backend() {
+    let app = test_helpers::create_test_app();
+
+    let req = axum::http::Request::builder()
+        .uri("/db-info")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["backend"], "sqlite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
