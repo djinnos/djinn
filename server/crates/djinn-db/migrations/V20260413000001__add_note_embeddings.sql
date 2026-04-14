@@ -17,7 +17,8 @@ CREATE TABLE note_embedding_meta (
     embedded_at     TEXT NOT NULL,
     model_version   TEXT NOT NULL,
     embedding_dim   INTEGER NOT NULL,
-    extension_state TEXT NOT NULL DEFAULT 'pending'
+    extension_state TEXT NOT NULL DEFAULT 'pending',
+    branch          TEXT NOT NULL DEFAULT 'main'
 );
 
 CREATE INDEX idx_note_embedding_meta_model_version
@@ -25,3 +26,6 @@ CREATE INDEX idx_note_embedding_meta_model_version
 
 CREATE INDEX idx_note_embedding_meta_embedded_at
     ON note_embedding_meta(embedded_at DESC);
+
+CREATE INDEX idx_note_embedding_meta_branch
+    ON note_embedding_meta(branch);

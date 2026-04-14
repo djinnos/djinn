@@ -2,6 +2,111 @@ use super::*;
 use crate::repositories::note::NoteSearchParams;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn semantic_candidate_branch_resolution_tracks_task_and_canonical_metadata() {
+    let _guard = super::sqlite_vec_test_lock().lock().await;
+    crate::database::set_sqlite_vec_disabled_for_tests(false);
+
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
+
+    let epic_id = make_epic(&db, &project.id).await;
+    let task = TaskRepository::new(db.clone(), EventBus::noop())
+        .create_with_ac(
+            &epic_id,
+            "Branch-aware semantic retrieval",
+            "exercise branch-aware embeddings",
+            "design",
+            "task",
+            1,
+            "worker",
+            None,
+            Some(r#"[{"title":"semantic"}]"#),
+        )
+        .await
+        .unwrap();
+
+    let canonical = repo
+        .create_db_note(&project.id, "Canonical Semantic", "body", "reference", "[]")
+        .await
+        .unwrap();
+    let branch_local = repo
+        .create_db_note(&project.id, "Task Semantic", "body", "reference", "[]")
+        .await
+        .unwrap();
+    let unrelated = repo
+        .create_db_note(
+            &project.id,
+            "Unrelated Task Semantic",
+            "body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+    let embedding = vec![0.33_f32; 768];
+    repo.upsert_embedding(UpsertNoteEmbedding {
+        note_id: &canonical.id,
+        content_hash: "canonical-hash",
+        model_version: "model-v1",
+        embedding: &embedding,
+        branch: "main",
+    })
+    .await
+    .unwrap();
+    repo.upsert_embedding(UpsertNoteEmbedding {
+        note_id: &branch_local.id,
+        content_hash: "branch-hash",
+        model_version: "model-v1",
+        embedding: &embedding,
+        branch: &task_branch_name(&task.short_id),
+    })
+    .await
+    .unwrap();
+    repo.upsert_embedding(UpsertNoteEmbedding {
+        note_id: &unrelated.id,
+        content_hash: "unrelated-hash",
+        model_version: "model-v1",
+        embedding: &embedding,
+        branch: "task/other",
+    })
+    .await
+    .unwrap();
+
+    let branch_name = task_branch_name(&task.short_id);
+    assert_eq!(
+        repo.embedding_branch_for_note(&canonical.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("main")
+    );
+    assert_eq!(
+        repo.embedding_branch_for_note(&branch_local.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(branch_name.as_str())
+    );
+
+    let scores = repo
+        .semantic_candidate_scores(&project.id, &embedding, Some(&task.id), None, None, 10)
+        .await
+        .unwrap();
+    if !repo.db.sqlite_vec_status().await.unwrap().available {
+        assert!(scores.is_empty());
+    } else {
+        assert!(
+            scores.iter().all(|(id, _)| id != &unrelated.id),
+            "semantic retrieval should exclude unrelated task-branch embeddings"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fts5_search() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();

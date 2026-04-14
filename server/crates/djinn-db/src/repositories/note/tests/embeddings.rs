@@ -31,8 +31,22 @@ fn embedding_with_value(value: f32) -> Vec<f32> {
     vec![value; 768]
 }
 
+#[test]
+fn worktree_root_infers_task_embedding_branch() {
+    let worktree = std::path::Path::new("/tmp/.djinn/worktrees/exen");
+    assert_eq!(
+        infer_embedding_branch_from_worktree(worktree).as_deref(),
+        Some("task/exen")
+    );
+    assert_eq!(
+        infer_embedding_branch_from_worktree(std::path::Path::new("/tmp/.djinn/worktrees/_index")),
+        None
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedding_upsert_and_delete_round_trip() {
+    let _guard = super::sqlite_vec_test_lock().lock().await;
     crate::database::set_sqlite_vec_disabled_for_tests(false);
 
     let tmp = crate::database::test_tempdir().unwrap();
@@ -72,6 +86,7 @@ async fn embedding_upsert_and_delete_round_trip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedding_query_gracefully_returns_empty_when_vec_disabled() {
+    let _guard = super::sqlite_vec_test_lock().lock().await;
     crate::database::set_sqlite_vec_disabled_for_tests(true);
 
     let tmp = crate::database::test_tempdir().unwrap();
@@ -115,6 +130,7 @@ async fn embedding_query_gracefully_returns_empty_when_vec_disabled() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedding_lifecycle_tracks_create_update_delete_with_provider() {
+    let _guard = super::sqlite_vec_test_lock().lock().await;
     crate::database::set_sqlite_vec_disabled_for_tests(false);
 
     let tmp = crate::database::test_tempdir().unwrap();
@@ -178,7 +194,71 @@ async fn embedding_lifecycle_tracks_create_update_delete_with_provider() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn branch_embedding_promotion_and_discard_update_metadata() {
+    let _guard = super::sqlite_vec_test_lock().lock().await;
+    let tmp = crate::database::test_tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = make_project(&db, tmp.path()).await;
+    let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+    let note = repo
+        .create_db_note(&project.id, "Task Branch Note", "body", "reference", "[]")
+        .await
+        .unwrap();
+
+    repo.upsert_embedding(UpsertNoteEmbedding {
+        note_id: &note.id,
+        content_hash: "task-hash",
+        model_version: "model-v1",
+        embedding: &embedding_with_value(0.7),
+        branch: "task/exen",
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.embedding_branch_for_note(&note.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("task/exen")
+    );
+    assert_eq!(
+        repo.promote_branch_embeddings("task/exen", "main")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repo.embedding_branch_for_note(&note.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("main")
+    );
+
+    repo.upsert_embedding(UpsertNoteEmbedding {
+        note_id: &note.id,
+        content_hash: "task-hash-2",
+        model_version: "model-v1",
+        embedding: &embedding_with_value(0.8),
+        branch: "task/exen",
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.delete_embeddings_for_branch("task/exen")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(repo.get_embedding(&note.id).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reindex_repairs_missing_and_stale_embeddings_with_provider() {
+    let _guard = super::sqlite_vec_test_lock().lock().await;
     crate::database::set_sqlite_vec_disabled_for_tests(false);
 
     let tmp = crate::database::test_tempdir().unwrap();
@@ -247,6 +327,7 @@ async fn reindex_repairs_missing_and_stale_embeddings_with_provider() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedding_provider_failure_degrades_without_persisting_embeddings() {
+    let _guard = super::sqlite_vec_test_lock().lock().await;
     crate::database::set_sqlite_vec_disabled_for_tests(false);
 
     let tmp = crate::database::test_tempdir().unwrap();

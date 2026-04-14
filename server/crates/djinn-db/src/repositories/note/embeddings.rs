@@ -112,6 +112,14 @@ impl QdrantNoteVectorStore {
     }
 }
 
+pub fn infer_embedding_branch_from_worktree(worktree_root: &std::path::Path) -> Option<String> {
+    let short_id = worktree_root.file_name()?.to_str()?;
+    if short_id.is_empty() || short_id == "_index" {
+        return None;
+    }
+    Some(task_branch_name(short_id))
+}
+
 #[cfg(feature = "qdrant")]
 impl QdrantNoteVectorStore {
     pub fn client(&self) -> std::result::Result<qdrant_client::Qdrant, String> {
@@ -168,6 +176,14 @@ fn embedding_query_branches(branch: Option<&str>) -> Vec<String> {
     branches
 }
 
+pub(super) fn embedding_branch_filter_sql(branch: Option<&str>) -> (String, Vec<String>) {
+    let branches = embedding_query_branches(branch);
+    let placeholders = std::iter::repeat_n("?", branches.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (format!("m.branch IN ({placeholders})"), branches)
+}
+
 #[cfg(feature = "qdrant")]
 fn qdrant_value_from_str(value: &str) -> qdrant_client::qdrant::Value {
     use qdrant_client::qdrant::value::Kind;
@@ -178,10 +194,7 @@ fn qdrant_value_from_str(value: &str) -> qdrant_client::qdrant::Value {
 }
 
 #[cfg(feature = "qdrant")]
-fn qdrant_keyword_condition(
-    key: &str,
-    value: &str,
-) -> qdrant_client::qdrant::Condition {
+fn qdrant_keyword_condition(key: &str, value: &str) -> qdrant_client::qdrant::Condition {
     qdrant_client::qdrant::Condition::matches(key, value.to_string())
 }
 
@@ -608,7 +621,11 @@ impl NoteRepository {
             .await
     }
 
-    pub async fn promote_branch_embeddings(&self, from_branch: &str, to_branch: &str) -> Result<u64> {
+    pub async fn promote_branch_embeddings(
+        &self,
+        from_branch: &str,
+        to_branch: &str,
+    ) -> Result<u64> {
         self.db.ensure_initialized().await?;
         let result = sqlx::query(
             "UPDATE note_embedding_meta
@@ -624,12 +641,11 @@ impl NoteRepository {
 
     pub async fn delete_embeddings_for_branch(&self, branch: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let note_ids: Vec<String> = sqlx::query_scalar(
-            "SELECT note_id FROM note_embedding_meta WHERE branch = ?1",
-        )
-        .bind(canonical_embedding_branch(branch))
-        .fetch_all(self.db.pool())
-        .await?;
+        let note_ids: Vec<String> =
+            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?1")
+                .bind(canonical_embedding_branch(branch))
+                .fetch_all(self.db.pool())
+                .await?;
         let deleted = note_ids.len() as u64;
         for note_id in note_ids {
             self.delete_embedding(&note_id).await?;
@@ -639,16 +655,14 @@ impl NoteRepository {
 
     pub async fn embedding_branch_counts(&self) -> Result<Vec<(String, i64)>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as(
-                "SELECT branch, COUNT(*)
+        Ok(sqlx::query_as(
+            "SELECT branch, COUNT(*)
                  FROM note_embedding_meta
                  GROUP BY branch
                  ORDER BY branch",
-            )
-            .fetch_all(self.db.pool())
-            .await?,
         )
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     pub async fn embedding_branch_for_note(&self, note_id: &str) -> Result<Option<String>> {

@@ -39,7 +39,22 @@ The MySQL/Dolt schema snapshot intentionally omits those features and replaces t
 
 - a native `FULLTEXT` index on `notes(title, content, tags)`
 - ordinary relational embedding tables (`note_embeddings`, `note_embedding_meta`)
+- branch metadata on `note_embedding_meta.branch` so canonical (`main`) and task-local
+  (`task/<short_id>`) vectors can be filtered together during retrieval and promoted or deleted
+  during task completion / discard flows without depending on `sqlite-vec` tables
 - no trigger-maintained shadow tables
+
+## Branch-aware semantic retrieval contract
+
+- Task-session note writes infer an embedding branch from the worktree root (`.djinn/worktrees/<short_id>`)
+  and persist vectors/metadata under `task/<short_id>`.
+- Semantic retrieval composes `task/<short_id>` plus `main` by filtering embedding metadata on the
+  allowed branch set before RRF fusion with lexical, temporal, graph, and task-affinity signals.
+- Knowledge promotion updates embedding metadata from `task/<short_id>` to `main`; discard / abandon
+  deletes embeddings for the task branch entirely.
+- Qdrant collections should mirror this contract via payload fields keyed by `note_id`,
+  `content_hash`, `model_version`, and `branch`, with a payload index on `branch` for fast
+  `task/<short_id>` + `main` filtered queries.
 
 ## Verification hooks
 

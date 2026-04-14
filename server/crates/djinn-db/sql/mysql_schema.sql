@@ -131,6 +131,7 @@ CREATE TABLE note_embedding_meta (
     model_version   VARCHAR(255) NOT NULL,
     embedding_dim   INT NOT NULL,
     extension_state VARCHAR(64) NOT NULL DEFAULT 'pending',
+    branch          VARCHAR(255) NOT NULL DEFAULT 'main',
     CONSTRAINT fk_note_embedding_meta_note FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
 );
 
@@ -138,6 +139,8 @@ CREATE INDEX idx_note_embedding_meta_model_version
     ON note_embedding_meta(model_version);
 CREATE INDEX idx_note_embedding_meta_embedded_at
     ON note_embedding_meta(embedded_at DESC);
+CREATE INDEX idx_note_embedding_meta_branch
+    ON note_embedding_meta(branch);
 
 CREATE TABLE note_links (
     source_note_id       VARCHAR(36) NOT NULL,

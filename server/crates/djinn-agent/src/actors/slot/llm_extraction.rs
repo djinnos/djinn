@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use djinn_db::{
     NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
-    permalink_for,
+    permalink_for, task_branch_name,
 };
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
@@ -469,7 +469,8 @@ async fn run_llm_extraction_inner(
     );
 
     // ── Write notes ────────────────────────────────────────────────────────
-    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .with_embedding_branch(Some(task_branch_name(&task.short_id)));
     let provenance = format!(
         "\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*"
     );

@@ -41,7 +41,8 @@ pub use djinn_core::models::{
 pub use embeddings::{
     EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
     NoteEmbeddingProvider, NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore,
-    QdrantNoteVectorStore, SqliteVecNoteVectorStore, UpsertNoteEmbedding, task_branch_name,
+    QdrantNoteVectorStore, SqliteVecNoteVectorStore, UpsertNoteEmbedding,
+    infer_embedding_branch_from_worktree, task_branch_name,
 };
 pub use lexical_search::{
     LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
@@ -125,6 +126,12 @@ impl NoteRepository {
     }
 
     pub fn with_worktree_root(mut self, worktree_root: Option<PathBuf>) -> Self {
+        if let Some(embedding_branch) = worktree_root
+            .as_deref()
+            .and_then(infer_embedding_branch_from_worktree)
+        {
+            self.embedding_branch = embedding_branch;
+        }
         self.worktree_root = worktree_root;
         self
     }

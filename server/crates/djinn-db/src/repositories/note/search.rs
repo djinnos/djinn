@@ -1,4 +1,5 @@
 use super::*;
+use crate::repositories::note::embeddings::embedding_branch_filter_sql;
 use crate::repositories::note::rrf::rrf_fuse;
 use djinn_core::models::{ContradictionCandidate, TypeRisk};
 
@@ -325,13 +326,15 @@ impl NoteRepository {
         let placeholders = std::iter::repeat_n("?", note_ids.len())
             .collect::<Vec<_>>()
             .join(", ");
+        let (branch_filter_sql, branch_filter_values) =
+            embedding_branch_filter_sql(task_branch.as_deref());
         let sql = format!(
             "SELECT n.id FROM notes n
              JOIN note_embedding_meta m ON m.note_id = n.id
              WHERE n.project_id = ?1
                AND (?2 = '' OR n.folder = ?2)
                AND (?3 = '' OR n.note_type = ?3)
-               AND (?4 = '' OR m.branch IN (?4, 'main'))
+               AND {branch_filter_sql}
                AND n.id IN ({})",
             placeholders
         );
@@ -339,8 +342,10 @@ impl NoteRepository {
         let mut query = sqlx::query_scalar::<_, String>(&sql)
             .bind(project_id)
             .bind(folder.unwrap_or(""))
-            .bind(note_type.unwrap_or(""))
-            .bind(task_branch.unwrap_or_default());
+            .bind(note_type.unwrap_or(""));
+        for branch in &branch_filter_values {
+            query = query.bind(branch);
+        }
         for note_id in &note_ids {
             query = query.bind(note_id);
         }
@@ -366,19 +371,17 @@ impl NoteRepository {
             return Ok(None);
         };
 
-        Ok(
-            sqlx::query_scalar::<_, String>(
-                "SELECT short_id
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT short_id
                  FROM tasks
                  WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)
                  LIMIT 1",
-            )
-            .bind(project_id)
-            .bind(task_id)
-            .fetch_optional(self.db.pool())
-            .await?
-            .map(|short_id| task_branch_name(&short_id)),
         )
+        .bind(project_id)
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        .map(|short_id| task_branch_name(&short_id)))
     }
 
     /// Generate a markdown catalog (table of contents) for all notes in a
