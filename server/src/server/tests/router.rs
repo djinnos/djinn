@@ -3,7 +3,9 @@ use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use crate::memory_mount::{MemoryMountRuntimeStatus, MountedMemoryFilesystem};
+use crate::memory_mount::{
+    MemoryMountRuntimeStatus, MemoryMountViewFallbackReason, MountedMemoryFilesystem,
+};
 use crate::server::{self, AppState};
 use crate::test_helpers;
 use tokio_util::sync::CancellationToken;
@@ -35,6 +37,7 @@ async fn health_returns_ok() {
     assert!(json["memory_mount"]["project_id"].is_null());
     assert!(json["memory_mount"]["detail"].is_null());
     assert!(json["memory_mount"]["last_error"].is_null());
+    assert!(json["memory_mount"]["view"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -54,6 +57,8 @@ async fn health_reports_memory_mount_runtime_status_details() {
                 last_error: Some(
                     "failed to flush pending write for research/note.md: boom".to_string(),
                 ),
+                view_selection: Some(crate::memory_fs::MemoryViewSelection::Canonical),
+                view_fallback: Some(MemoryMountViewFallbackReason::NoRunningSessionForActiveTask),
             },
         )))
         .await;
@@ -84,6 +89,59 @@ async fn health_reports_memory_mount_runtime_status_details() {
         json["memory_mount"]["last_error"],
         "failed to flush pending write for research/note.md: boom"
     );
+    assert_eq!(json["memory_mount"]["view"]["kind"], "canonical");
+    assert_eq!(json["memory_mount"]["view"]["branch"], "main");
+    assert!(json["memory_mount"]["view"]["task_short_id"].is_null());
+    assert!(json["memory_mount"]["view"]["worktree_root"].is_null());
+    assert_eq!(
+        json["memory_mount"]["view"]["fallback_reason"],
+        "no_running_session_for_active_task"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_reports_task_scoped_memory_mount_view_details() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    state
+        .set_memory_mount_for_tests(Some(MountedMemoryFilesystem::with_status(
+            MemoryMountRuntimeStatus {
+                lifecycle: crate::server::MemoryMountLifecycleState::Mounted,
+                configured: true,
+                mount_path: Some(std::path::PathBuf::from("/mnt/djinn-memory")),
+                project_id: Some("project-123".to_string()),
+                detail: None,
+                pending_writes: 1,
+                last_error: None,
+                view_selection: Some(crate::memory_fs::MemoryViewSelection::Task {
+                    task_short_id: Some("u5qe".to_string()),
+                    worktree_root: Some(std::path::PathBuf::from(
+                        "/worktrees/project/.djinn/worktrees/u5qe",
+                    )),
+                }),
+                view_fallback: None,
+            },
+        )))
+        .await;
+    let app = server::router(state);
+
+    let req = axum::http::Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["memory_mount"]["view"]["kind"], "task_scoped");
+    assert_eq!(json["memory_mount"]["view"]["branch"], "task/u5qe");
+    assert_eq!(json["memory_mount"]["view"]["task_short_id"], "u5qe");
+    assert_eq!(
+        json["memory_mount"]["view"]["worktree_root"],
+        "/worktrees/project/.djinn/worktrees/u5qe"
+    );
+    assert!(json["memory_mount"]["view"]["fallback_reason"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

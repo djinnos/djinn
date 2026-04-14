@@ -9,7 +9,9 @@
 //! The mount is disabled by default. When enabled on Linux with the cargo feature present, Djinn
 //! mounts the single registered project's memory note tree at `memory_mount_path` using FUSE.
 //! Runtime note operations resolve through the active task/session branch context when one can be
-//! determined. Otherwise the mount falls back to the canonical `main` view.
+//! determined. Otherwise the mount falls back to the canonical `main` view. Runtime status and
+//! health surfaces expose that selection explicitly so operators can see whether agents are using
+//! the canonical view or a task-scoped worktree view, plus any fallback reason.
 //!
 //! Operational safety for this wave:
 //! - startup rejects invalid configuration before the HTTP server begins serving
@@ -40,10 +42,9 @@ use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 
 use crate::events::EventBus;
+use crate::memory_fs::MemoryViewSelection;
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
-use crate::memory_fs::{
-    MemoryEntryKind, MemoryEntryMetadata, MemoryFilesystemCore, MemoryViewSelection,
-};
+use crate::memory_fs::{MemoryEntryKind, MemoryEntryMetadata, MemoryFilesystemCore};
 
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
 const WRITE_DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
@@ -125,6 +126,18 @@ pub(crate) struct MemoryMountRuntimeStatus {
     pub(crate) detail: Option<String>,
     pub(crate) pending_writes: usize,
     pub(crate) last_error: Option<String>,
+    pub(crate) view_selection: Option<MemoryViewSelection>,
+    pub(crate) view_fallback: Option<MemoryMountViewFallbackReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemoryMountViewFallbackReason {
+    AmbiguousActiveTaskContext,
+    ActiveTaskNotFound,
+    ActiveTaskForDifferentProject,
+    NoRunningSessionForActiveTask,
+    ActiveSessionMissingWorktreePath,
+    ActiveSessionOnCanonicalProjectRoot,
 }
 
 #[cfg_attr(
@@ -141,6 +154,8 @@ impl MemoryMountRuntimeStatus {
             detail: None,
             pending_writes: 0,
             last_error: None,
+            view_selection: None,
+            view_fallback: None,
         }
     }
 
@@ -153,6 +168,8 @@ impl MemoryMountRuntimeStatus {
             detail: Some("mount validated but not yet attached".to_string()),
             pending_writes: 0,
             last_error: None,
+            view_selection: Some(MemoryViewSelection::Canonical),
+            view_fallback: Some(MemoryMountViewFallbackReason::AmbiguousActiveTaskContext),
         }
     }
 
@@ -170,6 +187,15 @@ impl MemoryMountRuntimeStatus {
 
     fn set_pending_writes(&mut self, pending_writes: usize) {
         self.pending_writes = pending_writes;
+    }
+
+    fn set_view_selection(
+        &mut self,
+        selection: MemoryViewSelection,
+        fallback: Option<MemoryMountViewFallbackReason>,
+    ) {
+        self.view_selection = Some(selection);
+        self.view_fallback = fallback;
     }
 }
 
@@ -432,10 +458,20 @@ impl LinuxMemoryFilesystem {
     }
 
     fn current_view_selection(&self) -> MemoryViewSelection {
-        self.runtime.block_on(
-            self.state
-                .resolve_memory_mount_view_selection(&self.project_id, &self.project_path),
-        )
+        self.runtime.block_on(async {
+            let resolution = self
+                .state
+                .resolve_memory_mount_view_selection_with_fallback(
+                    &self.project_id,
+                    &self.project_path,
+                )
+                .await;
+            self.runtime_status
+                .lock()
+                .await
+                .set_view_selection(resolution.selection.clone(), resolution.fallback.clone());
+            resolution.selection
+        })
     }
 
     fn next_fh(&self, path: &str) -> u64 {
@@ -595,9 +631,10 @@ impl LinuxMemoryFilesystem {
                 return;
             };
 
-            let selection = state
-                .resolve_memory_mount_view_selection(&project_id, &project_path)
+            let resolution = state
+                .resolve_memory_mount_view_selection_with_fallback(&project_id, &project_path)
                 .await;
+            let selection = resolution.selection.clone();
             let flush_result = core
                 .write_file_in_view(
                     &project_id,
@@ -615,6 +652,7 @@ impl LinuxMemoryFilesystem {
 
             let mut status = runtime_status.lock().await;
             status.set_pending_writes(pending_count);
+            status.set_view_selection(resolution.selection, resolution.fallback);
             match flush_result {
                 Ok(_) => {
                     if matches!(
@@ -1517,11 +1555,18 @@ mod tests {
 
         state.agent_context().register_activity(&task.id);
 
-        let selection = state
-            .resolve_memory_mount_view_selection(&project.id, Path::new(&project.path))
+        let resolution = state
+            .resolve_memory_mount_view_selection_with_fallback(
+                &project.id,
+                Path::new(&project.path),
+            )
             .await;
 
-        assert_eq!(selection, MemoryViewSelection::Canonical);
+        assert_eq!(resolution.selection, MemoryViewSelection::Canonical);
+        assert_eq!(
+            resolution.fallback,
+            Some(MemoryMountViewFallbackReason::NoRunningSessionForActiveTask)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1537,10 +1582,17 @@ mod tests {
         agent.register_activity(&first.id);
         agent.register_activity(&second.id);
 
-        let selection = state
-            .resolve_memory_mount_view_selection(&project.id, Path::new(&project.path))
+        let resolution = state
+            .resolve_memory_mount_view_selection_with_fallback(
+                &project.id,
+                Path::new(&project.path),
+            )
             .await;
 
-        assert_eq!(selection, MemoryViewSelection::Canonical);
+        assert_eq!(resolution.selection, MemoryViewSelection::Canonical);
+        assert_eq!(
+            resolution.fallback,
+            Some(MemoryMountViewFallbackReason::AmbiguousActiveTaskContext)
+        );
     }
 }

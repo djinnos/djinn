@@ -16,7 +16,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_db::{
     Database, NoopNoteVectorStore, NoteRepository, NoteVectorStore, ProjectRepository,
-    QdrantNoteVectorStore, SettingsRepository, SqliteVecNoteVectorStore,
+    QdrantNoteVectorStore, SettingsRepository, SqliteVecNoteVectorStore, task_branch_name,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -33,6 +33,12 @@ use canonical_graph_refresh_planner::{
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemoryMountViewResolution {
+    pub(crate) selection: MemoryViewSelection,
+    pub(crate) fallback: Option<crate::memory_mount::MemoryMountViewFallbackReason>,
+}
 
 /// Shared application state, cheaply cloneable via `Arc`.
 #[derive(Clone)]
@@ -237,10 +243,65 @@ impl AppState {
                 detail: None,
                 pending_writes: 0,
                 last_error: None,
+                view: None,
             };
         };
         let active = mount.is_active();
         let status = mount.status_snapshot().await;
+        let view = status.view_selection.as_ref().map(|selection| {
+            let kind = match selection {
+                MemoryViewSelection::Canonical => crate::server::MemoryMountViewKind::Canonical,
+                MemoryViewSelection::Branch { .. }
+                | MemoryViewSelection::Worktree { .. }
+                | MemoryViewSelection::Task { .. } => crate::server::MemoryMountViewKind::TaskScoped,
+            };
+            let branch = match selection {
+                MemoryViewSelection::Canonical => "main".to_string(),
+                MemoryViewSelection::Branch { branch } => branch.clone(),
+                MemoryViewSelection::Worktree { .. } => "main".to_string(),
+                MemoryViewSelection::Task { task_short_id, .. } => task_short_id
+                    .as_deref()
+                    .map(task_branch_name)
+                    .unwrap_or_else(|| "main".to_string()),
+            };
+            let (task_short_id, worktree_root) = match selection {
+                MemoryViewSelection::Task {
+                    task_short_id,
+                    worktree_root,
+                } => (
+                    task_short_id.clone(),
+                    worktree_root.as_ref().map(|root| root.display().to_string()),
+                ),
+                MemoryViewSelection::Worktree { root } => (None, Some(root.display().to_string())),
+                _ => (None, None),
+            };
+            crate::server::MemoryMountViewHealth {
+                kind,
+                branch,
+                task_short_id,
+                worktree_root,
+                fallback_reason: status.view_fallback.as_ref().map(|fallback| match fallback {
+                    crate::memory_mount::MemoryMountViewFallbackReason::AmbiguousActiveTaskContext => {
+                        crate::server::MemoryMountFallbackReason::AmbiguousActiveTaskContext
+                    }
+                    crate::memory_mount::MemoryMountViewFallbackReason::ActiveTaskNotFound => {
+                        crate::server::MemoryMountFallbackReason::ActiveTaskNotFound
+                    }
+                    crate::memory_mount::MemoryMountViewFallbackReason::ActiveTaskForDifferentProject => {
+                        crate::server::MemoryMountFallbackReason::ActiveTaskForDifferentProject
+                    }
+                    crate::memory_mount::MemoryMountViewFallbackReason::NoRunningSessionForActiveTask => {
+                        crate::server::MemoryMountFallbackReason::NoRunningSessionForActiveTask
+                    }
+                    crate::memory_mount::MemoryMountViewFallbackReason::ActiveSessionMissingWorktreePath => {
+                        crate::server::MemoryMountFallbackReason::ActiveSessionMissingWorktreePath
+                    }
+                    crate::memory_mount::MemoryMountViewFallbackReason::ActiveSessionOnCanonicalProjectRoot => {
+                        crate::server::MemoryMountFallbackReason::ActiveSessionOnCanonicalProjectRoot
+                    }
+                }),
+            }
+        });
         crate::server::MemoryMountHealth {
             enabled: status.configured,
             active,
@@ -251,6 +312,7 @@ impl AppState {
             detail: status.detail,
             pending_writes: status.pending_writes,
             last_error: status.last_error,
+            view,
         }
     }
 
@@ -271,6 +333,16 @@ impl AppState {
         project_id: &str,
         project_path: &Path,
     ) -> MemoryViewSelection {
+        self.resolve_memory_mount_view_selection_with_fallback(project_id, project_path)
+            .await
+            .selection
+    }
+
+    pub(crate) async fn resolve_memory_mount_view_selection_with_fallback(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+    ) -> MemoryMountViewResolution {
         let active_task_ids: Vec<String> = self
             .inner
             .active_tasks
@@ -281,7 +353,12 @@ impl AppState {
             .collect();
 
         let [task_id] = active_task_ids.as_slice() else {
-            return MemoryViewSelection::Canonical;
+            return MemoryMountViewResolution {
+                selection: MemoryViewSelection::Canonical,
+                fallback: Some(
+                    crate::memory_mount::MemoryMountViewFallbackReason::AmbiguousActiveTaskContext,
+                ),
+            };
         };
 
         let task_repo = djinn_db::TaskRepository::new(self.db().clone(), self.event_bus());
@@ -290,7 +367,12 @@ impl AppState {
                 task_id,
                 "memory mount falling back to main: active task not found"
             );
-            return MemoryViewSelection::Canonical;
+            return MemoryMountViewResolution {
+                selection: MemoryViewSelection::Canonical,
+                fallback: Some(
+                    crate::memory_mount::MemoryMountViewFallbackReason::ActiveTaskNotFound,
+                ),
+            };
         };
 
         if task.project_id != project_id {
@@ -300,7 +382,12 @@ impl AppState {
                 mount_project_id = %project_id,
                 "memory mount falling back to main: active task belongs to another project"
             );
-            return MemoryViewSelection::Canonical;
+            return MemoryMountViewResolution {
+                selection: MemoryViewSelection::Canonical,
+                fallback: Some(
+                    crate::memory_mount::MemoryMountViewFallbackReason::ActiveTaskForDifferentProject,
+                ),
+            };
         }
 
         let session_repo = djinn_db::SessionRepository::new(self.db().clone(), self.event_bus());
@@ -310,7 +397,12 @@ impl AppState {
                 short_id = %task.short_id,
                 "memory mount falling back to main: no running session for active task"
             );
-            return MemoryViewSelection::Canonical;
+            return MemoryMountViewResolution {
+                selection: MemoryViewSelection::Canonical,
+                fallback: Some(
+                    crate::memory_mount::MemoryMountViewFallbackReason::NoRunningSessionForActiveTask,
+                ),
+            };
         };
 
         let Some(worktree_path) = session
@@ -324,7 +416,12 @@ impl AppState {
                 short_id = %task.short_id,
                 "memory mount falling back to main: active session has no worktree path"
             );
-            return MemoryViewSelection::Canonical;
+            return MemoryMountViewResolution {
+                selection: MemoryViewSelection::Canonical,
+                fallback: Some(
+                    crate::memory_mount::MemoryMountViewFallbackReason::ActiveSessionMissingWorktreePath,
+                ),
+            };
         };
 
         let worktree_root = PathBuf::from(worktree_path);
@@ -334,12 +431,20 @@ impl AppState {
                 short_id = %task.short_id,
                 "memory mount falling back to main: active session is on canonical project root"
             );
-            return MemoryViewSelection::Canonical;
+            return MemoryMountViewResolution {
+                selection: MemoryViewSelection::Canonical,
+                fallback: Some(
+                    crate::memory_mount::MemoryMountViewFallbackReason::ActiveSessionOnCanonicalProjectRoot,
+                ),
+            };
         }
 
-        MemoryViewSelection::Task {
-            task_short_id: Some(task.short_id),
-            worktree_root: Some(worktree_root),
+        MemoryMountViewResolution {
+            selection: MemoryViewSelection::Task {
+                task_short_id: Some(task.short_id),
+                worktree_root: Some(worktree_root),
+            },
+            fallback: None,
         }
     }
 

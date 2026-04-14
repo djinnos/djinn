@@ -46,6 +46,44 @@ pub(crate) enum MemoryMountLifecycleState {
     Degraded,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryMountViewKind {
+    Canonical,
+    TaskScoped,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryMountFallbackReason {
+    AmbiguousActiveTaskContext,
+    ActiveTaskNotFound,
+    ActiveTaskForDifferentProject,
+    NoRunningSessionForActiveTask,
+    ActiveSessionMissingWorktreePath,
+    ActiveSessionOnCanonicalProjectRoot,
+}
+
+/// Structured view-selection state for the mounted memory surface.
+///
+/// ADR-057's filesystem-first flow means agents primarily interact with memory through the mounted
+/// filesystem instead of CRUD-oriented MCP tools. Operators can use this payload to tell whether
+/// the mount is currently serving the canonical `main` knowledge view or a task-scoped worktree
+/// view, plus why the runtime fell back to canonical when it could not safely select a task view.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct MemoryMountViewHealth {
+    kind: MemoryMountViewKind,
+    branch: String,
+    task_short_id: Option<String>,
+    worktree_root: Option<String>,
+    fallback_reason: Option<MemoryMountFallbackReason>,
+}
+
+/// Health snapshot for the ADR-057 mounted-memory runtime.
+///
+/// The `view` field makes the filesystem-first exposure contract explicit: it reports which memory
+/// view mounted agents are actually reading and writing right now, rather than forcing operators to
+/// infer canonical-vs-task-scoped behavior from debug logs.
 #[derive(Serialize)]
 pub(crate) struct MemoryMountHealth {
     enabled: bool,
@@ -57,6 +95,7 @@ pub(crate) struct MemoryMountHealth {
     detail: Option<String>,
     pending_writes: usize,
     last_error: Option<String>,
+    view: Option<MemoryMountViewHealth>,
 }
 
 async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
