@@ -2,6 +2,7 @@ use std::path::Path;
 
 use djinn_core::events::EventBus;
 use djinn_core::models::Note;
+use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 
 use crate::TaskRepository;
@@ -20,6 +21,11 @@ mod scope_paths_regressions;
 mod search_ranking;
 mod session_scoped_consolidation;
 mod wikilink_graph;
+
+fn sqlite_vec_test_lock() -> &'static Mutex<()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 async fn make_epic(db: &Database, project_id: &str) -> String {
     let epic_id = uuid::Uuid::now_v7().to_string();

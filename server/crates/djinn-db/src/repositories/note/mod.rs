@@ -39,9 +39,10 @@ pub use djinn_core::models::{
     NoteDedupCandidate,
 };
 pub use embeddings::{
-    EmbeddedNote, NoopNoteVectorStore, NoteEmbeddingMatch, NoteEmbeddingProvider,
-    NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore, QdrantNoteVectorStore,
-    SqliteVecNoteVectorStore, UpsertNoteEmbedding,
+    EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
+    NoteEmbeddingProvider, NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore,
+    QdrantNoteVectorStore, SqliteVecNoteVectorStore, UpsertNoteEmbedding,
+    infer_embedding_branch_from_worktree, task_branch_name,
 };
 pub use lexical_search::{
     LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
@@ -108,6 +109,7 @@ pub struct NoteRepository {
     events: EventBus,
     worktree_root: Option<PathBuf>,
     embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
+    embedding_branch: String,
     vector_store: Arc<dyn NoteVectorStore>,
 }
 
@@ -118,11 +120,18 @@ impl NoteRepository {
             events,
             worktree_root: None,
             embedding_provider: None,
+            embedding_branch: "main".to_string(),
             vector_store: Arc::new(SqliteVecNoteVectorStore) as Arc<dyn NoteVectorStore>,
         }
     }
 
     pub fn with_worktree_root(mut self, worktree_root: Option<PathBuf>) -> Self {
+        if let Some(embedding_branch) = worktree_root
+            .as_deref()
+            .and_then(infer_embedding_branch_from_worktree)
+        {
+            self.embedding_branch = embedding_branch;
+        }
         self.worktree_root = worktree_root;
         self
     }
@@ -132,6 +141,13 @@ impl NoteRepository {
         embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
     ) -> Self {
         self.embedding_provider = embedding_provider;
+        self
+    }
+
+    pub fn with_embedding_branch(mut self, embedding_branch: Option<String>) -> Self {
+        if let Some(embedding_branch) = embedding_branch {
+            self.embedding_branch = embedding_branch;
+        }
         self
     }
 
@@ -148,6 +164,10 @@ impl NoteRepository {
 
     pub fn embedding_provider(&self) -> Option<Arc<dyn NoteEmbeddingProvider>> {
         self.embedding_provider.clone()
+    }
+
+    pub fn embedding_branch(&self) -> &str {
+        &self.embedding_branch
     }
 
     pub fn vector_store(&self) -> Arc<dyn NoteVectorStore> {

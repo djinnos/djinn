@@ -150,6 +150,7 @@ pub async fn memory_search(
             .semantic_candidate_scores(
                 &project_id,
                 &embedding.values,
+                task_id,
                 p.folder.as_deref(),
                 p.note_type.as_deref(),
                 limit,

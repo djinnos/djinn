@@ -51,5 +51,26 @@ ADR-054 should close immediately after the reconciliation wave proves those thre
 
 ## Relations
 - [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
+<<<<<<< HEAD
+<<<<<<< HEAD
+<<<<<<< HEAD
+- [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
+- [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]
+
+## Link cleanup note
+- Repaired the stale ADR-053 permalink alias above to the canonical target `[[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]`.
+- Residual legacy title-alias debt in adjacent design notes was left to the narrower current-note cleanup pass unless a canonical target was unambiguous.
+=======
+- [[reference/project-memory-broken-link-and-orphan-backlog-triage]]
+- [[cases/classify-residual-broken-wikilinks-by-legacy-alias-type-before-cleanup]]
+- [[cases/bucket-intentional-orphan-heavy-folders-separately-in-memory-health-reporting]]
+- [[cases/broken-link-backlog-shifted-from-roadmap-artifact-to-legacy-shorthand-adr-title-aliases]]
+>>>>>>> origin/main
+=======
+- [[design/working-spec-adr-055-sqlite-seam-inventory]]
+- [[design/working-spec-adr-055-task-knowledge-branching-rollout]]
+>>>>>>> origin/main
+=======
 - [[research/technical/adr-054-closure-artifact-reconciliation-findings]]
 - [[reference/project-memory-broken-link-and-orphan-backlog-triage]]
+>>>>>>> origin/main

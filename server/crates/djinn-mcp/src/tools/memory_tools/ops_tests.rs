@@ -445,6 +445,7 @@ mod tests {
             content_hash: "semantic-hash",
             model_version: "nomic-embed-text-v1.5",
             embedding: &embedding,
+            branch: "main",
         })
         .await
         .unwrap();
@@ -469,7 +470,7 @@ mod tests {
         ));
 
         let semantic_candidates = repo
-            .semantic_candidate_scores(&project.id, &embedding, None, None, 10)
+            .semantic_candidate_scores(&project.id, &embedding, None, None, None, 10)
             .await
             .unwrap();
 

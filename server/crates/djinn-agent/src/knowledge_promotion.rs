@@ -72,7 +72,7 @@ fn preview_candidate(diff: WorktreeNoteDiff) -> KnowledgePromotionNoteCandidate 
 async fn project_and_worktree_for_task(
     task_id: &str,
     app_state: &AgentContext,
-) -> Option<(String, String, PathBuf)> {
+) -> Option<(String, String, String, PathBuf)> {
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -89,14 +89,16 @@ async fn project_and_worktree_for_task(
         .await
         .ok()
         .flatten();
+    let task_short_id = task.short_id.clone();
     Some((
         task.project_id,
+        task_short_id.clone(),
         project_path,
         worktree.map(PathBuf::from).unwrap_or_else(|| {
             Path::new(&fallback_project_path)
                 .join(".djinn")
                 .join("worktrees")
-                .join(&task.short_id)
+                .join(&task_short_id)
         }),
     ))
 }
@@ -105,7 +107,7 @@ pub async fn preview_task_knowledge_promotion(
     task_id: &str,
     app_state: &AgentContext,
 ) -> Option<KnowledgePromotionPreview> {
-    let (project_id, project_path, worktree_path) =
+    let (project_id, _task_short_id, project_path, worktree_path) =
         project_and_worktree_for_task(task_id, app_state).await?;
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -146,11 +148,12 @@ pub async fn apply_task_knowledge_decision(
     cleanup_reason: KnowledgeCleanupReason,
     app_state: &AgentContext,
 ) -> Option<KnowledgePromotionResult> {
-    let (project_id, project_path, worktree_path) =
+    let (project_id, task_short_id, project_path, worktree_path) =
         project_and_worktree_for_task(task_id, app_state).await?;
     let preview = preview_task_knowledge_promotion(task_id, app_state).await?;
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let branch = djinn_db::task_branch_name(&task_short_id);
 
     let promoted_count = match decision {
         KnowledgePromotionDecision::Promote => note_repo
@@ -163,6 +166,17 @@ pub async fn apply_task_knowledge_decision(
         KnowledgePromotionDecision::Promote => 0,
         KnowledgePromotionDecision::Discard => note_repo
             .delete_worktree_notes_from_canonical(&project_id, &worktree_path)
+            .await
+            .unwrap_or(0),
+    };
+
+    let embedding_rows = match decision {
+        KnowledgePromotionDecision::Promote => note_repo
+            .promote_branch_embeddings(&branch, "main")
+            .await
+            .unwrap_or(0),
+        KnowledgePromotionDecision::Discard => note_repo
+            .delete_embeddings_for_branch(&branch)
             .await
             .unwrap_or(0),
     };
@@ -184,6 +198,8 @@ pub async fn apply_task_knowledge_decision(
                 "extraction_quality": preview.extraction_quality,
                 "promoted_count": promoted_count,
                 "discarded_count": discarded_count,
+                "embedding_rows": embedding_rows,
+                "embedding_branch": branch,
             })
             .to_string(),
         )
