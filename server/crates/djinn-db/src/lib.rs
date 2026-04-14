@@ -13,9 +13,9 @@ pub mod test_support {
 }
 
 pub use database::{
-    Database, DatabaseBackendKind, DatabaseBootstrapInfo, DatabaseConnectConfig,
-    MysqlBackendFlavor, MysqlDatabaseConfig, SqliteDatabaseConfig, SqliteVecStatus,
-    default_db_path,
+    Database, DatabaseBackendCapabilities, DatabaseBackendKind, DatabaseBootstrapInfo,
+    DatabaseConnectConfig, DatabasePool, MysqlBackendFlavor, MysqlDatabaseConfig,
+    NoteSearchBackend, NoteVectorBackend, SqliteDatabaseConfig, SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
 pub use migrations::{
@@ -41,7 +41,7 @@ pub use repositories::{
         CreatedCanonicalConsolidatedNote, DbNoteGroup, EmbeddedNote, LexicalSearchBackend,
         LexicalSearchMode, LexicalSearchPlan, NoopNoteVectorStore, NoteAssociationEntry,
         NoteConsolidationRepository, NoteDedupCandidate, NoteEmbeddingMatch, NoteEmbeddingProvider,
-        NoteEmbeddingRecord, NoteRepository, NoteSearchParams, NoteVectorBackend, NoteVectorStore,
+        NoteEmbeddingRecord, NoteRepository, NoteSearchParams, NoteVectorStore,
         QdrantNoteVectorStore, STALE_CITATION, SqliteVecNoteVectorStore, UpdateNoteIndexParams,
         UpsertNoteEmbedding, build_lexical_search_plan, file_path_for, file_path_for_with_status,
         folder_for_type, folder_for_type_with_status, infer_embedding_branch_from_worktree,

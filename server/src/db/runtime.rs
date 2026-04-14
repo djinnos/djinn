@@ -136,10 +136,10 @@ impl DatabaseRuntimeManager {
             }
             DatabaseBackendKind::Mysql => {
                 if mode.managed_process {
-                    "dolt sql-server lifecycle hook reserved here; bootstrap is staged until repository cutover completes"
+                    "dolt sql-server backend selected; runtime will use the mysql-compatible connection seam"
                         .to_owned()
                 } else {
-                    "mysql backend configuration parsed; runtime health checks will attach here once repository support lands"
+                    "mysql backend selected; runtime will use the mysql-compatible connection seam"
                         .to_owned()
                 }
             }
@@ -212,7 +212,12 @@ fn runtime_detail_for_bootstrap(bootstrap: &DatabaseBootstrapInfo) -> String {
                     .to_owned()
             }
         }
-        DatabaseBackendKind::Mysql => "mysql-compatible backend selected".to_owned(),
+        DatabaseBackendKind::Mysql => {
+            format!(
+                "{} backend ready via mysql-compatible sqlx pool",
+                bootstrap.backend_label
+            )
+        }
     }
 }
 

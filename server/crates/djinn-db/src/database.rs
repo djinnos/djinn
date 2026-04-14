@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::ffi::sqlite3_auto_extension;
 use serde::{Deserialize, Serialize};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Executor, SqlitePool};
+use sqlx::{Executor, MySqlPool, SqlitePool};
 use tokio::sync::OnceCell;
 use tracing::warn;
 
@@ -94,6 +95,52 @@ pub struct DatabaseBootstrapInfo {
     pub readonly: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoteSearchBackend {
+    SqliteFts5,
+    MysqlFulltext,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoteVectorBackend {
+    SqliteVec,
+    External,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseBackendCapabilities {
+    pub backend_kind: DatabaseBackendKind,
+    pub backend_label: String,
+    pub lexical_search: NoteSearchBackend,
+    pub note_vector_backend: NoteVectorBackend,
+    pub supports_sqlite_pragmas: bool,
+    pub supports_sqlite_vec: bool,
+    pub supports_branching_metadata: bool,
+    pub supports_readonly_connection_mode: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum DatabasePool {
+    Sqlite(SqlitePool),
+    Mysql(MySqlPool),
+}
+
+impl DatabasePool {
+    pub fn as_sqlite(&self) -> Option<&SqlitePool> {
+        match self {
+            Self::Sqlite(pool) => Some(pool),
+            Self::Mysql(_) => None,
+        }
+    }
+
+    pub fn as_mysql(&self) -> Option<&MySqlPool> {
+        match self {
+            Self::Sqlite(_) => None,
+            Self::Mysql(pool) => Some(pool),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -114,10 +161,11 @@ static SQLITE_VEC_DISABLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug)]
 pub struct Database {
-    pool: SqlitePool,
-    db_path: std::path::PathBuf,
+    pool: DatabasePool,
+    db_path: Option<std::path::PathBuf>,
     readonly: bool,
     bootstrap: DatabaseBootstrapInfo,
+    capabilities: DatabaseBackendCapabilities,
     initialized: Arc<OnceCell<()>>,
     sqlite_vec_status: Arc<OnceCell<SqliteVecStatus>>,
 }
@@ -162,19 +210,30 @@ impl Database {
     pub fn open_with_config(config: DatabaseConnectConfig) -> DbResult<Self> {
         match config {
             DatabaseConnectConfig::Sqlite(sqlite) => Self::open_sqlite(&sqlite, 8),
-            DatabaseConnectConfig::Mysql(mysql) => Err(DbError::InvalidData(format!(
-                "database backend `{}` is configured but djinn-db repositories still require SQLite during the staged Dolt/MySQL migration",
-                mysql.display_backend()
-            ))),
+            DatabaseConnectConfig::Mysql(mysql) => Self::open_mysql(&mysql, 8),
         }
     }
 
     pub fn pool(&self) -> &SqlitePool {
+        self.pool.as_sqlite().expect(
+            "sqlite pool requested for a mysql/dolt runtime; branch on backend_capabilities() before using sqlite-specific repository paths",
+        )
+    }
+
+    pub fn mysql_pool(&self) -> Option<&MySqlPool> {
+        self.pool.as_mysql()
+    }
+
+    pub fn pool_kind(&self) -> &DatabasePool {
         &self.pool
     }
 
     pub fn bootstrap_info(&self) -> &DatabaseBootstrapInfo {
         &self.bootstrap
+    }
+
+    pub fn backend_capabilities(&self) -> &DatabaseBackendCapabilities {
+        &self.capabilities
     }
 
     pub fn backend_kind(&self) -> DatabaseBackendKind {
@@ -221,14 +280,64 @@ impl Database {
             .connect_lazy_with(opts);
 
         Ok(Self {
-            pool,
-            db_path: config.path.clone(),
+            pool: DatabasePool::Sqlite(pool),
+            db_path: Some(config.path.clone()),
             readonly: config.readonly,
             bootstrap: DatabaseBootstrapInfo {
                 backend_kind: DatabaseBackendKind::Sqlite,
                 backend_label: "sqlite".to_owned(),
                 target: config.path.display().to_string(),
                 readonly: config.readonly,
+            },
+            capabilities: DatabaseBackendCapabilities {
+                backend_kind: DatabaseBackendKind::Sqlite,
+                backend_label: "sqlite".to_owned(),
+                lexical_search: NoteSearchBackend::SqliteFts5,
+                note_vector_backend: NoteVectorBackend::SqliteVec,
+                supports_sqlite_pragmas: true,
+                supports_sqlite_vec: true,
+                supports_branching_metadata: false,
+                supports_readonly_connection_mode: true,
+            },
+            initialized: Arc::new(OnceCell::new()),
+            sqlite_vec_status: Arc::new(OnceCell::new()),
+        })
+    }
+
+    fn open_mysql(config: &MysqlDatabaseConfig, max_connections: u32) -> DbResult<Self> {
+        let opts = MySqlConnectOptions::from_str(&config.url)?;
+        let pool = MySqlPoolOptions::new()
+            .max_connections(max_connections)
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("SET SESSION sql_mode = CONCAT(@@sql_mode, ',STRICT_ALL_TABLES')")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_lazy_with(opts);
+
+        let backend_label = config.display_backend().to_owned();
+        Ok(Self {
+            pool: DatabasePool::Mysql(pool),
+            db_path: None,
+            readonly: false,
+            bootstrap: DatabaseBootstrapInfo {
+                backend_kind: DatabaseBackendKind::Mysql,
+                backend_label: backend_label.clone(),
+                target: config.url.clone(),
+                readonly: false,
+            },
+            capabilities: DatabaseBackendCapabilities {
+                backend_kind: DatabaseBackendKind::Mysql,
+                backend_label,
+                lexical_search: NoteSearchBackend::MysqlFulltext,
+                note_vector_backend: NoteVectorBackend::External,
+                supports_sqlite_pragmas: false,
+                supports_sqlite_vec: false,
+                supports_branching_metadata: matches!(config.flavor, MysqlBackendFlavor::Dolt),
+                supports_readonly_connection_mode: false,
             },
             initialized: Arc::new(OnceCell::new()),
             sqlite_vec_status: Arc::new(OnceCell::new()),
@@ -240,8 +349,22 @@ impl Database {
             return Ok(());
         }
 
-        let db_path = self.db_path.clone();
-        let pool = self.pool.clone();
+        if let Some(pool) = self.mysql_pool().cloned() {
+            self.initialized
+                .get_or_try_init(|| async move {
+                    let mut conn = pool.acquire().await?;
+                    sqlx::query("SELECT 1").execute(&mut *conn).await?;
+                    Ok::<(), DbError>(())
+                })
+                .await?;
+            return Ok(());
+        }
+
+        let db_path = self
+            .db_path
+            .clone()
+            .expect("sqlite databases always retain a filesystem path");
+        let pool = self.pool().clone();
         let sqlite_vec_status = self.sqlite_vec_status.clone();
         self.initialized
             .get_or_try_init(|| async {
@@ -262,6 +385,16 @@ impl Database {
     }
 
     pub async fn sqlite_vec_status(&self) -> DbResult<SqliteVecStatus> {
+        if !self.capabilities.supports_sqlite_vec {
+            return Ok(SqliteVecStatus {
+                available: false,
+                version: None,
+                detail: Some(format!(
+                    "backend `{}` uses {:?} vectors instead of sqlite-vec",
+                    self.bootstrap.backend_label, self.capabilities.note_vector_backend
+                )),
+            });
+        }
         self.ensure_initialized().await?;
         Ok(self
             .sqlite_vec_status
@@ -734,16 +867,24 @@ mod tests {
         set_sqlite_vec_disabled_for_tests(false);
     }
 
-    #[test]
-    fn mysql_backend_selection_returns_explicit_staging_error() {
-        let error = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
+    #[tokio::test(flavor = "current_thread")]
+    async fn mysql_backend_selection_returns_explicit_staging_error() {
+        let db = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
             url: "mysql://root@127.0.0.1:3306/djinn".to_owned(),
             flavor: MysqlBackendFlavor::Dolt,
         }))
-        .expect_err("mysql/dolt backend should not silently fall back to sqlite");
+        .expect("mysql/dolt backend should construct a concrete runtime path");
 
-        assert!(error.to_string().contains("still require SQLite"));
-        assert!(error.to_string().contains("dolt"));
+        assert_eq!(db.backend_kind(), DatabaseBackendKind::Mysql);
+        assert_eq!(db.bootstrap_info().backend_label, "dolt");
+        assert!(db.mysql_pool().is_some());
+        assert!(db.pool_kind().as_sqlite().is_none());
+        assert_eq!(
+            db.backend_capabilities().lexical_search,
+            NoteSearchBackend::MysqlFulltext
+        );
+        assert!(db.backend_capabilities().supports_branching_metadata);
+        assert!(!db.backend_capabilities().supports_sqlite_vec);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -762,5 +903,37 @@ mod tests {
         assert_eq!(db.bootstrap_info().backend_label, "sqlite");
         assert_eq!(db.bootstrap_info().target, db_path.display().to_string());
         assert!(!db.bootstrap_info().readonly);
+        assert_eq!(
+            db.backend_capabilities().lexical_search,
+            NoteSearchBackend::SqliteFts5
+        );
+        assert!(db.backend_capabilities().supports_sqlite_pragmas);
+        assert!(db.backend_capabilities().supports_sqlite_vec);
+        assert!(!db.backend_capabilities().supports_branching_metadata);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mysql_and_dolt_capabilities_differ_only_by_branch_metadata() {
+        let mysql = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
+            url: "mysql://root@127.0.0.1:3306/djinn".to_owned(),
+            flavor: MysqlBackendFlavor::Mysql,
+        }))
+        .unwrap();
+        let dolt = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
+            url: "mysql://root@127.0.0.1:3307/djinn".to_owned(),
+            flavor: MysqlBackendFlavor::Dolt,
+        }))
+        .unwrap();
+
+        assert_eq!(
+            mysql.backend_capabilities().lexical_search,
+            dolt.backend_capabilities().lexical_search
+        );
+        assert_eq!(
+            mysql.backend_capabilities().note_vector_backend,
+            dolt.backend_capabilities().note_vector_backend
+        );
+        assert!(!mysql.backend_capabilities().supports_branching_metadata);
+        assert!(dolt.backend_capabilities().supports_branching_metadata);
     }
 }
