@@ -25,7 +25,7 @@ use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use serde::Deserialize;
 
 use super::session_extraction::SessionTaxonomy;
-use crate::context::AgentContext;
+use crate::context::{AgentContext, KnowledgeBranchTarget};
 
 // ── Prompt constants ──────────────────────────────────────────────────────────
 
@@ -82,6 +82,45 @@ struct ExtractedNote {
     content: String,
     #[serde(default)]
     scope_paths: Vec<String>,
+}
+
+impl ExtractionContext<'_> {
+    async fn create_extracted_note(
+        &self,
+        title: &str,
+        content: &str,
+        note_type: &str,
+        scope_paths_json: &str,
+    ) -> djinn_db::Result<djinn_core::models::Note> {
+        match self.knowledge_branch_target {
+            KnowledgeBranchTarget::Main => {
+                self.note_repo
+                    .create_db_note_with_scope(
+                        self.project_id,
+                        title,
+                        content,
+                        note_type,
+                        "[]",
+                        scope_paths_json,
+                    )
+                    .await
+            }
+            KnowledgeBranchTarget::TaskScoped { .. } => {
+                self.note_repo
+                    .create_with_scope(
+                        self.project_id,
+                        Path::new(self.project_path),
+                        title,
+                        content,
+                        note_type,
+                        None,
+                        "[]",
+                        scope_paths_json,
+                    )
+                    .await
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -149,6 +188,7 @@ struct ExtractionContext<'a> {
     provider: &'a dyn LlmProvider,
     project_id: &'a str,
     project_path: &'a str,
+    knowledge_branch_target: &'a KnowledgeBranchTarget,
     session_id: &'a str,
     task_short_id: &'a str,
     task_title: &'a str,
@@ -469,7 +509,20 @@ async fn run_llm_extraction_inner(
     );
 
     // ── Write notes ────────────────────────────────────────────────────────
-    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let knowledge_branch_target = app_state
+        .knowledge_branch_target_for(Path::new(project_path), session.worktree_path.as_deref());
+    tracing::debug!(
+        session_id = %session_id,
+        knowledge_branch_target = %knowledge_branch_target.intent_label(),
+        worktree_root = ?knowledge_branch_target.worktree_root(),
+        "llm_extraction: resolved knowledge write target"
+    );
+    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .with_worktree_root(
+            knowledge_branch_target
+                .worktree_root()
+                .map(Path::to_path_buf),
+        );
     let provenance = format!(
         "\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*"
     );
@@ -486,6 +539,7 @@ async fn run_llm_extraction_inner(
         provider: provider.as_ref(),
         project_id: &project.id,
         project_path: &project.path,
+        knowledge_branch_target: &knowledge_branch_target,
         session_id: &session_id,
         task_short_id: &task.short_id,
         task_title: &task.title,
@@ -634,13 +688,10 @@ async fn process_extracted_note(
     };
     let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
     match extraction_context
-        .note_repo
-        .create_db_note_with_scope(
-            extraction_context.project_id,
+        .create_extracted_note(
             &note.title,
             &content_with_provenance,
             note_type,
-            "[]",
             &scope_paths_json,
         )
         .await
