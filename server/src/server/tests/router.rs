@@ -42,11 +42,19 @@ async fn health_reports_memory_mount_runtime_status_details() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
     state
         .set_memory_mount_for_tests(Some(MountedMemoryFilesystem::with_status(
-            MemoryMountRuntimeStatus::failed(
-                Some(std::path::PathBuf::from("/mnt/djinn-memory")),
-                Some("project-123".to_string()),
-                "failed to flush pending write for research/note.md: boom",
-            ),
+            MemoryMountRuntimeStatus {
+                lifecycle: crate::server::MemoryMountLifecycleState::Degraded,
+                configured: true,
+                mount_path: Some(std::path::PathBuf::from("/mnt/djinn-memory")),
+                project_id: Some("project-123".to_string()),
+                detail: Some(
+                    "failed to flush pending write for research/note.md: boom".to_string(),
+                ),
+                pending_writes: 0,
+                last_error: Some(
+                    "failed to flush pending write for research/note.md: boom".to_string(),
+                ),
+            },
         )))
         .await;
     let app = server::router(state);
@@ -63,7 +71,7 @@ async fn health_reports_memory_mount_runtime_status_details() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["memory_mount"]["enabled"], true);
     assert_eq!(json["memory_mount"]["active"], false);
-    assert_eq!(json["memory_mount"]["lifecycle"], "failed");
+    assert_eq!(json["memory_mount"]["lifecycle"], "degraded");
     assert_eq!(json["memory_mount"]["configured"], true);
     assert_eq!(json["memory_mount"]["mount_path"], "/mnt/djinn-memory");
     assert_eq!(json["memory_mount"]["project_id"], "project-123");

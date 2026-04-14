@@ -156,23 +156,6 @@ impl MemoryMountRuntimeStatus {
         }
     }
 
-    pub(crate) fn failed(
-        mount_path: Option<PathBuf>,
-        project_id: Option<String>,
-        detail: impl Into<String>,
-    ) -> Self {
-        let detail = detail.into();
-        Self {
-            lifecycle: crate::server::MemoryMountLifecycleState::Failed,
-            configured: mount_path.is_some() || project_id.is_some(),
-            mount_path,
-            project_id,
-            detail: Some(detail.clone()),
-            pending_writes: 0,
-            last_error: Some(detail),
-        }
-    }
-
     fn mark_mounted(&mut self) {
         self.lifecycle = crate::server::MemoryMountLifecycleState::Mounted;
         self.detail = None;

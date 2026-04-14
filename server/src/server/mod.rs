@@ -44,7 +44,6 @@ pub(crate) enum MemoryMountLifecycleState {
     Configured,
     Mounted,
     Degraded,
-    Failed,
 }
 
 #[derive(Serialize)]
