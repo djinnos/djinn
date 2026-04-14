@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use djinn_core::models::Note;
 use djinn_db::{
     NoteRepository, folder_for_type, infer_note_type, normalize_virtual_note_path, permalink_for,
-    permalink_from_virtual_note_path, render_note_markdown, title_from_permalink,
+    permalink_from_virtual_note_path, render_note_markdown, task_branch_name, title_from_permalink,
     virtual_note_path_for_permalink,
 };
 use thiserror::Error;
@@ -41,6 +42,78 @@ pub struct ResolvedNotePath {
     pub logical_path: String,
     pub permalink: String,
     pub note_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MemoryViewSelection {
+    #[default]
+    Canonical,
+    Branch {
+        branch: String,
+    },
+    Worktree {
+        root: PathBuf,
+    },
+    Task {
+        task_short_id: Option<String>,
+        worktree_root: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone)]
+pub struct ResolvedMemoryView {
+    pub repo: NoteRepository,
+    pub branch: String,
+    pub worktree_root: Option<PathBuf>,
+}
+
+pub trait MemoryViewResolver: Send + Sync {
+    fn resolve_view(
+        &self,
+        selection: &MemoryViewSelection,
+        base_repo: &NoteRepository,
+    ) -> std::result::Result<ResolvedMemoryView, djinn_db::Error>;
+}
+
+#[derive(Debug, Default)]
+pub struct DefaultMemoryViewResolver;
+
+impl MemoryViewResolver for DefaultMemoryViewResolver {
+    fn resolve_view(
+        &self,
+        selection: &MemoryViewSelection,
+        base_repo: &NoteRepository,
+    ) -> std::result::Result<ResolvedMemoryView, djinn_db::Error> {
+        let mut repo = base_repo.clone();
+        let (branch, worktree_root) = match selection {
+            MemoryViewSelection::Canonical => ("main".to_string(), None),
+            MemoryViewSelection::Branch { branch } => (branch.clone(), None),
+            MemoryViewSelection::Worktree { root } => {
+                repo = repo.with_worktree_root(Some(root.clone()));
+                (repo.embedding_branch().to_string(), Some(root.clone()))
+            }
+            MemoryViewSelection::Task {
+                task_short_id,
+                worktree_root,
+            } => {
+                if let Some(root) = worktree_root.clone() {
+                    repo = repo.with_worktree_root(Some(root.clone()));
+                    (repo.embedding_branch().to_string(), Some(root))
+                } else if let Some(short_id) = task_short_id {
+                    (task_branch_name(short_id), None)
+                } else {
+                    ("main".to_string(), None)
+                }
+            }
+        };
+
+        repo = repo.with_embedding_branch(Some(branch.clone()));
+        Ok(ResolvedMemoryView {
+            repo,
+            branch,
+            worktree_root,
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -108,11 +181,27 @@ impl MemoryTree {
 
 pub struct MemoryFilesystemCore {
     repo: NoteRepository,
+    view_resolver: Arc<dyn MemoryViewResolver>,
 }
 
 impl MemoryFilesystemCore {
     pub fn new(repo: NoteRepository) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            view_resolver: Arc::new(DefaultMemoryViewResolver),
+        }
+    }
+
+    pub fn with_view_resolver(mut self, view_resolver: Arc<dyn MemoryViewResolver>) -> Self {
+        self.view_resolver = view_resolver;
+        self
+    }
+
+    pub fn resolve_memory_view(
+        &self,
+        selection: &MemoryViewSelection,
+    ) -> Result<ResolvedMemoryView> {
+        Ok(self.view_resolver.resolve_view(selection, &self.repo)?)
     }
 
     pub async fn resolve_note_path(
@@ -120,13 +209,24 @@ impl MemoryFilesystemCore {
         project_id: &str,
         path: &str,
     ) -> Result<ResolvedNotePath> {
+        self.resolve_note_path_in_view(project_id, &MemoryViewSelection::Canonical, path)
+            .await
+    }
+
+    pub async fn resolve_note_path_in_view(
+        &self,
+        project_id: &str,
+        selection: &MemoryViewSelection,
+        path: &str,
+    ) -> Result<ResolvedNotePath> {
         let normalized = normalize_virtual_note_path(path);
+        let view = self.resolve_memory_view(selection)?;
         let permalink = permalink_from_virtual_note_path(&normalized).ok_or_else(|| {
             MemoryFsError::NotFile {
                 path: normalized.clone(),
             }
         })?;
-        let note = self
+        let note = view
             .repo
             .get_by_permalink(project_id, &permalink)
             .await?
@@ -142,6 +242,16 @@ impl MemoryFilesystemCore {
     }
 
     pub async fn stat(&self, project_id: &str, path: &str) -> Result<MemoryEntryMetadata> {
+        self.stat_in_view(project_id, &MemoryViewSelection::Canonical, path)
+            .await
+    }
+
+    pub async fn stat_in_view(
+        &self,
+        project_id: &str,
+        selection: &MemoryViewSelection,
+        path: &str,
+    ) -> Result<MemoryEntryMetadata> {
         let normalized = normalize_virtual_note_path(path);
         if normalized.is_empty() {
             return Ok(MemoryEntryMetadata {
@@ -151,7 +261,7 @@ impl MemoryFilesystemCore {
             });
         }
 
-        let tree = self.build_tree(project_id).await?;
+        let tree = self.build_tree(project_id, selection).await?;
         if tree.directories.contains(&normalized) {
             return Ok(MemoryEntryMetadata {
                 path: normalized,
@@ -168,8 +278,18 @@ impl MemoryFilesystemCore {
     }
 
     pub async fn list_dir(&self, project_id: &str, path: &str) -> Result<Vec<MemoryDirEntry>> {
+        self.list_dir_in_view(project_id, &MemoryViewSelection::Canonical, path)
+            .await
+    }
+
+    pub async fn list_dir_in_view(
+        &self,
+        project_id: &str,
+        selection: &MemoryViewSelection,
+        path: &str,
+    ) -> Result<Vec<MemoryDirEntry>> {
         let normalized = normalize_virtual_note_path(path);
-        let tree = self.build_tree(project_id).await?;
+        let tree = self.build_tree(project_id, selection).await?;
 
         if !normalized.is_empty() && !tree.directories.contains(&normalized) {
             if tree.files.contains_key(&normalized) {
@@ -217,8 +337,21 @@ impl MemoryFilesystemCore {
     }
 
     pub async fn read_file(&self, project_id: &str, path: &str) -> Result<MemoryFile> {
-        let resolved = self.resolve_note_path(project_id, path).await?;
-        let note = self
+        self.read_file_in_view(project_id, &MemoryViewSelection::Canonical, path)
+            .await
+    }
+
+    pub async fn read_file_in_view(
+        &self,
+        project_id: &str,
+        selection: &MemoryViewSelection,
+        path: &str,
+    ) -> Result<MemoryFile> {
+        let view = self.resolve_memory_view(selection)?;
+        let resolved = self
+            .resolve_note_path_in_view(project_id, selection, path)
+            .await?;
+        let note = view
             .repo
             .get_by_permalink(project_id, &resolved.permalink)
             .await?
@@ -226,7 +359,7 @@ impl MemoryFilesystemCore {
                 path: resolved.logical_path.clone(),
             })?;
 
-        self.repo.touch_accessed(&note.id).await?;
+        view.repo.touch_accessed(&note.id).await?;
 
         let content = self.render_note_content(&note);
         let metadata = MemoryEntryMetadata {
@@ -250,6 +383,25 @@ impl MemoryFilesystemCore {
         path: &str,
         content: &str,
     ) -> Result<MemoryFile> {
+        self.write_file_in_view(
+            project_id,
+            &MemoryViewSelection::Canonical,
+            project_path,
+            path,
+            content,
+        )
+        .await
+    }
+
+    pub async fn write_file_in_view(
+        &self,
+        project_id: &str,
+        selection: &MemoryViewSelection,
+        project_path: &Path,
+        path: &str,
+        content: &str,
+    ) -> Result<MemoryFile> {
+        let view = self.resolve_memory_view(selection)?;
         let normalized = normalize_virtual_note_path(path);
         let target_permalink = permalink_from_virtual_note_path(&normalized).ok_or_else(|| {
             MemoryFsError::NotFile {
@@ -258,7 +410,7 @@ impl MemoryFilesystemCore {
         })?;
         let parsed = parse_note_write(&target_permalink, content);
 
-        let note = match self
+        let note = match view
             .repo
             .get_by_permalink(project_id, &target_permalink)
             .await?
@@ -266,19 +418,19 @@ impl MemoryFilesystemCore {
             Some(existing) => {
                 let desired_permalink = permalink_for(&parsed.note_type, &parsed.title);
                 let note = if desired_permalink != existing.permalink {
-                    self.repo
+                    view.repo
                         .move_note(&existing.id, project_path, &parsed.title, &parsed.note_type)
                         .await?
                 } else {
                     existing
                 };
 
-                self.repo
+                view.repo
                     .update(&note.id, &parsed.title, &parsed.content, &parsed.tags)
                     .await?
             }
             None => {
-                self.repo
+                view.repo
                     .create(
                         project_id,
                         project_path,
@@ -295,8 +447,21 @@ impl MemoryFilesystemCore {
     }
 
     pub async fn delete_file(&self, project_id: &str, path: &str) -> Result<()> {
-        let resolved = self.resolve_note_path(project_id, path).await?;
-        self.repo.delete(&resolved.note_id).await?;
+        self.delete_file_in_view(project_id, &MemoryViewSelection::Canonical, path)
+            .await
+    }
+
+    pub async fn delete_file_in_view(
+        &self,
+        project_id: &str,
+        selection: &MemoryViewSelection,
+        path: &str,
+    ) -> Result<()> {
+        let view = self.resolve_memory_view(selection)?;
+        let resolved = self
+            .resolve_note_path_in_view(project_id, selection, path)
+            .await?;
+        view.repo.delete(&resolved.note_id).await?;
         Ok(())
     }
 
@@ -307,7 +472,28 @@ impl MemoryFilesystemCore {
         from_path: &str,
         to_path: &str,
     ) -> Result<ResolvedNotePath> {
-        let source = self.resolve_note_path(project_id, from_path).await?;
+        self.rename_file_in_view(
+            project_id,
+            &MemoryViewSelection::Canonical,
+            project_path,
+            from_path,
+            to_path,
+        )
+        .await
+    }
+
+    pub async fn rename_file_in_view(
+        &self,
+        project_id: &str,
+        selection: &MemoryViewSelection,
+        project_path: &Path,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<ResolvedNotePath> {
+        let view = self.resolve_memory_view(selection)?;
+        let source = self
+            .resolve_note_path_in_view(project_id, selection, from_path)
+            .await?;
         let normalized_target = normalize_virtual_note_path(to_path);
         let target_permalink =
             permalink_from_virtual_note_path(&normalized_target).ok_or_else(|| {
@@ -316,7 +502,7 @@ impl MemoryFilesystemCore {
                 }
             })?;
 
-        if let Some(existing) = self
+        if let Some(existing) = view
             .repo
             .get_by_permalink(project_id, &target_permalink)
             .await?
@@ -329,7 +515,7 @@ impl MemoryFilesystemCore {
 
         let title = title_from_permalink(&target_permalink);
         let note_type = infer_note_type(&target_permalink);
-        let moved = self
+        let moved = view
             .repo
             .move_note(&source.note_id, project_path, &title, &note_type)
             .await?;
@@ -341,8 +527,13 @@ impl MemoryFilesystemCore {
         })
     }
 
-    async fn build_tree(&self, project_id: &str) -> Result<MemoryTree> {
-        let notes = self.repo.list(project_id, None).await?;
+    async fn build_tree(
+        &self,
+        project_id: &str,
+        selection: &MemoryViewSelection,
+    ) -> Result<MemoryTree> {
+        let view = self.resolve_memory_view(selection)?;
+        let notes = view.repo.list(project_id, None).await?;
         let mut tree = MemoryTree::default();
         tree.directories.insert(String::new());
 
@@ -467,6 +658,23 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_db::Database;
     use djinn_db::test_support::make_project;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct RecordingResolver {
+        seen: Mutex<Vec<MemoryViewSelection>>,
+    }
+
+    impl MemoryViewResolver for RecordingResolver {
+        fn resolve_view(
+            &self,
+            selection: &MemoryViewSelection,
+            base_repo: &NoteRepository,
+        ) -> std::result::Result<ResolvedMemoryView, djinn_db::Error> {
+            self.seen.lock().unwrap().push(selection.clone());
+            DefaultMemoryViewResolver.resolve_view(selection, base_repo)
+        }
+    }
 
     async fn make_core() -> (MemoryFilesystemCore, Database, String, tempfile::TempDir) {
         let base = std::env::current_dir()
@@ -731,6 +939,153 @@ mod tests {
         assert_eq!(note.note_type, "design");
         assert_eq!(note.tags, "[\"meta\",\"frontmatter\"]");
         assert_eq!(note.content, "Design body");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_view_without_context_falls_back_to_main_branch() {
+        let (core, _db, _project_id, _project_root) = make_core().await;
+
+        let view = core
+            .resolve_memory_view(&MemoryViewSelection::Task {
+                task_short_id: None,
+                worktree_root: None,
+            })
+            .unwrap();
+
+        assert_eq!(view.branch, "main");
+        assert!(view.worktree_root.is_none());
+        assert_eq!(view.repo.embedding_branch(), "main");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_view_uses_explicit_worktree_selection_for_mutations() {
+        let (core, db, project_id, project_root) = make_core().await;
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).unwrap();
+        let worktree_root = tempfile::Builder::new()
+            .prefix("memory-fs-task-view-")
+            .tempdir_in(&base)
+            .unwrap();
+        let selection = MemoryViewSelection::Task {
+            task_short_id: Some("abc1".to_string()),
+            worktree_root: Some(worktree_root.path().to_path_buf()),
+        };
+
+        let file = core
+            .write_file_in_view(
+                &project_id,
+                &selection,
+                project_root.path(),
+                "research/task-note.md",
+                "---\ntitle: Task Note\ntype: research\ntags: [\"branch\"]\n---\n\nTask body",
+            )
+            .await
+            .unwrap();
+        assert_eq!(file.permalink, "research/task-note");
+
+        let expected_worktree_path = worktree_root.path().join(".djinn/research/task-note.md");
+        assert!(expected_worktree_path.exists());
+        assert!(
+            !project_root
+                .path()
+                .join(".djinn/research/task-note.md")
+                .exists()
+        );
+
+        let stat = core
+            .stat_in_view(&project_id, &selection, "research/task-note.md")
+            .await
+            .unwrap();
+        assert_eq!(stat.kind, MemoryEntryKind::File);
+
+        let listed = core
+            .list_dir_in_view(&project_id, &selection, "research")
+            .await
+            .unwrap();
+        assert!(listed.iter().any(|entry| entry.name == "task-note.md"));
+
+        let read_back = core
+            .read_file_in_view(&project_id, &selection, "research/task-note.md")
+            .await
+            .unwrap();
+        assert!(read_back.content.contains("Task body"));
+
+        let renamed = core
+            .rename_file_in_view(
+                &project_id,
+                &selection,
+                project_root.path(),
+                "research/task-note.md",
+                "patterns/task-note-renamed.md",
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.permalink, "patterns/task-note-renamed");
+
+        core.delete_file_in_view(&project_id, &selection, "patterns/task-note-renamed.md")
+            .await
+            .unwrap();
+        assert!(
+            !worktree_root
+                .path()
+                .join(".djinn/patterns/task-note-renamed.md")
+                .exists()
+        );
+
+        let persisted = NoteRepository::new(db, EventBus::noop())
+            .get_by_permalink(&project_id, "patterns/task-note-renamed")
+            .await
+            .unwrap();
+        assert!(persisted.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_view_selection_is_threaded_through_core_operations() {
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("test-tmp");
+        std::fs::create_dir_all(&base).unwrap();
+        let project_root = tempfile::Builder::new()
+            .prefix("memory-fs-recording-")
+            .tempdir_in(&base)
+            .unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let project = make_project(&db, project_root.path()).await;
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+        repo.create(
+            &project.id,
+            project_root.path(),
+            "Selection Note",
+            "body",
+            "reference",
+            "[]",
+        )
+        .await
+        .unwrap();
+
+        let recording = Arc::new(RecordingResolver::default());
+        let core = MemoryFilesystemCore::new(repo.clone()).with_view_resolver(recording.clone());
+        let selection = MemoryViewSelection::Branch {
+            branch: "task/sel1".to_string(),
+        };
+
+        core.stat_in_view(&project.id, &selection, "reference/selection-note.md")
+            .await
+            .unwrap();
+        core.list_dir_in_view(&project.id, &selection, "reference")
+            .await
+            .unwrap();
+        core.read_file_in_view(&project.id, &selection, "reference/selection-note.md")
+            .await
+            .unwrap();
+
+        let seen = recording.seen.lock().unwrap();
+        assert_eq!(seen.len(), 4);
+        assert!(seen.iter().all(|item| item == &selection));
     }
 }
 

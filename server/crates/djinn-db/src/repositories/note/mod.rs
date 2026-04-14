@@ -105,6 +105,7 @@ const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, fil
 
 // ── Repository ────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct NoteRepository {
     db: Database,
     events: EventBus,
