@@ -22,6 +22,93 @@ const MAX_VERIFICATION_CHARS: usize = 3000;
 /// Max characters for a single inline PR review comment included in the prompt.
 const MAX_PR_COMMENT_CHARS: usize = 500;
 
+/// Maximum number of new hygiene/exploration follow-up tasks the Planner should
+/// create during a single patrol when no explicit override is configured.
+const DEFAULT_PATROL_KNOWLEDGE_TASK_BUDGET: usize = 2;
+
+/// Environment variable for overriding the patrol knowledge-task budget.
+const PATROL_KNOWLEDGE_TASK_BUDGET_ENV: &str = "DJINN_PLANNER_PATROL_KNOWLEDGE_TASK_BUDGET";
+
+fn planner_patrol_knowledge_task_budget() -> usize {
+    std::env::var(PATROL_KNOWLEDGE_TASK_BUDGET_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PATROL_KNOWLEDGE_TASK_BUDGET)
+}
+
+fn normalize_text_for_matching(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_hygiene_knowledge_task(task: &Task) -> bool {
+    if task.status == "closed" {
+        return false;
+    }
+
+    let searchable = normalize_text_for_matching(&[&task.title, &task.description, &task.design]);
+    let has_hygiene_keyword = [
+        "orphan",
+        "broken link",
+        "duplicate cluster",
+        "duplicate note",
+        "consolidat",
+        "stale note",
+        "low-confidence",
+        "low confidence",
+        "memory hygiene",
+        "extraction",
+        "review_needed",
+        "review needed",
+    ]
+    .iter()
+    .any(|keyword| searchable.contains(keyword));
+
+    has_hygiene_keyword && matches!(task.issue_type.as_str(), "planning" | "task" | "research")
+}
+
+fn is_exploration_knowledge_task(task: &Task) -> bool {
+    if task.status == "closed" {
+        return false;
+    }
+
+    let searchable = normalize_text_for_matching(&[&task.title, &task.description, &task.design]);
+    let has_exploration_keyword = [
+        "explore and document",
+        "explore",
+        "document",
+        "subsystem overview",
+        "overview",
+        "undocumented",
+        "knowledge gap",
+        "architectural",
+        "structural change",
+        "new module",
+    ]
+    .iter()
+    .any(|keyword| searchable.contains(keyword));
+
+    has_exploration_keyword && matches!(task.issue_type.as_str(), "spike" | "research" | "planning")
+}
+
+fn format_open_knowledge_tasks(tasks: &[Task]) -> String {
+    if tasks.is_empty() {
+        return "none".to_string();
+    }
+
+    tasks
+        .iter()
+        .take(4)
+        .map(|task| format!("`{}` ({})", task.short_id, task.title))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Return the most recent N high-signal comments (lead, reviewer, verification)
 /// from the activity log, in chronological order (oldest first).
 /// Each entry is formatted as "**Label:** body".
@@ -1025,11 +1112,20 @@ pub(crate) async fn build_planner_patrol_context(
         .flatten()?;
     let note_repo =
         djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let notes = note_repo
         .list(&project_id, None)
         .await
         .ok()
         .unwrap_or_default();
+    let open_tasks = task_repo
+        .list_by_project(&project_id)
+        .await
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|candidate| candidate.status != "closed" && candidate.id != task.id)
+        .collect::<Vec<_>>();
 
     let mut documented_paths = Vec::new();
     for note in &notes {
@@ -1130,6 +1226,37 @@ pub(crate) async fn build_planner_patrol_context(
                 .collect::<Vec<_>>()
                 .join(", ")
         }
+    ));
+
+    let budget = planner_patrol_knowledge_task_budget();
+    let open_hygiene_tasks = open_tasks
+        .iter()
+        .filter(|task| is_hygiene_knowledge_task(task))
+        .cloned()
+        .collect::<Vec<_>>();
+    let open_exploration_tasks = open_tasks
+        .iter()
+        .filter(|task| is_exploration_knowledge_task(task))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    lines.push("\n### Knowledge Task Guard Rails".to_string());
+    lines.push(format!(
+        "- Patrol knowledge-task budget: create at most {budget} new hygiene/exploration follow-up tasks this patrol (override with `{PATROL_KNOWLEDGE_TASK_BUDGET_ENV}`, default {DEFAULT_PATROL_KNOWLEDGE_TASK_BUDGET})."
+    ));
+    lines.push(format!(
+        "- Open hygiene knowledge tasks already on the board: {}",
+        format_open_knowledge_tasks(&open_hygiene_tasks)
+    ));
+    lines.push(format!(
+        "- Open exploration knowledge tasks already on the board: {}",
+        format_open_knowledge_tasks(&open_exploration_tasks)
+    ));
+    lines.push(
+        "- If a relevant hygiene or exploration task is already open for the same area/problem, suppress creating another one and mention the existing task in your patrol summary instead.".to_string(),
+    );
+    lines.push(format!(
+        "- If no similar open knowledge task exists, you may still create eligible follow-up work, but never exceed {budget} total new knowledge tasks in this patrol."
     ));
 
     Some(lines.join("\n"))
@@ -1375,5 +1502,67 @@ mod tests {
         assert!(summary.contains("`server/src/old_area.rs`"));
         assert!(summary.contains("Undocumented hotspots: `server/src/new_area.rs`"));
         assert!(summary.contains("Weakly documented hotspots: `server/src/existing.rs`"));
+        assert!(summary.contains("Knowledge Task Guard Rails"));
+        assert!(
+            summary
+                .contains("create at most 2 new hygiene/exploration follow-up tasks this patrol")
+        );
+        assert!(summary.contains("you may still create eligible follow-up work"));
+    }
+
+    #[tokio::test]
+    async fn planner_patrol_context_suppresses_duplicate_knowledge_follow_ups_when_similar_tasks_are_open()
+     {
+        let (db, mut ctx, project, _tmp) = setup_project().await;
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
+            diff: None,
+            ranked: vec![],
+        }));
+
+        task_repo
+            .create_in_project(
+                &project.id,
+                None,
+                "Consolidate duplicate notes about planner patrol",
+                "memory hygiene cleanup for duplicate cluster",
+                "",
+                "planning",
+                1,
+                "planner",
+                Some("open"),
+                None,
+            )
+            .await
+            .expect("create hygiene task");
+
+        task_repo
+            .create_in_project(
+                &project.id,
+                None,
+                "Explore and document server/src/new_area.rs",
+                "undocumented subsystem knowledge gap",
+                "",
+                "spike",
+                1,
+                "architect",
+                Some("open"),
+                None,
+            )
+            .await
+            .expect("create exploration task");
+
+        let summary = build_planner_patrol_context(&patrol_task(&project.id), &ctx, &project.path)
+            .await
+            .expect("planner patrol context");
+
+        assert!(summary.contains("Open hygiene knowledge tasks already on the board: `"));
+        assert!(summary.contains("Consolidate duplicate notes about planner patrol"));
+        assert!(summary.contains("Open exploration knowledge tasks already on the board: `"));
+        assert!(summary.contains("Explore and document server/src/new_area.rs"));
+        assert!(summary.contains(
+            "If a relevant hygiene or exploration task is already open for the same area/problem, suppress creating another one"
+        ));
     }
 }
