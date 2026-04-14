@@ -13,10 +13,12 @@
 //!
 //! All errors are logged as warnings; nothing propagates to the caller.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use djinn_db::{
     NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
+    permalink_for,
 };
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
@@ -115,7 +117,11 @@ struct ExtractionContext<'a> {
     note_repo: &'a NoteRepository,
     provider: &'a dyn LlmProvider,
     project_id: &'a str,
+    project_path: &'a str,
     session_id: &'a str,
+    task_short_id: &'a str,
+    task_title: &'a str,
+    task_description: &'a str,
     provenance: &'a str,
     session_scope_paths: &'a [String],
     #[cfg(test)]
@@ -440,7 +446,11 @@ async fn run_llm_extraction_inner(
         note_repo: &note_repo,
         provider: provider.as_ref(),
         project_id: &project.id,
+        project_path: &project.path,
         session_id: &session_id,
+        task_short_id: &task.short_id,
+        task_title: &task.title,
+        task_description: &task.description,
         provenance: &provenance,
         session_scope_paths: &session_scope_paths,
         #[cfg(test)]
@@ -565,6 +575,7 @@ async fn process_extracted_note(
             return;
         }
         ExtractionOutcome::DowngradeToWorkingSpec => {
+            persist_working_spec(extraction_context, note, &assessment.reasons).await;
             extraction_quality.downgraded += 1;
             return;
         }
@@ -625,6 +636,164 @@ async fn process_extracted_note(
                 "llm_extraction: failed to create note; skipping"
             );
         }
+    }
+}
+
+async fn persist_working_spec(
+    extraction_context: &ExtractionContext<'_>,
+    note: &ExtractedNote,
+    reasons: &[&'static str],
+) {
+    let scope_paths = if note.scope_paths.is_empty() {
+        extraction_context.session_scope_paths.to_vec()
+    } else {
+        note.scope_paths.clone()
+    };
+    let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
+    let title = format!("Working Spec {}", extraction_context.task_short_id);
+    let permalink = permalink_for("design", &title);
+    let section = render_working_spec_entry(extraction_context, note, reasons, &scope_paths);
+
+    match extraction_context
+        .note_repo
+        .get_by_permalink(extraction_context.project_id, &permalink)
+        .await
+    {
+        Ok(Some(existing)) => {
+            let merged = merge_working_spec_content(&existing.content, &section);
+            match extraction_context
+                .note_repo
+                .update(&existing.id, &title, &merged, "[]")
+                .await
+            {
+                Ok(updated) => {
+                    if let Err(error) = extraction_context
+                        .note_repo
+                        .update_scope_paths(&updated.id, &scope_paths_json)
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %extraction_context.session_id,
+                            note_id = %updated.id,
+                            error = %error,
+                            "llm_extraction: failed to update working spec scope paths"
+                        );
+                    }
+                    tracing::debug!(
+                        session_id = %extraction_context.session_id,
+                        note_id = %updated.id,
+                        permalink = %permalink,
+                        "llm_extraction: updated task working spec"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    session_id = %extraction_context.session_id,
+                    permalink = %permalink,
+                    error = %error,
+                    "llm_extraction: failed to update working spec"
+                ),
+            }
+        }
+        Ok(None) => match extraction_context
+            .note_repo
+            .create_with_scope(
+                extraction_context.project_id,
+                Path::new(extraction_context.project_path),
+                &title,
+                &render_working_spec_document(extraction_context, &section, &scope_paths),
+                "design",
+                None,
+                "[]",
+                &scope_paths_json,
+            )
+            .await
+        {
+            Ok(created) => tracing::debug!(
+                session_id = %extraction_context.session_id,
+                note_id = %created.id,
+                permalink = %permalink,
+                "llm_extraction: created task working spec"
+            ),
+            Err(error) => tracing::warn!(
+                session_id = %extraction_context.session_id,
+                permalink = %permalink,
+                error = %error,
+                "llm_extraction: failed to create working spec"
+            ),
+        },
+        Err(error) => tracing::warn!(
+            session_id = %extraction_context.session_id,
+            permalink = %permalink,
+            error = %error,
+            "llm_extraction: failed to load existing working spec"
+        ),
+    }
+}
+
+fn render_working_spec_document(
+    extraction_context: &ExtractionContext<'_>,
+    section: &str,
+    scope_paths: &[String],
+) -> String {
+    let scope_lines = if scope_paths.is_empty() {
+        "- none captured".to_string()
+    } else {
+        scope_paths
+            .iter()
+            .map(|path| format!("- `{path}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "# Working Spec\n\n## Active objective\n- Task {task_short_id}: {task_title}\n- {task_description}\n\n## Relevant scope\n{scope_lines}\n\n## Constraints\n- This note is task-scoped working context routed from non-durable extraction output.\n- Keep mutable hypotheses and open questions here instead of promoting them to durable case/pattern/pitfall notes.\n\n## Current hypotheses\n- Session-local understanding may evolve as implementation continues.\n\n## Open questions\n- Which parts of this working context should be promoted or discarded when the task completes?\n\n## Captured session knowledge\n{section}",
+        task_short_id = extraction_context.task_short_id,
+        task_title = extraction_context.task_title,
+        task_description = extraction_context.task_description,
+    )
+}
+
+fn render_working_spec_entry(
+    extraction_context: &ExtractionContext<'_>,
+    note: &ExtractedNote,
+    reasons: &[&'static str],
+    scope_paths: &[String],
+) -> String {
+    let routing_reasons = if reasons.is_empty() {
+        "- session_local_context".to_string()
+    } else {
+        reasons
+            .iter()
+            .map(|reason| format!("- {reason}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let scope_lines = if scope_paths.is_empty() {
+        "- none captured".to_string()
+    } else {
+        scope_paths
+            .iter()
+            .map(|path| format!("- `{path}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "### {title}\n\n#### Objective\n- Preserve useful but non-durable understanding for task {task_short_id}.\n\n#### Files / symbols / scope\n{scope_lines}\n\n#### Constraints\n{routing_reasons}\n\n#### Current hypotheses\n- {content}\n\n#### Open questions\n- Should any portion of this be promoted into durable memory after the task completes?\n\n#### Routing rationale\n- Routed from extracted session output because it was useful for the current task but failed durable extraction thresholds.\n\n#### Provenance\n- Extracted from session {session_id}.\n",
+        title = note.title,
+        task_short_id = extraction_context.task_short_id,
+        content = note.content.trim(),
+        session_id = extraction_context.session_id,
+    )
+}
+
+fn merge_working_spec_content(existing: &str, section: &str) -> String {
+    let trimmed_existing = existing.trim_end();
+    let trimmed_section = section.trim();
+    if trimmed_existing.contains(trimmed_section) {
+        trimmed_existing.to_string()
+    } else {
+        format!("{trimmed_existing}\n\n{trimmed_section}\n")
     }
 }
 

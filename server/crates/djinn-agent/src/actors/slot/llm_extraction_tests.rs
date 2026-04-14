@@ -692,7 +692,7 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
     };
 
     let provider = Arc::new(FakeProvider::text(
-        r#"{"cases":[],"patterns":[{"title":"Temporary Working Spec Note","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory."}],"pitfalls":[]}"#,
+        r#"{"cases":[],"patterns":[{"title":"Temporary Working Spec Note","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory.","scope_paths":["server/crates/djinn-agent/src/actors/slot"]}],"pitfalls":[]}"#,
     ));
 
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -702,9 +702,34 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
+    assert_eq!(
+        notes.len(),
+        1,
+        "downgraded note should be retained as a working spec"
+    );
+    let working_spec = &notes[0];
+    assert_eq!(working_spec.note_type, "design");
+    assert_eq!(
+        working_spec.title,
+        format!("Working Spec {}", fixture.task.short_id)
+    );
+    assert!(working_spec.content.contains("## Active objective"));
+    assert!(working_spec.content.contains("## Relevant scope"));
+    assert!(working_spec.content.contains("## Constraints"));
+    assert!(working_spec.content.contains("## Current hypotheses"));
+    assert!(working_spec.content.contains("## Open questions"));
+    assert!(working_spec.content.contains("Temporary Working Spec Note"));
+    assert!(working_spec.content.contains("task-scoped working context"));
+    assert!(working_spec.content.contains(&fixture.session_id));
+    assert!(working_spec.folder.starts_with("design"));
+
+    let durable_notes: Vec<_> = notes
+        .iter()
+        .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
+        .collect();
     assert!(
-        notes.is_empty(),
-        "downgraded notes should not become durable writes"
+        durable_notes.is_empty(),
+        "downgraded notes should not become durable extracted notes"
     );
 
     let stored_json: Option<String> =
