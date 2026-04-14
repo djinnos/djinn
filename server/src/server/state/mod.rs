@@ -34,6 +34,37 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
+fn canonical_view_resolution(
+    active_task_count: usize,
+    fallback: Option<crate::server::MemoryMountViewFallback>,
+) -> crate::server::MemoryMountViewResolution {
+    let fallback = fallback.or_else(|| {
+        (active_task_count > 1).then(|| crate::server::MemoryMountViewFallback {
+            reason: crate::server::MemoryMountViewFallbackReason::AmbiguousActiveTasks,
+            detail: Some(
+                "mounted memory requires exactly one active task before task-scoped selection can be used"
+                    .to_string(),
+            ),
+            active_task_count: Some(active_task_count),
+            task_id: None,
+            task_short_id: None,
+            task_project_id: None,
+            mount_project_id: None,
+            session_worktree_path: None,
+        })
+    });
+
+    crate::server::MemoryMountViewResolution {
+        selection: MemoryViewSelection::Canonical,
+        health: crate::server::MemoryMountViewHealth {
+            kind: crate::server::MemoryMountViewKind::Canonical,
+            task_short_id: None,
+            worktree_root: None,
+            fallback,
+        },
+    }
+}
+
 /// Shared application state, cheaply cloneable via `Arc`.
 #[derive(Clone)]
 pub struct AppState {
@@ -235,6 +266,12 @@ impl AppState {
                 mount_path: None,
                 project_id: None,
                 detail: None,
+                view: crate::server::MemoryMountViewHealth {
+                    kind: crate::server::MemoryMountViewKind::Canonical,
+                    task_short_id: None,
+                    worktree_root: None,
+                    fallback: None,
+                },
                 pending_writes: 0,
                 last_error: None,
             };
@@ -249,6 +286,7 @@ impl AppState {
             mount_path: status.mount_path.map(|path| path.display().to_string()),
             project_id: status.project_id,
             detail: status.detail,
+            view: status.view,
             pending_writes: status.pending_writes,
             last_error: status.last_error,
         }
@@ -271,6 +309,20 @@ impl AppState {
         project_id: &str,
         project_path: &Path,
     ) -> MemoryViewSelection {
+        self.resolve_memory_mount_view_resolution(project_id, project_path)
+            .await
+            .selection
+    }
+
+    #[cfg_attr(
+        not(any(test, all(target_os = "linux", feature = "memory-mount"))),
+        allow(dead_code)
+    )]
+    pub(crate) async fn resolve_memory_mount_view_resolution(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+    ) -> crate::server::MemoryMountViewResolution {
         let active_task_ids: Vec<String> = self
             .inner
             .active_tasks
@@ -281,7 +333,7 @@ impl AppState {
             .collect();
 
         let [task_id] = active_task_ids.as_slice() else {
-            return MemoryViewSelection::Canonical;
+            return canonical_view_resolution(active_task_ids.len(), None);
         };
 
         let task_repo = djinn_db::TaskRepository::new(self.db().clone(), self.event_bus());
@@ -290,7 +342,19 @@ impl AppState {
                 task_id,
                 "memory mount falling back to main: active task not found"
             );
-            return MemoryViewSelection::Canonical;
+            return canonical_view_resolution(
+                1,
+                Some(crate::server::MemoryMountViewFallback {
+                    reason: crate::server::MemoryMountViewFallbackReason::ActiveTaskNotFound,
+                    detail: Some("active task no longer exists in the database".to_string()),
+                    active_task_count: Some(1),
+                    task_id: Some(task_id.to_string()),
+                    task_short_id: None,
+                    task_project_id: None,
+                    mount_project_id: Some(project_id.to_string()),
+                    session_worktree_path: None,
+                }),
+            );
         };
 
         if task.project_id != project_id {
@@ -300,7 +364,19 @@ impl AppState {
                 mount_project_id = %project_id,
                 "memory mount falling back to main: active task belongs to another project"
             );
-            return MemoryViewSelection::Canonical;
+            return canonical_view_resolution(
+                1,
+                Some(crate::server::MemoryMountViewFallback {
+                    reason: crate::server::MemoryMountViewFallbackReason::TaskProjectMismatch,
+                    detail: Some("active task belongs to another registered project".to_string()),
+                    active_task_count: Some(1),
+                    task_id: Some(task.id),
+                    task_short_id: Some(task.short_id),
+                    task_project_id: Some(task.project_id),
+                    mount_project_id: Some(project_id.to_string()),
+                    session_worktree_path: None,
+                }),
+            );
         }
 
         let session_repo = djinn_db::SessionRepository::new(self.db().clone(), self.event_bus());
@@ -310,7 +386,19 @@ impl AppState {
                 short_id = %task.short_id,
                 "memory mount falling back to main: no running session for active task"
             );
-            return MemoryViewSelection::Canonical;
+            return canonical_view_resolution(
+                1,
+                Some(crate::server::MemoryMountViewFallback {
+                    reason: crate::server::MemoryMountViewFallbackReason::NoActiveSession,
+                    detail: Some("no running session is attached to the active task".to_string()),
+                    active_task_count: Some(1),
+                    task_id: Some(task.id),
+                    task_short_id: Some(task.short_id),
+                    task_project_id: Some(project_id.to_string()),
+                    mount_project_id: Some(project_id.to_string()),
+                    session_worktree_path: None,
+                }),
+            );
         };
 
         let Some(worktree_path) = session
@@ -324,7 +412,19 @@ impl AppState {
                 short_id = %task.short_id,
                 "memory mount falling back to main: active session has no worktree path"
             );
-            return MemoryViewSelection::Canonical;
+            return canonical_view_resolution(
+                1,
+                Some(crate::server::MemoryMountViewFallback {
+                    reason: crate::server::MemoryMountViewFallbackReason::MissingSessionWorktree,
+                    detail: Some("active session did not publish a worktree path".to_string()),
+                    active_task_count: Some(1),
+                    task_id: Some(task.id),
+                    task_short_id: Some(task.short_id),
+                    task_project_id: Some(project_id.to_string()),
+                    mount_project_id: Some(project_id.to_string()),
+                    session_worktree_path: None,
+                }),
+            );
         };
 
         let worktree_root = PathBuf::from(worktree_path);
@@ -334,12 +434,35 @@ impl AppState {
                 short_id = %task.short_id,
                 "memory mount falling back to main: active session is on canonical project root"
             );
-            return MemoryViewSelection::Canonical;
+            return canonical_view_resolution(
+                1,
+                Some(crate::server::MemoryMountViewFallback {
+                    reason: crate::server::MemoryMountViewFallbackReason::CanonicalProjectRoot,
+                    detail: Some(
+                        "active session worktree resolves to the canonical project root"
+                            .to_string(),
+                    ),
+                    active_task_count: Some(1),
+                    task_id: Some(task.id),
+                    task_short_id: Some(task.short_id),
+                    task_project_id: Some(project_id.to_string()),
+                    mount_project_id: Some(project_id.to_string()),
+                    session_worktree_path: Some(worktree_root.display().to_string()),
+                }),
+            );
         }
 
-        MemoryViewSelection::Task {
-            task_short_id: Some(task.short_id),
-            worktree_root: Some(worktree_root),
+        crate::server::MemoryMountViewResolution {
+            selection: MemoryViewSelection::Task {
+                task_short_id: Some(task.short_id.clone()),
+                worktree_root: Some(worktree_root.clone()),
+            },
+            health: crate::server::MemoryMountViewHealth {
+                kind: crate::server::MemoryMountViewKind::TaskScoped,
+                task_short_id: Some(task.short_id),
+                worktree_root: Some(worktree_root.display().to_string()),
+                fallback: None,
+            },
         }
     }
 
