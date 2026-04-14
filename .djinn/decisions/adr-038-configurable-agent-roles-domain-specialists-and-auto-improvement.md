@@ -4,6 +4,8 @@ type: adr
 tags: ["adr","architecture","agents","roles","specialists","auto-improvement","paperclip","autoresearch"]
 ---
 
+
+
 # ADR-038: Configurable Agent Roles, Domain Specialists, and Auto-Improvement
 
 ## Status: Draft
@@ -275,5 +277,5 @@ ADR-036 Phase 20 (structured finalization) can run in parallel and improves the 
 - ADR-023 — consumed (session reflection provides learning signal, build_context provides compressed knowledge)
 - ADR-036 — complementary (structured finalization improves outcome signal quality)
 - ADR-035 — complementary (repo map helps specialists understand their domain boundaries)
-- [[Paperclip Reference]] — inspiration for adapter-based agent configuration
-- [[Autoresearch Reference]] — inspiration for propose/evaluate/keep-discard improvement loop
+- [[Project memory broken-link and orphan backlog triage]] — inspiration for adapter-based agent configuration
+- [[Project memory broken-link and orphan backlog triage]] — inspiration for propose/evaluate/keep-discard improvement loop

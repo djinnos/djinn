@@ -4,6 +4,8 @@ type: adr
 tags: ["knowledge-extraction","consolidation","db-storage","task-routing","session-reflection"]
 ---
 
+
+
 **Status:** Draft
 **Date:** 2026-03-24
 **Authors:** Fernando, Claude
@@ -64,7 +66,7 @@ The `decomposition` type is too narrow — it only covers epic-to-task breakdown
 
 ### Reference: Ruflo Comparison (Actionable Items)
 
-From the [[Ruflo Comparison Analysis]], the patterns most relevant to these problems:
+From the [[Project memory broken-link and orphan backlog triage]], the patterns most relevant to these problems:
 
 | Ruflo Pattern | Djinn Gap | This ADR |
 |---------------|-----------|----------|
@@ -271,4 +273,4 @@ This is a lightweight version of Ruflo's Q-Learning Router — not learned routi
 - [[ADR-023: Cognitive Memory Architecture]] — extended (DB-only storage for machine-generated notes, consolidation as missing CONSOLIDATE step, access_count fix)
 - [[ADR-038: Configurable Agent Roles]] — complementary (extraction metrics feed into agent effectiveness monitoring, routing fixes improve dispatch)
 - [[ADR-034]] — extended (`decomposition` renamed to `planning`, architect prompt update)
-- [[Ruflo Comparison Analysis]] — inspiration for consolidation loop, dispatch failure memory, tool metrics
+- [[Project memory broken-link and orphan backlog triage]] — inspiration for consolidation loop, dispatch failure memory, tool metrics
