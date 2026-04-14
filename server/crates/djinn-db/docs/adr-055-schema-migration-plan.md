@@ -65,6 +65,92 @@ asserting that:
 - the MySQL snapshot uses `FULLTEXT` and excludes FTS5 / trigger / `vec0` structures
 - the MySQL schema and prototype together cover `tasks`, `notes`, and `sessions`
 
+## SQLite export -> MySQL/Dolt import verification workflow
+
+`server/scripts/adr055_sqlite_to_dolt_import.py` turns the staged schema target into a reproducible
+validation workflow for the core ADR-055 tables:
+
+- `projects`
+- `tasks`
+- `task_blockers`
+- `task_activity_log`
+- `notes`
+- `note_links`
+- `sessions`
+- `task_memory_refs`
+- `epic_memory_refs`
+- `session_messages`
+- `note_associations`
+- `consolidated_note_provenance`
+- `consolidation_run_metrics`
+
+### What the helper produces
+
+Given a SQLite database path, the helper:
+
+1. exports each core table to a deterministic TSV file in parent-first load order
+2. records row counts, column order, and SHA-256 digests in `manifest.json`
+3. generates `001_import_dry_run.sql` that:
+   - deletes target tables in child-first order
+   - reloads exported data with `LOAD DATA LOCAL INFILE`
+   - emits `VERIFY_COUNT` rows with expected vs actual counts
+   - ends with `ROLLBACK;`
+4. generates `002_import_commit.sql` for the same flow with `COMMIT;`
+5. generates `003_verify_counts.sql` for manual post-import inspection
+
+### Typical usage
+
+From `server/`:
+
+```bash
+python3 scripts/adr055_sqlite_to_dolt_import.py \
+  --sqlite /path/to/djinn.db \
+  --output-dir tmp/adr055-migration \
+  --force
+```
+
+If you want the generated SQL to include the staged schema snapshot for a fresh scratch database:
+
+```bash
+python3 scripts/adr055_sqlite_to_dolt_import.py \
+  --sqlite /path/to/djinn.db \
+  --output-dir tmp/adr055-migration \
+  --force \
+  --initialize-schema
+```
+
+To run the rollback-backed verification directly against a disposable MySQL/Dolt database:
+
+```bash
+MYSQL_PWD=secret python3 scripts/adr055_sqlite_to_dolt_import.py \
+  --sqlite /path/to/djinn.db \
+  --output-dir tmp/adr055-migration \
+  --force \
+  --validate-live \
+  --mysql-database djinn_adr055_scratch \
+  --mysql-host 127.0.0.1 \
+  --mysql-port 3306 \
+  --mysql-user root
+```
+
+The helper exits non-zero if:
+
+- a required source table is missing from SQLite
+- the mysql client cannot be invoked for live validation
+- any `VERIFY_COUNT` expected/actual values differ
+- the target does not emit verification rows for all tracked tables
+
+### Dry-run and rollback guidance
+
+- Prefer a disposable MySQL database or disposable Dolt branch for every rehearsal.
+- Use `001_import_dry_run.sql` first; it always ends in `ROLLBACK;` so the imported rows are not
+  retained.
+- Only inspect or replay `002_import_commit.sql` after dry-run row counts match.
+- Keep the generated `manifest.json` alongside the TSV exports so a review can confirm exactly which
+  row counts and files were validated.
+- This workflow is intentionally scoped to migration verification and does not replace the existing
+  SQLite runtime or automate production cutover.
+
 ## Intended cutover sequence
 
 1. Keep SQLite refinery migrations as-is for the current runtime.
