@@ -1,4 +1,5 @@
 use axum::Router;
+use axum::extract::State;
 use axum::routing::{get, post};
 
 use serde::Serialize;
@@ -32,12 +33,14 @@ pub fn router(state: AppState) -> Router {
 struct HealthResponse {
     status: &'static str,
     version: &'static str,
+    database: crate::db::runtime::DatabaseRuntimeHealth,
 }
 
-async fn health() -> axum::Json<HealthResponse> {
+async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
     axum::Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+        database: state.database_health(),
     })
 }
 

@@ -137,9 +137,9 @@ async fn make_fixture() -> TestFixture {
 /// Build a FakeProvider that returns a valid extraction JSON with one of each note type.
 fn fake_extraction_provider() -> Arc<FakeProvider> {
     let json = r#"{
-  "cases": [{"title": "Test Case Note", "content": "A test case: problem and solution described here."}],
-  "patterns": [{"title": "Test Pattern Note", "content": "A reusable pattern discovered in this session."}],
-  "pitfalls": [{"title": "Test Pitfall Note", "content": "A pitfall encountered and how it was resolved."}]
+  "cases": [{"title": "Test Case Note", "content": "Situation: a flaky extraction pipeline had to compare candidate summaries under a deterministic constraint. Approach taken: inject a stable candidate seam and record why the fix worked. Result: future tasks can reuse the lesson when similar novelty checks fail."}],
+  "patterns": [{"title": "Test Pattern Note", "content": "Recommended approach: use a reusable seam when a workflow needs deterministic comparisons across multiple future tasks. Why it works: the approach isolates unstable dependencies and clarifies when to use the pattern and its tradeoffs."}],
+  "pitfalls": [{"title": "Test Pitfall Note", "content": "Trigger / smell: semantic duplicate checks become flaky when summaries change between runs. Failure mode: extraction creates noisy sibling notes. Prevention and recovery: inject stable summaries, compare them consistently, and avoid repeating the error in future tasks."}]
 }"#;
     Arc::new(FakeProvider::text(json))
 }
@@ -445,6 +445,9 @@ async fn llm_extracted_notes_have_confidence_0_5() {
     assert_eq!(stored_taxonomy.extraction_quality.dedup_skipped, 0);
     assert_eq!(stored_taxonomy.extraction_quality.novelty_skipped, 0);
     assert_eq!(stored_taxonomy.extraction_quality.written, 3);
+    assert_eq!(stored_taxonomy.extraction_quality.merged, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 0);
+    assert_eq!(stored_taxonomy.extraction_quality.discarded, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -454,7 +457,7 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
     let taxonomy = SessionTaxonomy::default();
-    let json = r#"{"cases":[{"title":"Provenance Test","content":"This content should have provenance."}],"patterns":[],"pitfalls":[]}"#;
+    let json = r#"{"cases":[{"title":"Provenance Test","content":"Situation: extraction provenance must remain visible after a durable note is written. Constraint: future tasks need to know which session produced the case. Approach taken: append a provenance footer and keep the reusable lesson in the note result. Result: the stored case stays traceable. Lesson: future tasks can trust the durable note provenance."}],"patterns":[],"pitfalls":[]}"#;
     let provider = Arc::new(FakeProvider::text(json));
 
     run_llm_extraction_with_provider(session_id.clone(), taxonomy, ctx, provider).await;
@@ -610,6 +613,18 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         .expect("get existing after run")
         .expect("existing note after run");
     assert!(updated_existing.confidence > starting_confidence);
+
+    let stored_json: Option<String> =
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+            .bind(&fixture.session_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .expect("query session event_taxonomy after merge outcome");
+    let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
+        .expect("deserialize stored taxonomy after merge outcome");
+    assert_eq!(stored_taxonomy.extraction_quality.merged, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.novelty_skipped, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.written, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -630,7 +645,7 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
             djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
-                text: r#"{"cases":[{"title":"Fallback Novel Note","content":"Should still be written when novelty check output is invalid."}],"patterns":[],"pitfalls":[]}"#.to_string(),
+                text: r#"{"cases":[{"title":"Fallback Novel Note","content":"Situation: a novelty response returned invalid JSON during extraction. Constraint: the durable lesson still matters across future tasks. Approach taken: continue with the durable case because the fallback preserved useful knowledge. Result: extraction still captured the note. Lesson: future tasks can reuse the fallback when novelty checks fail."}],"patterns":[],"pitfalls":[]}"#.to_string(),
             }),
             djinn_provider::provider::StreamEvent::Done,
         ],
@@ -659,6 +674,91 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
 
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].title, "Fallback Novel Note");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 1,
+        errors: 0,
+        tools_used: 2,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let provider = Arc::new(FakeProvider::text(
+        r#"{"cases":[],"patterns":[{"title":"Temporary Working Spec Note","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory."}],"pitfalls":[]}"#,
+    ));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    assert!(
+        notes.is_empty(),
+        "downgraded notes should not become durable writes"
+    );
+
+    let stored_json: Option<String> =
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+            .bind(&fixture.session_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .expect("query session event_taxonomy after downgrade");
+    let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
+        .expect("deserialize stored taxonomy after downgrade");
+    assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.written, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_discards_note_with_type_mismatch() {
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let taxonomy = SessionTaxonomy {
+        files_changed: 1,
+        errors: 0,
+        tools_used: 2,
+        notes_read: 0,
+        notes_written: 1,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let provider = Arc::new(FakeProvider::text(
+        r#"{"cases":[],"patterns":[{"title":"Vague Pattern Claim","content":"This worked."}],"pitfalls":[]}"#,
+    ));
+
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+    assert!(notes.is_empty(), "discarded notes should not be persisted");
+
+    let stored_json: Option<String> =
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+            .bind(&fixture.session_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .expect("query session event_taxonomy after discard");
+    let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
+        .expect("deserialize stored taxonomy after discard");
+    assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.discarded, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.written, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
