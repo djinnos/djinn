@@ -74,10 +74,10 @@ The manifest identifies six duplicate extracted leftovers for archival once run 
 {
   "before": {
     "heuristic_audit": {
-      "archive_candidates_rough": 807,
-      "demote_rough": 16,
-      "scanned_note_count": 821,
-      "underspecified_rough": 818
+      "archive_candidates_rough": 821,
+      "demote_rough": 19,
+      "scanned_note_count": 835,
+      "underspecified_rough": 832
     },
     "targeted_status": {
       "demoted_working_spec_rows": 0,
@@ -87,12 +87,14 @@ The manifest identifies six duplicate extracted leftovers for archival once run 
       "skill_discovery_family_rows": 3
     }
   },
+  "mode": "dry_run",
+  "project_id": "019d2f47-d38f-7750-a333-ec60dee8661c",
   "projected_after": {
     "heuristic_audit": {
-      "archive_candidates_rough": 807,
-      "demote_rough": 16,
-      "scanned_note_count": 813,
-      "underspecified_rough": 810
+      "archive_candidates_rough": 821,
+      "demote_rough": 19,
+      "scanned_note_count": 827,
+      "underspecified_rough": 824
     },
     "targeted_status": {
       "demoted_working_spec_rows": 2,
@@ -107,14 +109,14 @@ The manifest identifies six duplicate extracted leftovers for archival once run 
 
 ### Interpretation
 
-- The overall ADR-054 backlog remains large (`821` scanned extracted notes), which matches the task goal of making the remaining migration backlog measurable.
+- The overall ADR-054 backlog remains large (`835` scanned extracted notes), which matches the task goal of making the remaining migration backlog measurable.
 - This pass intentionally targets a narrow, high-confidence slice.
 - Within that slice, the manifest reduces:
   - skill-discovery duplicate family size from `3` notes to `1`
   - semantic-retrieval duplicate family size from `5` notes to `1`
   - pending archive leftovers from `6` to `0`
   - demoted Working Spec targets from `0` to `2`
-- The projected `scanned_note_count` drop from `821` to `813` reflects six archive deletions plus two demotions out of the extracted taxonomy.
+- The projected `scanned_note_count` drop from `835` to `827` reflects six archive deletions plus two demotions out of the extracted taxonomy.
 
 ## Writable-database caveat captured during verification
 
