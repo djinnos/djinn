@@ -797,9 +797,38 @@ async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
+    assert_eq!(
+        notes.len(),
+        1,
+        "notes missing ADR-054 sections should be routed into the working-spec fallback"
+    );
+
+    let working_spec = &notes[0];
+    assert_eq!(working_spec.note_type, "design");
+    assert_eq!(
+        working_spec.title,
+        format!("Working Spec {}", fixture.task.short_id)
+    );
+    assert!(working_spec.content.contains("## Active objective"));
+    assert!(working_spec.content.contains("## Relevant scope"));
+    assert!(working_spec.content.contains("## Constraints"));
+    assert!(working_spec.content.contains("## Current hypotheses"));
+    assert!(working_spec.content.contains("## Open questions"));
+    assert!(working_spec.content.contains("Unstructured Pattern Note"));
     assert!(
-        notes.is_empty(),
-        "notes missing ADR-054 sections should be routed away from durable writes"
+        working_spec
+            .content
+            .contains("missing_required_adr_054_sections")
+    );
+    assert!(working_spec.content.contains(&fixture.session_id));
+
+    let durable_notes: Vec<_> = notes
+        .iter()
+        .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
+        .collect();
+    assert!(
+        durable_notes.is_empty(),
+        "notes missing ADR-054 sections should not become durable extracted notes"
     );
 
     let stored_json: Option<String> =
