@@ -31,4 +31,4 @@ tags: ["working-spec","adr-055","cleanup"]
 The original extracted case observed that ADR-055 design work enumerated explicit SQLite-coupled surfaces so migration could proceed through known seams instead of scattered edits. The inventory was organized around bootstrap, migrations, lexical search, semantic vector storage, and repository APIs.
 
 ---
-Created during ADR-054 cleanup on 2026-04-14 as the Working Spec replacement for [[cases/adr-roadmap-captured-sqlite-migration-seam-inventory-categories]].
+Created during ADR-054 cleanup on 2026-04-14 as the Working Spec replacement for [[cases/adr-roadmap-captured-sqlite-migration-seam-inventory-categories]]. Re-materialized canonically from task `019d89de-7e6b-7651-954f-cc325a0fcf22` so epic memory refs resolve through memory tools.

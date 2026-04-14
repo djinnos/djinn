@@ -31,4 +31,4 @@ tags: ["working-spec","adr-055","cleanup"]
 The original extracted case defined the concrete architectural flow for per-task knowledge branching so implementation could connect task dispatch, session-memory writes, and post-task promotion without re-deriving the lifecycle.
 
 ---
-Created during ADR-054 cleanup on 2026-04-14 as the Working Spec replacement for [[cases/adr-055-integration-contract-for-per-task-knowledge-branching]].
+Created during ADR-054 cleanup on 2026-04-14 as the Working Spec replacement for [[cases/adr-055-integration-contract-for-per-task-knowledge-branching]]. Re-materialized canonically from task `019d89de-7e6b-7651-954f-cc325a0fcf22` so epic memory refs resolve through memory tools.
