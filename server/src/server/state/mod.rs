@@ -24,6 +24,7 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 mod canonical_graph_refresh_planner;
 mod settings;
 
+use crate::memory_fs::MemoryViewSelection;
 use crate::memory_mount::MountedMemoryFilesystem;
 use canonical_graph_refresh_planner::{
     CanonicalGraphRefreshPlanner, CanonicalGraphRefreshProbe, RefreshPlan, WarmPlan, WarmPlanInputs,
@@ -229,6 +230,87 @@ impl AppState {
         crate::server::MemoryMountHealth {
             enabled: mount.is_some(),
             active,
+        }
+    }
+
+    #[cfg_attr(
+        not(any(test, all(target_os = "linux", feature = "memory-mount"))),
+        allow(dead_code)
+    )]
+    pub(crate) async fn resolve_memory_mount_view_selection(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+    ) -> MemoryViewSelection {
+        let active_task_ids: Vec<String> = self
+            .inner
+            .active_tasks
+            .lock()
+            .expect("poisoned")
+            .keys()
+            .cloned()
+            .collect();
+
+        let [task_id] = active_task_ids.as_slice() else {
+            return MemoryViewSelection::Canonical;
+        };
+
+        let task_repo = djinn_db::TaskRepository::new(self.db().clone(), self.event_bus());
+        let Some(task) = task_repo.get(task_id).await.ok().flatten() else {
+            tracing::debug!(
+                task_id,
+                "memory mount falling back to main: active task not found"
+            );
+            return MemoryViewSelection::Canonical;
+        };
+
+        if task.project_id != project_id {
+            tracing::debug!(
+                task_id = %task.id,
+                task_project_id = %task.project_id,
+                mount_project_id = %project_id,
+                "memory mount falling back to main: active task belongs to another project"
+            );
+            return MemoryViewSelection::Canonical;
+        }
+
+        let session_repo = djinn_db::SessionRepository::new(self.db().clone(), self.event_bus());
+        let Some(session) = session_repo.active_for_task(&task.id).await.ok().flatten() else {
+            tracing::debug!(
+                task_id = %task.id,
+                short_id = %task.short_id,
+                "memory mount falling back to main: no running session for active task"
+            );
+            return MemoryViewSelection::Canonical;
+        };
+
+        let Some(worktree_path) = session
+            .worktree_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        else {
+            tracing::debug!(
+                task_id = %task.id,
+                short_id = %task.short_id,
+                "memory mount falling back to main: active session has no worktree path"
+            );
+            return MemoryViewSelection::Canonical;
+        };
+
+        let worktree_root = PathBuf::from(worktree_path);
+        if worktree_root == project_path {
+            tracing::debug!(
+                task_id = %task.id,
+                short_id = %task.short_id,
+                "memory mount falling back to main: active session is on canonical project root"
+            );
+            return MemoryViewSelection::Canonical;
+        }
+
+        MemoryViewSelection::Task {
+            task_short_id: Some(task.short_id),
+            worktree_root: Some(worktree_root),
         }
     }
 
