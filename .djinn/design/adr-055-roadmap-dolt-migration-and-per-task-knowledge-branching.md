@@ -4,15 +4,27 @@ type: design
 tags: ["adr-055","roadmap","dolt","mysql","qdrant"]
 ---
 
+
 # ADR-055 Roadmap — Dolt Migration and Per-Task Knowledge Branching
+
 
 ## Status
 
-Epic `5izw` remains open. Wave 1 is complete: the codebase now has explicit seams for selectable SQLite vs MySQL/Dolt backend configuration, staged MySQL schema artifacts, backend-neutral lexical-search planning, Qdrant vector-store scaffolding, and branch-aware knowledge promotion/retrieval seams.
+Epic `5izw` is complete and ready for closure. Wave 1 and Wave 2 both landed: the codebase now has executable MySQL/Dolt runtime support, backend-aware lexical search execution, Dolt server/branch lifecycle helpers, SQLite→Dolt import verification tooling, and coordinator history-maintenance hooks on top of the earlier schema, Qdrant, and branch-aware knowledge seams.
 
-The next work should move from scaffolding into executable runtime cutover infrastructure while preserving SQLite as the safe default.
+The roadmap work described in this note has been fully delivered; no additional decomposition wave is required for ADR-055.
 
-## Completed in Wave 1
+## Completed in Wave 2
+
+- Real MySQL/Dolt runtime support landed in `djinn-db`, replacing the earlier staging-error path.
+- Repository lexical search now routes through the backend-aware execution seam for SQLite and MySQL/Dolt.
+- Dolt server-management and branch SQL lifecycle helpers landed for branch create / checkout / merge / delete operations.
+- SQLite-to-Dolt migration import verification tooling now provides reproducible import checks and dry-run safety guidance.
+- Coordinator maintenance now includes ADR-055 history-maintenance / compaction scheduling hooks with safety guards.
+
+## Remaining work
+
+None for this epic. Any future follow-up should be opened as a new epic focused on production cutover hardening or operational rollout rather than additional ADR-055 decomposition.
 
 - SQLite-coupled migration seams inventoried in [[reference/adr-055-sqlite-seam-inventory-for-dolt-migration]].
 - Vector storage abstraction introduced with Qdrant scaffold and branch-aware embedding metadata/filtering.
