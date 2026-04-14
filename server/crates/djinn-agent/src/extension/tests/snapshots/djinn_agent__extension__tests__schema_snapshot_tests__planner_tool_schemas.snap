@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 233
+assertion_line: 236
 expression: tool_schemas_planner()
 ---
 [
@@ -397,6 +397,55 @@ expression: tool_schemas_planner()
   },
   {
     "concurrent_safe": false,
+    "description": "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "File content to write",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "name": "write"
+  },
+  {
+    "concurrent_safe": false,
+    "description": "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).",
+    "inputSchema": {
+      "properties": {
+        "new_text": {
+          "description": "Replacement text",
+          "type": "string"
+        },
+        "old_text": {
+          "description": "Exact text to find and replace",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ],
+      "type": "object"
+    },
+    "name": "edit"
+  },
+  {
+    "concurrent_safe": false,
     "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
     "inputSchema": {
       "properties": {
@@ -693,83 +742,6 @@ expression: tool_schemas_planner()
       "type": "object"
     },
     "name": "task_comment_add"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Create or update a note. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.",
-    "inputSchema": {
-      "properties": {
-        "content": {
-          "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes.",
-          "type": "string"
-        },
-        "status": {
-          "description": "Optional explicit status. For ADRs, use \"proposed\" to route into .djinn/decisions/proposed/.",
-          "type": "string"
-        },
-        "tags": {
-          "description": "Optional tags for categorisation",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "title": {
-          "description": "Note title",
-          "type": "string"
-        },
-        "type": {
-          "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)",
-          "type": "string"
-        }
-      },
-      "required": [
-        "title",
-        "content",
-        "type"
-      ],
-      "type": "object"
-    },
-    "name": "memory_write"
-  },
-  {
-    "concurrent_safe": false,
-    "description": "Edit an existing note. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
-    "inputSchema": {
-      "properties": {
-        "content": {
-          "description": "New content to insert or replace with",
-          "type": "string"
-        },
-        "find_text": {
-          "description": "Required for find_replace: exact text to search for",
-          "type": "string"
-        },
-        "identifier": {
-          "description": "Note permalink or title",
-          "type": "string"
-        },
-        "operation": {
-          "description": "Edit operation: append, prepend, find_replace, replace_section",
-          "type": "string"
-        },
-        "section": {
-          "description": "Required for replace_section: heading text identifying the section",
-          "type": "string"
-        },
-        "type": {
-          "description": "If provided and different from current type, move the note to the new type's folder",
-          "type": "string"
-        }
-      },
-      "required": [
-        "identifier",
-        "operation",
-        "content"
-      ],
-      "type": "object"
-    },
-    "name": "memory_edit"
   },
   {
     "concurrent_safe": true,
