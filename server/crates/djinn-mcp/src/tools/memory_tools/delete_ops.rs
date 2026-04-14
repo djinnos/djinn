@@ -16,7 +16,8 @@ pub(super) async fn memory_delete_with_worktree(
 
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_worktree_root(worktree_root)
-        .with_embedding_provider(server.state.embedding_provider());
+        .with_embedding_provider(server.state.embedding_provider())
+        .with_vector_store(server.state.vector_store());
 
     let Some(note) = resolve_note_by_identifier(&repo, &project_id, &p.identifier).await else {
         return Json(MemoryDeleteResponse {

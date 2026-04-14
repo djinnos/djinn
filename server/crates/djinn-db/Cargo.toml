@@ -8,6 +8,7 @@ doctest = false
 
 [features]
 test-support = []
+qdrant = ["dep:qdrant-client"]
 
 [dependencies]
 async-trait = "0.1"
@@ -20,6 +21,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+qdrant-client = { version = "1", optional = true, default-features = false, features = ["reqwest"] }
 sqlite-vec = "0.1"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
 tempfile = "3"

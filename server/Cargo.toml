@@ -15,6 +15,7 @@ doctest = false
 
 [features]
 default = []
+qdrant = ["djinn-db/qdrant"]
 vendored = ["git2/vendored-libgit2", "git2/vendored-openssl"]
 
 [dependencies]

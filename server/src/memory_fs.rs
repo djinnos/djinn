@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use djinn_core::models::NoteCompact;
+use djinn_core::models::Note;
 use djinn_db::{
     NoteRepository, folder_for_type, infer_note_type, normalize_virtual_note_path, permalink_for,
     permalink_from_virtual_note_path, render_note_markdown, title_from_permalink,
@@ -68,7 +68,7 @@ struct ParsedMemoryNoteWrite {
 #[derive(Debug, Default)]
 struct MemoryTree {
     directories: BTreeSet<String>,
-    files: BTreeMap<String, NoteCompact>,
+    files: BTreeMap<String, Note>,
 }
 
 impl MemoryTree {
@@ -98,7 +98,7 @@ impl MemoryTree {
         }
     }
 
-    fn insert_note(&mut self, note: NoteCompact) {
+    fn insert_note(&mut self, note: Note) {
         let file_path = virtual_note_path_for_permalink(&note.permalink);
         let parent = Self::parent_dir(&file_path);
         self.insert_dir_hierarchy(&parent);
@@ -228,7 +228,7 @@ impl MemoryFilesystemCore {
 
         self.repo.touch_accessed(&note.id).await?;
 
-        let content = render_note_markdown(&note.title, &note.note_type, &note.tags, &note.content);
+        let content = self.render_note_content(&note);
         let metadata = MemoryEntryMetadata {
             path: resolved.logical_path.clone(),
             kind: MemoryEntryKind::File,
@@ -342,7 +342,7 @@ impl MemoryFilesystemCore {
     }
 
     async fn build_tree(&self, project_id: &str) -> Result<MemoryTree> {
-        let notes = self.repo.list_compact(project_id, None, None, 0).await?;
+        let notes = self.repo.list(project_id, None).await?;
         let mut tree = MemoryTree::default();
         tree.directories.insert(String::new());
 
@@ -357,15 +357,17 @@ impl MemoryFilesystemCore {
         Ok(tree)
     }
 
-    fn file_metadata(&self, note: &NoteCompact) -> MemoryEntryMetadata {
+    fn file_metadata(&self, note: &Note) -> MemoryEntryMetadata {
         let path = virtual_note_path_for_permalink(&note.permalink);
+        let size = self.render_note_content(note).len() as u64;
         MemoryEntryMetadata {
             path,
             kind: MemoryEntryKind::File,
-            size: 0,
+            size,
         }
     }
 
+<<<<<<< HEAD
     fn memory_file_from_note(&self, note: &djinn_core::models::Note) -> MemoryFile {
         let content = render_note_markdown(&note.title, &note.note_type, &note.tags, &note.content);
         MemoryFile {
@@ -424,6 +426,11 @@ fn frontmatter_value(frontmatter: &str, key: &str) -> Option<String> {
         line.strip_prefix(&prefix)
             .map(|value| value.trim().to_string())
     })
+=======
+    fn render_note_content(&self, note: &Note) -> String {
+        render_note_markdown(&note.title, &note.note_type, &note.tags, &note.content)
+    }
+>>>>>>> origin/main
 }
 
 fn known_note_folders() -> Vec<String> {
@@ -505,6 +512,12 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.permalink, "patterns/reusable-flow");
 
+        let before = repo
+            .get_by_permalink(&project_id, "patterns/reusable-flow")
+            .await
+            .unwrap()
+            .unwrap();
+
         let file = core
             .read_file(&project_id, "patterns/reusable-flow.md")
             .await
@@ -512,13 +525,15 @@ mod tests {
         assert_eq!(file.metadata.kind, MemoryEntryKind::File);
         assert!(file.content.contains("title: Reusable Flow"));
         assert!(file.content.contains("Body text"));
+        assert_eq!(file.metadata.size, file.content.len() as u64);
 
         let touched = repo
             .get_by_permalink(&project_id, "patterns/reusable-flow")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(touched.access_count, 1);
+        assert_eq!(touched.access_count, before.access_count + 1);
+        assert!(touched.last_accessed >= before.last_accessed);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -555,6 +570,19 @@ mod tests {
         let root_entries = core.list_dir(&project_id, "").await.unwrap();
         assert!(root_entries.iter().any(|entry| entry.name == "brief.md"));
         assert!(root_entries.iter().any(|entry| entry.name == "design"));
+
+        let brief_stat = core.stat(&project_id, "brief.md").await.unwrap();
+        assert_eq!(brief_stat.kind, MemoryEntryKind::File);
+        assert!(brief_stat.size > 0);
+        assert_eq!(
+            root_entries
+                .iter()
+                .find(|entry| entry.name == "brief.md")
+                .unwrap()
+                .metadata
+                .size,
+            brief_stat.size
+        );
 
         let design_entries = core.list_dir(&project_id, "design").await.unwrap();
         assert!(design_entries.iter().any(|entry| entry.name == "specs"));
