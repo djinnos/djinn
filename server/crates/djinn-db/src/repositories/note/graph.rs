@@ -1,4 +1,5 @@
 use super::*;
+use crate::repositories::note::{NoteConsolidationRepository, STALE_CITATION};
 
 impl NoteRepository {
     // ── Wikilink graph ────────────────────────────────────────────────────────
@@ -173,12 +174,42 @@ impl NoteRepository {
         let stale_notes_by_folder = stale_rows
             .into_iter()
             .map(|(folder, count)| StaleFolder { folder, count })
-            .collect();
+            .collect::<Vec<_>>();
+        let stale_note_count = stale_notes_by_folder
+            .iter()
+            .map(|folder| folder.count)
+            .sum();
+
+        let low_confidence_note_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notes
+             WHERE project_id = ?1
+               AND confidence < ?2",
+        )
+        .bind(project_id)
+        .bind(STALE_CITATION)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        let consolidation_repo = NoteConsolidationRepository::new(self.db.clone());
+        let mut duplicate_cluster_count = 0_i64;
+        for group in consolidation_repo.list_db_note_groups().await? {
+            if group.project_id != project_id {
+                continue;
+            }
+
+            let clusters = consolidation_repo
+                .likely_duplicate_clusters(project_id, &group.note_type)
+                .await?;
+            duplicate_cluster_count += clusters.len() as i64;
+        }
 
         Ok(HealthReport {
             total_notes,
             broken_link_count,
             orphan_note_count,
+            duplicate_cluster_count,
+            low_confidence_note_count,
+            stale_note_count,
             stale_notes_by_folder,
         })
     }

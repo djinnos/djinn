@@ -49,9 +49,9 @@ impl DjinnMcpServer {
     }
 
     /// Returns aggregate health report (total notes, broken links, orphan notes,
-    /// stale notes by folder).
+    /// duplicate clusters, low-confidence notes, stale note totals, stale notes by folder).
     #[tool(
-        description = "Returns aggregate health report (total notes, broken links, orphan notes, stale notes by folder)."
+        description = "Returns aggregate health report (total notes, broken links, orphan notes, duplicate clusters, low-confidence notes, stale note totals, stale notes by folder)."
     )]
     pub async fn memory_health(
         &self,
@@ -64,6 +64,9 @@ impl DjinnMcpServer {
                     total_notes: None,
                     broken_link_count: None,
                     orphan_note_count: None,
+                    duplicate_cluster_count: None,
+                    low_confidence_note_count: None,
+                    stale_note_count: None,
                     stale_notes_by_folder: None,
                     error: Some("project parameter required".to_string()),
                 });
@@ -75,6 +78,9 @@ impl DjinnMcpServer {
                 total_notes: None,
                 broken_link_count: None,
                 orphan_note_count: None,
+                duplicate_cluster_count: None,
+                low_confidence_note_count: None,
+                stale_note_count: None,
                 stale_notes_by_folder: None,
                 error: Some(format!("project not found: {project_path}")),
             });
@@ -87,6 +93,9 @@ impl DjinnMcpServer {
                 total_notes: Some(h.total_notes),
                 broken_link_count: Some(h.broken_link_count),
                 orphan_note_count: Some(h.orphan_note_count),
+                duplicate_cluster_count: Some(h.duplicate_cluster_count),
+                low_confidence_note_count: Some(h.low_confidence_note_count),
+                stale_note_count: Some(h.stale_note_count),
                 stale_notes_by_folder: Some(h.stale_notes_by_folder),
                 error: None,
             }),
@@ -94,6 +103,9 @@ impl DjinnMcpServer {
                 total_notes: None,
                 broken_link_count: None,
                 orphan_note_count: None,
+                duplicate_cluster_count: None,
+                low_confidence_note_count: None,
+                stale_note_count: None,
                 stale_notes_by_folder: None,
                 error: Some(e.to_string()),
             }),

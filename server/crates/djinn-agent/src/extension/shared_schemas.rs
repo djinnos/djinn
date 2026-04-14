@@ -307,7 +307,7 @@ pub(crate) fn tool_memory_build_context() -> RmcpTool {
 pub(crate) fn tool_memory_health() -> RmcpTool {
     RmcpTool::new(
         "memory_health".to_string(),
-        "Returns aggregate health report: total notes, broken link count, orphan note count, stale notes by folder.".to_string(),
+        "Returns aggregate health report: total notes, broken link count, orphan note count, duplicate cluster count, low-confidence note count, stale note count, stale notes by folder.".to_string(),
         object!({
             "type": "object",
             "properties": {}

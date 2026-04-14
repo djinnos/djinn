@@ -3174,11 +3174,26 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
+        "duplicate_cluster_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
         "error": {
           "nullable": true,
           "type": "string"
         },
+        "low_confidence_note_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
         "orphan_note_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "stale_note_count": {
           "format": "int64",
           "nullable": true,
           "type": "integer"
