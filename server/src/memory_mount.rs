@@ -72,9 +72,9 @@ impl MemoryMountConfig {
     }
 }
 
-#[derive(Debug)]
 pub struct MountedMemoryFilesystem {
     runtime_status: std::sync::Arc<tokio::sync::Mutex<MemoryMountRuntimeStatus>>,
+    view_context: Option<(crate::server::AppState, String, PathBuf)>,
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
     session: Option<fuser::BackgroundSession>,
 }
@@ -85,6 +85,7 @@ impl MountedMemoryFilesystem {
             runtime_status: std::sync::Arc::new(tokio::sync::Mutex::new(
                 MemoryMountRuntimeStatus::disabled(),
             )),
+            view_context: None,
             #[cfg(all(target_os = "linux", feature = "memory-mount"))]
             session: None,
         }
@@ -94,6 +95,7 @@ impl MountedMemoryFilesystem {
     pub(crate) fn with_status(status: MemoryMountRuntimeStatus) -> Self {
         Self {
             runtime_status: std::sync::Arc::new(tokio::sync::Mutex::new(status)),
+            view_context: None,
             #[cfg(all(target_os = "linux", feature = "memory-mount"))]
             session: None,
         }
@@ -103,14 +105,22 @@ impl MountedMemoryFilesystem {
     fn from_session(
         session: fuser::BackgroundSession,
         runtime_status: std::sync::Arc<tokio::sync::Mutex<MemoryMountRuntimeStatus>>,
+        view_context: (crate::server::AppState, String, PathBuf),
     ) -> Self {
         Self {
             runtime_status,
+            view_context: Some(view_context),
             session: Some(session),
         }
     }
 
     pub(crate) async fn status_snapshot(&self) -> MemoryMountRuntimeStatus {
+        if let Some((state, project_id, project_path)) = &self.view_context {
+            let resolution = state
+                .resolve_memory_mount_view_resolution(project_id, project_path)
+                .await;
+            self.runtime_status.lock().await.view = resolution.health;
+        }
         self.runtime_status.lock().await.clone()
     }
 
@@ -132,6 +142,7 @@ pub(crate) struct MemoryMountRuntimeStatus {
     pub(crate) mount_path: Option<PathBuf>,
     pub(crate) project_id: Option<String>,
     pub(crate) detail: Option<String>,
+    pub(crate) view: crate::server::MemoryMountViewHealth,
     pub(crate) pending_writes: usize,
     pub(crate) last_error: Option<String>,
 }
@@ -148,6 +159,12 @@ impl MemoryMountRuntimeStatus {
             mount_path: None,
             project_id: None,
             detail: None,
+            view: crate::server::MemoryMountViewHealth {
+                kind: crate::server::MemoryMountViewKind::Canonical,
+                task_short_id: None,
+                worktree_root: None,
+                fallback: None,
+            },
             pending_writes: 0,
             last_error: None,
         }
@@ -160,6 +177,12 @@ impl MemoryMountRuntimeStatus {
             mount_path: Some(mount_path),
             project_id: Some(project_id),
             detail: Some("mount validated but not yet attached".to_string()),
+            view: crate::server::MemoryMountViewHealth {
+                kind: crate::server::MemoryMountViewKind::Canonical,
+                task_short_id: None,
+                worktree_root: None,
+                fallback: None,
+            },
             pending_writes: 0,
             last_error: None,
         }
@@ -294,6 +317,8 @@ pub async fn start_memory_mount(
                 resolved.project_id.clone(),
             ),
         ));
+        let project_id = resolved.project_id.clone();
+        let project_path = resolved.project_path.clone();
         let fs = LinuxMemoryFilesystem::new(
             repo,
             resolved.project_id,
@@ -319,6 +344,7 @@ pub async fn start_memory_mount(
         Ok(Some(MountedMemoryFilesystem::from_session(
             session,
             runtime_status,
+            (state, project_id, project_path),
         )))
     }
 
@@ -441,10 +467,18 @@ impl LinuxMemoryFilesystem {
     }
 
     fn current_view_selection(&self) -> MemoryViewSelection {
-        self.runtime.block_on(
+        self.current_view_resolution().selection
+    }
+
+    fn current_view_resolution(&self) -> crate::server::MemoryMountViewResolution {
+        let resolution = self.runtime.block_on(
             self.state
-                .resolve_memory_mount_view_selection(&self.project_id, &self.project_path),
-        )
+                .resolve_memory_mount_view_resolution(&self.project_id, &self.project_path),
+        );
+        self.runtime.block_on(async {
+            self.runtime_status.lock().await.view = resolution.health.clone();
+        });
+        resolution
     }
 
     fn next_fh(&self, path: &str) -> u64 {
@@ -1510,10 +1544,27 @@ mod tests {
         assert_eq!(
             selection,
             MemoryViewSelection::Task {
-                task_short_id: Some(task.short_id),
+                task_short_id: Some(task.short_id.clone()),
                 worktree_root: Some(worktree_dir.path().to_path_buf()),
             }
         );
+
+        let resolution = state
+            .resolve_memory_mount_view_resolution(&project.id, Path::new(&project.path))
+            .await;
+        assert_eq!(
+            resolution.health.kind,
+            crate::server::MemoryMountViewKind::TaskScoped
+        );
+        assert_eq!(
+            resolution.health.task_short_id.as_deref(),
+            Some(task.short_id.as_str())
+        );
+        assert_eq!(
+            resolution.health.worktree_root.as_deref(),
+            Some(worktree_dir.path().to_string_lossy().as_ref())
+        );
+        assert!(resolution.health.fallback.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1531,6 +1582,26 @@ mod tests {
             .await;
 
         assert_eq!(selection, MemoryViewSelection::Canonical);
+
+        let resolution = state
+            .resolve_memory_mount_view_resolution(&project.id, Path::new(&project.path))
+            .await;
+        assert_eq!(
+            resolution.health.kind,
+            crate::server::MemoryMountViewKind::Canonical
+        );
+        let fallback = resolution
+            .health
+            .fallback
+            .expect("fallback should be reported");
+        assert_eq!(
+            fallback.reason,
+            crate::server::MemoryMountViewFallbackReason::NoActiveSession
+        );
+        assert_eq!(
+            fallback.task_short_id.as_deref(),
+            Some(task.short_id.as_str())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1551,5 +1622,18 @@ mod tests {
             .await;
 
         assert_eq!(selection, MemoryViewSelection::Canonical);
+
+        let resolution = state
+            .resolve_memory_mount_view_resolution(&project.id, Path::new(&project.path))
+            .await;
+        let fallback = resolution
+            .health
+            .fallback
+            .expect("fallback should be reported");
+        assert_eq!(
+            fallback.reason,
+            crate::server::MemoryMountViewFallbackReason::AmbiguousActiveTasks
+        );
+        assert_eq!(fallback.active_task_count, Some(2));
     }
 }
