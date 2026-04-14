@@ -78,6 +78,10 @@ mod tests {
     use djinn_db::NoteRepository;
     use djinn_db::TaskRepository;
     use djinn_db::{CreateSessionParams, SessionRepository};
+    use djinn_db::{
+        DoltHistoryMaintenanceAction, DoltHistoryMaintenanceExecution,
+        DoltHistoryMaintenancePolicy, DoltHistoryMaintenanceService,
+    };
     use djinn_provider::catalog::health::HealthTracker;
 
     fn spawn_coordinator(
@@ -188,6 +192,43 @@ mod tests {
             .await
             .unwrap();
         (task, note)
+    }
+
+    #[tokio::test]
+    async fn dolt_history_maintenance_defaults_to_safe_planning_only_cutover() {
+        let service_db = Database::open_in_memory().unwrap();
+        let service = DoltHistoryMaintenanceService::new(&service_db);
+        assert!(!service.is_dolt_backend());
+
+        let policy = DoltHistoryMaintenancePolicy::default();
+        assert!(!policy.execution_enabled);
+
+        let plan = djinn_db::plan_dolt_history_maintenance(
+            &policy,
+            &djinn_db::DoltHistoryMaintenanceSnapshot {
+                commit_count: 5_500,
+                current_hour_utc: 3,
+                non_main_branches: vec!["task/qhnb".to_string()],
+                row_counts: vec![djinn_db::DoltHistoryTableCount {
+                    table: "notes".to_string(),
+                    row_count: 42,
+                }],
+            },
+        );
+
+        assert_eq!(plan.action, DoltHistoryMaintenanceAction::Flatten);
+        assert!(!plan.is_safe_to_execute());
+        let execution = if plan.action == DoltHistoryMaintenanceAction::None {
+            DoltHistoryMaintenanceExecution::NoActionRequired
+        } else if !plan.is_safe_to_execute() {
+            DoltHistoryMaintenanceExecution::BlockedBySafetyChecks
+        } else {
+            DoltHistoryMaintenanceExecution::PlannedOnly
+        };
+        assert_eq!(
+            execution,
+            DoltHistoryMaintenanceExecution::BlockedBySafetyChecks
+        );
     }
 
     fn coordinator_actor_for_tests(
