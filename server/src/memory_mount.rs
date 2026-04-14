@@ -1372,25 +1372,30 @@ mod tests {
     }
 
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn runtime_queue_write_and_truncate_coalesce_through_flush_path() {
-        let (fs, path, _project_dir) = build_runtime_test_filesystem("hello").await;
+    #[test]
+    fn runtime_queue_write_and_truncate_coalesce_through_flush_path() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let (fs, path, _project_dir) = runtime.block_on(build_runtime_test_filesystem("hello"));
 
-        assert_eq!(fs.runtime_status.lock().await.pending_writes, 0);
+        assert_eq!(runtime.block_on(fs.runtime_status.lock()).pending_writes, 0);
 
         fs.queue_write(&path, 5, b" world")
             .expect("stage append write");
-        assert_eq!(fs.runtime_status.lock().await.pending_writes, 1);
+        assert_eq!(runtime.block_on(fs.runtime_status.lock()).pending_writes, 1);
         assert_eq!(fs.pending_content(&path).as_deref(), Some("hello world"));
 
         fs.queue_truncate(&path, 5).expect("stage truncate");
-        assert_eq!(fs.runtime_status.lock().await.pending_writes, 1);
+        assert_eq!(runtime.block_on(fs.runtime_status.lock()).pending_writes, 1);
         assert_eq!(fs.pending_content(&path).as_deref(), Some("hello"));
 
         fs.flush_pending_write(&path)
             .expect("flush coalesced pending write");
 
-        let status = fs.runtime_status.lock().await.clone();
+        let status = runtime.block_on(fs.runtime_status.lock()).clone();
         assert_eq!(status.pending_writes, 0);
         assert_eq!(
             status.lifecycle,
@@ -1398,30 +1403,37 @@ mod tests {
         );
         assert_eq!(status.detail, None);
 
-        let file = fs
-            .core
-            .read_file_in_view(&fs.project_id, &MemoryViewSelection::Canonical, &path)
-            .await
+        let file = runtime
+            .block_on(fs.core.read_file_in_view(
+                &fs.project_id,
+                &MemoryViewSelection::Canonical,
+                &path,
+            ))
             .expect("read flushed file");
         assert_eq!(file.content, "hello");
     }
 
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn runtime_flush_failure_updates_degraded_status_from_real_flush_logic() {
-        let (fs, path, project_dir) = build_runtime_test_filesystem("seed").await;
+    #[test]
+    fn runtime_flush_failure_updates_degraded_status_from_real_flush_logic() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let (fs, path, project_dir) = runtime.block_on(build_runtime_test_filesystem("seed"));
         std::fs::remove_dir_all(project_dir.path()).expect("remove backing project dir");
 
         fs.queue_write(&path, 0, b"broken")
             .expect("stage write before failed flush");
-        assert_eq!(fs.runtime_status.lock().await.pending_writes, 1);
+        assert_eq!(runtime.block_on(fs.runtime_status.lock()).pending_writes, 1);
 
         let errno = fs
             .flush_pending_write(&path)
             .expect_err("flush should fail once project path is removed");
         assert_eq!(errno, libc::EIO);
 
-        let status = fs.runtime_status.lock().await.clone();
+        let status = runtime.block_on(fs.runtime_status.lock()).clone();
         assert_eq!(status.pending_writes, 0);
         assert_eq!(
             status.lifecycle,
