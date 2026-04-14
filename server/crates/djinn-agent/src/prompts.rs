@@ -476,7 +476,8 @@ mod tests {
         assert!(prompt.contains("/home/user/project"));
         assert!(prompt.contains("/home/user/project/.djinn/worktrees/t123"));
         assert!(prompt.contains("issue_type` is `research`"));
-        assert!(prompt.contains("type=\"research\""));
+        assert!(prompt.contains(".djinn/memory/"));
+        assert!(prompt.contains("write`/`edit`/`apply_patch`"));
         assert!(prompt.contains("Originated from task task-123"));
         // No un-substituted placeholders
         assert!(!prompt.contains("{{"));
