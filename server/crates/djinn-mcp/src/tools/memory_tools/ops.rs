@@ -28,7 +28,8 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
         Err(error) => return MemoryNoteResponse::error(error),
     };
 
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
     let note = match repo.get_by_permalink(&project_id, &p.identifier).await {
         Ok(Some(note)) => note,
         _ => match repo
@@ -82,7 +83,8 @@ pub async fn memory_search(
         }
     };
 
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
     let limit = p.limit.unwrap_or(10).clamp(1, 100) as usize;
     let semantic_scores = match server.state.embed_memory_query(&p.query).await {
         Ok(Some(embedding)) => repo
@@ -143,7 +145,8 @@ pub async fn memory_list(server: &DjinnMcpServer, p: ListParams) -> MemoryListRe
         }
     };
 
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
     let depth = p.depth.unwrap_or(1);
     let notes = repo
         .list_compact(
@@ -175,7 +178,8 @@ pub async fn memory_build_context(
         }
     };
 
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
     let max_related = p.max_related.unwrap_or(10).clamp(1, 50) as usize;
     let budget = p.budget.map(|b| b as usize);
     let url = p.url.strip_prefix("memory://").unwrap_or(&p.url);
@@ -256,7 +260,8 @@ pub async fn memory_health(server: &DjinnMcpServer, p: HealthParams) -> MemoryHe
             };
         }
     };
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
     match repo.health(&project_id).await {
         Ok(h) => MemoryHealthResponse {
             total_notes: Some(h.total_notes),
@@ -294,7 +299,8 @@ pub async fn memory_broken_links(
             };
         }
     };
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
     let folder = normalize_folder_filter(p.folder);
     let broken_links = repo
         .broken_links(&project_id, folder.as_deref())
@@ -316,7 +322,8 @@ pub async fn memory_orphans(server: &DjinnMcpServer, p: OrphansParams) -> Memory
             };
         }
     };
-    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus());
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
     let folder = normalize_folder_filter(p.folder);
     let orphans = repo
         .orphans(&project_id, folder.as_deref())

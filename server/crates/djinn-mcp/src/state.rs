@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use djinn_core::events::EventBus;
 use djinn_core::models::DjinnSettings;
-use djinn_db::{Database, repositories::note::NoteEmbeddingProvider};
+use djinn_db::{
+    Database,
+    repositories::note::{NoteEmbeddingProvider, NoteVectorStore},
+};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::bridge::{
@@ -27,6 +30,7 @@ pub struct McpState {
     coordinator: Option<Arc<dyn CoordinatorOps>>,
     pool: Option<Arc<dyn SlotPoolOps>>,
     embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
+    vector_store: Option<Arc<dyn NoteVectorStore>>,
     lsp: Arc<dyn LspOps>,
     sync: Arc<dyn SyncOps>,
     runtime: Arc<dyn RuntimeOps>,
@@ -45,6 +49,7 @@ impl McpState {
         coordinator: Option<Arc<dyn CoordinatorOps>>,
         pool: Option<Arc<dyn SlotPoolOps>>,
         embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
+        vector_store: Option<Arc<dyn NoteVectorStore>>,
         lsp: Arc<dyn LspOps>,
         sync: Arc<dyn SyncOps>,
         runtime: Arc<dyn RuntimeOps>,
@@ -60,6 +65,7 @@ impl McpState {
             coordinator,
             pool,
             embedding_provider,
+            vector_store,
             lsp,
             sync,
             runtime,
@@ -98,6 +104,10 @@ impl McpState {
 
     pub fn embedding_provider(&self) -> Option<Arc<dyn NoteEmbeddingProvider>> {
         self.embedding_provider.clone()
+    }
+
+    pub fn vector_store(&self) -> Option<Arc<dyn NoteVectorStore>> {
+        self.vector_store.clone()
     }
 
     pub fn lsp(&self) -> &Arc<dyn LspOps> {
@@ -394,6 +404,7 @@ pub(crate) mod stubs {
             CatalogService::new(),
             HealthTracker::new(),
             "test-user".into(),
+            None,
             None,
             None,
             None,

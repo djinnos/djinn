@@ -87,6 +87,7 @@ mod tests {
             Some(Arc::new(StubCoordinatorOps)),
             Some(Arc::new(StubSlotPoolOps)),
             None,
+            None,
             Arc::new(StubLspOps),
             Arc::new(StubSyncOps),
             Arc::new(StubRuntimeOps),
@@ -364,6 +365,7 @@ mod tests {
             Some(Arc::new(StubCoordinatorOps)),
             Some(Arc::new(StubSlotPoolOps)),
             None,
+            None,
             Arc::new(StubLspOps),
             Arc::new(StubSyncOps),
             Arc::new(SemanticRuntimeOps {
@@ -431,6 +433,7 @@ mod tests {
             "test-user".into(),
             Some(Arc::new(StubCoordinatorOps)),
             Some(Arc::new(StubSlotPoolOps)),
+            None,
             None,
             Arc::new(StubLspOps),
             Arc::new(StubSyncOps),

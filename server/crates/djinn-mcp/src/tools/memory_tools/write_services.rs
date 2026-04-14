@@ -29,6 +29,7 @@ pub(super) fn note_repository(
     NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_worktree_root(worktree_root)
         .with_embedding_provider(server.state.embedding_provider())
+        .with_vector_store(server.state.vector_store())
 }
 
 pub(super) async fn maybe_update_singleton_note(
