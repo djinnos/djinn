@@ -697,6 +697,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn worker_prompt_documents_filesystem_first_memory_boundary() {
+        let task = make_task();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(
+            prompt.contains("ADR-057 steady-state path"),
+            "worker prompt should describe the ADR-057 mounted-memory boundary"
+        );
+        assert!(
+            prompt.contains("reflects the current task/session branch view"),
+            "worker prompt should describe branch-aware mounted-memory behavior"
+        );
+        assert!(
+            prompt.contains("memory_graph")
+                && prompt.contains("memory_associations")
+                && prompt.contains("memory_confirm"),
+            "worker prompt should call out retained analytical memory tools even when they are not worker CRUD tools"
+        );
+    }
+
     /// Per ADR-051 §1 the memory-health review moved from Architect to Planner
     /// (patrol mode). This test now asserts the content lives on the Planner
     /// prompt side.
@@ -737,6 +759,16 @@ mod tests {
         assert!(
             prompt.contains("stop once the patrol budget is exhausted"),
             "planner prompt should enforce the knowledge-task budget"
+        );
+        assert!(
+            prompt.contains("memory_graph")
+                && prompt.contains("memory_associations")
+                && prompt.contains("memory_confirm"),
+            "planner prompt should distinguish retained analytical tools from deprecated CRUD flows"
+        );
+        assert!(
+            prompt.contains("active branch/session view"),
+            "planner prompt should describe the mounted memory runtime expectation"
         );
     }
 
@@ -798,6 +830,16 @@ mod tests {
         assert!(
             prompt.contains("task objective"),
             "architect prompt should ask for enough context to explain why a memory note exists"
+        );
+        assert!(
+            prompt.contains("memory_graph")
+                && prompt.contains("memory_associations")
+                && prompt.contains("memory_confirm"),
+            "architect prompt should document retained analytical memory tools at the ADR-057 boundary"
+        );
+        assert!(
+            prompt.contains("filesystem-first at `.djinn/memory/`"),
+            "architect prompt should describe the filesystem-first mounted-memory boundary"
         );
     }
 
