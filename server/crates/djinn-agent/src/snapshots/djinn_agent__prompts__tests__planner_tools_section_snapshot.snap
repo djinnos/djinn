@@ -1,6 +1,6 @@
 ---
 source: crates/djinn-agent/src/prompts.rs
-assertion_line: 804
+assertion_line: 846
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
@@ -30,6 +30,7 @@ expression: section
 - `memory_edit(content, identifier, operation, find_text?, section?, type?)` — Edit an existing note. Operations: "append" (add to end), "prepend" (add after frontmatter), "find_replace" (exact text replacement, requires find_text), "replace_section" (replace content under a markdown heading, requires section).
 - `memory_build_context(limit?, min_confidence?, query?, task_id?)` — Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.
 - `memory_health()` — Returns aggregate health report: total notes, broken link count, orphan note count, duplicate cluster count, low-confidence note count, stale note count, stale notes by folder.
+- `memory_extracted_audit()` — Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and required structure. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance.
 - `memory_broken_links(folder?)` — Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).
 - `memory_orphans(folder?)` — Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).
 - `agent_metrics(role)` — Show execution quality metrics for a role to support prompt tuning and intervention decisions.

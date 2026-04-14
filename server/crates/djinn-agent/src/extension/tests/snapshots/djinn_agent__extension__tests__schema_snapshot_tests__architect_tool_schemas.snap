@@ -899,6 +899,15 @@ expression: tool_schemas_architect()
   },
   {
     "concurrent_safe": true,
+    "description": "Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and required structure. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "memory_extracted_audit"
+  },
+  {
+    "concurrent_safe": true,
     "description": "Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).",
     "inputSchema": {
       "properties": {
