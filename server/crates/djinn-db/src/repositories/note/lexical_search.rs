@@ -25,6 +25,58 @@ pub struct LexicalSearchPlan {
     pub replacement_notes: Vec<&'static str>,
 }
 
+pub fn executable_lexical_search_sql(plan: &LexicalSearchPlan) -> String {
+    match plan.backend {
+        LexicalSearchBackend::SqliteFts5 => plan.sql.clone(),
+        LexicalSearchBackend::MysqlFulltext => {
+            let mut normalized = String::with_capacity(plan.sql.len());
+            let mut chars = plan.sql.chars().peekable();
+
+            while let Some(ch) = chars.next() {
+                if ch == '?' {
+                    normalized.push('?');
+                    while matches!(chars.peek(), Some(next) if next.is_ascii_digit()) {
+                        chars.next();
+                    }
+                } else {
+                    normalized.push(ch);
+                }
+            }
+
+            normalized
+        }
+    }
+}
+
+pub fn normalize_lexical_score(plan: &LexicalSearchPlan, raw_score: f64) -> f64 {
+    if plan.score_descending {
+        raw_score
+    } else {
+        -raw_score
+    }
+}
+
+pub fn lexical_search_threshold(
+    backend: LexicalSearchBackend,
+    mode: LexicalSearchMode,
+) -> Result<Option<f64>> {
+    let threshold = match (backend, mode) {
+        (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Dedup) => Some(-3.0),
+        (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Contradiction) => Some(5.0),
+        (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Dedup) => Some(0.0),
+        (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Contradiction) => Some(0.0),
+        _ => None,
+    };
+
+    if let Some(threshold) = threshold
+        && backend == LexicalSearchBackend::MysqlFulltext
+    {
+        validate_mysql_fulltext_threshold(threshold)?;
+    }
+
+    Ok(threshold)
+}
+
 pub fn sanitize_sqlite_fts5_query(raw: &str) -> Option<String> {
     let tokens: Vec<&str> = raw
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -259,5 +311,59 @@ mod tests {
     fn mysql_thresholds_must_be_non_negative() {
         assert!(validate_mysql_fulltext_threshold(0.0).is_ok());
         assert!(validate_mysql_fulltext_threshold(-0.1).is_err());
+    }
+
+    #[test]
+    fn mysql_execution_sql_uses_mysql_placeholders() {
+        let plan = build_lexical_search_plan(
+            LexicalSearchBackend::MysqlFulltext,
+            LexicalSearchMode::Ranked,
+            "rust sqlite",
+        )
+        .unwrap()
+        .unwrap();
+
+        let sql = executable_lexical_search_sql(&plan);
+        assert!(sql.contains("AGAINST (? IN BOOLEAN MODE)"));
+        assert!(!sql.contains("?1"));
+        assert!(!sql.contains("?2"));
+    }
+
+    #[test]
+    fn score_normalization_preserves_best_first_across_backends() {
+        let sqlite_plan = build_lexical_search_plan(
+            LexicalSearchBackend::SqliteFts5,
+            LexicalSearchMode::Ranked,
+            "rust sqlite",
+        )
+        .unwrap()
+        .unwrap();
+        let mysql_plan = build_lexical_search_plan(
+            LexicalSearchBackend::MysqlFulltext,
+            LexicalSearchMode::Ranked,
+            "rust sqlite",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(normalize_lexical_score(&sqlite_plan, -2.5), 2.5);
+        assert_eq!(normalize_lexical_score(&mysql_plan, 2.5), 2.5);
+    }
+
+    #[test]
+    fn thresholds_follow_backend_score_conventions() {
+        assert_eq!(
+            lexical_search_threshold(LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Dedup)
+                .unwrap(),
+            Some(-3.0)
+        );
+        assert_eq!(
+            lexical_search_threshold(
+                LexicalSearchBackend::MysqlFulltext,
+                LexicalSearchMode::Contradiction,
+            )
+            .unwrap(),
+            Some(0.0)
+        );
     }
 }

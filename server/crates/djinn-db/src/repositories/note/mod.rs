@@ -46,6 +46,7 @@ pub use embeddings::{
 };
 pub use lexical_search::{
     LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
+    executable_lexical_search_sql, lexical_search_threshold, normalize_lexical_score,
     sanitize_mysql_boolean_query, sanitize_sqlite_fts5_query, validate_mysql_fulltext_threshold,
 };
 pub use scoring::{

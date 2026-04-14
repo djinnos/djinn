@@ -4,6 +4,10 @@ use djinn_core::models::{Note, NoteAbstract, NoteOverview};
 
 use crate::error::DbResult as Result;
 use crate::repositories::note::rrf::rrf_fuse;
+use crate::repositories::note::{
+    LexicalSearchMode, build_lexical_search_plan, executable_lexical_search_sql,
+    normalize_lexical_score,
+};
 
 use super::NoteRepository;
 
@@ -208,43 +212,39 @@ impl NoteRepository {
         query: &str,
         limit: usize,
     ) -> Result<Vec<(String, f64)>> {
-        // Sanitize query for FTS5
-        let tokens: Vec<&str> = query
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|t| {
-                let t = t.to_uppercase();
-                !t.is_empty() && t.len() > 2 && t != "AND" && t != "OR" && t != "NOT"
-            })
-            .take(10) // Limit to top 10 terms
-            .collect();
-
-        if tokens.is_empty() {
+        let Some(plan) = build_lexical_search_plan(
+            self.lexical_search_backend(),
+            LexicalSearchMode::Discovery,
+            query,
+        )?
+        else {
             return Ok(vec![]);
-        }
+        };
 
-        let safe_query = tokens
+        let sql = executable_lexical_search_sql(&plan);
+        let rows: Vec<(String, f64)> = match self.db.pool_kind() {
+            crate::database::DatabasePool::Sqlite(pool) => {
+                sqlx::query_as(&sql)
+                    .bind(&plan.query)
+                    .bind(project_id)
+                    .bind(limit as i64)
+                    .fetch_all(pool)
+                    .await?
+            }
+            crate::database::DatabasePool::Mysql(pool) => {
+                sqlx::query_as::<sqlx::MySql, _>(&sql)
+                    .bind(&plan.query)
+                    .bind(project_id)
+                    .bind(limit as i64)
+                    .fetch_all(pool)
+                    .await?
+            }
+        };
+
+        Ok(rows
             .into_iter()
-            .map(|t| format!("\"{t}\""))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let rows: Vec<(String, f64)> = sqlx::query_as(
-            "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score
-             FROM notes_fts
-             JOIN notes n ON notes_fts.rowid = n.rowid
-             WHERE notes_fts MATCH ?1
-               AND n.project_id = ?2
-             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
-             LIMIT ?3",
-        )
-        .bind(&safe_query)
-        .bind(project_id)
-        .bind(limit as i64)
-        .fetch_all(self.db.pool())
-        .await?;
-
-        // Convert BM25 to score (lower BM25 = better, so negate)
-        Ok(rows.into_iter().map(|(id, bm25)| (id, -bm25)).collect())
+            .map(|(id, score)| (id, normalize_lexical_score(&plan, score)))
+            .collect())
     }
 
     /// Get temporal scores for all notes in project.
