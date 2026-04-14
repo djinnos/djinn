@@ -31,6 +31,8 @@ You are an autonomous agent in the Djinn task execution system. **There is no hu
 
 {{knowledge_context_section}}
 
+{{planner_patrol_context_section}}
+
 {{activity_section}}
 
 ## Environment

@@ -740,7 +740,7 @@ impl DjinnMcpServer {
 
     /// Board health report: epic progress, stale tasks, and review queue.
     #[tool(
-        description = "Returns aggregate health report (total notes, broken links, orphan notes, stale notes by folder)."
+        description = "Returns board health plus planner-facing memory-health summary (epic progress, stale tasks, review queue, duplicate clusters, low-confidence notes, stale notes, broken links, and orphans)."
     )]
     pub async fn board_health(
         &self,

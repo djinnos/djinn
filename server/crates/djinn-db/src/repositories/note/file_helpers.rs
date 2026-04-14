@@ -30,6 +30,37 @@ pub fn folder_for_type(note_type: &str) -> &'static str {
     }
 }
 
+/// Return the virtual filesystem path for a note permalink.
+///
+/// Examples:
+/// - `patterns/example` -> `patterns/example.md`
+/// - `brief` -> `brief.md`
+pub fn virtual_note_path_for_permalink(permalink: &str) -> String {
+    format!("{}.md", permalink.trim_matches('/'))
+}
+
+/// Resolve a logical virtual note path back into its canonical permalink.
+///
+/// Returns `None` when the path does not name a markdown file.
+pub fn permalink_from_virtual_note_path(path: &str) -> Option<String> {
+    let normalized = normalize_virtual_note_path(path);
+    let trimmed = normalized.strip_suffix(".md")?;
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Normalize a logical virtual path by trimming leading/trailing separators and
+/// collapsing empty path segments.
+pub fn normalize_virtual_note_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Return the storage folder for a given note type and explicit write status.
 pub fn folder_for_type_with_status(note_type: &str, status: Option<&str>) -> &'static str {
     match (note_type, status) {
@@ -122,11 +153,16 @@ pub(super) fn write_note_file(
         std::fs::create_dir_all(parent)
             .map_err(|e| Error::InvalidData(format!("create_dir_all {}: {e}", parent.display())))?;
     }
-    let file_content =
-        format!("---\ntitle: {title}\ntype: {note_type}\ntags: {tags}\n---\n\n{content}",);
+    let file_content = render_note_markdown(title, note_type, tags, content);
     std::fs::write(file_path, file_content)
         .map_err(|e| Error::InvalidData(format!("write note file {}: {e}", file_path.display())))?;
     Ok(())
+}
+
+/// Render a note as markdown with YAML frontmatter using the repository's
+/// canonical on-disk format.
+pub fn render_note_markdown(title: &str, note_type: &str, tags: &str, content: &str) -> String {
+    format!("---\ntitle: {title}\ntype: {note_type}\ntags: {tags}\n---\n\n{content}")
 }
 
 // ── Catalog builder ──────────────────────────────────────────────────────────

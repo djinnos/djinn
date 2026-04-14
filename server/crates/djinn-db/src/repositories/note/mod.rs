@@ -57,7 +57,9 @@ pub use indexing::UpdateNoteIndexParams;
 use file_helpers::{build_catalog, write_note_file};
 pub use file_helpers::{
     file_path_for, file_path_for_with_status, folder_for_type, folder_for_type_with_status,
-    is_singleton, permalink_for, permalink_for_with_status, slugify,
+    is_singleton, normalize_virtual_note_path, permalink_for, permalink_for_with_status,
+    permalink_from_virtual_note_path, render_note_markdown, slugify,
+    virtual_note_path_for_permalink,
 };
 use indexing::{index_links_for_note, resolve_links_for_note};
 

@@ -214,6 +214,9 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
 
     let health = repo.health(&project.id).await.unwrap();
     assert_eq!(health.orphan_note_count, orphans.len() as i64);
+    assert_eq!(health.stale_note_count, 0);
+    assert_eq!(health.low_confidence_note_count, 0);
+    assert_eq!(health.duplicate_cluster_count, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

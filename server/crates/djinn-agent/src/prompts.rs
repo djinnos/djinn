@@ -85,6 +85,10 @@ pub struct TaskContext {
     // ── Knowledge context ────────────────────────────────────────────────
     /// Path-scoped knowledge notes relevant to this task's code areas.
     pub knowledge_context: Option<String>,
+
+    // ── Planner patrol context ───────────────────────────────────────────
+    /// Planner-patrol-only summary of code-graph diffs and undocumented hotspots.
+    pub planner_patrol_context: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -186,6 +190,15 @@ pub(crate) fn render_prompt_for_role(
         _ => String::new(),
     };
     out = out.replace("{{knowledge_context_section}}", &knowledge_context_section);
+
+    let planner_patrol_context_section = match &ctx.planner_patrol_context {
+        Some(text) if !text.trim().is_empty() => format!("## Planner Patrol Context\n\n{text}\n"),
+        _ => String::new(),
+    };
+    out = out.replace(
+        "{{planner_patrol_context_section}}",
+        &planner_patrol_context_section,
+    );
 
     let activity_section = match &ctx.activity {
         Some(log) if !log.trim().is_empty() => format!(
@@ -443,6 +456,7 @@ mod tests {
             verification_failure: None,
             epic_context: None,
             knowledge_context: None,
+            planner_patrol_context: None,
         }
     }
 
@@ -738,6 +752,22 @@ mod tests {
             prompt.contains("planning task to deprecate the outdated note"),
             "planner prompt should prescribe planning-task routing for contradiction resolution"
         );
+    }
+
+    #[test]
+    fn planner_prompt_includes_patrol_context_section_when_present() {
+        let task = make_task();
+        let ctx = TaskContext {
+            planner_patrol_context: Some(
+                "### Code Graph Diff Summary\n\nNew modules: `server/src/new_area.rs`".into(),
+            ),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::Planner, &task, &ctx);
+
+        assert!(prompt.contains("Planner Patrol Context"));
+        assert!(prompt.contains("Code Graph Diff Summary"));
+        assert!(prompt.contains("New modules:"));
     }
 
     /// Architect spike notes must still carry task traceability (per ADR-051

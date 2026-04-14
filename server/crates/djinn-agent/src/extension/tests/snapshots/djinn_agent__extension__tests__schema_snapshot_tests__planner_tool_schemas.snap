@@ -799,7 +799,7 @@ expression: tool_schemas_planner()
   },
   {
     "concurrent_safe": true,
-    "description": "Returns aggregate health report: total notes, broken link count, orphan note count, stale notes by folder.",
+    "description": "Returns aggregate health report: total notes, broken link count, orphan note count, duplicate cluster count, low-confidence note count, stale note count, stale notes by folder.",
     "inputSchema": {
       "properties": {},
       "type": "object"
