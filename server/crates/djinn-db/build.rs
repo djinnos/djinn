@@ -15,4 +15,7 @@
 //! decided nothing in `djinn-db` had changed.
 fn main() {
     println!("cargo:rerun-if-changed=migrations");
+    println!("cargo:rerun-if-changed=schema.sql");
+    println!("cargo:rerun-if-changed=sql/mysql_schema.sql");
+    println!("cargo:rerun-if-changed=sql/mysql_notes_fulltext_prototype.sql");
 }
