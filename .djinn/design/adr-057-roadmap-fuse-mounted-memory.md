@@ -5,12 +5,18 @@ tags: ["adr-057","roadmap","memory","filesystem","fuse"]
 ---
 
 
+
 # ADR-057 Roadmap — FUSE-Mounted Memory
 
 ## Status
-Epic `tcet` remains open. Wave 1 is landed in the codebase, and the planned wave-2 follow-ons are now substantially landed as well: branch-aware memory view selection beneath the filesystem core (`40oi`), session-aware branch context in the Linux memory mount runtime (`l7fo`), and the narrowed runtime batching/flush-path coverage follow-up (`qshy`) are all closed. The epic is not yet complete because agent-facing CRUD contraction is still actively in flight via `6lq5`, and the roadmap still has unshipped wave-3 work to make filesystem-first usage explicit and operable for agents.
+Epic `tcet` remains open, but the remaining work is now tightly bounded and already decomposed into the final wave. The filesystem foundation and runtime slices are landed: the transport-neutral memory filesystem core, repository-backed read/list/stat behavior, write-through mutations, Linux FUSE mount plumbing, integration hardening, branch-aware view selection, session-aware runtime wiring, batching/flush-path coverage, and filesystem-first CRUD contraction (`6lq5`) are all closed.
 
-What remains is no longer the broad wave-2 runtime foundation. The remaining work is the wave-3 completion slice: finish the filesystem-first agent/tool migration after `6lq5`, expose clearer branch/view UX and operational guardrails around the mounted memory surface, and document the compatibility boundary between retained analytical MCP tools and deprecated CRUD-first flows.
+The epic is not yet complete because the final filesystem-first UX completion tasks are still in progress:
+- `u5qe` — expose mounted-memory view selection and fallback state in runtime status surfaces
+- `hl1b` — document and verify the filesystem-first memory tool migration boundary
+- `ski2` — add filesystem-first mount enablement and branch-aware usage guardrails
+
+A narrow memory-hygiene companion task `lki7` is approved and keeps the active ADR-057 canonical notes clean, but it does not expand the implementation scope of the epic itself.
 
 ## Current codebase anchors
 - Memory note persistence and indexing live under `server/crates/djinn-db/src/repositories/note/`.
