@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::ffi::sqlite3_auto_extension;
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};
 use tokio::sync::OnceCell;
@@ -14,6 +15,92 @@ use crate::error::{DbError, DbResult};
 use crate::migrations;
 
 const NOTE_EMBEDDING_DIMENSIONS: usize = 768;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseBackendKind {
+    Sqlite,
+    Mysql,
+}
+
+impl DatabaseBackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Mysql => "mysql",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MysqlBackendFlavor {
+    Mysql,
+    Dolt,
+}
+
+impl MysqlBackendFlavor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mysql => "mysql",
+            Self::Dolt => "dolt",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+pub enum DatabaseConnectConfig {
+    Sqlite(SqliteDatabaseConfig),
+    Mysql(MysqlDatabaseConfig),
+}
+
+impl DatabaseConnectConfig {
+    pub fn backend_kind(&self) -> DatabaseBackendKind {
+        match self {
+            Self::Sqlite(_) => DatabaseBackendKind::Sqlite,
+            Self::Mysql(_) => DatabaseBackendKind::Mysql,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqliteDatabaseConfig {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub readonly: bool,
+    #[serde(default = "default_true")]
+    pub create_if_missing: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MysqlDatabaseConfig {
+    pub url: String,
+    #[serde(default = "default_mysql_flavor")]
+    pub flavor: MysqlBackendFlavor,
+}
+
+impl MysqlDatabaseConfig {
+    pub fn display_backend(&self) -> &'static str {
+        self.flavor.as_str()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseBootstrapInfo {
+    pub backend_kind: DatabaseBackendKind,
+    pub backend_label: String,
+    pub target: String,
+    pub readonly: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_mysql_flavor() -> MysqlBackendFlavor {
+    MysqlBackendFlavor::Mysql
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SqliteVecStatus {
@@ -25,11 +112,12 @@ pub struct SqliteVecStatus {
 static SQLITE_VEC_REGISTRATION: OnceLock<Result<(), String>> = OnceLock::new();
 static SQLITE_VEC_DISABLED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Database {
     pool: SqlitePool,
     db_path: std::path::PathBuf,
     readonly: bool,
+    bootstrap: DatabaseBootstrapInfo,
     initialized: Arc<OnceCell<()>>,
     sqlite_vec_status: Arc<OnceCell<SqliteVecStatus>>,
 }
@@ -37,54 +125,20 @@ pub struct Database {
 impl Database {
     /// Open (or create) the database at `path`, auto-creating parent dirs.
     pub fn open(path: &Path) -> DbResult<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| DbError::InvalidData(e.to_string()))?;
-        }
-
-        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
-            .create_if_missing(true)
-            .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(8)
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    apply_pragmas(conn).await?;
-                    Ok(())
-                })
-            })
-            .connect_lazy_with(opts);
-
-        Ok(Self {
-            pool,
-            db_path: path.to_path_buf(),
+        Self::open_with_config(DatabaseConnectConfig::Sqlite(SqliteDatabaseConfig {
+            path: path.to_path_buf(),
             readonly: false,
-            initialized: Arc::new(OnceCell::new()),
-            sqlite_vec_status: Arc::new(OnceCell::new()),
-        })
+            create_if_missing: true,
+        }))
     }
 
     /// Open the database at `path` in read-only mode.
     pub fn open_readonly(path: &Path) -> DbResult<Self> {
-        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}?mode=ro", path.display()))?
-            .read_only(true)
-            .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(8)
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    apply_pragmas_readonly(conn).await?;
-                    Ok(())
-                })
-            })
-            .connect_lazy_with(opts);
-
-        Ok(Self {
-            pool,
-            db_path: path.to_path_buf(),
+        Self::open_with_config(DatabaseConnectConfig::Sqlite(SqliteDatabaseConfig {
+            path: path.to_path_buf(),
             readonly: true,
-            initialized: Arc::new(OnceCell::new()),
-            sqlite_vec_status: Arc::new(OnceCell::new()),
-        })
+            create_if_missing: false,
+        }))
     }
 
     /// Open a temporary database for tests.
@@ -94,15 +148,73 @@ impl Database {
     pub fn open_in_memory() -> DbResult<Self> {
         let base = workspace_test_tmp_dir()?;
         let tmp = base.join(format!("djinn-test-{}.db", uuid::Uuid::now_v7()));
-        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", tmp.display()))?
-            .create_if_missing(true)
+        Self::open_sqlite(
+            &SqliteDatabaseConfig {
+                path: tmp,
+                readonly: false,
+                create_if_missing: true,
+            },
+            1,
+        )
+    }
+
+    /// Open a database using an explicit backend selection seam.
+    pub fn open_with_config(config: DatabaseConnectConfig) -> DbResult<Self> {
+        match config {
+            DatabaseConnectConfig::Sqlite(sqlite) => Self::open_sqlite(&sqlite, 8),
+            DatabaseConnectConfig::Mysql(mysql) => Err(DbError::InvalidData(format!(
+                "database backend `{}` is configured but djinn-db repositories still require SQLite during the staged Dolt/MySQL migration",
+                mysql.display_backend()
+            ))),
+        }
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    pub fn bootstrap_info(&self) -> &DatabaseBootstrapInfo {
+        &self.bootstrap
+    }
+
+    pub fn backend_kind(&self) -> DatabaseBackendKind {
+        self.bootstrap.backend_kind
+    }
+
+    fn open_sqlite(config: &SqliteDatabaseConfig, max_connections: u32) -> DbResult<Self> {
+        if !config.readonly
+            && config.create_if_missing
+            && let Some(parent) = config.path.parent()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| DbError::InvalidData(e.to_string()))?;
+        }
+
+        let dsn = if config.readonly {
+            format!("sqlite://{}?mode=ro", config.path.display())
+        } else {
+            format!("sqlite://{}", config.path.display())
+        };
+
+        let mut opts = SqliteConnectOptions::from_str(&dsn)?
+            .read_only(config.readonly)
             .foreign_keys(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(300))
-            .after_connect(|conn, _meta| {
+        if !config.readonly {
+            opts = opts.create_if_missing(config.create_if_missing);
+        }
+
+        let mut pool_opts = SqlitePoolOptions::new().max_connections(max_connections);
+        if max_connections == 1 {
+            pool_opts = pool_opts.acquire_timeout(std::time::Duration::from_secs(300));
+        }
+        let readonly = config.readonly;
+        let pool = pool_opts
+            .after_connect(move |conn, _meta| {
                 Box::pin(async move {
-                    apply_pragmas(conn).await?;
+                    if readonly {
+                        apply_pragmas_readonly(conn).await?;
+                    } else {
+                        apply_pragmas(conn).await?;
+                    }
                     Ok(())
                 })
             })
@@ -110,15 +222,17 @@ impl Database {
 
         Ok(Self {
             pool,
-            db_path: tmp,
-            readonly: false,
+            db_path: config.path.clone(),
+            readonly: config.readonly,
+            bootstrap: DatabaseBootstrapInfo {
+                backend_kind: DatabaseBackendKind::Sqlite,
+                backend_label: "sqlite".to_owned(),
+                target: config.path.display().to_string(),
+                readonly: config.readonly,
+            },
             initialized: Arc::new(OnceCell::new()),
             sqlite_vec_status: Arc::new(OnceCell::new()),
         })
-    }
-
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
     }
 
     pub async fn ensure_initialized(&self) -> DbResult<()> {
@@ -618,5 +732,35 @@ mod tests {
         assert_eq!(count, 0);
 
         set_sqlite_vec_disabled_for_tests(false);
+    }
+
+    #[test]
+    fn mysql_backend_selection_returns_explicit_staging_error() {
+        let error = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
+            url: "mysql://root@127.0.0.1:3306/djinn".to_owned(),
+            flavor: MysqlBackendFlavor::Dolt,
+        }))
+        .expect_err("mysql/dolt backend should not silently fall back to sqlite");
+
+        assert!(error.to_string().contains("still require SQLite"));
+        assert!(error.to_string().contains("dolt"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sqlite_backend_selection_preserves_bootstrap_metadata() {
+        let dir = crate::database::test_tempdir().unwrap();
+        let db_path = dir.path().join("selected.db");
+
+        let db = Database::open_with_config(DatabaseConnectConfig::Sqlite(SqliteDatabaseConfig {
+            path: db_path.clone(),
+            readonly: false,
+            create_if_missing: true,
+        }))
+        .unwrap();
+
+        assert_eq!(db.backend_kind(), DatabaseBackendKind::Sqlite);
+        assert_eq!(db.bootstrap_info().backend_label, "sqlite");
+        assert_eq!(db.bootstrap_info().target, db_path.display().to_string());
+        assert!(!db.bootstrap_info().readonly);
     }
 }

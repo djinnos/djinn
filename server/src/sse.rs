@@ -10,7 +10,6 @@ use tokio::sync::broadcast;
 
 use crate::events::DjinnEventEnvelope;
 use crate::server::AppState;
-use djinn_db::default_db_path;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const SESSION_MESSAGE_MIN_INTERVAL: Duration = Duration::from_millis(50);
@@ -250,12 +249,14 @@ pub async fn events_handler(
 #[derive(Serialize)]
 pub struct DbInfo {
     path: String,
+    backend: String,
     wsl: bool,
     direct_access_likely: bool,
 }
 
-pub async fn db_info_handler() -> axum::Json<DbInfo> {
-    let path = default_db_path();
+pub async fn db_info_handler(State(state): State<AppState>) -> axum::Json<DbInfo> {
+    let health = state.database_health();
+    let path = std::path::PathBuf::from(&health.target);
     let wsl = is_wsl();
     let direct_access_likely = !path
         .components()
@@ -264,6 +265,7 @@ pub async fn db_info_handler() -> axum::Json<DbInfo> {
 
     axum::Json(DbInfo {
         path: path.to_string_lossy().into_owned(),
+        backend: health.backend_label,
         wsl,
         direct_access_likely,
     })

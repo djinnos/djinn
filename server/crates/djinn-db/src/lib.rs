@@ -12,7 +12,11 @@ pub mod test_support {
     };
 }
 
-pub use database::{Database, SqliteVecStatus, default_db_path};
+pub use database::{
+    Database, DatabaseBackendKind, DatabaseBootstrapInfo, DatabaseConnectConfig,
+    MysqlBackendFlavor, MysqlDatabaseConfig, SqliteDatabaseConfig, SqliteVecStatus,
+    default_db_path,
+};
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
     agent::{

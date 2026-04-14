@@ -50,6 +50,12 @@ pub struct ExtractionQuality {
     pub dedup_skipped: u32,
     pub novelty_skipped: u32,
     pub written: u32,
+    #[serde(default)]
+    pub merged: u32,
+    #[serde(default)]
+    pub downgraded: u32,
+    #[serde(default)]
+    pub discarded: u32,
 }
 
 // ── Tool name classification ──────────────────────────────────────────────────
@@ -865,6 +871,9 @@ mod tests {
                 dedup_skipped: 1,
                 novelty_skipped: 0,
                 written: 1,
+                merged: 0,
+                downgraded: 0,
+                discarded: 0,
             },
         };
         let json = serde_json::to_string(&tax).unwrap();
