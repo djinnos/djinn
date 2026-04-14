@@ -1,4 +1,0 @@
-[main]
-envix = "Develop"
-db_type = "Sqlite"
-db_path = "./db.sql"

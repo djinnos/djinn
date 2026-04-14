@@ -88,6 +88,23 @@ impl MountedMemoryFilesystem {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn ensure_mount_runtime_support() -> Result<()> {
+    bail!("memory mount is only supported on Linux in ADR-057 wave 1")
+}
+
+#[cfg(all(target_os = "linux", not(feature = "memory-mount")))]
+fn ensure_mount_runtime_support() -> Result<()> {
+    bail!(
+        "memory mount is enabled in settings but djinn-server was built without the `memory-mount` feature"
+    )
+}
+
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
+fn ensure_mount_runtime_support() -> Result<()> {
+    Ok(())
+}
+
 pub async fn validate_mount_config(
     settings: &DjinnSettings,
     db: djinn_db::Database,
@@ -101,16 +118,13 @@ pub async fn validate_mount_config(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (db, events);
-        bail!("memory mount is only supported on Linux in ADR-057 wave 1")
+        ensure_mount_runtime_support()?;
+        unreachable!("non-Linux support check should always fail")
     }
 
     #[cfg(target_os = "linux")]
     {
-        if !cfg!(feature = "memory-mount") {
-            bail!(
-                "memory mount is enabled in settings but djinn-server was built without the `memory-mount` feature"
-            );
-        }
+        ensure_mount_runtime_support()?;
 
         let mount_path = config.mount_path.ok_or_else(|| {
             anyhow!("memory_mount_path must be set when memory_mount_enabled is true")
@@ -774,10 +788,36 @@ mod tests {
         assert!(error.to_string().contains("absolute path"));
 
         #[cfg(not(all(target_os = "linux", feature = "memory-mount")))]
+        assert!(error.to_string().contains(
+            "memory mount is enabled in settings but djinn-server was built without the `memory-mount` feature"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enabled_mount_requires_mount_path() {
+        let settings = DjinnSettings {
+            memory_mount_enabled: Some(true),
+            memory_mount_path: None,
+            ..Default::default()
+        };
+        let error = validate_mount_config(&settings, create_test_db(), test_events())
+            .await
+            .expect_err("missing mount path should fail");
+
+        #[cfg(all(target_os = "linux", feature = "memory-mount"))]
         assert!(
             error
                 .to_string()
-                .contains("built without the `memory-mount` feature")
+                .contains("memory_mount_path must be set when memory_mount_enabled is true")
+        );
+
+        #[cfg(not(all(target_os = "linux", feature = "memory-mount")))]
+        assert!(
+            error.to_string().contains(
+                "memory mount is enabled in settings but djinn-server was built without the `memory-mount` feature"
+            ) || error
+                .to_string()
+                .contains("memory mount is only supported on Linux in ADR-057 wave 1")
         );
     }
 }

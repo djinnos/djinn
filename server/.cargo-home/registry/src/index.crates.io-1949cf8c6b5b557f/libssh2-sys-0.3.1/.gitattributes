@@ -1,2 +1,0 @@
-# apparently libssh2 has trouble with CRLF, but of course only on windows
-* text eol=lf
