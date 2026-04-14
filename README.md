@@ -216,6 +216,21 @@ cat ~/.djinn/server.json
 | **Settings** | `settings_get`, `settings_save` | Configuration management |
 | **Execution** | `execution_start`, `execution_pause` | Control the task executor |
 
+## Experimental Linux memory mount
+
+Djinn includes initial ADR-057 Linux FUSE plumbing behind both a compile-time feature flag and an
+explicit runtime settings gate. It is disabled by default.
+
+- Build with `cd server && cargo build --features linux-fuse-memory-mount`
+- Host requirements: Linux FUSE support (`/dev/fuse`, `fusermount3`, and permission to mount)
+- Enable with `settings_set(memory_mount_enabled=true, memory_mount_project_id="<project-id>")`
+- Default mount location: `<project>/.djinn/memory`
+- Optional override: `memory_mount_path` must be an absolute path inside the configured project root
+
+Current scope only covers Linux startup/config validation plus repository-backed FUSE translation
+for read/list/stat/write-style note operations. macOS fallback transport, branch-aware mounting,
+and write debounce/lifecycle hardening remain out of scope for later ADR-057 waves.
+
 ## Community
 
 - [GitHub Issues](https://github.com/djinnos/djinn/issues) — Bug reports and feature requests

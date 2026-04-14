@@ -102,6 +102,9 @@ impl AppState {
 
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
         self.validate_models_providers_connected(settings).await?;
+        crate::memory_mount::resolve_mount_config(self, settings)
+            .await
+            .map_err(|e| e.to_string())?;
         let raw =
             serde_json::to_string(settings).map_err(|e| format!("serialize settings: {e}"))?;
         let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
@@ -243,6 +246,10 @@ impl AppState {
             if let Err(e) = djinn_agent::provider::telemetry::init(&config) {
                 tracing::warn!(error = %e, "failed to initialize Langfuse telemetry");
             }
+        }
+
+        if let Err(e) = crate::memory_mount::ensure_memory_mount(self, settings).await {
+            tracing::warn!(error = %e, "failed to reconcile memory mount configuration");
         }
     }
 }

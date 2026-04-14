@@ -6227,6 +6227,21 @@ expression: signatures
               "nullable": true,
               "type": "object"
             },
+            "memory_mount_enabled": {
+              "description": "Enable the experimental Linux-only memory FUSE mount at server startup.",
+              "nullable": true,
+              "type": "boolean"
+            },
+            "memory_mount_path": {
+              "description": "Mount path override. When omitted, Djinn mounts at `<project>/.djinn/memory`.",
+              "nullable": true,
+              "type": "string"
+            },
+            "memory_mount_project_id": {
+              "description": "Project id that should back the mounted memory filesystem.",
+              "nullable": true,
+              "type": "string"
+            },
             "models": {
               "description": "Ordered list of models available to agents, e.g. `[\"openai/gpt-4o\"]`.",
               "items": {
@@ -6330,6 +6345,21 @@ expression: signatures
           "description": "Per-model concurrent session caps (e.g. {\"openai/gpt-4o\": 4}). Omit to keep current value.",
           "nullable": true,
           "type": "object"
+        },
+        "memory_mount_enabled": {
+          "description": "Enable the experimental Linux-only memory FUSE mount. Omit to keep current value.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "memory_mount_path": {
+          "description": "Absolute mount path override. Defaults to `<project>/.djinn/memory`. Set to \"\" to clear.",
+          "nullable": true,
+          "type": "string"
+        },
+        "memory_mount_project_id": {
+          "description": "Project id that backs the memory mount. Required when enabling the mount. Set to \"\" to clear.",
+          "nullable": true,
+          "type": "string"
         },
         "models": {
           "description": "Ordered list of models available to all agents (e.g. [\"openai/gpt-4o\"]). Omit to keep current value.",

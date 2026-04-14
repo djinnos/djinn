@@ -11,6 +11,7 @@ pub mod index_tree;
 pub mod logging;
 mod mcp_bridge;
 pub mod memory_fs;
+pub mod memory_mount;
 pub mod process;
 pub mod repo_graph;
 pub mod repo_map;

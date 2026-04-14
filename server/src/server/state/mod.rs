@@ -91,6 +91,8 @@ struct Inner {
     /// immediately without spawning a duplicate task).  The entry is removed
     /// by the spawned task in its completion branch.
     pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
+    #[cfg(all(target_os = "linux", feature = "linux-fuse-memory-mount"))]
+    pub memory_mount: Mutex<Option<crate::memory_mount::MountedMemoryFilesystem>>,
 }
 
 impl AppState {
@@ -141,6 +143,8 @@ impl AppState {
                 indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
                 chat_warmed_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
+                #[cfg(all(target_os = "linux", feature = "linux-fuse-memory-mount"))]
+                memory_mount: Mutex::new(None),
             }),
         }
     }
@@ -459,6 +463,7 @@ impl AppState {
         sync.spawn_background_task(self.cancel().clone(), self.sync_user_id().to_string());
 
         self.restore_model_health_state().await;
+        self.apply_runtime_settings_from_db().await;
 
         // Finalize any sessions left in `running` from a previous process.
         self.interrupt_stale_sessions_on_startup().await;
@@ -488,6 +493,34 @@ impl AppState {
         // use.  Per-worktree skeleton refresh is no longer required.
 
         crate::task_confidence::spawn_task_outcome_listener(self.clone());
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-fuse-memory-mount"))]
+    pub(crate) async fn reconcile_memory_mount(
+        &self,
+        desired: Option<crate::memory_mount::MemoryMountConfig>,
+    ) -> Result<(), crate::memory_mount::MemoryMountError> {
+        let mut current = self.inner.memory_mount.lock().await;
+        let needs_restart = match (&*current, &desired) {
+            (None, None) => false,
+            (Some(_), None) => true,
+            (None, Some(_)) => true,
+            (Some(existing), Some(next)) => existing.config != *next,
+        };
+
+        if !needs_restart {
+            return Ok(());
+        }
+
+        if current.take().is_some() {
+            tracing::info!("memory FUSE mount stopped");
+        }
+
+        if let Some(config) = desired {
+            *current = Some(crate::memory_mount::start_memory_mount(self, config).await?);
+        }
+
+        Ok(())
     }
 
     async fn interrupt_stale_sessions_on_startup(&self) {

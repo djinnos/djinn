@@ -29,6 +29,12 @@ pub struct DjinnSettings {
     pub langfuse_secret_key: Option<String>,
     /// Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).
     pub langfuse_endpoint: Option<String>,
+    /// Enable the experimental Linux-only memory FUSE mount at server startup.
+    pub memory_mount_enabled: Option<bool>,
+    /// Project id that should back the mounted memory filesystem.
+    pub memory_mount_project_id: Option<String>,
+    /// Mount path override. When omitted, Djinn mounts at `<project>/.djinn/memory`.
+    pub memory_mount_path: Option<String>,
 }
 
 impl DjinnSettings {
@@ -75,6 +81,9 @@ impl DjinnSettings {
             langfuse_public_key: None,
             langfuse_secret_key: None,
             langfuse_endpoint: None,
+            memory_mount_enabled: None,
+            memory_mount_project_id: None,
+            memory_mount_path: None,
         }
     }
 

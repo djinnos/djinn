@@ -42,6 +42,12 @@ pub struct SettingsSetParams {
     pub langfuse_secret_key: Option<String>,
     /// Langfuse OTLP endpoint URL (defaults to "http://localhost:3000/api/public/otel"). Set to "" to disable. Omit to keep current value.
     pub langfuse_endpoint: Option<String>,
+    /// Enable the experimental Linux-only memory FUSE mount. Omit to keep current value.
+    pub memory_mount_enabled: Option<bool>,
+    /// Project id that backs the memory mount. Required when enabling the mount. Set to "" to clear.
+    pub memory_mount_project_id: Option<String>,
+    /// Absolute mount path override. Defaults to `<project>/.djinn/memory`. Set to "" to clear.
+    pub memory_mount_path: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -141,6 +147,15 @@ impl DjinnMcpServer {
         }
         if let Some(v) = p.langfuse_endpoint {
             settings.langfuse_endpoint = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = p.memory_mount_enabled {
+            settings.memory_mount_enabled = Some(v);
+        }
+        if let Some(v) = p.memory_mount_project_id {
+            settings.memory_mount_project_id = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = p.memory_mount_path {
+            settings.memory_mount_path = if v.is_empty() { None } else { Some(v) };
         }
 
         match self.state.apply_settings(&settings).await {
