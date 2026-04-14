@@ -16,18 +16,29 @@
 //! - exactly one registered project is supported; branch-aware and multi-project mounting remain
 //!   out of scope for later ADR-057 waves
 
+use std::path::PathBuf;
+
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
 use std::collections::HashMap;
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
 use std::ffi::OsStr;
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
+use std::path::Path;
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
 use std::sync::{Arc, Mutex};
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use djinn_core::models::DjinnSettings;
-use djinn_db::{NoteRepository, ProjectRepository};
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
+use djinn_db::NoteRepository;
+use djinn_db::ProjectRepository;
 
 use crate::events::EventBus;
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
 use crate::memory_fs::{MemoryEntryKind, MemoryFilesystemCore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -718,6 +729,7 @@ fn file_attr_for_metadata(metadata: &crate::memory_fs::MemoryEntryMetadata) -> f
     }
 }
 
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
 fn repo_err_to_errno(error: impl std::fmt::Display) -> i32 {
     let message = error.to_string();
     if message.contains("path not found") {
@@ -757,6 +769,15 @@ mod tests {
         let error = validate_mount_config(&settings, create_test_db(), test_events())
             .await
             .expect_err("relative path should fail");
+
+        #[cfg(all(target_os = "linux", feature = "memory-mount"))]
         assert!(error.to_string().contains("absolute path"));
+
+        #[cfg(not(all(target_os = "linux", feature = "memory-mount")))]
+        assert!(
+            error
+                .to_string()
+                .contains("built without the `memory-mount` feature")
+        );
     }
 }
