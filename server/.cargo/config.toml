@@ -18,6 +18,9 @@ rustc-wrapper = "sccache"
 # AND the env injection are gone now; cargo's default + sccache is the
 # whole story.
 
+[env]
+TMPDIR = "/var/tmp"
+
 # Use mold for faster linking
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
