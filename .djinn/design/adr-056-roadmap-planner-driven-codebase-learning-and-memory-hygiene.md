@@ -10,47 +10,34 @@ tags: ["adr-056","roadmap","planner","memory-hygiene","codebase-learning"]
 Implement the accepted ADR by extending Planner-led maintenance workflows with actionable memory-health and codebase-learning signals, while keeping the board protected from hygiene-task spam.
 
 ## Epic Status
-Open. The ADR is accepted/proposed as a work plan, but no implementation tasks beyond this planning task exist yet, and the codebase does not yet show the ADR's glue work: patrol-context enrichment, knowledge-task budgeting, graph-to-note staleness propagation, or planner-created cleanup/exploration flows tied to those signals.
+Closed. Wave 1 delivered the planned vertical slice and the codebase now exposes the ADR's core glue: planner-facing patrol context enrichment, guard-railed knowledge-task budgeting, code-graph diff and knowledge-gap summaries, graph-driven scoped-note freshness decay, and combined coverage-analysis/regression proof.
 
-## Existing Foundation Confirmed
-- Planner prompt already includes patrol guidance for `memory_health`, broken links, orphan notes, contradictions, and scoped-note review in `server/crates/djinn-agent/src/prompts/planner.md`.
-- Housekeeping already prunes associations, flags orphan notes, rebuilds content hashes, and repairs broken wikilinks in `server/src/housekeeping.rs`.
-- Duplicate-cluster detection already exists in `server/crates/djinn-db/src/repositories/note/consolidation.rs`.
-- Scoped note retrieval and confidence gating already exist in `server/crates/djinn-db/src/repositories/note/search.rs`.
-- `STALE_CITATION` confidence scoring already exists in `server/crates/djinn-db/src/repositories/note/scoring.rs`.
+## Completed Foundation and Delivery
+- Planner patrol context now surfaces aggregated memory-health signals, including duplicate-cluster counts, low-confidence/stale-note counts, and broken-link/orphan data.
+- Planner patrol applies guard rails for knowledge-task budgeting and trigger suppression so patrol can create follow-up work without flooding the board.
+- Planner-facing patrol context includes code-graph diff summaries plus undocumented or weakly documented hotspots.
+- Canonical graph refresh propagates code-change staleness to scoped notes through `scope_paths` overlap, `STALE_CITATION`, and review-needed marking.
+- Coverage analysis and regression coverage prove the combined planner context includes memory-health, code-graph, stale-area, and budgeting signals together.
 
-## Gaps This Epic Must Close
-1. Patrol context does not yet expose duplicate-cluster counts, low-confidence/stale-note counts, or code-graph change summaries in a planner-oriented summary.
-2. Planner workflow lacks guard-railed task creation rules for hygiene/exploration triggers described by the ADR.
-3. There is no graph-diff → `scope_paths` → stale-confidence/review-needed glue.
-4. There is no explicit coverage analysis that cross-references active code structure with scoped-note coverage.
+## Wave 1 Tasks Completed
+1. `gpt4` — Implement ADR-056 patrol memory-health summary enrichment.
+2. `ncyf` — Implement ADR-056 patrol knowledge-task budgeting and trigger guard rails.
+3. `flkb` — Implement ADR-056 code-graph diff and knowledge-gap patrol summary.
+4. `tru0` — Implement ADR-056 scoped-note freshness decay from canonical graph changes.
+5. `366v` — Implement ADR-056 coverage-gap analysis and planner-context regression tests.
 
-## Wave 1 Plan
-Focus on the minimum vertical slice that makes the ADR real without overcommitting to a giant refactor.
+## Outcome Against ADR Scope
+The epic's planned phases are functionally satisfied for this wave:
+- Phase 1 memory-health visibility: delivered.
+- Phase 2 planner-spawn guard rails: delivered.
+- Phase 3 code-structure awareness: delivered.
+- Phase 4 freshness decay: delivered.
+- Phase 5 tuning baseline/regression proof: delivered through combined coverage analysis and tests.
 
-### Task 1 — Patrol memory-health enrichment
-Add the missing patrol-facing memory-health summary plumbing so Planner can see duplicate clusters, low-confidence notes, stale-note counts, and existing broken-link/orphan signals in one place.
-
-### Task 2 — Patrol knowledge-task budgeting and trigger handling
-Wire Planner patrol decision logic so it can create at most a bounded number of knowledge tasks per patrol and avoid flooding the board when open hygiene tasks already exist.
-
-### Task 3 — Code-graph diff + knowledge-gap summary
-Expose graph-diff and undocumented-hotspot summaries to Planner patrol context so the Planner can spot structural knowledge gaps before creating architect spikes.
-
-### Task 4 — Freshness decay from changed code
-Apply `STALE_CITATION` and `review_needed` tagging to notes whose `scope_paths` overlap changed files from canonical graph refreshes.
-
-### Task 5 — Coverage analysis and regression tests
-Add coverage-gap analysis (modules with little/no note coverage vs changed scoped notes) and end-to-end tests proving the planner sees the new summaries and budget behavior.
-
-## Sequencing
-- Tasks 1 and 2 establish the patrol-side behavior and should land before patrol begins creating additional work from the new signals.
-- Task 3 provides code-graph context that Task 5 will validate.
-- Task 4 depends on graph refresh and scoped-note overlap logic and should land after Task 3's graph-side plumbing is available.
-- Task 5 closes the wave with coverage analysis and regression proof across the new planner context.
+Future tuning can happen as routine follow-up work if patrol behavior reveals threshold or prompt adjustments, but no remaining roadmap items are required to satisfy ADR-056's implementation goal.
 
 ## Done Criteria
-The epic can close when Planner patrol has first-class visibility into memory health and code-structure gaps, can create bounded follow-up knowledge tasks from those signals, and code changes automatically reduce confidence/tag scoped notes for review using graph diffs.
+Satisfied. Planner patrol has first-class visibility into memory health and code-structure gaps, can create bounded follow-up knowledge tasks from those signals, and code changes automatically reduce confidence/tag scoped notes for review using graph diffs.
 
 ## Relations
 - [[decisions/adr-056-proposal-planner-driven-codebase-learning-and-memory-hygiene]]
