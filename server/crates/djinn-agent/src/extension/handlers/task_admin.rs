@@ -1,4 +1,7 @@
 use super::*;
+use crate::knowledge_promotion::{
+    KnowledgeCleanupReason, KnowledgePromotionDecision, apply_task_knowledge_decision,
+};
 
 pub(super) async fn call_task_transition(
     state: &AgentContext,
@@ -149,6 +152,13 @@ pub(super) async fn call_task_delete_branch(
         &project_dir,
         state,
         true,
+    )
+    .await;
+    let _ = apply_task_knowledge_decision(
+        &task.id,
+        KnowledgePromotionDecision::Discard,
+        KnowledgeCleanupReason::BranchReset,
+        state,
     )
     .await;
 

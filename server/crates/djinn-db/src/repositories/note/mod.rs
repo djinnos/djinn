@@ -63,6 +63,24 @@ pub use file_helpers::{
 };
 use indexing::{index_links_for_note, resolve_links_for_note};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeNoteChangeKind {
+    Added,
+    Modified,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeNoteDiff {
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub tags: String,
+    pub change_kind: WorktreeNoteChangeKind,
+    pub canonical_note_id: Option<String>,
+    pub canonical_file_exists: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct NoteSearchParams<'a> {
     pub project_id: &'a str,

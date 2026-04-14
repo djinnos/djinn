@@ -4,6 +4,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::context::AgentContext;
+use crate::knowledge_promotion::{
+    KnowledgeCleanupReason, KnowledgePromotionDecision, apply_task_knowledge_decision,
+};
 use djinn_core::models::{SessionStatus, TransitionAction};
 use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 use djinn_git::GitError;
@@ -468,6 +471,13 @@ pub(crate) async fn merge_and_transition(
                 false, // keep the branch — PR needs it
             )
             .await;
+            let _ = apply_task_knowledge_decision(
+                task_id,
+                KnowledgePromotionDecision::Promote,
+                KnowledgeCleanupReason::TaskCompleted,
+                app_state,
+            )
+            .await;
             cleanup_paused_worker_session(task_id, app_state).await;
             let _ = repo
                 .log_activity(
@@ -506,6 +516,13 @@ pub(crate) async fn merge_and_transition(
                 &project_dir,
                 app_state,
                 true, // delete the branch — nothing to keep
+            )
+            .await;
+            let _ = apply_task_knowledge_decision(
+                task_id,
+                KnowledgePromotionDecision::Discard,
+                KnowledgeCleanupReason::TaskAbandoned,
+                app_state,
             )
             .await;
             cleanup_paused_worker_session(task_id, app_state).await;
@@ -587,6 +604,13 @@ pub(crate) async fn merge_and_transition(
                 &project_dir,
                 app_state,
                 true,
+            )
+            .await;
+            let _ = apply_task_knowledge_decision(
+                task_id,
+                KnowledgePromotionDecision::Promote,
+                KnowledgeCleanupReason::TaskCompleted,
+                app_state,
             )
             .await;
             cleanup_paused_worker_session(task_id, app_state).await;

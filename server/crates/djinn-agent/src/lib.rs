@@ -14,6 +14,7 @@ pub mod context;
 pub mod chat_tools;
 pub(crate) mod extension;
 pub mod file_time;
+pub mod knowledge_promotion;
 pub mod lsp;
 pub(crate) mod task_merge;
 pub use djinn_provider::message;

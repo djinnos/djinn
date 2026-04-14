@@ -249,6 +249,70 @@ pub(super) fn db_only_consolidation_type(note_type: &str) -> bool {
 }
 
 impl NoteRepository {
+    pub async fn diff_worktree_notes_against_canonical(
+        &self,
+        project_id: &str,
+        project_path: &Path,
+        worktree_root: &Path,
+    ) -> Result<Vec<WorktreeNoteDiff>> {
+        self.db.ensure_initialized().await?;
+
+        let notes_root = worktree_root.join(".djinn");
+        if !notes_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut markdown_files = Vec::new();
+        collect_markdown_files(&notes_root, &mut markdown_files)?;
+
+        let mut diffs = Vec::new();
+        for file_path in markdown_files {
+            let Some(parsed) = parse_worktree_note_file(worktree_root, &file_path)? else {
+                continue;
+            };
+
+            let permalink = permalink_for(&parsed.note_type, &parsed.title);
+            let canonical = self.get_by_permalink(project_id, &permalink).await?;
+            let canonical_file_exists = canonical
+                .as_ref()
+                .map(|note| !note.file_path.is_empty() && Path::new(&note.file_path).exists())
+                .unwrap_or_else(|| {
+                    file_path_for(project_path, &parsed.note_type, &parsed.title).exists()
+                });
+
+            let (change_kind, canonical_note_id) = match canonical {
+                Some(existing) => {
+                    let unchanged = existing.title == parsed.title
+                        && existing.content == parsed.content
+                        && existing.tags == parsed.tags
+                        && canonical_file_exists;
+                    (
+                        if unchanged {
+                            WorktreeNoteChangeKind::Unchanged
+                        } else {
+                            WorktreeNoteChangeKind::Modified
+                        },
+                        Some(existing.id),
+                    )
+                }
+                None => (WorktreeNoteChangeKind::Added, None),
+            };
+
+            diffs.push(WorktreeNoteDiff {
+                permalink,
+                title: parsed.title,
+                note_type: parsed.note_type,
+                tags: parsed.tags,
+                change_kind,
+                canonical_note_id,
+                canonical_file_exists,
+            });
+        }
+
+        diffs.sort_by(|a, b| a.permalink.cmp(&b.permalink));
+        Ok(diffs)
+    }
+
     pub async fn sync_worktree_notes_to_canonical(
         &self,
         project_id: &str,
@@ -312,6 +376,37 @@ impl NoteRepository {
         }
 
         Ok(synced)
+    }
+
+    pub async fn delete_worktree_notes_from_canonical(
+        &self,
+        project_id: &str,
+        worktree_root: &Path,
+    ) -> Result<usize> {
+        self.db.ensure_initialized().await?;
+
+        let notes_root = worktree_root.join(".djinn");
+        if !notes_root.exists() {
+            return Ok(0);
+        }
+
+        let mut markdown_files = Vec::new();
+        collect_markdown_files(&notes_root, &mut markdown_files)?;
+
+        let mut deleted = 0usize;
+        for file_path in markdown_files {
+            let Some(parsed) = parse_worktree_note_file(worktree_root, &file_path)? else {
+                continue;
+            };
+
+            let permalink = permalink_for(&parsed.note_type, &parsed.title);
+            if let Some(existing) = self.get_by_permalink(project_id, &permalink).await? {
+                self.delete(&existing.id).await?;
+                deleted += 1;
+            }
+        }
+
+        Ok(deleted)
     }
 
     pub async fn upsert_db_note_by_permalink(
