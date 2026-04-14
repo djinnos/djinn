@@ -34,6 +34,76 @@ fn make_tmpdir() -> TempDir {
     crate::test_helpers::test_tempdir("djinn-llm-extraction-")
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_routes_durable_writes_into_task_worktree_when_session_has_one() {
+    let fixture = make_fixture().await;
+    let worktree_root = fixture
+        .tmpdir
+        .path()
+        .join(".djinn")
+        .join("worktrees")
+        .join("7941");
+    std::fs::create_dir_all(&worktree_root).expect("create worktree root");
+    set_session_worktree_path(&fixture, &worktree_root).await;
+
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+    let taxonomy = SessionTaxonomy {
+        files_changed: 3,
+        errors: 2,
+        tools_used: 6,
+        notes_read: 1,
+        notes_written: 2,
+        tasks_transitioned: 1,
+        ..SessionTaxonomy::default()
+    };
+
+    let provider = fake_extraction_provider();
+    run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+        .with_worktree_root(Some(worktree_root.clone()));
+    let all_notes = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes");
+
+    let case_note = all_notes
+        .iter()
+        .find(|note| note.note_type == "case")
+        .expect("case note created");
+    assert_eq!(case_note.storage, "file");
+    assert!(
+        case_note
+            .file_path
+            .ends_with(".djinn/cases/test-case-note.md")
+    );
+
+    assert!(
+        worktree_root
+            .join(".djinn/cases/test-case-note.md")
+            .exists()
+    );
+    assert!(
+        worktree_root
+            .join(".djinn/patterns/test-pattern-note.md")
+            .exists()
+    );
+    assert!(
+        worktree_root
+            .join(".djinn/pitfalls/test-pitfall-note.md")
+            .exists()
+    );
+}
+
+async fn set_session_worktree_path(fixture: &TestFixture, worktree_path: &std::path::Path) {
+    sqlx::query("UPDATE sessions SET worktree_path = ?1 WHERE id = ?2")
+        .bind(worktree_path.to_string_lossy().to_string())
+        .bind(&fixture.session_id)
+        .execute(fixture.db.pool())
+        .await
+        .expect("update session worktree_path");
+}
+
 static SEMANTIC_DUPLICATE_CANDIDATE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn semantic_duplicate_candidate_lookup(
