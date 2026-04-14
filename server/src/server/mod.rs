@@ -37,10 +37,26 @@ struct HealthResponse {
     memory_mount: MemoryMountHealth,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryMountLifecycleState {
+    Disabled,
+    Configured,
+    Mounted,
+    Degraded,
+}
+
 #[derive(Serialize)]
 pub(crate) struct MemoryMountHealth {
     enabled: bool,
     active: bool,
+    lifecycle: MemoryMountLifecycleState,
+    configured: bool,
+    mount_path: Option<String>,
+    project_id: Option<String>,
+    detail: Option<String>,
+    pending_writes: usize,
+    last_error: Option<String>,
 }
 
 async fn health(State(state): State<AppState>) -> axum::Json<HealthResponse> {
