@@ -58,5 +58,9 @@ Goal: connect the filesystem view to task/session context and begin shrinking CR
 ## Relations
 - [[decisions/adr-057-proposal-fuse-mounted-memory-filesystem-as-the-primary-agent-interface]]
 - [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]
-- [[decisions/adr-054-proposal-memory-extraction-quality-gates-and-note-taxonomy]]
+- [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
 - [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
+
+## Link cleanup note
+- Normalized the stale ADR-054 roadmap/dependency alias to the canonical ADR permalink `[[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]`.
+- Remaining alias-debt cleanup outside confidently canonical current targets is intentionally left for broader memory-health follow-up work.

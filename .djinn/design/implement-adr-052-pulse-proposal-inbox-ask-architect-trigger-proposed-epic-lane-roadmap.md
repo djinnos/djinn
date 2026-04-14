@@ -7,7 +7,7 @@ tags: ["adr-052","pulse","proposal-inbox","roadmap"]
 # Implement ADR-052: Pulse proposal inbox, ask-architect trigger, proposed epic lane — Roadmap
 
 ## Status
-Wave 1 implementation landed on main: Pulse now exposes the ask-architect entrypoint, proposal inbox/detail surface, accept/reject review actions, and sidebar badge/toast notification path. The plumbing dependency epic [[design/fix-proposal-pipeline-plumbing-defects-adr-052-defects-uncovered-roadmap]] is closed.
+Wave 1 implementation landed on main: Pulse now exposes the ask-architect entrypoint, proposal inbox/detail surface, accept/reject review actions, and sidebar badge/toast notification path. The plumbing dependency epic for proposal-pipeline defects uncovered during ADR-052 planning is closed.
 
 ## Planner decision: proposed epic lane
 For v1, use **Option C (hybrid projection)** from ADR-052.
@@ -49,7 +49,10 @@ Close the epic once:
 ## Relations
 - [[decisions/adr-052-pulse-proposal-inbox-ask-architect-trigger-and-virtual-proposed-epic-lane]]
 - [[decisions/adr-051-planner-as-patrol-and-architect-as-consultant]]
-- [[design/fix-proposal-pipeline-plumbing-defects-adr-052-defects-uncovered-roadmap]]
+
+## Link cleanup note
+- Removed the stale non-resolving `design/fix-proposal-pipeline-plumbing-defects-adr-052-defects-uncovered-roadmap` wikilink because no canonical design note with that permalink exists in the current knowledge base.
+- Left broader historical alias cleanup out of scope for this note; this pass only kept links with confidently canonical current targets.
 
 
 
