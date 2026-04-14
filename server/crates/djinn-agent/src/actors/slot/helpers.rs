@@ -1083,6 +1083,28 @@ fn note_scope_covers_path(note_scope_paths: &[String], path: &str) -> bool {
     })
 }
 
+fn graph_diff_changed_file_paths(diff: &djinn_mcp::bridge::GraphDiff) -> Vec<String> {
+    let mut changed = std::collections::BTreeSet::new();
+
+    for node in diff.added_nodes.iter().chain(diff.removed_nodes.iter()) {
+        if node.kind == "file"
+            && let Some(path) = node.key.strip_prefix("file:")
+        {
+            changed.insert(path.to_string());
+        }
+    }
+
+    for edge in diff.added_edges.iter().chain(diff.removed_edges.iter()) {
+        for endpoint in [&edge.from, &edge.to] {
+            if let Some(path) = endpoint.strip_prefix("file:") {
+                changed.insert(path.to_string());
+            }
+        }
+    }
+
+    changed.into_iter().collect()
+}
+
 pub(crate) async fn build_planner_patrol_context(
     task: &Task,
     app_state: &AgentContext,
@@ -1118,6 +1140,7 @@ pub(crate) async fn build_planner_patrol_context(
         .await
         .ok()
         .unwrap_or_default();
+    let memory_health = note_repo.health(&project_id).await.ok();
     let open_tasks = task_repo
         .list_by_project(&project_id)
         .await
@@ -1128,14 +1151,70 @@ pub(crate) async fn build_planner_patrol_context(
         .collect::<Vec<_>>();
 
     let mut documented_paths = Vec::new();
+    let changed_paths = diff
+        .as_ref()
+        .map(graph_diff_changed_file_paths)
+        .unwrap_or_default();
+    let mut stale_scoped_areas = Vec::new();
     for note in &notes {
         let scopes = parse_json_array(&note.scope_paths);
         if !scopes.is_empty() {
+            let note_tags = parse_json_array(&note.tags);
+            if changed_paths
+                .iter()
+                .any(|changed| note_scope_covers_path(&scopes, changed))
+            {
+                let is_review_needed = note_tags.iter().any(|tag| tag == "review_needed");
+                let scope_display = scopes
+                    .iter()
+                    .take(3)
+                    .map(|scope| format!("`{scope}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                stale_scoped_areas.push(format!(
+                    "{} scoped to {} (confidence {:.3}, review_needed: {})",
+                    note.title,
+                    scope_display,
+                    note.confidence,
+                    if is_review_needed || note.confidence <= djinn_db::STALE_CITATION {
+                        "yes"
+                    } else {
+                        "pending decay"
+                    }
+                ));
+            }
             documented_paths.extend(scopes);
         }
     }
 
     let mut lines = Vec::new();
+    if let Some(health) = memory_health {
+        lines.push("### Memory Health Signals".to_string());
+        lines.push(format!(
+            "- Notes: {} total, {} low-confidence, {} stale, {} duplicate clusters, {} broken links, {} orphans",
+            health.total_notes,
+            health.low_confidence_note_count,
+            health.stale_note_count,
+            health.duplicate_cluster_count,
+            health.broken_link_count,
+            health.orphan_note_count
+        ));
+        lines.push(format!(
+            "- Stale-note folders: {}",
+            if health.stale_notes_by_folder.is_empty() {
+                "none".to_string()
+            } else {
+                health
+                    .stale_notes_by_folder
+                    .iter()
+                    .take(4)
+                    .map(|folder| format!("`{}` ({})", folder.folder, folder.count))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ));
+        lines.push(String::new());
+    }
     lines.push("### Code Graph Diff Summary".to_string());
 
     if let Some(diff) = diff {
@@ -1222,6 +1301,19 @@ pub(crate) async fn build_planner_patrol_context(
             weakly_documented_hotspots
                 .iter()
                 .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    ));
+    lines.push(format!(
+        "- Stale scoped-note areas affected by changed code: {}",
+        if stale_scoped_areas.is_empty() {
+            "none".to_string()
+        } else {
+            stale_scoped_areas
+                .iter()
+                .take(4)
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -1447,6 +1539,23 @@ mod tests {
             )
             .await
             .expect("create scoped note");
+        let stale_note = note_repo
+            .create_with_scope(
+                &project.id,
+                tmp.path(),
+                "Stale changed-area note",
+                "needs review after canonical graph changes",
+                "reference",
+                None,
+                r#"["review_needed"]"#,
+                r#"["server/src/new_area.rs"]"#,
+            )
+            .await
+            .expect("create stale scoped note");
+        note_repo
+            .set_confidence(&stale_note.id, 0.2)
+            .await
+            .expect("lower stale note confidence");
 
         ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
             diff: Some(GraphDiff {
@@ -1497,11 +1606,15 @@ mod tests {
             .await
             .expect("planner patrol context");
 
+        assert!(summary.contains("Memory Health Signals"));
+        assert!(summary.contains("1 low-confidence"));
         assert!(summary.contains("Code Graph Diff Summary"));
         assert!(summary.contains("`server/src/new_area.rs`"));
         assert!(summary.contains("`server/src/old_area.rs`"));
-        assert!(summary.contains("Undocumented hotspots: `server/src/new_area.rs`"));
-        assert!(summary.contains("Weakly documented hotspots: `server/src/existing.rs`"));
+        assert!(summary.contains("Weakly documented hotspots: `server/src/new_area.rs`"));
+        assert!(summary.contains("`server/src/existing.rs` (score 0.750, coverage 1)"));
+        assert!(summary.contains("Stale scoped-note areas affected by changed code:"));
+        assert!(summary.contains("Stale changed-area note scoped to `server/src/new_area.rs`"));
         assert!(summary.contains("Knowledge Task Guard Rails"));
         assert!(
             summary

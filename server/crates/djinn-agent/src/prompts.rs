@@ -771,7 +771,7 @@ mod tests {
         let task = make_task();
         let ctx = TaskContext {
             planner_patrol_context: Some(
-                "### Code Graph Diff Summary\n\nNew modules: `server/src/new_area.rs`".into(),
+                "### Memory Health Signals\n- Notes: 2 total, 1 low-confidence\n\n### Code Graph Diff Summary\n\nNew modules: `server/src/new_area.rs`\n\n### Knowledge Coverage Gaps\n- Stale scoped-note areas affected by changed code: `server/src/new_area.rs`".into(),
             ),
             ..make_ctx()
         };
