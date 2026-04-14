@@ -304,23 +304,36 @@ async fn extracted_note_audit_groups_merge_strengthen_demote_and_archive_backlog
     let report = repo.extracted_note_audit(&project.id).await.unwrap();
 
     assert_eq!(report.scanned_note_count, 5);
-    assert!(report.rerun_hint.contains("Rerun `memory_extracted_audit()`"));
-    assert!(report
-        .merge_candidates
-        .iter()
-        .any(|finding| finding.note_id == merge_a.id && finding.related_note_ids.contains(&merge_b.id)));
-    assert!(report
-        .underspecified
-        .iter()
-        .any(|finding| finding.note_id == underspecified.id));
-    assert!(report
-        .demote_to_working_spec
-        .iter()
-        .any(|finding| finding.note_id == demote.id));
-    assert!(report
-        .archive_candidates
-        .iter()
-        .any(|finding| finding.note_id == archive.id));
+    assert!(
+        report
+            .rerun_hint
+            .contains("Rerun `memory_extracted_audit()`")
+    );
+    assert!(
+        report
+            .merge_candidates
+            .iter()
+            .any(|finding| finding.note_id == merge_a.id
+                && finding.related_note_ids.contains(&merge_b.id))
+    );
+    assert!(
+        report
+            .underspecified
+            .iter()
+            .any(|finding| finding.note_id == underspecified.id)
+    );
+    assert!(
+        report
+            .demote_to_working_spec
+            .iter()
+            .any(|finding| finding.note_id == demote.id)
+    );
+    assert!(
+        report
+            .archive_candidates
+            .iter()
+            .any(|finding| finding.note_id == archive.id)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
