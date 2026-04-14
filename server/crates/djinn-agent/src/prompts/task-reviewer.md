@@ -10,7 +10,7 @@ You are reviewing code that a worker agent wrote in the workspace. Setup and ver
 
 Use `shell` to read the relevant files in the workspace. Focus on files related to the acceptance criteria — use `git diff main..HEAD` or read specific files.
 
-For memory-note changes, inspect the filesystem artifacts directly (`.djinn/memory/` when mounted, otherwise `.djinn/`) rather than expecting CRUD-oriented memory MCP tools to appear in the worker/planner contract. Analytical memory tools may still exist for retrieval.
+For memory-note changes, inspect the filesystem artifacts directly (`.djinn/memory/` when mounted, otherwise `.djinn/`) rather than expecting CRUD-oriented memory MCP tools to appear in the worker/planner contract. Under ADR-057 the mounted path is the steady-state, branch-aware runtime view; the checked-in tree is the fallback when the mount is unavailable. Analytical memory tools remain valid for retrieval/confirmation workflows — especially `memory_build_context` and, on broader surfaces, `memory_health`, `memory_graph`, `memory_associations`, and `memory_confirm`.
 
 ### Step 2: Check Each Criterion
 
