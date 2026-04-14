@@ -1,8 +1,9 @@
 ---
 title: ADR-045: SSE Event Batching and Knowledge Base Housekeeping
-type: adr
+type: 
 tags: ["sse","memory","cleanup","dedup","performance"]
 ---
+
 
 # ADR-045: SSE Event Batching and Knowledge Base Housekeeping
 
@@ -72,7 +73,7 @@ A periodic tokio task (`HousekeepingWorker`) running on a configurable interval 
 |-----------|-------|--------|
 | **Prune stale associations** | Delete where `weight < 0.05 AND age > 90 days` | Existing `prune_old_associations()` |
 | **Flag orphan notes** | Notes with zero inbound links, zero access in 30+ days, not singleton types | Existing `memory_orphans` query |
-| **Auto-fix broken wikilinks** | For each broken `[[target]]`, FTS-search for best match by title; if BM25 > threshold, update the source note's content | New — uses existing FTS |
+| **Auto-fix broken wikilinks** | For each broken wikilink target, FTS-search for best match by title; if BM25 > threshold, update the source note's content | New — uses existing FTS |
 | **Rebuild stale content hashes** | Notes where `content_hash IS NULL` | New — backfill migration supplement |
 
 Results are logged as structured tracing events. No notes are deleted automatically — orphans are flagged (e.g., tagged `orphan`) for human or agent review.

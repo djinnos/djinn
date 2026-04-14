@@ -5,6 +5,7 @@ tags: ["adr","memory","code-graph","scip","state-of-the-art","proposal"]
 ---
 
 
+
 # Proposal: Repository Understanding and Memory Freshness Upgrade Path
 
 ## Status
@@ -12,10 +13,10 @@ Proposal
 
 ## Context
 Djinn already has a strong base:
-- SCIP-backed repository intelligence via [[ADR-043 Repository Map — SCIP-Powered Structural Context for Agent Sessions]]
-- architect/chat graph query direction via [[ADR-050 Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions]]
-- semantic memory search via [[ADR-053 Semantic Memory Search — Candle Embeddings with sqlite-vec]]
-- cognitive-memory behaviors already established by [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+- SCIP-backed repository intelligence via [[decisions/adr-043-repository-map-scip-powered-structural-context-for-agent-sessions]]
+- architect/chat graph query direction via [[decisions/adr-050-architect-chat-code-graph-consolidation]]
+- semantic memory search via [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
+- cognitive-memory behaviors already established by [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]]
 
 This proposal therefore assumes **ADR-023 is the conceptual baseline** and **ADR-053 is the current implementation wave**. The main question is no longer whether Djinn should have semantic retrieval or cognitive memory architecture; it is whether the **memory artifact model itself** is expressive enough for agents and humans to keep knowledge fresh and actionable.
 
@@ -230,7 +231,7 @@ The main remaining opportunity is not “add another search mode”, but to unif
 That combination appears to be the actual frontier.
 
 ## Relations
-- [[ADR-043 Repository Map — SCIP-Powered Structural Context for Agent Sessions]]
-- [[ADR-050 Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions]]
-- [[ADR-053 Semantic Memory Search — Candle Embeddings with sqlite-vec]]
-- [[Cognitive Memory Systems Research]]
+- [[decisions/adr-043-repository-map-scip-powered-structural-context-for-agent-sessions]]
+- [[decisions/adr-050-architect-chat-code-graph-consolidation]]
+- [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
+- [[research/cognitive-memory-systems-research]]
