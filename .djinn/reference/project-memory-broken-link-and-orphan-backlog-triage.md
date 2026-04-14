@@ -32,7 +32,7 @@ Implication:
 - This bucket should be treated as **real cleanup work in note content**.
 - The likely fix is targeted replacement of title-style links with canonical permalinks, not tooling changes to `memory_broken_links()`.
 
-Known supporting evidence already exists in case note [[cases/canonical-memory-maintenance-identified-exact-adr-link-replacements-and-stale-roadmap-status-text]].
+Known supporting evidence already exists in the case note `cases/canonical-memory-maintenance-identified-exact-adr-link-replacements-and-stale-roadmap-status-text`.
 
 ### 2. A few likely genuinely missing or renamed targets — **small follow-up during cleanup pass**
 Some raw texts do not look like canonical note permalinks or stable note titles and may represent renamed, removed, or never-created targets:
@@ -43,7 +43,7 @@ Some raw texts do not look like canonical note permalinks or stable note titles 
 These should be triaged during the cleanup pass, but they are a minority relative to bucket 1. No separate project-wide tooling task is needed before attempting content cleanup.
 
 ### 3. Prior aggregate/detail contradiction — **already resolved, not part of remaining backlog**
-The earlier "counts nonzero but detail empty" issue was a tool/default-parameter bug, already captured by [[cases/default-optional-folder-filters-must-map-to-null-not-empty-string-for-memory-detail-tools]].
+The earlier "counts nonzero but detail empty" issue was a tool/default-parameter bug, already captured by the case note `cases/default-optional-folder-filters-must-map-to-null-not-empty-string-for-memory-detail-tools`.
 
 Decision:
 - Do **not** reopen the detail-tool bug as part of this backlog.
@@ -96,7 +96,7 @@ When patrol sees high memory-health counts:
 
 ## Routed next action
 
-Created follow-up planning task [[Route actionable project-memory cleanup after backlog triage]] to own the narrow actionable cleanup without reopening project-wide triage.
+Created follow-up planning task "Route actionable project-memory cleanup after backlog triage" to own the narrow actionable cleanup without reopening project-wide triage.
 
 
 ## Follow-up decision: orphan-heavy folders reporting policy (2026-04-09)
@@ -161,11 +161,11 @@ Use three interpretation buckets instead of treating the 797 total as one cleanu
 The first cleanup batch should target the **active semantic-memory orphan case cluster**, not the completed-epic roadmap requirements or older archival research notes.
 
 Recommended first batch:
-- [[cases/embedding-runtime-seam-added-for-semantic-memory]]
-- [[cases/thread-semantic-search-context-through-bridge-and-state-layers]]
-- [[cases/blend-semantic-retrieval-into-existing-note-search-without-changing-the-mcp-interface]]
-- [[cases/added-vector-aware-ranking-to-the-existing-note-search-pipeline]]
-- [[cases/blend-semantic-vector-search-into-existing-memory-search-ranking]]
+- `cases/embedding-runtime-seam-added-for-semantic-memory`
+- `cases/thread-semantic-search-context-through-bridge-and-state-layers`
+- `cases/blend-semantic-retrieval-into-existing-note-search-without-changing-the-mcp-interface`
+- `cases/added-vector-aware-ranking-to-the-existing-note-search-pipeline`
+- `cases/blend-semantic-vector-search-into-existing-memory-search-ranking`
 
 Rationale:
 - all five are recent orphan case notes tied to the still-active semantic-memory epic (`h1yj`)
@@ -213,8 +213,8 @@ Representative sources:
 Classification: **mixed historical debt, mostly tolerable rather than urgent content defect**.
 
 Rationale:
-- In older ADR/reference notes, `[[Roadmap]]` was often used as generic shorthand for “the roadmap note/current plan” rather than a stable permalink contract.
-- There is now a canonical singleton `[[roadmap]]`, but mass-normalizing every historical `[[Roadmap]]` occurrence across legacy notes would be broad editorial churn with low operational value.
+- In older ADR/reference notes, the legacy shorthand `Roadmap` was often used for “the roadmap note/current plan” rather than a stable permalink contract.
+- There is now a canonical singleton `roadmap`, but mass-normalizing every historical `Roadmap` occurrence across legacy notes would be broad editorial churn with low operational value.
 - Recent/current canonical notes were already cleaned up in prior tasks; what remains is mostly archival language in historical notes.
 
 Recommended action:
@@ -277,7 +277,7 @@ The residual `decisions/*` and `reference/*` broken-link slice should be interpr
    - recommended fix: replace broken title-style links with canonical permalinks
 
 2. **Tolerated historical alias debt**
-   - legacy ADR/reference notes whose broken links are mostly old title-case aliases or generic `Roadmap`
+- legacy ADR/reference notes whose broken links are mostly old title-case aliases or generic `Roadmap`
    - recommended fix: leave in place unless a note is otherwise being updated
 
 3. **Minor parser/placeholder noise**
@@ -292,4 +292,6 @@ If follow-up cleanup is scheduled, keep it **narrow and current-facing**:
 - do **not** add alias-resolution support for generic `Roadmap` or historical ADR titles at the memory-tool layer
 
 This classification makes future patrols cheaper: elevated counts from old `decisions/*` / `reference/*` notes should not be interpreted as fresh regressions unless the broken links are concentrated in currently maintained canonical notes.
+
+Scope boundary for the current cleanup: normalize only the broken links in the currently maintained canonical notes named above; leave broad historical `Roadmap`, ADR-title alias, `cases/*`, and `reference/repo-maps/*` debt untouched outside this narrow pass.
 

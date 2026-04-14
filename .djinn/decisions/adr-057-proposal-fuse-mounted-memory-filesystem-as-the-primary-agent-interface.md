@@ -14,7 +14,7 @@ Proposed
 
 Date: 2026-04-13
 
-Related: [[ADR-055 Proposal: Dolt Migration and Per-Task Knowledge Branching]], [[ADR-054 Proposal: Memory Extraction Quality Gates and Note Taxonomy]], [[ADR-056 Proposal: Planner-Driven Codebase Learning and Memory Hygiene]], [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+Related: [[ADR-055 Proposal: Dolt Migration and Per-Task Knowledge Branching]], [[ADR-054 Proposal: Memory Extraction Quality Gates and Note Taxonomy]], [[ADR-056 Proposal: Planner-Driven Codebase Learning and Memory Hygiene]], [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]]
 
 ## Context
 
@@ -113,9 +113,9 @@ Option A is cleaner (agents don't need to know about branches), but Option B is 
 
 ### 4. Wikilink resolution
 
-Notes use `[[wikilinks]]` to reference each other. The FUSE layer resolves these for rendering:
+Notes use wikilinks to reference each other. The FUSE layer resolves them for rendering:
 
-- `[[Note Title]]` → resolves to the file path of the matching note
+- `Note Title` wikilinks → resolve to the file path of the matching note
 - Broken links are visible as files in a virtual `.broken-links/` directory
 - Creating a file that matches a broken link title automatically repairs the link
 
@@ -283,5 +283,5 @@ Half-measure. The power of this approach is that agents can write notes by creat
 - [[ADR-055 Proposal: Dolt Migration and Per-Task Knowledge Branching]]
 - [[ADR-054 Proposal: Memory Extraction Quality Gates and Note Taxonomy]]
 - [[ADR-056 Proposal: Planner-Driven Codebase Learning and Memory Hygiene]]
-- [[ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning]]
+- [[decisions/adr-023-cognitive-memory-architecture-multi-signal-retrieval-and-associative-learning]]
 - [[ADR-053: Semantic Memory Search — Candle Embeddings with sqlite-vec]]
