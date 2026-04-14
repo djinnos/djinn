@@ -3045,6 +3045,128 @@ expression: signatures
       "required": [
         "project"
       ],
+      "title": "ExtractedAuditParams",
+      "type": "object"
+    },
+    "name": "memory_extracted_audit",
+    "output_schema": {
+      "$defs": {
+        "ExtractedNoteAuditCategory": {
+          "description": "Classification assigned during ADR-054 extracted-note corpus audits.",
+          "enum": [
+            "merge_candidate",
+            "underspecified",
+            "demote_to_working_spec",
+            "archive_candidate"
+          ],
+          "type": "string"
+        },
+        "ExtractedNoteAuditFinding": {
+          "description": "A single extracted note flagged by the ADR-054 audit.",
+          "properties": {
+            "category": {
+              "$ref": "#/$defs/ExtractedNoteAuditCategory"
+            },
+            "folder": {
+              "type": "string"
+            },
+            "note_id": {
+              "type": "string"
+            },
+            "note_type": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "related_note_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "note_id",
+            "permalink",
+            "title",
+            "note_type",
+            "folder",
+            "category",
+            "reasons",
+            "related_note_ids"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "archive_candidates": {
+          "items": {
+            "$ref": "#/$defs/ExtractedNoteAuditFinding"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "demote_to_working_spec": {
+          "items": {
+            "$ref": "#/$defs/ExtractedNoteAuditFinding"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "merge_candidates": {
+          "items": {
+            "$ref": "#/$defs/ExtractedNoteAuditFinding"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "rerun_hint": {
+          "nullable": true,
+          "type": "string"
+        },
+        "scanned_note_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "underspecified": {
+          "items": {
+            "$ref": "#/$defs/ExtractedNoteAuditFinding"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "MemoryExtractedAuditResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
       "title": "GraphParams",
       "type": "object"
     },
