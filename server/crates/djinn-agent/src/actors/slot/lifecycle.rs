@@ -1039,6 +1039,9 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         }
     };
 
+    let planner_patrol_context =
+        super::helpers::build_planner_patrol_context(&task, &app_state, &project_path).await;
+
     let base_system_prompt = runtime_role.render_prompt(
         &task,
         &TaskContext {
@@ -1061,6 +1064,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
             verification_failure,
             epic_context,
             knowledge_context,
+            planner_patrol_context,
         },
     );
     // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).

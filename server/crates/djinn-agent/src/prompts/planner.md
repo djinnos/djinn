@@ -51,6 +51,13 @@ For spikes or tasks with non-trivial design decisions:
 - If `orphan_note_count > 0`: call `memory_orphans()` to list unlinked notes. Orphans in `decisions/` or `patterns/` are often fine (standalone reference). Orphans in `pitfalls/` or `scratch/` older than 14 days may be stale — flag them for cleanup.
 - If any folder shows high stale-note counts: note it in your `submit_grooming` summary as a maintenance signal.
 
+### A5b. Code Structure Change and Coverage Review
+- Read the **Planner Patrol Context** section injected into this prompt. It summarizes canonical graph diffs, new/removed modules, and undocumented or weakly documented hotspots derived from existing code-graph plus note-scope data.
+- Treat **new modules**, **removed modules**, and large added/removed edge counts as structural-change signals. If a major subsystem moved or appeared without documentation coverage, create a `spike` task for the Architect.
+- Treat **undocumented hotspots** as candidates for architect spikes when they are both structurally central and lack scoped note coverage.
+- Treat **weakly documented hotspots** as lower-severity follow-ups: prefer planning tasks when scoped notes exist but coverage is thin or stale.
+- Include the most important graph-side signals in your `submit_grooming` summary so patrol output captures both memory health and code-structure drift.
+
 ### A6. Contradiction and Low-Confidence Review
 - Search for contradicted or low-confidence notes: `memory_search(q="contradicts supersedes stale")`.
 - Review any notes that appear to conflict with each other or with recent ADRs.
