@@ -21,7 +21,9 @@ mod tests {
     use crate::{
         server::DjinnMcpServer,
         state::stubs::test_mcp_state,
-        tools::memory_tools::{BrokenLinksParams, EditParams, ReadParams, WriteParams, ops},
+        tools::memory_tools::{
+            BrokenLinksParams, EditParams, ListParams, ReadParams, WriteParams, ops,
+        },
     };
 
     async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
@@ -624,6 +626,103 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&canonical_path).unwrap(),
             std::fs::read_to_string(&worktree_path).unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_singleton_worktree_write_uses_canonical_project_identity_and_exact_permalink_reads()
+     {
+        let project_tmp = workspace_tempdir();
+        let worktree_tmp = project_tmp
+            .path()
+            .join(".djinn/worktrees/test-design-canonical-write");
+        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, project_tmp.path()).await;
+        let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
+
+        let title = "ADR-054 Roadmap Memory Extraction Quality Gates and Note Taxonomy";
+        let permalink = "design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy";
+        let content = "Originated from ADR-054 closure reconciliation.";
+
+        let Json(created) = server
+            .memory_write_with_worktree(
+                Parameters(WriteParams {
+                    project: worktree_tmp.to_string_lossy().to_string(),
+                    title: title.to_string(),
+                    content: content.to_string(),
+                    note_type: "design".to_string(),
+                    status: None,
+                    tags: Some(vec!["adr-054".to_string(), "design".to_string()]),
+                    scope_paths: None,
+                }),
+                Some(PathBuf::from(&worktree_tmp)),
+            )
+            .await;
+
+        assert!(created.error.is_none(), "{:?}", created.error);
+        assert_eq!(created.permalink.as_deref(), Some(permalink));
+
+        let note = repo
+            .get_by_permalink(&project.id, permalink)
+            .await
+            .unwrap()
+            .expect("canonical row should exist immediately");
+
+        let canonical_path = project_tmp.path().join(
+            ".djinn/design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy.md",
+        );
+        let worktree_path = worktree_tmp.join(
+            ".djinn/design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy.md",
+        );
+
+        assert_eq!(
+            std::path::Path::new(&note.file_path),
+            canonical_path.as_path()
+        );
+        assert!(
+            worktree_path.exists(),
+            "worktree-authored note should exist on disk immediately"
+        );
+        assert!(
+            !canonical_path.exists(),
+            "non-singleton worktree writes should keep the canonical row identity without forcing an immediate canonical file mirror"
+        );
+
+        let read_back = ops::memory_read(
+            &server,
+            ReadParams {
+                project: project_tmp.path().to_string_lossy().to_string(),
+                identifier: permalink.to_string(),
+            },
+        )
+        .await;
+        assert_eq!(read_back.error, None);
+        assert_eq!(read_back.id.as_deref(), Some(note.id.as_str()));
+        assert_eq!(read_back.permalink.as_deref(), Some(permalink));
+        assert_eq!(read_back.content.as_deref(), Some(content));
+
+        let listed = ops::memory_list(
+            &server,
+            ListParams {
+                project: project_tmp.path().to_string_lossy().to_string(),
+                folder: Some("design".to_string()),
+                note_type: Some("design".to_string()),
+                depth: Some(1),
+            },
+        )
+        .await;
+        assert!(listed.error.is_none(), "{:?}", listed.error);
+        assert!(
+            listed.notes.iter().any(|entry| {
+                entry.permalink == permalink
+                    && entry.title == title
+                    && entry.note_type == "design"
+                    && entry.folder == "design"
+            }),
+            "design note should be listed under canonical project identity"
         );
     }
 
