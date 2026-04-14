@@ -18,6 +18,7 @@ pub struct UpsertNoteEmbedding<'a> {
     pub content_hash: &'a str,
     pub model_version: &'a str,
     pub embedding: &'a [f32],
+    pub branch: &'a str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
@@ -29,12 +30,18 @@ pub struct NoteEmbeddingRecord {
     pub embedded_at: String,
     pub updated_at: String,
     pub extension_state: String,
+    pub branch: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoteEmbeddingMatch {
     pub note_id: String,
     pub distance: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct EmbeddingQueryContext<'a> {
+    pub branch: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +69,7 @@ pub trait NoteVectorStore: Send + Sync {
         &self,
         repo: &NoteRepository,
         query_embedding: &[f32],
+        query: EmbeddingQueryContext<'_>,
         limit: usize,
     ) -> Result<Vec<NoteEmbeddingMatch>>;
 }
@@ -131,7 +139,51 @@ type EmbeddingRepairRow = (
     String,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
+
+pub fn task_branch_name(task_short_id: &str) -> String {
+    format!("task/{task_short_id}")
+}
+
+fn canonical_embedding_branch(branch: &str) -> String {
+    let trimmed = branch.trim();
+    if trimmed.is_empty() {
+        return "main".to_string();
+    }
+    if let Some(short_id) = trimmed.strip_prefix("task_") {
+        return task_branch_name(short_id);
+    }
+    trimmed.to_string()
+}
+
+fn embedding_query_branches(branch: Option<&str>) -> Vec<String> {
+    let mut branches = vec!["main".to_string()];
+    if let Some(branch) = branch {
+        let branch = canonical_embedding_branch(branch);
+        if branch != "main" {
+            branches.insert(0, branch);
+        }
+    }
+    branches
+}
+
+#[cfg(feature = "qdrant")]
+fn qdrant_value_from_str(value: &str) -> qdrant_client::qdrant::Value {
+    use qdrant_client::qdrant::value::Kind;
+
+    qdrant_client::qdrant::Value {
+        kind: Some(Kind::StringValue(value.to_string())),
+    }
+}
+
+#[cfg(feature = "qdrant")]
+fn qdrant_keyword_condition(
+    key: &str,
+    value: &str,
+) -> qdrant_client::qdrant::Condition {
+    qdrant_client::qdrant::Condition::matches(key, value.to_string())
+}
 
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
     embedding
@@ -185,22 +237,24 @@ async fn upsert_embedding_metadata(
 
     sqlx::query(
         "INSERT INTO note_embedding_meta (
-            note_id, content_hash, embedded_at, model_version, embedding_dim, extension_state
+            note_id, content_hash, embedded_at, model_version, embedding_dim, extension_state, branch
          ) VALUES (
-            ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3, ?4, ?5
+            ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3, ?4, ?5, ?6
          )
          ON CONFLICT(note_id) DO UPDATE SET
             content_hash = excluded.content_hash,
             embedded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
             model_version = excluded.model_version,
             embedding_dim = excluded.embedding_dim,
-            extension_state = excluded.extension_state",
+            extension_state = excluded.extension_state,
+            branch = excluded.branch",
     )
     .bind(input.note_id)
     .bind(input.content_hash)
     .bind(input.model_version)
     .bind(embedding_dim)
     .bind(extension_state)
+    .bind(canonical_embedding_branch(input.branch))
     .execute(&mut *tx)
     .await?;
 
@@ -247,6 +301,7 @@ impl NoteVectorStore for SqliteVecNoteVectorStore {
                 content_hash: input.content_hash,
                 model_version: input.model_version,
                 embedding: input.embedding,
+                branch: input.branch,
             },
             if status.available { "ready" } else { "pending" },
         )
@@ -284,6 +339,7 @@ impl NoteVectorStore for SqliteVecNoteVectorStore {
         &self,
         repo: &NoteRepository,
         query_embedding: &[f32],
+        query: EmbeddingQueryContext<'_>,
         limit: usize,
     ) -> Result<Vec<NoteEmbeddingMatch>> {
         let status = repo.db.sqlite_vec_status().await?;
@@ -293,15 +349,24 @@ impl NoteVectorStore for SqliteVecNoteVectorStore {
 
         let limit = i64::try_from(limit)
             .map_err(|_| Error::InvalidData("embedding query limit exceeds i64".to_owned()))?;
-        let rows = sqlx::query_as::<_, (String, f64)>(
-            "SELECT note_id, distance
-             FROM note_embeddings_vec
-             WHERE embedding MATCH ?1 AND k = ?2",
-        )
-        .bind(embedding_to_blob(query_embedding))
-        .bind(limit)
-        .fetch_all(repo.db.pool())
-        .await?;
+        let branches = embedding_query_branches(query.branch);
+        let placeholders = std::iter::repeat_n("?", branches.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT v.note_id, v.distance
+             FROM note_embeddings_vec v
+             JOIN note_embedding_meta m ON m.note_id = v.note_id
+             WHERE v.embedding MATCH ?1 AND v.k = ?2
+               AND m.branch IN ({placeholders})",
+        );
+        let mut rows_query = sqlx::query_as::<_, (String, f64)>(&sql)
+            .bind(embedding_to_blob(query_embedding))
+            .bind(limit);
+        for branch in &branches {
+            rows_query = rows_query.bind(branch);
+        }
+        let rows = rows_query.fetch_all(repo.db.pool()).await?;
 
         Ok(rows
             .into_iter()
@@ -336,6 +401,7 @@ impl NoteVectorStore for NoopNoteVectorStore {
         &self,
         _repo: &NoteRepository,
         _query_embedding: &[f32],
+        _query: EmbeddingQueryContext<'_>,
         _limit: usize,
     ) -> Result<Vec<NoteEmbeddingMatch>> {
         Ok(vec![])
@@ -379,6 +445,7 @@ impl NoteVectorStore for QdrantNoteVectorStore {
         &self,
         _repo: &NoteRepository,
         _query_embedding: &[f32],
+        _query: EmbeddingQueryContext<'_>,
         _limit: usize,
     ) -> Result<Vec<NoteEmbeddingMatch>> {
         Ok(vec![])
@@ -409,6 +476,7 @@ impl NoteRepository {
                         content_hash: &content_hash,
                         model_version: &embedded.model_version,
                         embedding: &embedded.values,
+                        branch: self.embedding_branch(),
                     })
                     .await
                 {
@@ -453,7 +521,7 @@ impl NoteRepository {
         let current_model_version = provider.model_version();
         let rows: Vec<EmbeddingRepairRow> = sqlx::query_as(
             "SELECT n.id, n.title, n.note_type, n.tags, n.content,
-                        m.content_hash, m.model_version
+                        m.content_hash, m.model_version, m.branch
                  FROM notes n
                  LEFT JOIN note_embedding_meta m ON m.note_id = n.id
                  WHERE n.project_id = ?1",
@@ -465,13 +533,22 @@ impl NoteRepository {
         let total = rows.len();
         let start = std::time::Instant::now();
         let mut repaired = 0u64;
-        for (note_id, title, note_type, tags, content, embedded_hash, embedded_model_version) in
-            rows
+        for (
+            note_id,
+            title,
+            note_type,
+            tags,
+            content,
+            embedded_hash,
+            embedded_model_version,
+            embedded_branch,
+        ) in rows
         {
             tokio::task::yield_now().await;
             let expected_hash = embedding_content_hash(&title, &note_type, &tags, &content);
             let needs_refresh = embedded_hash.as_deref() != Some(expected_hash.as_str())
-                || embedded_model_version.as_deref() != Some(current_model_version.as_str());
+                || embedded_model_version.as_deref() != Some(current_model_version.as_str())
+                || embedded_branch.as_deref() != Some(self.embedding_branch());
             if needs_refresh {
                 repaired += 1;
                 self.sync_note_embedding(&note_id, &title, &note_type, &tags, &content)
@@ -504,7 +581,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, NoteEmbeddingRecord>(
             "SELECT m.note_id, m.content_hash, m.model_version, m.embedding_dim, m.embedded_at,
-                    e.updated_at, m.extension_state
+                    e.updated_at, m.extension_state, m.branch
              FROM note_embedding_meta m
              JOIN note_embeddings e ON e.note_id = m.note_id
              WHERE m.note_id = ?1",
@@ -522,11 +599,65 @@ impl NoteRepository {
     pub async fn query_similar_embeddings(
         &self,
         query_embedding: &[f32],
+        query: EmbeddingQueryContext<'_>,
         limit: usize,
     ) -> Result<Vec<NoteEmbeddingMatch>> {
         self.db.ensure_initialized().await?;
         self.vector_store()
-            .query_similar_embeddings(self, query_embedding, limit)
+            .query_similar_embeddings(self, query_embedding, query, limit)
             .await
+    }
+
+    pub async fn promote_branch_embeddings(&self, from_branch: &str, to_branch: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            "UPDATE note_embedding_meta
+             SET branch = ?2
+             WHERE branch = ?1",
+        )
+        .bind(canonical_embedding_branch(from_branch))
+        .bind(canonical_embedding_branch(to_branch))
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_embeddings_for_branch(&self, branch: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let note_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT note_id FROM note_embedding_meta WHERE branch = ?1",
+        )
+        .bind(canonical_embedding_branch(branch))
+        .fetch_all(self.db.pool())
+        .await?;
+        let deleted = note_ids.len() as u64;
+        for note_id in note_ids {
+            self.delete_embedding(&note_id).await?;
+        }
+        Ok(deleted)
+    }
+
+    pub async fn embedding_branch_counts(&self) -> Result<Vec<(String, i64)>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as(
+                "SELECT branch, COUNT(*)
+                 FROM note_embedding_meta
+                 GROUP BY branch
+                 ORDER BY branch",
+            )
+            .fetch_all(self.db.pool())
+            .await?,
+        )
+    }
+
+    pub async fn embedding_branch_for_note(&self, note_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_scalar("SELECT branch FROM note_embedding_meta WHERE note_id = ?1")
+                .bind(note_id)
+                .fetch_optional(self.db.pool())
+                .await?,
+        )
     }
 }

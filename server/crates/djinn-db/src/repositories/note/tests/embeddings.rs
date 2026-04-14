@@ -53,6 +53,7 @@ async fn embedding_upsert_and_delete_round_trip() {
             content_hash: "hash-1",
             model_version: "nomic-embed-text-v1.5",
             embedding: &embedding,
+            branch: "main",
         })
         .await
         .unwrap();
@@ -91,12 +92,16 @@ async fn embedding_query_gracefully_returns_empty_when_vec_disabled() {
             content_hash: "hash-2",
             model_version: "nomic-embed-text-v1.5",
             embedding: &embedding,
+            branch: "main",
         })
         .await
         .unwrap();
 
     let status = repo.db.sqlite_vec_status().await.unwrap();
-    let results = repo.query_similar_embeddings(&embedding, 5).await.unwrap();
+    let results = repo
+        .query_similar_embeddings(&embedding, EmbeddingQueryContext::default(), 5)
+        .await
+        .unwrap();
     if status.available {
         assert_eq!(record.extension_state, "ready");
         assert!(!results.is_empty());
@@ -211,6 +216,7 @@ async fn reindex_repairs_missing_and_stale_embeddings_with_provider() {
         content_hash: "stale-hash",
         model_version: "old-model",
         embedding: &embedding_with_value(0.9),
+        branch: "main",
     })
     .await
     .unwrap();

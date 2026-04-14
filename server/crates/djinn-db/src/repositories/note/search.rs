@@ -300,14 +300,22 @@ impl NoteRepository {
         &self,
         project_id: &str,
         query_embedding: &[f32],
+        task_id: Option<&str>,
         folder: Option<&str>,
         note_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(String, f64)>> {
         self.db.ensure_initialized().await?;
 
+        let task_branch = self.semantic_branch_for_task(project_id, task_id).await?;
         let raw_matches = self
-            .query_similar_embeddings(query_embedding, limit.saturating_mul(5).max(limit))
+            .query_similar_embeddings(
+                query_embedding,
+                EmbeddingQueryContext {
+                    branch: task_branch.as_deref(),
+                },
+                limit.saturating_mul(5).max(limit),
+            )
             .await?;
         if raw_matches.is_empty() {
             return Ok(vec![]);
@@ -318,18 +326,21 @@ impl NoteRepository {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT id FROM notes
-             WHERE project_id = ?1
-               AND (?2 = '' OR folder = ?2)
-               AND (?3 = '' OR note_type = ?3)
-               AND id IN ({})",
+            "SELECT n.id FROM notes n
+             JOIN note_embedding_meta m ON m.note_id = n.id
+             WHERE n.project_id = ?1
+               AND (?2 = '' OR n.folder = ?2)
+               AND (?3 = '' OR n.note_type = ?3)
+               AND (?4 = '' OR m.branch IN (?4, 'main'))
+               AND n.id IN ({})",
             placeholders
         );
 
         let mut query = sqlx::query_scalar::<_, String>(&sql)
             .bind(project_id)
             .bind(folder.unwrap_or(""))
-            .bind(note_type.unwrap_or(""));
+            .bind(note_type.unwrap_or(""))
+            .bind(task_branch.unwrap_or_default());
         for note_id in &note_ids {
             query = query.bind(note_id);
         }
@@ -344,6 +355,30 @@ impl NoteRepository {
         scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         scores.truncate(limit);
         Ok(scores)
+    }
+
+    async fn semantic_branch_for_task(
+        &self,
+        project_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(task_id) = task_id else {
+            return Ok(None);
+        };
+
+        Ok(
+            sqlx::query_scalar::<_, String>(
+                "SELECT short_id
+                 FROM tasks
+                 WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)
+                 LIMIT 1",
+            )
+            .bind(project_id)
+            .bind(task_id)
+            .fetch_optional(self.db.pool())
+            .await?
+            .map(|short_id| task_branch_name(&short_id)),
+        )
     }
 
     /// Generate a markdown catalog (table of contents) for all notes in a
