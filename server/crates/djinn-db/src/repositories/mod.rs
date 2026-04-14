@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod dolt_branch;
+pub mod dolt_history_maintenance;
 pub mod epic;
 pub mod events;
 pub mod git_settings;

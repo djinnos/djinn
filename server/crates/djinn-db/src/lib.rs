@@ -31,6 +31,12 @@ pub use repositories::{
         DoltBranchError, DoltBranchLifecycle, DoltBranchLifecycleAction, DoltBranchLifecycleResult,
         DoltBranchSqlHelper,
     },
+    dolt_history_maintenance::{
+        DoltHistoryMaintenanceAction, DoltHistoryMaintenanceError, DoltHistoryMaintenanceExecution,
+        DoltHistoryMaintenancePlan, DoltHistoryMaintenancePolicy, DoltHistoryMaintenanceReport,
+        DoltHistoryMaintenanceService, DoltHistoryMaintenanceSnapshot, DoltHistoryTableCount,
+        plan_dolt_history_maintenance, verify_row_counts,
+    },
     epic::{
         EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult, EpicRepository,
         EpicTaskCounts, EpicUpdateInput,
