@@ -1,71 +1,147 @@
 ---
 title: ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
 type: design
-tags: ["adr-054","roadmap","memory","extraction","quality-gates"]
+tags: ["adr-054","roadmap","memory","broken-links","orphans","classification"]
 ---
 
 # ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
 
 ## Status
-Epic remains open for a final rollout/cleanup wave. Core ADR-054 extraction behavior is now implemented: `llm_extraction.rs` evaluates notes through the richer quality gate, supports `durable_write` / `merge_into_existing` / `downgrade_to_working_spec` / `discard`, enforces durable note templates, and routes non-durable knowledge into task-scoped Working Specs. The repository also now has an extracted-note audit path. The remaining work is to finish access-tracking coverage in MCP memory retrieval flows and to clean up the existing corpus plus roadmap/design hygiene exposed by the audit.
+In progress — implementation work is largely landed, with final closure verification still running.
 
-## What is already landed
+## Goal
+Tighten extraction quality in `llm_extraction.rs` so durable memory writes are gated by stronger note taxonomy, structured templates, semantic novelty checks, and real access signals instead of permissive session-extraction defaults.
 
-### 1. Extraction quality-gate decision engine
-`server/crates/djinn-agent/src/actors/slot/llm_extraction.rs` now evaluates extracted notes across specificity, generality, durability, novelty, type fit, and required structure, then routes them to `MergeIntoExisting`, `DowngradeToWorkingSpec`, `Discard`, or `DurableWrite`.
+## Landed work
+- Extraction quality-gate decisions implemented in `llm_extraction.rs`.
+- Structured templates enforced for durable `pattern` / `pitfall` / `case` notes.
+- Working Spec routing added for non-durable extracted knowledge.
+- MCP memory search/retrieval access tracking extended so freshness signals are real.
+- Corpus audit tooling landed for ADR-054 cleanup classification.
+- Narrow roadmap/design canonical-link cleanup landed for current planning artifacts.
 
-### 2. Working Spec routing is implemented
-`persist_working_spec()` in `llm_extraction.rs` now creates or updates a task-scoped `design` note named `Working Spec <task-short-id>` so session-local understanding is preserved without polluting the durable pattern/pitfall/case corpus.
+## Remaining closure tasks
+- `8vh1` — verify the corpus cleanup pass and record before/after evidence.
+- `lnvm` — reconcile final canonical memory refs and closure artifacts.
 
-### 3. Durable template enforcement is implemented
-The extraction flow now rejects or downgrades durable `pattern`, `pitfall`, and `case` notes that do not satisfy ADR-054’s required section structure, rather than accepting generic one-paragraph extracted notes.
+## Residual project-memory backlog classification (2026-04-14)
 
-### 4. Extracted-note audit tooling exists
-`server/crates/djinn-db/src/repositories/note/graph.rs` and the `memory_extracted_audit` MCP surface now classify existing extracted notes into merge, underspecified, demote-to-working-spec, and archive backlogs with rerun guidance. This is the repeatable Phase 3 audit path the ADR asked for.
+Current project-wide memory health sampled during this pass:
+- `memory_health()`: **101 broken wikilinks**, **930 orphan notes**, **1042 total notes**.
 
-### 5. Read-path access tracking is only partially complete
-`server/crates/djinn-mcp/src/tools/memory_tools/ops.rs` already calls `repo.touch_accessed(&note.id)` and `record_memory_read()` in `memory_read`, but `memory_search` still returns results without touching or recording accessed notes. ADR-054’s access-signal rollout is therefore incomplete.
+This classification pass is intentionally narrow: it separates tolerated backlog from actionable current-note debt so later cleanup can stay surgical.
 
-## Remaining gap versus ADR-054
+### Broken-link buckets
 
-1. **Access tracking is incomplete for retrieval flows**
-   - `memory_read` updates access signals, but `memory_search` does not increment access metadata or co-access tracking for returned results.
-   - The final wave should decide the intended semantics for search-result touches and implement them consistently, with tests.
+#### 1. Confident canonical-target defects in current notes — narrow actionable cleanup
+This is the smallest but highest-value slice.
 
-2. **The existing extracted corpus still needs cleanup execution**
-   - Audit tooling exists, but the actual migration of pre-existing notes has not been completed.
-   - Notes flagged as merge, underspecified, demote, or archive candidates need to be reconciled and rerun against the audit.
+Confirmed examples:
+- `[[design/working-spec-adr-055-sqlite-seam-inventory]]` is still referenced from [[cases/adr-roadmap-captured-sqlite-migration-seam-inventory-categories]] and remains unresolved.
+- Recent/high-value canonical notes previously identified in backlog triage remain the right place for any further narrow normalization if they still carry broken ADR-title/title-case links:
+  - [[decisions/adr-045-sse-event-batching-and-knowledge-base-housekeeping]]
+  - [[reference/repository-understanding-and-memory-freshness-upgrade-path]]
+  - [[reference/project-memory-broken-link-and-orphan-backlog-triage]]
 
-3. **Knowledge-base hygiene issues remain around roadmap/design links**
-   - Memory health still reports a large broken-link/orphan backlog.
-   - At least two broken links remain in `design/`, including one roadmap link and one ADR-title link, so ADR-054 should leave its own planning surfaces cleaner than it found them.
+Classification:
+- Treat these as **current-note defects** when the source note is still actively used for planning, patrol, or roadmap navigation.
+- Fix only when a canonical replacement target is known confidently.
 
-## Wave plan
+#### 2. Legacy ADR-title / shorthand alias debt — real backlog, but mostly historical
+The broken-link backlog is still dominated by old title-style and shorthand references, especially in `decisions/*` and `reference/*`.
 
-### Wave 1 — Finish access-signal rollout
-- Define and implement the intended access-tracking behavior for `memory_search` and any shared resolve/retrieval helpers implicated by ADR-054.
-- Add tests proving access_count / co-access behavior is updated without breaking search semantics.
+Repeated families seen in current evidence:
+- `Roadmap`
+- full ADR-title aliases such as `ADR-008: Agent Harness — Goose Library over Summon Subprocess Spawning`
+- title variants such as `ADR-023 Cognitive Memory Architecture`, `ADR-034 Agent Role Hierarchy`
+- shorthand forms such as `ADR-006`, `ADR-009`, `ADR-014`, `ADR-022`
 
-### Wave 2 — Execute extracted-note corpus cleanup
-- Use the extracted-note audit report to reconcile existing `case` / `pattern` / `pitfall` notes.
-- Merge duplicate families, strengthen underspecified notes, demote task-local notes, and archive low-value extracted leftovers.
-- Rerun the audit and document remaining counts.
+Classification:
+- This is **real note-content debt**, not a memory-tool defect.
+- Most of it should be treated as **legacy alias debt**, not as a fresh regression in current canonical notes.
+- Do **not** broaden ADR-054 closure into mass historical ADR/reference normalization.
 
-### Wave 3 — Repair roadmap/design hygiene surfaced by the audit
-- Fix broken roadmap/design wikilinks discovered during memory-health review.
-- Ensure the ADR-054 roadmap and related design notes point at canonical targets so the cleanup wave does not leave planning artifacts inconsistent.
+#### 3. Unresolved placeholder/prose link noise — opportunistic only
+A small tail still looks like placeholder or prose text wrapped in wikilink syntax rather than intended canonical notes.
 
-## This wave
-Create focused worker tasks for:
-1. completing MCP memory access-tracking coverage for search/retrieval flows
-2. cleaning the extracted corpus using the new ADR-054 audit categories and capturing rerun counts
-3. repairing design/roadmap broken links discovered during the ADR-054 audit sweep
+Representative examples from recent detail output:
+- `wikilinks`
+- `target`
+- `Note Title`
+- one-off prose labels in older notes
+
+Classification:
+- Leave this as **unresolved minor noise** unless the source note is otherwise being edited.
+- No separate alias-resolution policy is recommended.
+
+### Orphan buckets
+
+#### 1. `reference/repo-maps/*` — intentional orphan-heavy generated inventory
+Current orphan detail shows **67** repo-map notes under `reference/repo-maps/*`.
+
+Classification:
+- Treat as **expected baseline orphan noise**.
+- These notes are generated/reference-oriented artifacts and should not trigger cleanup work by count alone.
+
+#### 2. `cases/*` — tolerated retrieval-oriented inventory, not mass-link debt
+Current orphan detail shows **271** orphan `cases/*` notes.
+
+Classification:
+- Treat this as **tolerated historical/search-first inventory** rather than generic emergency cleanup.
+- A small subset may still deserve consolidation or linking when it becomes active epic knowledge, but the folder-wide count should not drive broad manual relinking.
+
+#### 3. `reference/*` outside repo maps — mixed, often actionable when current
+Current orphan detail shows **26** top-level `reference/*` notes outside repo maps.
+
+Classification:
+- This is a **mixed bucket**.
+- Current reference notes used by planning/patrol flows are more actionable than historical repo maps or case extracts.
+- These notes are the best candidate surface for any future narrow cleanup wave.
+
+#### 4. `design/*` — small, active, likely actionable
+Current orphan detail shows **2** orphan `design/*` notes in the sampled backlog.
+
+Classification:
+- Because design notes are usually active navigational surfaces, this is **actionable orphan debt**, not tolerated background inventory.
+- The missing canonical ADR roadmap note problem belonged in this bucket; this roadmap note now materializes that surface.
+
+#### 5. `research/*` — mostly archival
+Current orphan detail shows only a small tail in `research/*` in the sampled output.
+
+Classification:
+- Prefer archival tolerance or later deprecation/consolidation over new backlinks unless a note is still an active canonical reference.
+
+## Recommended next actions
+
+### For ADR-054 closure
+1. Keep `8vh1` focused on cleanup verification evidence.
+2. Keep `lnvm` focused on final canonical memory-ref reconciliation.
+3. Do **not** add a broad historical broken-link cleanup wave to ADR-054.
+
+### For later memory-hygiene work outside this closure wave
+1. If a follow-up cleanup task is opened, scope it to **current canonical notes only** — not to the entire historical ADR/reference backlog.
+2. Limit broken-link fixes to:
+   - confidently known canonical targets
+   - active roadmap/reference/design notes whose navigation quality still matters
+3. Treat broad `Roadmap` / ADR-title alias families as **legacy debt**, not as a mandatory closure blocker.
+
+### Reporting / patrol recommendation
+`memory_health()` should continue to report the **gross orphan count**, but patrol interpretation should bucket the backlog as:
+- **Intentional/generated baseline:** `reference/repo-maps/*`
+- **Tolerated retrieval inventory:** `cases/*`
+- **Actionable active-note debt:** current `reference/*`, `design/*`, and any current canonical note with confident broken-link targets
+
+Recommended policy:
+- keep raw aggregate/detail behavior unchanged
+- avoid suppressing orphan-heavy folders in the tool itself for now
+- teach patrol/decomposition notes to classify those folders explicitly before opening cleanup work
+
+## Closure guidance
+ADR-054 can still close after `8vh1` and `lnvm` if those tasks verify cleanup evidence and reconcile final canonical refs. The larger residual broken-link/orphan backlog is now classified as mostly **post-closure memory-hygiene debt**, not ADR-054 implementation incompleteness.
 
 ## Relations
 - [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
-- [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
-- [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]
-
-## Link cleanup note
-- Repaired the stale ADR-053 permalink alias above to the canonical target `[[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]`.
-- Residual legacy title-alias debt in adjacent design notes was left to the narrower current-note cleanup pass unless a canonical target was unambiguous.
+- [[reference/project-memory-broken-link-and-orphan-backlog-triage]]
+- [[cases/classify-residual-broken-wikilinks-by-legacy-alias-type-before-cleanup]]
+- [[cases/bucket-intentional-orphan-heavy-folders-separately-in-memory-health-reporting]]
+- [[cases/broken-link-backlog-shifted-from-roadmap-artifact-to-legacy-shorthand-adr-title-aliases]]
