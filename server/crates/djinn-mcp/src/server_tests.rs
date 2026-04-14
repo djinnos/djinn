@@ -6,7 +6,7 @@ mod tests {
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, handler::server::wrapper::Parameters};
     use serde_json::json;
-    use tokio::time::sleep;
+    use tokio::time::{Instant, sleep};
 
     use crate::{
         server::{DjinnMcpServer, SessionEndHookSessionManager},
@@ -64,6 +64,7 @@ mod tests {
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
+        let started_at = Instant::now();
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
                 project: tmp.path().to_str().unwrap().to_string(),
@@ -77,10 +78,28 @@ mod tests {
             .await;
 
         assert!(created.error.is_none());
+        assert!(
+            started_at.elapsed() < Duration::from_secs(1),
+            "memory_write should acknowledge before summary regeneration becomes a slow blocking step"
+        );
         let note_id = created.id.clone().expect("memory_write returns note id");
         let created_note = repo.get(&note_id).await.unwrap().unwrap();
-        assert!(created_note.abstract_.is_none());
-        assert!(created_note.overview.is_none());
+        // Summary regeneration is asynchronous and may complete before this assertion on
+        // fast machines, so treat missing summaries as the common case without requiring it.
+        assert!(
+            created_note.abstract_.is_none()
+                || created_note
+                    .abstract_
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+        );
+        assert!(
+            created_note.overview.is_none()
+                || created_note
+                    .overview
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+        );
 
         let generated = wait_for_summaries_change(&repo, &note_id, None).await;
         assert!(
