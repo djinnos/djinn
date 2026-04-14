@@ -1,7 +1,13 @@
 ---
 title: ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
 type: design
-tags: ["adr-054","roadmap","memory","quality-gates","taxonomy"]
+tags: ["adr-054","roadmap","memory","quality-gates","taxonomy","closure"]
+---
+
+---
+title: ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
+type: design
+tags: ["adr-054","roadmap","memory","quality-gates","taxonomy","closure"]
 ---
 
 # ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
@@ -23,15 +29,15 @@ Tighten extraction quality in `llm_extraction.rs` so durable memory writes are g
 - Residual broken-link/orphan backlog was classified narrowly so ADR-054 closure does not expand into historical alias cleanup.
 
 ## Closure blocker discovered in `lnvm`
-The intended canonical closure artifacts now exist on disk, but the memory surface in this session still fails to resolve them canonically:
+The intended canonical closure artifacts exist on disk, but the memory surface still fails to resolve them canonically in this session:
 - `design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy`
 - `design/working-spec-adr-055-sqlite-seam-inventory`
 - `design/working-spec-adr-055-task-knowledge-branching-rollout`
 
-Observed failure mode from spike `lnvm`:
+Observed failure mode from spike `lnvm` and planner recheck:
 - `memory_read()` does not resolve the roadmap permalink directly.
-- The two ADR-055 Working Spec permalinks fall through to superseded case-note matches instead of exact design-note resolution.
-- `memory_list(folder="design")` also failed to surface the expected design notes in this session.
+- The two ADR-055 Working Spec permalinks can fall through to superseded case-note matches instead of exact design-note resolution.
+- `memory_list(folder="design")` visibility has been inconsistent for the expected canonical design notes.
 
 This points to a memory-surface/index reconciliation problem, not missing note content.
 
