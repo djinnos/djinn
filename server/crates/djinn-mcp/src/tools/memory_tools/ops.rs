@@ -3,6 +3,7 @@ use djinn_db::{
     NoteRepository, ProjectRepository, normalize_virtual_note_path,
     permalink_from_virtual_note_path,
 };
+use std::path::{Path, PathBuf};
 
 use crate::server::DjinnMcpServer;
 
@@ -42,6 +43,43 @@ fn permalink_candidates(identifier: &str) -> Vec<String> {
         candidates.push(permalink);
     }
     candidates
+}
+
+fn inferred_worktree_roots(project_ref: &str) -> Option<(PathBuf, PathBuf)> {
+    let normalized = project_ref.trim_end_matches('/').replace('\\', "/");
+    let marker = "/.djinn/worktrees/";
+    let marker_index = normalized.find(marker)?;
+    let worktree_suffix = &normalized[marker_index + marker.len()..];
+    let worktree_name = worktree_suffix
+        .split('/')
+        .next()
+        .filter(|value| !value.is_empty())?;
+    let canonical_root = PathBuf::from(&normalized[..marker_index]);
+    let worktree_root = canonical_root
+        .join(".djinn")
+        .join("worktrees")
+        .join(worktree_name);
+    Some((canonical_root, worktree_root))
+}
+
+async fn sync_worktree_notes_for_project_ref(
+    server: &DjinnMcpServer,
+    project_id: &str,
+    project_ref: &str,
+) {
+    let Some((canonical_root, worktree_root)) = inferred_worktree_roots(project_ref) else {
+        return;
+    };
+
+    if !Path::new(&worktree_root).exists() {
+        return;
+    }
+
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
+    let _ = repo
+        .sync_worktree_notes_to_canonical(project_id, &canonical_root, &worktree_root)
+        .await;
 }
 
 async fn record_retrieved_notes(
@@ -130,30 +168,45 @@ pub async fn memory_read(server: &DjinnMcpServer, p: ReadParams) -> MemoryNoteRe
     } {
         note
     } else {
-        match repo
-            .search(NoteSearchParams {
-                project_id: &project_id,
-                query: &p.identifier,
-                task_id: None,
-                folder: None,
-                note_type: None,
-                limit: 1,
-                semantic_scores: None,
-            })
-            .await
-        {
-            Ok(results) if !results.is_empty() => {
-                match repo.get(&results[0].id).await.ok().flatten() {
-                    Some(note) => note,
-                    None => {
-                        return MemoryNoteResponse::error(format!(
-                            "note not found: {}",
-                            p.identifier
-                        ));
-                    }
+        sync_worktree_notes_for_project_ref(server, &project_id, &p.project).await;
+
+        if let Some(note) = {
+            let mut exact = None;
+            for candidate in permalink_candidates(&p.identifier) {
+                if let Ok(Some(note)) = repo.get_by_permalink(&project_id, &candidate).await {
+                    exact = Some(note);
+                    break;
                 }
             }
-            _ => return MemoryNoteResponse::error(format!("note not found: {}", p.identifier)),
+            exact
+        } {
+            note
+        } else {
+            match repo
+                .search(NoteSearchParams {
+                    project_id: &project_id,
+                    query: &p.identifier,
+                    task_id: None,
+                    folder: None,
+                    note_type: None,
+                    limit: 1,
+                    semantic_scores: None,
+                })
+                .await
+            {
+                Ok(results) if !results.is_empty() => {
+                    match repo.get(&results[0].id).await.ok().flatten() {
+                        Some(note) => note,
+                        None => {
+                            return MemoryNoteResponse::error(format!(
+                                "note not found: {}",
+                                p.identifier
+                            ));
+                        }
+                    }
+                }
+                _ => return MemoryNoteResponse::error(format!("note not found: {}", p.identifier)),
+            }
         }
     };
 
@@ -254,7 +307,7 @@ pub async fn memory_list(server: &DjinnMcpServer, p: ListParams) -> MemoryListRe
         .with_vector_store(server.state.vector_store());
     let depth = p.depth.unwrap_or(1);
     let folder = normalize_folder_filter(p.folder);
-    let notes = repo
+    let mut notes = repo
         .list_compact(
             &project_id,
             folder.as_deref(),
@@ -263,6 +316,19 @@ pub async fn memory_list(server: &DjinnMcpServer, p: ListParams) -> MemoryListRe
         )
         .await
         .unwrap_or_default();
+
+    if notes.is_empty() {
+        sync_worktree_notes_for_project_ref(server, &project_id, &p.project).await;
+        notes = repo
+            .list_compact(
+                &project_id,
+                folder.as_deref(),
+                p.note_type.as_deref(),
+                depth,
+            )
+            .await
+            .unwrap_or_default();
+    }
 
     MemoryListResponse { notes, error: None }
 }

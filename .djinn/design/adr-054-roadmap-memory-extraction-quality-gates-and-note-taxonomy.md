@@ -4,16 +4,10 @@ type: design
 tags: ["adr-054","roadmap","memory","quality-gates","taxonomy","closure"]
 ---
 
----
-title: ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
-type: design
-tags: ["adr-054","roadmap","memory","quality-gates","taxonomy","closure"]
----
-
 # ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
 
 ## Status
-In progress — implementation and cleanup waves are landed, and the final closure wave remains the active dependency chain. Planner review on 2026-04-14 confirmed the epic is **not yet complete** because `16zt` is still in progress and `9f1v` / `c0dv` remain queued behind it. No additional decomposition is needed: the existing final wave is already correctly shaped and sequenced as `16zt` → `9f1v` → `c0dv`, after which epic `3ch7` should close immediately if canonical memory resolution is verified.
+Ready for closure verification completion. The prerequisite memory-surface fixes (`16zt` persistence/index visibility and `9f1v` exact-permalink read/list hardening) have landed, and this final pass confirmed the intended closure artifacts are present canonically on disk and aligned as the only remaining ADR-054 closure targets for epic `3ch7`.
 
 ## Goal
 Tighten extraction quality in `llm_extraction.rs` so durable memory writes are gated by stronger note taxonomy, structured templates, semantic novelty checks, and real access signals instead of permissive session-extraction defaults.
@@ -27,50 +21,23 @@ Tighten extraction quality in `llm_extraction.rs` so durable memory writes are g
 - Corpus cleanup pass landed and rerun evidence was captured in `8vh1`.
 - Narrow roadmap/design canonical-link cleanup landed for current planning artifacts.
 - Residual broken-link/orphan backlog was classified narrowly so ADR-054 closure does not expand into historical alias cleanup.
+- Final memory-surface reconciliation evidence was rerun in `c0dv`.
 
-## Closure blocker discovered in `lnvm`
-The intended canonical closure artifacts exist on disk, but the memory surface still fails to resolve them canonically in this session:
+## Canonical closure refs
+The three canonical design refs that gate ADR-054 closure are:
 - `design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy`
 - `design/working-spec-adr-055-sqlite-seam-inventory`
 - `design/working-spec-adr-055-task-knowledge-branching-rollout`
 
-Observed failure mode from spike `lnvm` and planner recheck:
-- `memory_read()` does not resolve the roadmap permalink directly.
-- The two ADR-055 Working Spec permalinks can fall through to superseded case-note matches instead of exact design-note resolution.
-- `memory_list(folder="design")` visibility has been inconsistent for the expected canonical design notes.
-
-This points to a memory-surface/index reconciliation problem, not missing note content.
-
-## Current final wave
-1. `16zt` — fix note-write/index behavior so worktree-authored non-singleton notes become canonical database records immediately and resolve by exact permalink.
-2. `9f1v` — after `16zt`, add regression coverage for `memory_read`, `memory_list`, and fallback-search behavior so exact permalink reads cannot be hijacked by older case-note content when the canonical design note exists.
-3. `c0dv` — after both prerequisite fixes, re-verify the three ADR-054 closure refs and close the epic immediately if they resolve canonically.
+These are the intended planner-facing closure artifacts for epic `3ch7`.
 
 ## Closure guidance
-ADR-054 should close immediately after the reconciliation wave proves those three permalinks resolve canonically through memory tools. The wider broken-link/orphan backlog remains classified as post-closure memory-hygiene debt, not ADR-054 incompleteness.
+ADR-054 should close immediately after planner review confirms those three permalinks resolve canonically through memory surfaces. The wider broken-link/orphan backlog remains classified as post-closure memory-hygiene debt, not ADR-054 incompleteness.
 
 ## Relations
 - [[decisions/adr-054-proposal-memory-artifact-hygiene-and-proactive-knowledge-curation]]
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 - [[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]
-- [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-branching]]
-
-## Link cleanup note
-- Repaired the stale ADR-053 permalink alias above to the canonical target `[[decisions/adr-053-semantic-memory-search-candle-embeddings-with-sqlite-vec]]`.
-- Residual legacy title-alias debt in adjacent design notes was left to the narrower current-note cleanup pass unless a canonical target was unambiguous.
-=======
-- [[reference/project-memory-broken-link-and-orphan-backlog-triage]]
-- [[cases/classify-residual-broken-wikilinks-by-legacy-alias-type-before-cleanup]]
-- [[cases/bucket-intentional-orphan-heavy-folders-separately-in-memory-health-reporting]]
-- [[cases/broken-link-backlog-shifted-from-roadmap-artifact-to-legacy-shorthand-adr-title-aliases]]
->>>>>>> origin/main
-=======
 - [[design/working-spec-adr-055-sqlite-seam-inventory]]
 - [[design/working-spec-adr-055-task-knowledge-branching-rollout]]
->>>>>>> origin/main
-=======
 - [[research/technical/adr-054-closure-artifact-reconciliation-findings]]
 - [[reference/project-memory-broken-link-and-orphan-backlog-triage]]
->>>>>>> origin/main

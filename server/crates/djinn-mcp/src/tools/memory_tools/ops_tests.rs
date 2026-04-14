@@ -399,6 +399,107 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_read_ops_syncs_worktree_notes_before_search_fallback() {
+        let project_tmp = workspace_tempdir();
+        let worktree_tmp = project_tmp
+            .path()
+            .join(".djinn/worktrees/test-design-read-sync");
+        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let event_bus = event_bus_for(&tx);
+        let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
+        let project = project_repo
+            .create("test-project", project_tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let server = DjinnMcpServer::new(test_mcp_state(db.clone(), &tx));
+
+        let worktree_repo = NoteRepository::new(db.clone(), event_bus)
+            .with_worktree_root(Some(worktree_tmp.clone()));
+        worktree_repo
+            .create(
+                &project.id,
+                project_tmp.path(),
+                "ADR-054 Roadmap Memory Extraction Quality Gates and Note Taxonomy",
+                "Canonical worktree design note awaiting sync.",
+                "design",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let response = ops::memory_read(
+            &server,
+            ReadParams {
+                project: worktree_tmp.to_string_lossy().to_string(),
+                identifier:
+                    "design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy"
+                        .to_string(),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(
+            response.permalink.as_deref(),
+            Some("design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy")
+        );
+        assert_eq!(response.note_type.as_deref(), Some("design"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_list_ops_syncs_worktree_notes_before_returning_empty_design_folder() {
+        let project_tmp = workspace_tempdir();
+        let worktree_tmp = project_tmp
+            .path()
+            .join(".djinn/worktrees/test-design-list-sync");
+        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let event_bus = event_bus_for(&tx);
+        let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
+        let project = project_repo
+            .create("test-project", project_tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let server = DjinnMcpServer::new(test_mcp_state(db.clone(), &tx));
+
+        let worktree_repo = NoteRepository::new(db.clone(), event_bus)
+            .with_worktree_root(Some(worktree_tmp.clone()));
+        worktree_repo
+            .create(
+                &project.id,
+                project_tmp.path(),
+                "Working Spec ADR-055 SQLite Seam Inventory",
+                "Canonical worktree design note awaiting sync.",
+                "design",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let listed = ops::memory_list(
+            &server,
+            ListParams {
+                project: worktree_tmp.to_string_lossy().to_string(),
+                folder: Some("design".to_string()),
+                note_type: Some("design".to_string()),
+                depth: Some(1),
+            },
+        )
+        .await;
+
+        assert!(listed.error.is_none(), "{:?}", listed.error);
+        assert!(listed.notes.iter().any(|note| {
+            note.permalink == "design/working-spec-adr-055-sqlite-seam-inventory"
+                && note.note_type == "design"
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_search_ops_applies_task_fallback_and_success_shape() {
         let setup = setup_server().await;
 
