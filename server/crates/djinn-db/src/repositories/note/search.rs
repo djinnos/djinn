@@ -518,6 +518,60 @@ impl NoteRepository {
         Ok(query.fetch_all(self.db.pool()).await?)
     }
 
+    /// Query notes whose non-empty `scope_paths` overlap with the given code paths.
+    ///
+    /// Unlike [`Self::query_by_scope_overlap`], this excludes global notes so callers
+    /// can use it for change-driven scoped freshness decay without touching unrelated
+    /// project-wide knowledge.
+    pub async fn query_scoped_by_path_overlap(
+        &self,
+        project_id: &str,
+        changed_paths: &[String],
+        limit: usize,
+    ) -> Result<Vec<Note>> {
+        self.db.ensure_initialized().await?;
+
+        if changed_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut bind_values: Vec<String> = vec![project_id.to_string()];
+        let mut overlap_parts = Vec::new();
+
+        for changed_path in changed_paths {
+            let idx = bind_values.len() + 1;
+            bind_values.push(changed_path.clone());
+            overlap_parts.push(format!(
+                "EXISTS (SELECT 1 FROM json_each(n.scope_paths) AS sp \
+                 WHERE ?{idx} LIKE sp.value || '/%' \
+                    OR sp.value LIKE ?{idx} || '/%' \
+                    OR sp.value = ?{idx})"
+            ));
+        }
+
+        let overlap_clause = overlap_parts.join(" OR ");
+        let sql = format!(
+            "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
+                    n.storage, n.note_type, n.folder, n.tags, n.content,
+                    n.created_at, n.updated_at, n.last_accessed,
+                    n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
+                    n.scope_paths
+             FROM notes n
+             WHERE n.project_id = ?1
+               AND json_array_length(n.scope_paths) > 0
+               AND ({overlap_clause})
+             ORDER BY n.updated_at DESC
+             LIMIT {limit}"
+        );
+
+        let mut query = sqlx::query_as::<_, Note>(&sql);
+        for value in &bind_values {
+            query = query.bind(value);
+        }
+
+        Ok(query.fetch_all(self.db.pool()).await?)
+    }
+
     /// Find tasks whose `memory_refs` JSON array contains `permalink`.
     ///
     /// Returns minimal task info: `(id, short_id, title, status)`.
@@ -718,5 +772,122 @@ mod contradiction_tests {
             candidates.iter().all(|c| c.note_type == "pattern"),
             "different-type candidates should be filtered out (Low risk)"
         );
+    }
+}
+
+#[cfg(test)]
+mod scope_overlap_decay_tests {
+    use super::*;
+    use crate::database::Database;
+    use djinn_core::events::EventBus;
+    use std::collections::HashSet;
+
+    async fn make_repo_and_project() -> (NoteRepository, tempfile::TempDir, String) {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+            .bind(&id)
+            .bind("test")
+            .bind(tmp.path().to_str().unwrap())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        (NoteRepository::new(db, EventBus::noop()), tmp, id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_scoped_by_path_overlap_matches_parent_and_child_scopes_only() {
+        let (repo, tmp, project_id) = make_repo_and_project().await;
+
+        let parent = repo
+            .create_with_scope(
+                &project_id,
+                tmp.path(),
+                "Parent Scope",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["server/src"]"#,
+            )
+            .await
+            .unwrap();
+        let child = repo
+            .create_with_scope(
+                &project_id,
+                tmp.path(),
+                "Child Scope",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["server/src/server/state"]"#,
+            )
+            .await
+            .unwrap();
+        let unrelated = repo
+            .create_with_scope(
+                &project_id,
+                tmp.path(),
+                "Unrelated Scope",
+                "content",
+                "pattern",
+                None,
+                "[]",
+                r#"["desktop/src"]"#,
+            )
+            .await
+            .unwrap();
+        let global = repo
+            .create(
+                &project_id,
+                tmp.path(),
+                "Global Note",
+                "content",
+                "pattern",
+                "[]",
+            )
+            .await
+            .unwrap();
+
+        let matches = repo
+            .query_scoped_by_path_overlap(
+                &project_id,
+                &["server/src/server/state/mod.rs".to_string()],
+                20,
+            )
+            .await
+            .unwrap();
+
+        let ids: HashSet<String> = matches.into_iter().map(|note| note.id).collect();
+        assert!(ids.contains(&parent.id));
+        assert!(ids.contains(&child.id));
+        assert!(!ids.contains(&unrelated.id));
+        assert!(!ids.contains(&global.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_scoped_by_path_overlap_is_noop_for_empty_changed_paths() {
+        let (repo, tmp, project_id) = make_repo_and_project().await;
+        repo.create_with_scope(
+            &project_id,
+            tmp.path(),
+            "Scoped Note",
+            "content",
+            "pattern",
+            None,
+            "[]",
+            r#"["server/src"]"#,
+        )
+        .await
+        .unwrap();
+
+        let matches = repo
+            .query_scoped_by_path_overlap(&project_id, &[], 20)
+            .await
+            .unwrap();
+        assert!(matches.is_empty());
     }
 }
