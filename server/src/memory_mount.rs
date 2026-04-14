@@ -1,4 +1,4 @@
-//! Linux-only ADR-057 wave-1 memory mount plumbing.
+//! Linux-only ADR-057 mounted-memory enablement and guardrails.
 //!
 //! This module wires the transport-neutral [`crate::memory_fs::MemoryFilesystemCore`] into an
 //! initial FUSE adapter behind the `memory-mount` cargo feature and typed server settings:
@@ -8,8 +8,17 @@
 //!
 //! The mount is disabled by default. When enabled on Linux with the cargo feature present, Djinn
 //! mounts the single registered project's memory note tree at `memory_mount_path` using FUSE.
-//! Runtime note operations resolve through the active task/session branch context when one can be
+//! Runtime note operations resolve through the active task/session worktree context when one can be
 //! determined. Otherwise the mount falls back to the canonical `main` view.
+//!
+//! Filesystem-first usage guardrails for this slice:
+//! - `.djinn/memory/` represents the current session-selected view, not a branch-directory UX
+//! - when one active task with a non-canonical worktree is available for the mounted project, the
+//!   mount reflects that task/worktree view
+//! - when task/session/worktree resolution fails, or the active session is still on the canonical
+//!   project root, the mount intentionally falls back to the canonical `main` view
+//! - callers that need an explicit canonical read should not infer it from the mount path alone
+//! - no `@main`, `@task_*`, or other explicit branch directory affordances are supported here
 //!
 //! Operational safety for this wave:
 //! - startup rejects invalid configuration before the HTTP server begins serving

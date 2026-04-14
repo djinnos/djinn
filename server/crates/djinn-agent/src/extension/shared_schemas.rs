@@ -254,7 +254,7 @@ pub(crate) fn tool_memory_list() -> RmcpTool {
 pub(crate) fn tool_memory_write() -> RmcpTool {
     RmcpTool::new(
         "memory_write".to_string(),
-        "Compatibility fallback for note creation when filesystem writes are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.".to_string(),
+        "Compatibility fallback for note creation when filesystem writes are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. When mounted, `.djinn/memory/` reflects the current session-selected task/worktree view and falls back to canonical `main` when no task view is available; no explicit branch directories are exposed in this slice. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.".to_string(),
         object!({
             "type": "object",
             "required": ["title", "content", "type"],
@@ -272,7 +272,7 @@ pub(crate) fn tool_memory_write() -> RmcpTool {
 pub(crate) fn tool_memory_edit() -> RmcpTool {
     RmcpTool::new(
         "memory_edit".to_string(),
-        "Compatibility fallback for note edits when filesystem writes are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).".to_string(),
+        "Compatibility fallback for note edits when filesystem writes are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. When mounted, `.djinn/memory/` reflects the current session-selected task/worktree view and falls back to canonical `main` when no task view is available; no explicit branch directories are exposed in this slice. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "operation", "content"],

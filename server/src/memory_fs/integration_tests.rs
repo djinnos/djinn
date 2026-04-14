@@ -5,9 +5,10 @@
 //! assertions validate repository-visible side effects such as access tracking, frontmatter
 //! normalization, and wikilink/index maintenance.
 //!
-//! Wave-1 gaps remain intentionally out of scope here:
+//! Transport/runtime gaps remain intentionally out of scope here:
 //! - debounced write batching and commit coalescing belong to the mount transport/runtime layer
-//! - branch-aware mount switching belongs to later ADR-057 waves once session-scoped mounts land
+//! - session-aware task/worktree view selection and canonical fallback are verified at the mount
+//!   runtime seam rather than this repository-backed core layer
 //! - transport adapter behavior (FUSE/NFS inode semantics, kernel caching, mount lifecycle) is
 //!   covered separately from this repository-backed core seam
 //!

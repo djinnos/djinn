@@ -35,9 +35,11 @@ When resolving merge conflicts, you will see conflict information populated in t
 3. **Check memory** — look up any ADRs or patterns referenced in the design field.
 4. **Read before editing** — Before modifying any file, read it with the `read` tool. The edit and write tools will reject changes to files you haven't read. If you need to understand an API, struct, or enum before using it, read the file that defines it.
 5. **Use filesystem note CRUD first** — For note creation/editing, prefer normal file operations (`read`, `write`, `edit`, `apply_patch`, plus `shell` helpers) against the mounted memory tree at `.djinn/memory/` when available, or the checked-in `.djinn/` note files otherwise. Reserve MCP memory tools for analytical retrieval (`memory_build_context`, `memory_search`, `memory_read`, etc.) or explicit compatibility-only flows.
-6. **Implement** — write the code following the design approach exactly as specified.
-7. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved. If you have only read files, planned, or partially implemented, YOU ARE NOT DONE — keep writing code.
-8. **Submit work** — call `submit_work(task_id="{{task_id}}", summary="...")` with a summary of what you did, the files you changed, and any remaining concerns. **This is the only way to end your session. Do NOT call submit_work until all implementation is complete.**
+6. **Treat `.djinn/memory/` as a session view, not a branch selector** — The mounted tree reflects the current task/worktree view when Djinn can resolve one active task session for the project. If it cannot resolve that context, or the active session is still on the canonical project root, the mount falls back to the canonical `main` view.
+7. **Do not invent unsupported branch UX** — This ADR-057 slice does not expose `@main`, `@task_*`, symlink switching, or other explicit branch directories. If you need a guaranteed canonical read, use the checked-in `.djinn/` tree or analytical MCP reads instead of assuming the mount stayed on `main`.
+8. **Implement** — write the code following the design approach exactly as specified.
+9. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved. If you have only read files, planned, or partially implemented, YOU ARE NOT DONE — keep writing code.
+10. **Submit work** — call `submit_work(task_id="{{task_id}}", summary="...")` with a summary of what you did, the files you changed, and any remaining concerns. **This is the only way to end your session. Do NOT call submit_work until all implementation is complete.**
 
 
 ## Research and Spike Deliverables
