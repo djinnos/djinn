@@ -367,9 +367,12 @@ impl MemoryFilesystemCore {
         }
     }
 
-<<<<<<< HEAD
-    fn memory_file_from_note(&self, note: &djinn_core::models::Note) -> MemoryFile {
-        let content = render_note_markdown(&note.title, &note.note_type, &note.tags, &note.content);
+    fn render_note_content(&self, note: &Note) -> String {
+        render_note_markdown(&note.title, &note.note_type, &note.tags, &note.content)
+    }
+
+    fn memory_file_from_note(&self, note: &Note) -> MemoryFile {
+        let content = self.render_note_content(note);
         MemoryFile {
             metadata: MemoryEntryMetadata {
                 path: virtual_note_path_for_permalink(&note.permalink),
@@ -426,11 +429,6 @@ fn frontmatter_value(frontmatter: &str, key: &str) -> Option<String> {
         line.strip_prefix(&prefix)
             .map(|value| value.trim().to_string())
     })
-=======
-    fn render_note_content(&self, note: &Note) -> String {
-        render_note_markdown(&note.title, &note.note_type, &note.tags, &note.content)
-    }
->>>>>>> origin/main
 }
 
 fn known_note_folders() -> Vec<String> {
