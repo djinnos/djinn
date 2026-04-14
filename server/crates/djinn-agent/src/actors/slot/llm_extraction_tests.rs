@@ -136,12 +136,22 @@ async fn make_fixture() -> TestFixture {
 
 /// Build a FakeProvider that returns a valid extraction JSON with one of each note type.
 fn fake_extraction_provider() -> Arc<FakeProvider> {
-    let json = r#"{
-  "cases": [{"title": "Test Case Note", "content": "Situation: a flaky extraction pipeline had to compare candidate summaries under a deterministic constraint. Approach taken: inject a stable candidate seam and record why the fix worked. Result: future tasks can reuse the lesson when similar novelty checks fail."}],
-  "patterns": [{"title": "Test Pattern Note", "content": "Recommended approach: use a reusable seam when a workflow needs deterministic comparisons across multiple future tasks. Why it works: the approach isolates unstable dependencies and clarifies when to use the pattern and its tradeoffs."}],
-  "pitfalls": [{"title": "Test Pitfall Note", "content": "Trigger / smell: semantic duplicate checks become flaky when summaries change between runs. Failure mode: extraction creates noisy sibling notes. Prevention and recovery: inject stable summaries, compare them consistently, and avoid repeating the error in future tasks."}]
-}"#;
-    Arc::new(FakeProvider::text(json))
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Test Case Note",
+            "content": "## Situation\nA flaky extraction pipeline had to compare candidate summaries under a deterministic constraint.\n## Constraint\nNovelty checks needed stable inputs across repeated runs and future tasks.\n## Approach taken\nInject a stable candidate seam and keep the comparison summary explicit in the extraction flow.\n## Result\nThe extraction remained deterministic and avoided duplicate durable notes.\n## Why it worked / failed\nThe seam removed unstable inputs that were previously changing across runs.\n## Reusable lesson\nUse an explicit deterministic seam when extraction quality depends on comparing generated summaries reliably.\n## Related\n- novelty detection\n- extraction quality gates"
+        }],
+        "patterns": [{
+            "title": "Test Pattern Note",
+            "content": "## Context\nA workflow needs deterministic comparisons while still preserving reusable extraction behavior.\n## Problem shape\nUnstable provider responses can create noisy differences that look novel even when the underlying knowledge is the same.\n## Recommended approach\nIntroduce a reusable seam for the comparison inputs and keep the durable evaluation steps explicit.\n## Why it works\nThe seam isolates unstable dependencies and preserves a repeatable decision path.\n## Tradeoffs / limits\nIt adds test scaffolding and only helps when the comparison boundary is well understood.\n## When to use\nUse this when future tasks must compare summaries or candidates deterministically across repeated runs.\n## When not to use\nDo not use it when the workflow is intentionally exploratory or the comparison boundary is still changing.\n## Related\n- novelty detection\n- deterministic tests"
+        }],
+        "pitfalls": [{
+            "title": "Test Pitfall Note",
+            "content": "## Trigger / smell\nSemantic duplicate checks become flaky when summaries change between runs.\n## Failure mode\nExtraction creates noisy sibling notes instead of recognizing the same durable knowledge.\n## Observable symptoms\nRepeated runs alternate between merging and writing new notes with nearly identical content.\n## Prevention\nInject stable summaries and keep the comparison contract narrow and explicit.\n## Recovery\nReplace unstable inputs with deterministic fixtures and rerun the novelty gate.\n## Related\n- duplicate notes\n- extraction quality gates"
+        }]
+    })
+    .to_string();
+    Arc::new(FakeProvider::text(&json))
 }
 
 fn novelty_candidate(existing_id: &str) -> NoteDedupCandidate {
@@ -457,8 +467,16 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
     let taxonomy = SessionTaxonomy::default();
-    let json = r#"{"cases":[{"title":"Provenance Test","content":"Situation: extraction provenance must remain visible after a durable note is written. Constraint: future tasks need to know which session produced the case. Approach taken: append a provenance footer and keep the reusable lesson in the note result. Result: the stored case stays traceable. Lesson: future tasks can trust the durable note provenance."}],"patterns":[],"pitfalls":[]}"#;
-    let provider = Arc::new(FakeProvider::text(json));
+    let json = serde_json::json!({
+        "cases": [{
+            "title": "Provenance Test",
+            "content": "## Situation\nExtraction provenance must remain visible after a durable note is written.\n## Constraint\nFuture tasks need to know which session produced the case while keeping the note reusable.\n## Approach taken\nAppend a provenance footer and preserve the worked example in the durable case body.\n## Result\nThe stored case stays traceable without losing its reusable content.\n## Why it worked / failed\nThe footer keeps session origin explicit while leaving the durable lesson intact.\n## Reusable lesson\nKeep provenance appended separately so future tasks can trust the origin of extracted durable notes.\n## Related\n- provenance\n- durable extraction"
+        }],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
 
     run_llm_extraction_with_provider(session_id.clone(), taxonomy, ctx, provider).await;
 
@@ -645,7 +663,15 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
             djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
-                text: r#"{"cases":[{"title":"Fallback Novel Note","content":"Situation: a novelty response returned invalid JSON during extraction. Constraint: the durable lesson still matters across future tasks. Approach taken: continue with the durable case because the fallback preserved useful knowledge. Result: extraction still captured the note. Lesson: future tasks can reuse the fallback when novelty checks fail."}],"patterns":[],"pitfalls":[]}"#.to_string(),
+                text: serde_json::json!({
+                    "cases": [{
+                        "title": "Fallback Novel Note",
+                        "content": "## Situation\nA novelty response returned invalid JSON during extraction.\n## Constraint\nThe durable lesson still matters across future tasks even when the novelty call fails.\n## Approach taken\nContinue with the structured durable case after the novelty parser falls back to unknown.\n## Result\nExtraction still captured the note instead of losing the reusable precedent.\n## Why it worked / failed\nThe fallback preserved durable note creation when novelty infrastructure was temporarily unreliable.\n## Reusable lesson\nKeep the durable write path resilient when auxiliary novelty checks fail.\n## Related\n- novelty fallback\n- durable extraction"
+                    }],
+                    "patterns": [],
+                    "pitfalls": []
+                })
+                .to_string(),
             }),
             djinn_provider::provider::StreamEvent::Done,
         ],
@@ -746,13 +772,13 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn llm_extraction_discards_note_with_type_mismatch() {
+async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
 
     let taxonomy = SessionTaxonomy {
         files_changed: 1,
-        errors: 0,
+        errors: 1,
         tools_used: 2,
         notes_read: 0,
         notes_written: 1,
@@ -761,7 +787,7 @@ async fn llm_extraction_discards_note_with_type_mismatch() {
     };
 
     let provider = Arc::new(FakeProvider::text(
-        r#"{"cases":[],"patterns":[{"title":"Vague Pattern Claim","content":"This worked."}],"pitfalls":[]}"#,
+        r#"{"cases":[],"patterns":[{"title":"Unstructured Pattern Note","content":"Reusable approach: keep extraction deterministic across future tasks by isolating unstable inputs and documenting why the pattern helps."}],"pitfalls":[]}"#,
     ));
 
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
@@ -771,18 +797,21 @@ async fn llm_extraction_discards_note_with_type_mismatch() {
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-    assert!(notes.is_empty(), "discarded notes should not be persisted");
+    assert!(
+        notes.is_empty(),
+        "notes missing ADR-054 sections should be routed away from durable writes"
+    );
 
     let stored_json: Option<String> =
         sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
             .bind(&fixture.session_id)
             .fetch_one(fixture.db.pool())
             .await
-            .expect("query session event_taxonomy after discard");
+            .expect("query session event_taxonomy after template downgrade");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
-        .expect("deserialize stored taxonomy after discard");
+        .expect("deserialize stored taxonomy after template downgrade");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
-    assert_eq!(stored_taxonomy.extraction_quality.discarded, 1);
+    assert_eq!(stored_taxonomy.extraction_quality.downgraded, 1);
     assert_eq!(stored_taxonomy.extraction_quality.written, 0);
 }
 
