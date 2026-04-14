@@ -1,3 +1,9 @@
+---
+title: Cognitive Memory Scope
+type: reference
+tags: []
+---
+
 # Cognitive Memory Infrastructure Scope
 
 ## In Scope

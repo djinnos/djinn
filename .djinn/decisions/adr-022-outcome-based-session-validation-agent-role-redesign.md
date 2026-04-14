@@ -1,3 +1,9 @@
+---
+title: Adr 022 Outcome Based Session Validation Agent Role Redesign
+type: adr
+tags: []
+---
+
 
 # ADR-022: Outcome-Based Session Validation & Agent Role Redesign
 

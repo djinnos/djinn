@@ -1,12 +1,9 @@
 ---
-tags:
-    - adr
-    - milestone-2
-    - auth
-    - clerk
 title: 'ADR-001: Desktop-Only Clerk Authentication via System Browser PKCE'
 type: adr
+tags: []
 ---
+
 # ADR-001: Desktop-Only Clerk Authentication via System Browser PKCE
 
 ## Status: Accepted

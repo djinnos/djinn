@@ -1,6 +1,6 @@
 ---
 title: "ADR-029: Vertical Workspace Splitting and Agent Role Trait"
-type: 
+type: reference
 tags: ["adr","architecture","workspace","cargo","agent","trait","vertical-slice","compilation"]
 ---
 

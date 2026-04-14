@@ -1,13 +1,9 @@
 ---
-tags:
-    - research
-    - features
-    - market
-    - orchestration
-    - pricing
 title: Features Research
 type: research
+tags: []
 ---
+
 # AI Agent Orchestration Features Landscape (March 2026)
 
 ## Market Context

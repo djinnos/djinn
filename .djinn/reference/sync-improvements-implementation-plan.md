@@ -1,6 +1,6 @@
 ---
 title: "Sync Improvements Implementation Plan"
-type: 
+type: reference
 tags: ["sync", "git", "multi-device", "multi-project", "testing"]
 ---
 

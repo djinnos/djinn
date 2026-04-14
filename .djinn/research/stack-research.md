@@ -1,15 +1,9 @@
 ---
-tags:
-    - research
-    - stack
-    - rust
-    - axum
-    - libsql
-    - rmcp
-    - tokio
 title: Stack Research
 type: research
+tags: []
 ---
+
 # Rust MCP Server Stack Deep Dive (March 2026)
 
 ## Core Stack Versions

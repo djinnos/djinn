@@ -1,3 +1,9 @@
+---
+title: Adr 023 Cognitive Memory Architecture Multi Signal Retrieval And Associative Learning
+type: adr
+tags: []
+---
+
 # ADR-023: Cognitive Memory Architecture — Multi-Signal Retrieval and Associative Learning
 
 ## Status

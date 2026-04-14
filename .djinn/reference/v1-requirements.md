@@ -1,6 +1,6 @@
 ---
 title: V1 Requirements
-type: 
+type: reference
 tags: []
 ---
 

@@ -1,12 +1,12 @@
 ---
-title: 001 Language Selection Compiler As Ai Reviewer
+title: Language Selection — Compiler as AI Code Reviewer
 type: adr
 tags: []
 ---
 
 # ADR-001: Language Selection — Compiler as AI Code Reviewer
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-03-02
 **Context:** Djinn server rewrite — choosing implementation language given AI is the primary code author
 
@@ -23,7 +23,7 @@ This is not about developer ergonomics or hiring. The primary code author is an 
 ## Decision Drivers
 
 1. **AI writes most of the code** — the compiler is the primary reviewer
-2. **Concurrency is core** — MCP server, SSE, background goroutines/tasks
+2. **Concurrency is core** — MCP server, SSE, background tasks
 3. **libSQL is written in Rust** — first-class Rust SDK vs second-class Go FFI wrapper
 4. **Long-term correctness** — silent bugs in production are more expensive than compile-time friction
 5. **Desktop reads the same DB file** — no sync plumbing if both processes can access SQLite/libSQL
@@ -98,8 +98,6 @@ This is not about developer ergonomics or hiring. The primary code author is an 
 | JavaScript | 5.1% |
 | TypeScript | 2.2% |
 
-Rust outperforms Go and TS despite being "harder." Hypothesis: compiler feedback enables successful iteration; Go/TS bugs pass tests silently.
-
 ### Go Concurrency Blind Spot (Uber, PLDI 2022)
 
 - 2,000+ data races found in 46M LOC Go monorepo
@@ -122,25 +120,9 @@ Rust outperforms Go and TS despite being "harder." Hypothesis: compiler feedback
 
 ---
 
-## The Core Argument
-
-**The compiler is the most reliable code reviewer.** When AI is the primary author:
-
-```
-Python/JS  ←————————————————————————————→  Proof Assistants
-No compile   Go        TypeScript    Rust      (Lean/Coq)
-safety      (partial,   (safety      (memory    (logical
-            no concurr)  bypassed     safety +   correctness)
-                         by AI)      concurrency)
-```
-
-Go sits in the middle — better than dynamic languages, but its most dangerous bug class (concurrency) is invisible to the compiler. TypeScript's safety is theoretical when AI is writing the code. Rust is the furthest right on the practical spectrum: the compiler catches the bug classes that actually cause production incidents.
-
----
-
 ## Decision
 
-**Proposed: Option B — Rust**
+**Accepted: Option B — Rust**
 
 The rewrite cost is real but bounded. AI bears most of it. The long-term payoff is:
 - Every concurrent bug caught at compile time instead of production
@@ -168,8 +150,8 @@ The rewrite cost is real but bounded. AI bears most of it. The long-term payoff 
 
 ## Sources
 
-- [Mining Type Constructs in AI-Generated Code](https://arxiv.org/html/2602.17955) — TypeScript `any` study
-- [Multi-SWE-bench](https://arxiv.org/html/2504.02605v1) — cross-language pass@1 rates
+- [Mining Type Constructs in AI-Generated Code](https://arxiv.org/html/2602.17955)
+- [Multi-SWE-bench](https://arxiv.org/html/2504.02605v1)
 - [CodeRabbit AI vs Human Code Report](https://www.coderabbit.ai/blog/state-of-ai-vs-human-code-generation-report)
 - [Uber Data Race Patterns in Go](https://www.uber.com/en-US/blog/data-race-patterns-in-go/)
 - [Google: Eliminating Memory Safety Vulnerabilities](https://security.googleblog.com/2024/09/eliminating-memory-safety-vulnerabilities-Android.html)
@@ -177,3 +159,8 @@ The rewrite cost is real but bounded. AI bears most of it. The long-term payoff 
 - [RustForger / Rust-SWE-bench](https://arxiv.org/html/2602.22764v1)
 - [Prediction: AI Will Make Formal Verification Mainstream](https://martin.kleppmann.com/2025/12/08/ai-formal-verification.html)
 - [Security Weaknesses of Copilot-Generated Code](https://arxiv.org/html/2310.02059v3)
+
+## Relations
+- [[brief]] — project context driving this decision
+- [[Embedded Database Survey]] — database choice depends on language decision
+- [[Rust Agentic Ecosystem Survey]] — ecosystem viability for Rust

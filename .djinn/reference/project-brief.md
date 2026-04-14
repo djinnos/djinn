@@ -1,6 +1,6 @@
 ---
 title: Project Brief
-type: 
+type: reference
 tags: []
 ---
 

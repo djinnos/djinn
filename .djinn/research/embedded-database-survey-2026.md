@@ -1,3 +1,9 @@
+---
+title: Embedded Database Survey 2026
+type: research
+tags: []
+---
+
 # Embedded Database Survey for Djinn Server (March 2026)
 
 ## Context

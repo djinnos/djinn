@@ -1,15 +1,9 @@
 ---
-tags:
-    - adr
-    - mcp
-    - server
-    - api
-    - validation
-    - epics
-    - tasks
 title: 'ADR-003: Split Epic and Task MCP Tools with Input Validation'
 type: adr
+tags: []
 ---
+
 # ADR-003: Split Epic and Task MCP Tools with Input Validation
 
 ## Status: Accepted

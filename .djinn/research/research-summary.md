@@ -1,10 +1,9 @@
 ---
-tags:
-    - research
-    - synthesis
 title: Research Summary
 type: research
+tags: []
 ---
+
 # Research Synthesis — Djinn Server Rust Rewrite
 
 Cross-cutting analysis of Stack, Features, Architecture, and Pitfalls research, plus supplementary database investigation.

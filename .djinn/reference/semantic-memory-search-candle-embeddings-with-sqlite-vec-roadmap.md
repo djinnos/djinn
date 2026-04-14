@@ -1,6 +1,6 @@
 ---
 title: Semantic Memory Search — Candle Embeddings with sqlite-vec Roadmap
-type: 
+type: reference
 tags: ["semantic-search","memory","candle","sqlite-vec","roadmap"]
 ---
 

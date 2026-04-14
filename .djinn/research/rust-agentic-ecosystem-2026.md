@@ -1,3 +1,9 @@
+---
+title: Rust Agentic Ecosystem 2026
+type: research
+tags: []
+---
+
 # Rust Agentic & AI Ecosystem Survey (March 2026)
 
 ## Context

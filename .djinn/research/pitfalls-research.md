@@ -1,15 +1,9 @@
 ---
-tags:
-    - research
-    - pitfalls
-    - anti-patterns
-    - rust
-    - async
-    - sqlite
-    - rewrite
 title: Pitfalls Research
 type: research
+tags: []
 ---
+
 # Critical Pitfalls for Djinn Server Rewrite (March 2026)
 
 ## 1. Go→Rust Async Traps

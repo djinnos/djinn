@@ -1,6 +1,6 @@
 ---
 title: Rust Compilation and Tooling Optimization Strategy
-type: 
+type: reference
 tags: ["compilation","performance","tooling","worktree","cargo"]
 ---
 

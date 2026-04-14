@@ -1,3 +1,9 @@
+---
+title: Djinn Mcp Wiring Wip
+type: research
+tags: []
+---
+
 # djinn-mcp Server Wiring — WIP
 
 ## Status

@@ -1,12 +1,9 @@
 ---
-tags:
-    - scope
-    - agent
-    - goose
-    - reference
 title: Agent Harness Scope
 type: reference
+tags: []
 ---
+
 # Agent Harness Scope
 
 ## In Scope

@@ -1,3 +1,9 @@
+---
+title: Adr 041 Unified Tool Service Layer In Djinn Mcp
+type: adr
+tags: []
+---
+
 # ADR-041: Unified Tool Service Layer in djinn-mcp
 
 **Status:** Accepted

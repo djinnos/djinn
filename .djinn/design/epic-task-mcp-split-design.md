@@ -1,13 +1,9 @@
 ---
-tags:
-    - design
-    - mcp
-    - server
-    - api
-    - validation
 title: Epic-Task MCP Split Design
 type: design
+tags: []
 ---
+
 # Epic-Task MCP Split Design
 
 Full method signatures, validation rules, and return types for the epic/task MCP tool split defined in [[decisions/adr-003-split-epic-and-task-mcp-tools-with-input-validation|ADR-003: Split Epic and Task MCP Tools with Input Validation]].

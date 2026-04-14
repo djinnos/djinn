@@ -1,13 +1,9 @@
 ---
-tags:
-    - research
-    - rust
-    - agentic
-    - mcp
-    - ecosystem
 title: Rust Agentic Ecosystem Survey
 type: research
+tags: []
 ---
+
 # Rust Agentic & AI Ecosystem Survey (March 2026)
 
 ## Context

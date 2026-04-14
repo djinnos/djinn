@@ -1,11 +1,9 @@
 ---
-tags:
-    - sync
-    - git
-    - architecture
 title: djinn/ Namespace Git Sync
 type: adr
+tags: []
 ---
+
 # ADR-007: djinn/ Namespace Git Sync
 
 ## Status

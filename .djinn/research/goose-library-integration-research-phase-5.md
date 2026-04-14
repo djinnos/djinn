@@ -1,12 +1,9 @@
 ---
-tags:
-    - research
-    - goose
-    - agent
-    - phase-5
 title: Goose Library Integration Research - Phase 5
 type: research
+tags: []
 ---
+
 # Goose Library Integration Research - Phase 5
 
 ## Summary

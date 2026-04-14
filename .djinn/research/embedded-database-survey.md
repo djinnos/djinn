@@ -1,13 +1,9 @@
 ---
-tags:
-    - research
-    - database
-    - libsql
-    - turso
-    - sqlite
 title: Embedded Database Survey
 type: research
+tags: []
 ---
+
 # Embedded Database Survey for Djinn Server (March 2026)
 
 ## Context

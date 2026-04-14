@@ -1,3 +1,9 @@
+---
+title: Openviking And Context Mode Analysis
+type: research
+tags: []
+---
+
 # OpenViking and Context-Mode Analysis
 
 Reference implementations analyzed for ADR-023 v2 revision. Both validate the cognitive memory direction and contribute specific patterns adopted into the design.

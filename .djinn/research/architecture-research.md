@@ -1,15 +1,9 @@
 ---
-tags:
-    - research
-    - architecture
-    - actors
-    - turso
-    - git
-    - wsl
-    - state-machine
 title: Architecture Research
 type: research
+tags: []
 ---
+
 # Architecture Patterns for Djinn Server (March 2026)
 
 ## 1. Coordinator: Actor Hierarchy over God Object
