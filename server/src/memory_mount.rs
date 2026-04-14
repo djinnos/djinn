@@ -8,6 +8,8 @@
 //!
 //! The mount is disabled by default. When enabled on Linux with the cargo feature present, Djinn
 //! mounts the single registered project's memory note tree at `memory_mount_path` using FUSE.
+//! Runtime note operations resolve through the active task/session branch context when one can be
+//! determined. Otherwise the mount falls back to the canonical `main` view.
 //!
 //! Operational safety for this wave:
 //! - startup rejects invalid configuration before the HTTP server begins serving
@@ -39,7 +41,7 @@ use djinn_db::ProjectRepository;
 
 use crate::events::EventBus;
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
-use crate::memory_fs::{MemoryEntryKind, MemoryFilesystemCore};
+use crate::memory_fs::{MemoryEntryKind, MemoryFilesystemCore, MemoryViewSelection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryMountConfig {
@@ -183,17 +185,23 @@ pub async fn validate_mount_config(
 
 pub async fn start_memory_mount(
     settings: &DjinnSettings,
-    db: djinn_db::Database,
-    events: EventBus,
+    state: crate::server::AppState,
 ) -> Result<Option<MountedMemoryFilesystem>> {
-    let Some(resolved) = validate_mount_config(settings, db.clone(), events.clone()).await? else {
+    let Some(resolved) =
+        validate_mount_config(settings, state.db().clone(), state.event_bus()).await?
+    else {
         return Ok(None);
     };
 
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
     {
-        let repo = NoteRepository::new(db, events);
-        let fs = LinuxMemoryFilesystem::new(repo, resolved.project_id, resolved.project_path);
+        let repo = NoteRepository::new(state.db().clone(), state.event_bus());
+        let fs = LinuxMemoryFilesystem::new(
+            repo,
+            resolved.project_id,
+            resolved.project_path,
+            state.clone(),
+        );
         let options = vec![
             fuser::MountOption::FSName("djinn-memory".to_string()),
             fuser::MountOption::DefaultPermissions,
@@ -213,6 +221,7 @@ pub async fn start_memory_mount(
 
     #[cfg(not(all(target_os = "linux", feature = "memory-mount")))]
     {
+        let _ = state;
         let _ = resolved;
         bail!("memory mount support is unavailable in this build")
     }
@@ -233,6 +242,7 @@ struct LinuxMemoryFilesystem {
     core: MemoryFilesystemCore,
     project_id: String,
     project_path: PathBuf,
+    state: crate::server::AppState,
     runtime: tokio::runtime::Handle,
     file_handles: Arc<Mutex<HashMap<u64, String>>>,
     next_handle: std::sync::atomic::AtomicU64,
@@ -240,15 +250,28 @@ struct LinuxMemoryFilesystem {
 
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
 impl LinuxMemoryFilesystem {
-    fn new(repo: NoteRepository, project_id: String, project_path: PathBuf) -> Self {
+    fn new(
+        repo: NoteRepository,
+        project_id: String,
+        project_path: PathBuf,
+        state: crate::server::AppState,
+    ) -> Self {
         Self {
             core: MemoryFilesystemCore::new(repo),
             project_id,
             project_path,
+            state,
             runtime: tokio::runtime::Handle::current(),
             file_handles: Arc::new(Mutex::new(HashMap::new())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
         }
+    }
+
+    fn current_view_selection(&self) -> MemoryViewSelection {
+        self.runtime.block_on(
+            self.state
+                .resolve_memory_mount_view_selection(&self.project_id, &self.project_path),
+        )
     }
 
     fn next_fh(&self, path: &str) -> u64 {
@@ -299,34 +322,41 @@ impl LinuxMemoryFilesystem {
     }
 
     fn collect_paths(&self) -> Result<Vec<String>> {
-        fn visit(fs: &LinuxMemoryFilesystem, path: &str, entries: &mut Vec<String>) -> Result<()> {
+        fn visit(
+            fs: &LinuxMemoryFilesystem,
+            selection: &MemoryViewSelection,
+            path: &str,
+            entries: &mut Vec<String>,
+        ) -> Result<()> {
             entries.push(path.to_string());
             let metadata = fs
                 .runtime
-                .block_on(fs.core.stat(&fs.project_id, path))
+                .block_on(fs.core.stat_in_view(&fs.project_id, selection, path))
                 .map_err(|e| anyhow!(e.to_string()))?;
             if metadata.kind != MemoryEntryKind::Directory {
                 return Ok(());
             }
             let children = fs
                 .runtime
-                .block_on(fs.core.list_dir(&fs.project_id, path))
+                .block_on(fs.core.list_dir_in_view(&fs.project_id, selection, path))
                 .map_err(|e| anyhow!(e.to_string()))?;
             for child in children {
-                visit(fs, &child.metadata.path, entries)?;
+                visit(fs, selection, &child.metadata.path, entries)?;
             }
             Ok(())
         }
 
         let mut entries = Vec::new();
-        visit(self, "", &mut entries)?;
+        let selection = self.current_view_selection();
+        visit(self, &selection, "", &mut entries)?;
         Ok(entries)
     }
 
     fn attr_for_path(&self, path: &str) -> Result<fuser::FileAttr, i32> {
+        let selection = self.current_view_selection();
         let metadata = self
             .runtime
-            .block_on(self.core.stat(&self.project_id, path))
+            .block_on(self.core.stat_in_view(&self.project_id, &selection, path))
             .map_err(repo_err_to_errno)?;
         Ok(file_attr_for_metadata(&metadata))
     }
@@ -426,10 +456,12 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             .path_for_handle(fh)
             .or_else(|| self.path_for_inode(ino).ok())
             .unwrap_or_default();
-        let file = match self
-            .runtime
-            .block_on(self.core.read_file(&self.project_id, &path))
-        {
+        let selection = self.current_view_selection();
+        let file = match self.runtime.block_on(self.core.read_file_in_view(
+            &self.project_id,
+            &selection,
+            &path,
+        )) {
             Ok(file) => file,
             Err(err) => return reply.error(repo_err_to_errno(err)),
         };
@@ -460,9 +492,13 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             .path_for_handle(fh)
             .or_else(|| self.path_for_inode(ino).ok())
             .unwrap_or_default();
+        let selection = self.current_view_selection();
         let existing = self
             .runtime
-            .block_on(self.core.read_file(&self.project_id, &path))
+            .block_on(
+                self.core
+                    .read_file_in_view(&self.project_id, &selection, &path),
+            )
             .map(|file| file.content)
             .unwrap_or_default();
 
@@ -480,8 +516,9 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             Err(_) => return reply.error(libc::EINVAL),
         };
 
-        match self.runtime.block_on(self.core.write_file(
+        match self.runtime.block_on(self.core.write_file_in_view(
             &self.project_id,
+            &selection,
             &self.project_path,
             &path,
             &content,
@@ -524,10 +561,12 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             .and_then(|handle| self.path_for_handle(handle))
             .or_else(|| self.path_for_inode(ino).ok())
             .unwrap_or_default();
-        let existing = match self
-            .runtime
-            .block_on(self.core.read_file(&self.project_id, &path))
-        {
+        let selection = self.current_view_selection();
+        let existing = match self.runtime.block_on(self.core.read_file_in_view(
+            &self.project_id,
+            &selection,
+            &path,
+        )) {
             Ok(file) => file.content,
             Err(err) => return reply.error(repo_err_to_errno(err)),
         };
@@ -537,8 +576,9 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             Ok(content) => content,
             Err(_) => return reply.error(libc::EINVAL),
         };
-        match self.runtime.block_on(self.core.write_file(
+        match self.runtime.block_on(self.core.write_file_in_view(
             &self.project_id,
+            &selection,
             &self.project_path,
             &path,
             &content,
@@ -587,10 +627,12 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             .path_for_handle(fh)
             .or_else(|| self.path_for_inode(ino).ok())
             .unwrap_or_default();
-        let children = match self
-            .runtime
-            .block_on(self.core.list_dir(&self.project_id, &path))
-        {
+        let selection = self.current_view_selection();
+        let children = match self.runtime.block_on(self.core.list_dir_in_view(
+            &self.project_id,
+            &selection,
+            &path,
+        )) {
             Ok(children) => children,
             Err(err) => return reply.error(repo_err_to_errno(err)),
         };
@@ -641,8 +683,10 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             Err(errno) => return reply.error(errno),
         };
         let path = Self::child_path(&parent_path, name);
-        match self.runtime.block_on(self.core.write_file(
+        let selection = self.current_view_selection();
+        match self.runtime.block_on(self.core.write_file_in_view(
             &self.project_id,
+            &selection,
             &self.project_path,
             &path,
             "",
@@ -668,10 +712,12 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             Err(errno) => return reply.error(errno),
         };
         let path = Self::child_path(&parent_path, name);
-        match self
-            .runtime
-            .block_on(self.core.delete_file(&self.project_id, &path))
-        {
+        let selection = self.current_view_selection();
+        match self.runtime.block_on(self.core.delete_file_in_view(
+            &self.project_id,
+            &selection,
+            &path,
+        )) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(repo_err_to_errno(err)),
         }
@@ -697,8 +743,10 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
         };
         let from_path = Self::child_path(&from_parent, name);
         let to_path = Self::child_path(&to_parent, newname);
-        match self.runtime.block_on(self.core.rename_file(
+        let selection = self.current_view_selection();
+        match self.runtime.block_on(self.core.rename_file_in_view(
             &self.project_id,
+            &selection,
             &self.project_path,
             &from_path,
             &to_path,
@@ -762,7 +810,16 @@ fn repo_err_to_errno(error: impl std::fmt::Display) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{create_test_db, test_events};
+    use std::path::Path;
+
+    use crate::memory_fs::MemoryViewSelection;
+    use crate::server::AppState;
+    use crate::test_helpers::{
+        create_test_db, create_test_epic, create_test_project_with_dir, create_test_task,
+        test_events, workspace_tempdir,
+    };
+    use djinn_db::{CreateSessionParams, SessionRepository};
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn disabled_mount_settings_skip_validation() {
@@ -819,5 +876,78 @@ mod tests {
                 .to_string()
                 .contains("memory mount is only supported on Linux in ADR-057 wave 1")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_branch_selection_uses_active_task_session_worktree() {
+        let db = create_test_db();
+        let state = AppState::new(db.clone(), CancellationToken::new());
+        let (project, _project_dir) = create_test_project_with_dir(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let worktree_dir = workspace_tempdir("memory-mount-task-worktree-");
+
+        SessionRepository::new(db.clone(), test_events())
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "test-model",
+                agent_type: "worker",
+                worktree_path: Some(&worktree_dir.path().to_string_lossy()),
+                metadata_json: None,
+            })
+            .await
+            .expect("create running session");
+
+        state.agent_context().register_activity(&task.id);
+
+        let selection = state
+            .resolve_memory_mount_view_selection(&project.id, Path::new(&project.path))
+            .await;
+
+        assert_eq!(
+            selection,
+            MemoryViewSelection::Task {
+                task_short_id: Some(task.short_id),
+                worktree_root: Some(worktree_dir.path().to_path_buf()),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_branch_selection_falls_back_without_running_session_context() {
+        let db = create_test_db();
+        let state = AppState::new(db.clone(), CancellationToken::new());
+        let (project, _project_dir) = create_test_project_with_dir(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+
+        state.agent_context().register_activity(&task.id);
+
+        let selection = state
+            .resolve_memory_mount_view_selection(&project.id, Path::new(&project.path))
+            .await;
+
+        assert_eq!(selection, MemoryViewSelection::Canonical);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_branch_selection_falls_back_when_active_task_branch_is_ambiguous() {
+        let db = create_test_db();
+        let state = AppState::new(db.clone(), CancellationToken::new());
+        let (project, _project_dir) = create_test_project_with_dir(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let first = create_test_task(&db, &project.id, &epic.id).await;
+        let second = create_test_task(&db, &project.id, &epic.id).await;
+
+        let agent = state.agent_context();
+        agent.register_activity(&first.id);
+        agent.register_activity(&second.id);
+
+        let selection = state
+            .resolve_memory_mount_view_selection(&project.id, Path::new(&project.path))
+            .await;
+
+        assert_eq!(selection, MemoryViewSelection::Canonical);
     }
 }

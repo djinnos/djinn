@@ -220,10 +220,9 @@ impl AppState {
         };
 
         let settings = DjinnSettings::from_db_value(&raw);
-        let mount =
-            memory_mount::start_memory_mount(&settings, self.db().clone(), self.event_bus())
-                .await
-                .map_err(|e| e.to_string())?;
+        let mount = memory_mount::start_memory_mount(&settings, self.clone())
+            .await
+            .map_err(|e| e.to_string())?;
         *self.inner.memory_mount.lock().await = mount;
         Ok(())
     }
