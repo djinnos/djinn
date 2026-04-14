@@ -4,10 +4,16 @@ type: design
 tags: ["adr-054","roadmap","memory","quality-gates","taxonomy"]
 ---
 
+---
+title: ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
+type: design
+tags: ["adr-054","roadmap","memory","quality-gates","taxonomy"]
+---
+
 # ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
 
 ## Status
-In progress — implementation and cleanup waves are landed, but epic closure is now blocked on a narrow memory-surface reconciliation defect rather than missing ADR-054 content.
+In progress — implementation and cleanup waves are landed, and the final closure wave is now fully decomposed as a three-step dependency chain: `16zt` fixes worktree note write/index persistence, `9f1v` hardens exact-permalink read/list behavior on top of that fix, and `c0dv` performs the narrow closure re-verification before epic closure.
 
 ## Goal
 Tighten extraction quality in `llm_extraction.rs` so durable memory writes are gated by stronger note taxonomy, structured templates, semantic novelty checks, and real access signals instead of permissive session-extraction defaults.
@@ -35,10 +41,10 @@ Observed failure mode from spike `lnvm`:
 
 This points to a memory-surface/index reconciliation problem, not missing note content.
 
-## Next wave
-1. Fix note-write/index behavior so worktree-authored non-singleton notes become canonical database records immediately and resolve by exact permalink.
-2. Add regression coverage for `memory_read`, `memory_list`, and fallback-search behavior so exact permalink reads cannot be hijacked by older case-note content when the canonical design note exists.
-3. Reconcile the three ADR-054 closure refs after the fix lands so the epic can close without dangling or misleading memory refs.
+## Current final wave
+1. `16zt` — fix note-write/index behavior so worktree-authored non-singleton notes become canonical database records immediately and resolve by exact permalink.
+2. `9f1v` — after `16zt`, add regression coverage for `memory_read`, `memory_list`, and fallback-search behavior so exact permalink reads cannot be hijacked by older case-note content when the canonical design note exists.
+3. `c0dv` — after both prerequisite fixes, re-verify the three ADR-054 closure refs and close the epic immediately if they resolve canonically.
 
 ## Closure guidance
 ADR-054 should close immediately after the new reconciliation wave proves those three permalinks resolve canonically through memory tools. The wider broken-link/orphan backlog remains classified as post-closure memory-hygiene debt, not ADR-054 incompleteness.
