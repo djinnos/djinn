@@ -20,6 +20,7 @@ use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDe
 use djinn_mcp::tools::memory_tools::{
     BrokenLinksParams as SharedMemoryBrokenLinksParams,
     BuildContextParams as SharedMemoryBuildContextParams, EditParams as SharedMemoryEditParams,
+    ExtractedAuditParams as SharedMemoryExtractedAuditParams,
     HealthParams as SharedMemoryHealthParams, ListParams as SharedMemoryListParams,
     OrphansParams as SharedMemoryOrphansParams, ReadParams as SharedMemoryReadParams,
     SearchParams as SharedMemorySearchParams, WriteParams as SharedMemoryWriteParams,
@@ -52,8 +53,9 @@ pub(crate) use code_intel::{
 };
 use memory_agent::{
     call_agent_amend_prompt, call_agent_create, call_agent_metrics, call_memory_broken_links,
-    call_memory_build_context, call_memory_edit, call_memory_health, call_memory_list,
-    call_memory_move, call_memory_orphans, call_memory_read, call_memory_search, call_memory_write,
+    call_memory_build_context, call_memory_edit, call_memory_extracted_audit, call_memory_health,
+    call_memory_list, call_memory_move, call_memory_orphans, call_memory_read, call_memory_search,
+    call_memory_write,
 };
 use task_admin::{
     call_task_archive_activity, call_task_blocked_list, call_task_delete_branch,
@@ -174,6 +176,9 @@ where
         "memory_move" => call_memory_move(state, &call.arguments, &canonical_project_path).await,
         "memory_health" => {
             call_memory_health(state, &call.arguments, &canonical_project_path).await
+        }
+        "memory_extracted_audit" => {
+            call_memory_extracted_audit(state, &call.arguments, &canonical_project_path).await
         }
         "memory_broken_links" => {
             call_memory_broken_links(state, &call.arguments, &canonical_project_path).await

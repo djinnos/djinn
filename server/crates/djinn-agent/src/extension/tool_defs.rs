@@ -607,6 +607,10 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     ));
     tool_values.push(serialize_tool(shared_schemas::tool_memory_health(), true));
     tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_extracted_audit(),
+        true,
+    ));
+    tool_values.push(serialize_tool(
         shared_schemas::tool_memory_broken_links(),
         true,
     ));
@@ -660,6 +664,10 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         true,
     ));
     tool_values.push(serialize_tool(shared_schemas::tool_memory_health(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_extracted_audit(),
+        true,
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_broken_links(),
         true,

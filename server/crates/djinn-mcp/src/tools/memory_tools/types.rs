@@ -109,6 +109,11 @@ pub struct HealthParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct ExtractedAuditParams {
+    pub project: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct CatalogParams {
     pub project: String,
 }
@@ -208,6 +213,17 @@ pub struct MemoryAssociationEntry {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryAssociationsResponse {
     pub associations: Vec<MemoryAssociationEntry>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct MemoryExtractedAuditResponse {
+    pub scanned_note_count: Option<i64>,
+    pub merge_candidates: Option<Vec<djinn_core::models::ExtractedNoteAuditFinding>>,
+    pub underspecified: Option<Vec<djinn_core::models::ExtractedNoteAuditFinding>>,
+    pub demote_to_working_spec: Option<Vec<djinn_core::models::ExtractedNoteAuditFinding>>,
+    pub archive_candidates: Option<Vec<djinn_core::models::ExtractedNoteAuditFinding>>,
+    pub rerun_hint: Option<String>,
     pub error: Option<String>,
 }
 

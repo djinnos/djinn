@@ -4,14 +4,58 @@ use djinn_db::{NoteRepository, ProjectRepository};
 use crate::server::DjinnMcpServer;
 
 use super::{
-    BrokenLinksParams, BuildContextParams, HealthParams, ListParams, MemoryBrokenLinksResponse,
-    MemoryBuildContextResponse, MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse,
-    MemoryOrphansResponse, MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams,
-    SearchParams, note_to_view,
+    BrokenLinksParams, BuildContextParams, ExtractedAuditParams, HealthParams, ListParams,
+    MemoryBrokenLinksResponse, MemoryBuildContextResponse, MemoryExtractedAuditResponse,
+    MemoryHealthResponse, MemoryListResponse, MemoryNoteResponse, MemoryOrphansResponse,
+    MemorySearchResponse, MemorySearchResultItem, OrphansParams, ReadParams, SearchParams,
+    note_to_view,
 };
 
 fn normalize_folder_filter(folder: Option<String>) -> Option<String> {
     folder.filter(|value| !value.is_empty())
+}
+
+pub async fn memory_extracted_audit(
+    server: &DjinnMcpServer,
+    p: ExtractedAuditParams,
+) -> MemoryExtractedAuditResponse {
+    let project_id = match resolve_project_id(server, &p.project).await {
+        Ok(id) => id,
+        Err(error) => {
+            return MemoryExtractedAuditResponse {
+                scanned_note_count: None,
+                merge_candidates: None,
+                underspecified: None,
+                demote_to_working_spec: None,
+                archive_candidates: None,
+                rerun_hint: None,
+                error: Some(error),
+            };
+        }
+    };
+
+    let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
+        .with_vector_store(server.state.vector_store());
+    match repo.extracted_note_audit(&project_id).await {
+        Ok(report) => MemoryExtractedAuditResponse {
+            scanned_note_count: Some(report.scanned_note_count),
+            merge_candidates: Some(report.merge_candidates),
+            underspecified: Some(report.underspecified),
+            demote_to_working_spec: Some(report.demote_to_working_spec),
+            archive_candidates: Some(report.archive_candidates),
+            rerun_hint: Some(report.rerun_hint),
+            error: None,
+        },
+        Err(error) => MemoryExtractedAuditResponse {
+            scanned_note_count: None,
+            merge_candidates: None,
+            underspecified: None,
+            demote_to_working_spec: None,
+            archive_candidates: None,
+            rerun_hint: None,
+            error: Some(error.to_string()),
+        },
+    }
 }
 
 pub async fn resolve_project_id(server: &DjinnMcpServer, project: &str) -> Result<String, String> {

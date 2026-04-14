@@ -5,8 +5,8 @@ use sqlx::Sqlite;
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
-    BrokenLink, GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteCompact,
-    NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
+    BrokenLink, ExtractedNoteAuditReport, GraphEdge, GraphNode, GraphResponse, HealthReport, Note,
+    NoteCompact, NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
 };
 use std::sync::Arc;
 

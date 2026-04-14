@@ -315,6 +315,17 @@ pub(crate) fn tool_memory_health() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_memory_extracted_audit() -> RmcpTool {
+    RmcpTool::new(
+        "memory_extracted_audit".to_string(),
+        "Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and required structure. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {}
+        }),
+    )
+}
+
 pub(crate) fn tool_memory_broken_links() -> RmcpTool {
     RmcpTool::new(
         "memory_broken_links".to_string(),

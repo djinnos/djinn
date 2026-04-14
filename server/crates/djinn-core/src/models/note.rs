@@ -182,6 +182,40 @@ pub struct HealthReport {
     pub stale_notes_by_folder: Vec<StaleFolder>,
 }
 
+/// Classification assigned during ADR-054 extracted-note corpus audits.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractedNoteAuditCategory {
+    MergeCandidate,
+    Underspecified,
+    DemoteToWorkingSpec,
+    ArchiveCandidate,
+}
+
+/// A single extracted note flagged by the ADR-054 audit.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ExtractedNoteAuditFinding {
+    pub note_id: String,
+    pub permalink: String,
+    pub title: String,
+    pub note_type: String,
+    pub folder: String,
+    pub category: ExtractedNoteAuditCategory,
+    pub reasons: Vec<String>,
+    pub related_note_ids: Vec<String>,
+}
+
+/// Aggregate ADR-054 audit report for existing extracted notes.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ExtractedNoteAuditReport {
+    pub scanned_note_count: i64,
+    pub merge_candidates: Vec<ExtractedNoteAuditFinding>,
+    pub underspecified: Vec<ExtractedNoteAuditFinding>,
+    pub demote_to_working_spec: Vec<ExtractedNoteAuditFinding>,
+    pub archive_candidates: Vec<ExtractedNoteAuditFinding>,
+    pub rerun_hint: String,
+}
+
 /// Stale-note count for one folder.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StaleFolder {

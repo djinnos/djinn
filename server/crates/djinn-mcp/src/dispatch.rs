@@ -19,9 +19,9 @@ use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
 use crate::tools::graph_tools::CodeGraphParams;
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
-    DiffParams, EditParams, GraphParams, HealthParams, HistoryParams, ListParams,
-    MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams, ReindexParams,
-    SearchParams, TaskRefsParams, WriteParams,
+    DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
+    ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams,
+    ReindexParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::project_tools::{
     ProjectAddParams, ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
@@ -394,6 +394,13 @@ impl DjinnMcpServer {
                 name,
                 self.memory_health(Parameters(decode_args::<HealthParams>(name, args)?))
                     .await,
+            ),
+            "memory_extracted_audit" => map_json(
+                name,
+                self.memory_extracted_audit(Parameters(decode_args::<ExtractedAuditParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "memory_recent" => map_json(
                 name,
