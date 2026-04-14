@@ -4,12 +4,6 @@ type: design
 tags: ["adr-054","roadmap","memory","quality-gates","taxonomy"]
 ---
 
----
-title: ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
-type: design
-tags: ["adr-054","roadmap","memory","quality-gates","taxonomy"]
----
-
 # ADR-054 Roadmap — Memory Extraction Quality Gates and Note Taxonomy
 
 ## Status
