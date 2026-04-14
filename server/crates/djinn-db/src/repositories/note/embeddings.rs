@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(feature = "qdrant")]
+use std::collections::HashMap;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmbeddedNote {
     pub values: Vec<f32>,
@@ -72,6 +75,28 @@ pub trait NoteVectorStore: Send + Sync {
         query: EmbeddingQueryContext<'_>,
         limit: usize,
     ) -> Result<Vec<NoteEmbeddingMatch>>;
+
+    async fn promote_branch(
+        &self,
+        _repo: &NoteRepository,
+        _from_branch: &str,
+        _to_branch: &str,
+    ) -> Result<u64> {
+        Ok(0)
+    }
+
+    async fn delete_branch(&self, repo: &NoteRepository, branch: &str) -> Result<u64> {
+        let note_ids: Vec<String> =
+            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?1")
+                .bind(canonical_embedding_branch(branch))
+                .fetch_all(repo.db.pool())
+                .await?;
+        let deleted = note_ids.len() as u64;
+        for note_id in note_ids {
+            self.delete_embedding(repo, &note_id).await?;
+        }
+        Ok(deleted)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -196,6 +221,52 @@ fn qdrant_value_from_str(value: &str) -> qdrant_client::qdrant::Value {
 #[cfg(feature = "qdrant")]
 fn qdrant_keyword_condition(key: &str, value: &str) -> qdrant_client::qdrant::Condition {
     qdrant_client::qdrant::Condition::matches(key, value.to_string())
+}
+
+#[cfg(feature = "qdrant")]
+fn qdrant_note_point_id(note_id: &str) -> qdrant_client::qdrant::PointId {
+    note_id.to_string().into()
+}
+
+#[cfg(feature = "qdrant")]
+fn qdrant_payload(
+    input: &UpsertNoteEmbedding<'_>,
+) -> HashMap<String, qdrant_client::qdrant::Value> {
+    HashMap::from([
+        ("note_id".to_string(), qdrant_value_from_str(input.note_id)),
+        (
+            "content_hash".to_string(),
+            qdrant_value_from_str(input.content_hash),
+        ),
+        (
+            "model_version".to_string(),
+            qdrant_value_from_str(input.model_version),
+        ),
+        (
+            "branch".to_string(),
+            qdrant_value_from_str(&canonical_embedding_branch(input.branch)),
+        ),
+    ])
+}
+
+#[cfg(feature = "qdrant")]
+fn qdrant_branch_filter(branch: Option<&str>) -> qdrant_client::qdrant::Filter {
+    let branches = embedding_query_branches(branch);
+    qdrant_client::qdrant::Filter::should(
+        branches
+            .into_iter()
+            .map(|branch| qdrant_keyword_condition("branch", &branch)),
+    )
+}
+
+#[cfg(feature = "qdrant")]
+fn qdrant_note_ids_list(note_ids: &[String]) -> qdrant_client::qdrant::PointsIdsList {
+    qdrant_client::qdrant::PointsIdsList {
+        ids: note_ids
+            .iter()
+            .map(|note_id| qdrant_note_point_id(note_id))
+            .collect(),
+    }
 }
 
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
@@ -421,6 +492,141 @@ impl NoteVectorStore for NoopNoteVectorStore {
     }
 }
 
+#[cfg(feature = "qdrant")]
+impl QdrantNoteVectorStore {
+    async fn ensure_branch_index(&self, client: &qdrant_client::Qdrant) {
+        use qdrant_client::qdrant::{CreateFieldIndexCollectionBuilder, FieldType};
+
+        if let Err(error) = client
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(
+                    &self.config.collection,
+                    "branch",
+                    FieldType::Keyword,
+                )
+                .wait(true),
+            )
+            .await
+        {
+            tracing::debug!(
+                %error,
+                collection = %self.config.collection,
+                "failed to ensure qdrant branch payload index"
+            );
+        }
+    }
+
+    async fn qdrant_upsert(
+        &self,
+        input: &UpsertNoteEmbedding<'_>,
+    ) -> std::result::Result<(), String> {
+        use qdrant_client::qdrant::{PointStruct, UpsertPointsBuilder};
+
+        let client = self.client()?;
+        self.ensure_branch_index(&client).await;
+        client
+            .upsert_points(
+                UpsertPointsBuilder::new(
+                    &self.config.collection,
+                    vec![PointStruct::new(
+                        qdrant_note_point_id(input.note_id),
+                        input.embedding.to_vec(),
+                        qdrant_payload(input),
+                    )],
+                )
+                .wait(true),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn qdrant_delete_note(&self, note_id: &str) -> std::result::Result<(), String> {
+        use qdrant_client::qdrant::DeletePointsBuilder;
+
+        let client = self.client()?;
+        client
+            .delete_points(
+                DeletePointsBuilder::new(&self.config.collection)
+                    .wait(true)
+                    .points(vec![qdrant_note_point_id(note_id)]),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn qdrant_set_branch(
+        &self,
+        note_ids: &[String],
+        branch: &str,
+    ) -> std::result::Result<(), String> {
+        use qdrant_client::qdrant::SetPayloadPointsBuilder;
+
+        if note_ids.is_empty() {
+            return Ok(());
+        }
+
+        let client = self.client()?;
+        client
+            .set_payload(
+                SetPayloadPointsBuilder::new(
+                    &self.config.collection,
+                    HashMap::from([(
+                        "branch".to_string(),
+                        qdrant_value_from_str(&canonical_embedding_branch(branch)),
+                    )]),
+                )
+                .wait(true)
+                .points_selector(qdrant_note_ids_list(note_ids)),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn qdrant_delete_branch(&self, branch: &str) -> std::result::Result<(), String> {
+        use qdrant_client::qdrant::DeletePointsBuilder;
+
+        let client = self.client()?;
+        client
+            .delete_points(
+                DeletePointsBuilder::new(&self.config.collection)
+                    .wait(true)
+                    .points(qdrant_branch_filter(Some(branch))),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "qdrant"))]
+impl QdrantNoteVectorStore {
+    async fn qdrant_upsert(
+        &self,
+        _input: &UpsertNoteEmbedding<'_>,
+    ) -> std::result::Result<(), String> {
+        Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
+    }
+
+    async fn qdrant_delete_note(&self, _note_id: &str) -> std::result::Result<(), String> {
+        Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
+    }
+
+    async fn qdrant_set_branch(
+        &self,
+        _note_ids: &[String],
+        _branch: &str,
+    ) -> std::result::Result<(), String> {
+        Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
+    }
+
+    async fn qdrant_delete_branch(&self, _branch: &str) -> std::result::Result<(), String> {
+        Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
+    }
+}
+
 #[async_trait::async_trait]
 impl NoteVectorStore for QdrantNoteVectorStore {
     fn backend(&self) -> NoteVectorBackend {
@@ -446,22 +652,153 @@ impl NoteVectorStore for QdrantNoteVectorStore {
         repo: &NoteRepository,
         input: UpsertNoteEmbedding<'_>,
     ) -> Result<NoteEmbeddingRecord> {
-        let ready = self.can_index(repo).await?;
-        upsert_embedding_metadata(repo, input, if ready { "ready" } else { "pending" }).await
+        match self.qdrant_upsert(&input).await {
+            Ok(()) => upsert_embedding_metadata(repo, input, "ready").await,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    note_id = input.note_id,
+                    collection = %self.config.collection,
+                    "qdrant upsert unavailable; keeping local metadata pending"
+                );
+                upsert_embedding_metadata(repo, input, "pending").await
+            }
+        }
     }
 
     async fn delete_embedding(&self, repo: &NoteRepository, note_id: &str) -> Result<()> {
+        if let Err(error) = self.qdrant_delete_note(note_id).await {
+            tracing::debug!(
+                %error,
+                note_id,
+                collection = %self.config.collection,
+                "qdrant delete unavailable; deleting local metadata only"
+            );
+        }
         delete_embedding_metadata(repo, note_id).await
     }
 
     async fn query_similar_embeddings(
         &self,
         _repo: &NoteRepository,
-        _query_embedding: &[f32],
-        _query: EmbeddingQueryContext<'_>,
-        _limit: usize,
+        query_embedding: &[f32],
+        query: EmbeddingQueryContext<'_>,
+        limit: usize,
     ) -> Result<Vec<NoteEmbeddingMatch>> {
-        Ok(vec![])
+        #[cfg(feature = "qdrant")]
+        {
+            use qdrant_client::qdrant::SearchPointsBuilder;
+
+            let limit = u64::try_from(limit)
+                .map_err(|_| Error::InvalidData("embedding query limit exceeds u64".to_owned()))?;
+            let client = match self.client() {
+                Ok(client) => client,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        collection = %self.config.collection,
+                        "qdrant query unavailable; returning empty semantic matches"
+                    );
+                    return Ok(vec![]);
+                }
+            };
+
+            let response = match client
+                .search_points(
+                    SearchPointsBuilder::new(
+                        &self.config.collection,
+                        query_embedding.to_vec(),
+                        limit,
+                    )
+                    .filter(qdrant_branch_filter(query.branch))
+                    .with_payload(true),
+                )
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        collection = %self.config.collection,
+                        "qdrant search failed; returning empty semantic matches"
+                    );
+                    return Ok(vec![]);
+                }
+            };
+
+            return Ok(response
+                .result
+                .into_iter()
+                .filter_map(|point| {
+                    let note_id =
+                        point
+                            .payload
+                            .get("note_id")
+                            .and_then(|value| match &value.kind {
+                                Some(qdrant_client::qdrant::value::Kind::StringValue(value)) => {
+                                    Some(value.clone())
+                                }
+                                _ => None,
+                            })?;
+                    Some(NoteEmbeddingMatch {
+                        note_id,
+                        distance: -(point.score as f64),
+                    })
+                })
+                .collect());
+        }
+
+        #[cfg(not(feature = "qdrant"))]
+        {
+            let _ = (query_embedding, query, limit);
+            Ok(vec![])
+        }
+    }
+
+    async fn promote_branch(
+        &self,
+        repo: &NoteRepository,
+        from_branch: &str,
+        to_branch: &str,
+    ) -> Result<u64> {
+        let from_branch = canonical_embedding_branch(from_branch);
+        let to_branch = canonical_embedding_branch(to_branch);
+        let note_ids: Vec<String> =
+            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?1")
+                .bind(&from_branch)
+                .fetch_all(repo.db.pool())
+                .await?;
+        if let Err(error) = self.qdrant_set_branch(&note_ids, &to_branch).await {
+            tracing::debug!(
+                %error,
+                from_branch,
+                to_branch,
+                collection = %self.config.collection,
+                "qdrant branch promotion unavailable; updating local metadata only"
+            );
+        }
+        Ok(note_ids.len() as u64)
+    }
+
+    async fn delete_branch(&self, repo: &NoteRepository, branch: &str) -> Result<u64> {
+        let branch = canonical_embedding_branch(branch);
+        let note_ids: Vec<String> =
+            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?1")
+                .bind(&branch)
+                .fetch_all(repo.db.pool())
+                .await?;
+        if let Err(error) = self.qdrant_delete_branch(&branch).await {
+            tracing::debug!(
+                %error,
+                branch,
+                collection = %self.config.collection,
+                "qdrant branch delete unavailable; deleting local metadata only"
+            );
+        }
+        for note_id in &note_ids {
+            delete_embedding_metadata(repo, note_id).await?;
+        }
+        Ok(note_ids.len() as u64)
     }
 }
 
@@ -627,6 +964,10 @@ impl NoteRepository {
         to_branch: &str,
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
+        let promoted = self
+            .vector_store()
+            .promote_branch(self, from_branch, to_branch)
+            .await?;
         let result = sqlx::query(
             "UPDATE note_embedding_meta
              SET branch = ?2
@@ -636,21 +977,12 @@ impl NoteRepository {
         .bind(canonical_embedding_branch(to_branch))
         .execute(self.db.pool())
         .await?;
-        Ok(result.rows_affected())
+        Ok(result.rows_affected().max(promoted))
     }
 
     pub async fn delete_embeddings_for_branch(&self, branch: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let note_ids: Vec<String> =
-            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?1")
-                .bind(canonical_embedding_branch(branch))
-                .fetch_all(self.db.pool())
-                .await?;
-        let deleted = note_ids.len() as u64;
-        for note_id in note_ids {
-            self.delete_embedding(&note_id).await?;
-        }
-        Ok(deleted)
+        self.vector_store().delete_branch(self, branch).await
     }
 
     pub async fn embedding_branch_counts(&self) -> Result<Vec<(String, i64)>> {
