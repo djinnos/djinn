@@ -26,6 +26,14 @@ Implement [[decisions/adr-055-proposal-dolt-migration-and-per-task-knowledge-bra
 4. Prototype MySQL/Dolt lexical search to replace FTS5.
 5. Define the task-branch knowledge lifecycle contract.
 
+### In flight / planned
+- `mved` — catalog SQLite-specific migration seams for Dolt/MySQL + Qdrant
+- `6iiz` — introduce vector-store abstraction and Qdrant scaffold for note embeddings
+- `y70d` — refactor database bootstrap for selectable SQLite vs Dolt/MySQL backends
+- `keit` — prototype Dolt/MySQL FULLTEXT notes search to replace FTS5
+- `4hkv` — design task-branch knowledge promotion flow for ADR-055
+  - output: [[design/adr-055-task-branch-knowledge-promotion-flow]]
+
 ## Active work buckets
 
 ### 1. Seam inventory and migration map
