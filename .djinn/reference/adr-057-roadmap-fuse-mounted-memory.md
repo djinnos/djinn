@@ -1,8 +1,9 @@
 ---
 title: ADR-057 Roadmap — FUSE-Mounted Memory
-type: design
+type: 
 tags: ["adr-057","roadmap","memory","filesystem","fuse"]
 ---
+
 
 
 # ADR-057 Roadmap — FUSE-Mounted Memory
