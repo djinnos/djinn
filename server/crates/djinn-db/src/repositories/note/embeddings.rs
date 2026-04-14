@@ -398,11 +398,6 @@ impl NoteRepository {
             return;
         };
 
-        let can_index = self.vector_store().can_index(self).await.unwrap_or(false);
-        if !can_index {
-            return;
-        }
-
         let semantic_text = embedding_document_text(title, note_type, tags, content);
         let content_hash = embedding_content_hash(title, note_type, tags, content);
 
