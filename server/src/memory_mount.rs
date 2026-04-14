@@ -1380,17 +1380,33 @@ mod tests {
             .build()
             .expect("build runtime");
         let (fs, path, _project_dir) = runtime.block_on(build_runtime_test_filesystem("hello"));
+        let initial_file = runtime
+            .block_on(fs.core.read_file_in_view(
+                &fs.project_id,
+                &MemoryViewSelection::Canonical,
+                &path,
+            ))
+            .expect("read initial file");
+        let initial_content = initial_file.content;
 
         assert_eq!(runtime.block_on(fs.runtime_status.lock()).pending_writes, 0);
 
-        fs.queue_write(&path, 5, b" world")
+        fs.queue_write(&path, initial_content.len() as i64, b"\nqueued burst")
             .expect("stage append write");
         assert_eq!(runtime.block_on(fs.runtime_status.lock()).pending_writes, 1);
-        assert_eq!(fs.pending_content(&path).as_deref(), Some("hello world"));
+        let expected_burst = format!("{initial_content}\nqueued burst");
+        assert_eq!(
+            fs.pending_content(&path).as_deref(),
+            Some(expected_burst.as_str())
+        );
 
-        fs.queue_truncate(&path, 5).expect("stage truncate");
+        fs.queue_truncate(&path, initial_content.len() as u64)
+            .expect("stage truncate");
         assert_eq!(runtime.block_on(fs.runtime_status.lock()).pending_writes, 1);
-        assert_eq!(fs.pending_content(&path).as_deref(), Some("hello"));
+        assert_eq!(
+            fs.pending_content(&path).as_deref(),
+            Some(initial_content.as_str())
+        );
 
         fs.flush_pending_write(&path)
             .expect("flush coalesced pending write");
@@ -1410,7 +1426,7 @@ mod tests {
                 &path,
             ))
             .expect("read flushed file");
-        assert_eq!(file.content, "hello");
+        assert_eq!(file.content, initial_content);
     }
 
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
@@ -1421,17 +1437,17 @@ mod tests {
             .enable_all()
             .build()
             .expect("build runtime");
-        let (fs, path, project_dir) = runtime.block_on(build_runtime_test_filesystem("seed"));
-        std::fs::remove_dir_all(project_dir.path()).expect("remove backing project dir");
+        let (fs, path, _project_dir) = runtime.block_on(build_runtime_test_filesystem("seed"));
+        let invalid_path = "research";
 
-        fs.queue_write(&path, 0, b"broken")
+        fs.queue_write(invalid_path, 0, b"broken")
             .expect("stage write before failed flush");
         assert_eq!(runtime.block_on(fs.runtime_status.lock()).pending_writes, 1);
 
         let errno = fs
-            .flush_pending_write(&path)
-            .expect_err("flush should fail once project path is removed");
-        assert_eq!(errno, libc::EIO);
+            .flush_pending_write(invalid_path)
+            .expect_err("flush should fail for a directory path");
+        assert_eq!(errno, libc::EISDIR);
 
         let status = runtime.block_on(fs.runtime_status.lock()).clone();
         assert_eq!(status.pending_writes, 0);
@@ -1441,8 +1457,18 @@ mod tests {
         );
         let detail = status.detail.expect("degraded detail should be populated");
         assert!(detail.contains("failed to flush pending write for"));
-        assert!(detail.contains(&path));
+        assert!(detail.contains(invalid_path));
         assert_eq!(status.last_error.as_deref(), Some(detail.as_str()));
+
+        let canonical_file = runtime.block_on(fs.core.read_file_in_view(
+            &fs.project_id,
+            &MemoryViewSelection::Canonical,
+            &path,
+        ));
+        assert!(
+            canonical_file.is_ok(),
+            "existing note remains readable after failed flush"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
