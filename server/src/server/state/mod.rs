@@ -226,11 +226,40 @@ impl AppState {
 
     pub(crate) async fn memory_mount_health(&self) -> crate::server::MemoryMountHealth {
         let mount = self.inner.memory_mount.lock().await;
-        let active = mount.as_ref().is_some_and(|mount| mount.is_active());
+        let Some(mount) = mount.as_ref() else {
+            return crate::server::MemoryMountHealth {
+                enabled: false,
+                active: false,
+                lifecycle: crate::server::MemoryMountLifecycleState::Disabled,
+                configured: false,
+                mount_path: None,
+                project_id: None,
+                detail: None,
+                pending_writes: 0,
+                last_error: None,
+            };
+        };
+        let active = mount.is_active();
+        let status = mount.status_snapshot().await;
         crate::server::MemoryMountHealth {
-            enabled: mount.is_some(),
+            enabled: status.configured,
             active,
+            lifecycle: status.lifecycle,
+            configured: status.configured,
+            mount_path: status.mount_path.map(|path| path.display().to_string()),
+            project_id: status.project_id,
+            detail: status.detail,
+            pending_writes: status.pending_writes,
+            last_error: status.last_error,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_memory_mount_for_tests(
+        &self,
+        mount: Option<crate::memory_mount::MountedMemoryFilesystem>,
+    ) {
+        *self.inner.memory_mount.lock().await = mount;
     }
 
     #[cfg_attr(

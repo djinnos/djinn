@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-#[cfg(all(target_os = "linux", feature = "memory-mount"))]
+#[cfg(any(test, all(target_os = "linux", feature = "memory-mount")))]
 use std::collections::HashMap;
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
 use std::ffi::OsStr;
@@ -41,7 +41,12 @@ use djinn_db::ProjectRepository;
 
 use crate::events::EventBus;
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
-use crate::memory_fs::{MemoryEntryKind, MemoryFilesystemCore, MemoryViewSelection};
+use crate::memory_fs::{
+    MemoryEntryKind, MemoryEntryMetadata, MemoryFilesystemCore, MemoryViewSelection,
+};
+
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
+const WRITE_DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryMountConfig {
@@ -60,6 +65,7 @@ impl MemoryMountConfig {
 
 #[derive(Debug)]
 pub struct MountedMemoryFilesystem {
+    runtime_status: std::sync::Arc<tokio::sync::Mutex<MemoryMountRuntimeStatus>>,
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
     session: Option<fuser::BackgroundSession>,
 }
@@ -67,16 +73,36 @@ pub struct MountedMemoryFilesystem {
 impl MountedMemoryFilesystem {
     pub fn disabled() -> Self {
         Self {
+            runtime_status: std::sync::Arc::new(tokio::sync::Mutex::new(
+                MemoryMountRuntimeStatus::disabled(),
+            )),
+            #[cfg(all(target_os = "linux", feature = "memory-mount"))]
+            session: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_status(status: MemoryMountRuntimeStatus) -> Self {
+        Self {
+            runtime_status: std::sync::Arc::new(tokio::sync::Mutex::new(status)),
             #[cfg(all(target_os = "linux", feature = "memory-mount"))]
             session: None,
         }
     }
 
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
-    fn from_session(session: fuser::BackgroundSession) -> Self {
+    fn from_session(
+        session: fuser::BackgroundSession,
+        runtime_status: std::sync::Arc<tokio::sync::Mutex<MemoryMountRuntimeStatus>>,
+    ) -> Self {
         Self {
+            runtime_status,
             session: Some(session),
         }
+    }
+
+    pub(crate) async fn status_snapshot(&self) -> MemoryMountRuntimeStatus {
+        self.runtime_status.lock().await.clone()
     }
 
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
@@ -87,6 +113,80 @@ impl MountedMemoryFilesystem {
     #[cfg(not(all(target_os = "linux", feature = "memory-mount")))]
     pub fn is_active(&self) -> bool {
         false
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemoryMountRuntimeStatus {
+    pub(crate) lifecycle: crate::server::MemoryMountLifecycleState,
+    pub(crate) configured: bool,
+    pub(crate) mount_path: Option<PathBuf>,
+    pub(crate) project_id: Option<String>,
+    pub(crate) detail: Option<String>,
+    pub(crate) pending_writes: usize,
+    pub(crate) last_error: Option<String>,
+}
+
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "memory-mount")),
+    allow(dead_code)
+)]
+impl MemoryMountRuntimeStatus {
+    pub(crate) fn disabled() -> Self {
+        Self {
+            lifecycle: crate::server::MemoryMountLifecycleState::Disabled,
+            configured: false,
+            mount_path: None,
+            project_id: None,
+            detail: None,
+            pending_writes: 0,
+            last_error: None,
+        }
+    }
+
+    pub(crate) fn configured(mount_path: PathBuf, project_id: String) -> Self {
+        Self {
+            lifecycle: crate::server::MemoryMountLifecycleState::Configured,
+            configured: true,
+            mount_path: Some(mount_path),
+            project_id: Some(project_id),
+            detail: Some("mount validated but not yet attached".to_string()),
+            pending_writes: 0,
+            last_error: None,
+        }
+    }
+
+    pub(crate) fn failed(
+        mount_path: Option<PathBuf>,
+        project_id: Option<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        let detail = detail.into();
+        Self {
+            lifecycle: crate::server::MemoryMountLifecycleState::Failed,
+            configured: mount_path.is_some() || project_id.is_some(),
+            mount_path,
+            project_id,
+            detail: Some(detail.clone()),
+            pending_writes: 0,
+            last_error: Some(detail),
+        }
+    }
+
+    fn mark_mounted(&mut self) {
+        self.lifecycle = crate::server::MemoryMountLifecycleState::Mounted;
+        self.detail = None;
+    }
+
+    fn mark_degraded(&mut self, detail: impl Into<String>) {
+        let detail = detail.into();
+        self.lifecycle = crate::server::MemoryMountLifecycleState::Degraded;
+        self.detail = Some(detail.clone());
+        self.last_error = Some(detail);
+    }
+
+    fn set_pending_writes(&mut self, pending_writes: usize) {
+        self.pending_writes = pending_writes;
     }
 }
 
@@ -196,11 +296,18 @@ pub async fn start_memory_mount(
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]
     {
         let repo = NoteRepository::new(state.db().clone(), state.event_bus());
+        let runtime_status = std::sync::Arc::new(tokio::sync::Mutex::new(
+            MemoryMountRuntimeStatus::configured(
+                resolved.mount_path.clone(),
+                resolved.project_id.clone(),
+            ),
+        ));
         let fs = LinuxMemoryFilesystem::new(
             repo,
             resolved.project_id,
             resolved.project_path,
             state.clone(),
+            runtime_status.clone(),
         );
         let options = vec![
             fuser::MountOption::FSName("djinn-memory".to_string()),
@@ -215,8 +322,12 @@ pub async fn start_memory_mount(
                     resolved.mount_path.display()
                 )
             })?;
+        runtime_status.lock().await.mark_mounted();
         tracing::info!(mount_path = %resolved.mount_path.display(), "memory filesystem mounted");
-        Ok(Some(MountedMemoryFilesystem::from_session(session)))
+        Ok(Some(MountedMemoryFilesystem::from_session(
+            session,
+            runtime_status,
+        )))
     }
 
     #[cfg(not(all(target_os = "linux", feature = "memory-mount")))]
@@ -239,13 +350,63 @@ const TTL: Duration = Duration::from_secs(1);
 
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
 struct LinuxMemoryFilesystem {
-    core: MemoryFilesystemCore,
+    core: Arc<MemoryFilesystemCore>,
     project_id: String,
     project_path: PathBuf,
     state: crate::server::AppState,
     runtime: tokio::runtime::Handle,
     file_handles: Arc<Mutex<HashMap<u64, String>>>,
+    pending_writes: Arc<Mutex<HashMap<String, PendingWrite>>>,
+    runtime_status: std::sync::Arc<tokio::sync::Mutex<MemoryMountRuntimeStatus>>,
+    debounce_window: Duration,
     next_handle: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "memory-mount")))]
+#[derive(Debug, Clone)]
+struct PendingWrite {
+    generation: u64,
+    content: String,
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "memory-mount")))]
+fn apply_write_update(existing: String, offset: i64, data: &[u8]) -> Result<String, i32> {
+    let mut bytes = existing.into_bytes();
+    let offset = offset.max(0) as usize;
+    if bytes.len() < offset {
+        bytes.resize(offset, 0);
+    }
+    if bytes.len() < offset + data.len() {
+        bytes.resize(offset + data.len(), 0);
+    }
+    bytes[offset..offset + data.len()].copy_from_slice(data);
+    String::from_utf8(bytes).map_err(|_| libc::EINVAL)
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "memory-mount")))]
+fn apply_truncate_update(existing: String, size: u64) -> Result<String, i32> {
+    let mut bytes = existing.into_bytes();
+    bytes.resize(size as usize, 0);
+    String::from_utf8(bytes).map_err(|_| libc::EINVAL)
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "memory-mount")))]
+fn stage_pending_content(
+    pending_writes: &mut HashMap<String, PendingWrite>,
+    path: &str,
+    content: String,
+) -> u64 {
+    let generation = pending_writes
+        .get(path)
+        .map_or(1, |pending| pending.generation + 1);
+    pending_writes.insert(
+        path.to_string(),
+        PendingWrite {
+            generation,
+            content,
+        },
+    );
+    generation
 }
 
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
@@ -255,14 +416,18 @@ impl LinuxMemoryFilesystem {
         project_id: String,
         project_path: PathBuf,
         state: crate::server::AppState,
+        runtime_status: std::sync::Arc<tokio::sync::Mutex<MemoryMountRuntimeStatus>>,
     ) -> Self {
         Self {
-            core: MemoryFilesystemCore::new(repo),
+            core: Arc::new(MemoryFilesystemCore::new(repo)),
             project_id,
             project_path,
             state,
             runtime: tokio::runtime::Handle::current(),
             file_handles: Arc::new(Mutex::new(HashMap::new())),
+            pending_writes: Arc::new(Mutex::new(HashMap::new())),
+            runtime_status,
+            debounce_window: WRITE_DEBOUNCE_WINDOW,
             next_handle: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -353,6 +518,9 @@ impl LinuxMemoryFilesystem {
     }
 
     fn attr_for_path(&self, path: &str) -> Result<fuser::FileAttr, i32> {
+        if let Some(content) = self.pending_content(path) {
+            return self.staged_attr_for_path(path, &content);
+        }
         let selection = self.current_view_selection();
         let metadata = self
             .runtime
@@ -367,6 +535,188 @@ impl LinuxMemoryFilesystem {
             name.into_owned()
         } else {
             format!("{parent}/{name}")
+        }
+    }
+
+    fn pending_content(&self, path: &str) -> Option<String> {
+        self.pending_writes
+            .lock()
+            .expect("poisoned pending_writes")
+            .get(path)
+            .map(|pending| pending.content.clone())
+    }
+
+    fn update_pending_count(&self) {
+        let count = self
+            .pending_writes
+            .lock()
+            .expect("poisoned pending_writes")
+            .len();
+        self.runtime.block_on(async {
+            self.runtime_status.lock().await.set_pending_writes(count);
+        });
+    }
+
+    fn staged_attr_for_path(&self, path: &str, content: &str) -> Result<fuser::FileAttr, i32> {
+        let selection = self.current_view_selection();
+        let mut metadata = self
+            .runtime
+            .block_on(self.core.stat_in_view(&self.project_id, &selection, path))
+            .unwrap_or(MemoryEntryMetadata {
+                path: path.to_string(),
+                kind: MemoryEntryKind::File,
+                size: 0,
+            });
+        metadata.size = content.len() as u64;
+        Ok(file_attr_for_metadata(&metadata))
+    }
+
+    fn schedule_debounced_flush(&self, path: String, generation: u64) {
+        let pending_writes = self.pending_writes.clone();
+        let runtime_status = self.runtime_status.clone();
+        let core = self.core.clone();
+        let project_id = self.project_id.clone();
+        let project_path = self.project_path.clone();
+        let state = self.state.clone();
+        let debounce_window = self.debounce_window;
+
+        self.runtime.spawn(async move {
+            tokio::time::sleep(debounce_window).await;
+            let pending = {
+                let guard = pending_writes.lock().expect("poisoned pending_writes");
+                match guard.get(&path) {
+                    Some(candidate) if candidate.generation == generation => {
+                        Some(candidate.clone())
+                    }
+                    _ => None,
+                }
+            };
+
+            let Some(pending) = pending else {
+                return;
+            };
+
+            let selection = state
+                .resolve_memory_mount_view_selection(&project_id, &project_path)
+                .await;
+            let flush_result = core
+                .write_file_in_view(
+                    &project_id,
+                    &selection,
+                    &project_path,
+                    &path,
+                    &pending.content,
+                )
+                .await;
+
+            let mut guard = pending_writes.lock().expect("poisoned pending_writes");
+            if guard
+                .get(&path)
+                .is_some_and(|candidate| candidate.generation == generation)
+            {
+                guard.remove(&path);
+            }
+            let pending_count = guard.len();
+            drop(guard);
+
+            let mut status = runtime_status.lock().await;
+            status.set_pending_writes(pending_count);
+            match flush_result {
+                Ok(_) => {
+                    if matches!(
+                        status.lifecycle,
+                        crate::server::MemoryMountLifecycleState::Configured
+                            | crate::server::MemoryMountLifecycleState::Degraded
+                    ) {
+                        status.mark_mounted();
+                    }
+                }
+                Err(err) => status
+                    .mark_degraded(format!("failed to flush debounced write for {path}: {err}")),
+            }
+        });
+    }
+
+    fn queue_write(&self, path: &str, offset: i64, data: &[u8]) -> Result<u32, i32> {
+        let selection = self.current_view_selection();
+        let existing = self.pending_content(path).unwrap_or_else(|| {
+            self.runtime
+                .block_on(
+                    self.core
+                        .read_file_in_view(&self.project_id, &selection, path),
+                )
+                .map(|file| file.content)
+                .unwrap_or_default()
+        });
+
+        let content = apply_write_update(existing, offset, data)?;
+
+        let generation = {
+            let mut guard = self.pending_writes.lock().expect("poisoned pending_writes");
+            stage_pending_content(&mut guard, path, content)
+        };
+        self.update_pending_count();
+        self.schedule_debounced_flush(path.to_string(), generation);
+        Ok(data.len() as u32)
+    }
+
+    fn queue_truncate(&self, path: &str, size: u64) -> Result<fuser::FileAttr, i32> {
+        let selection = self.current_view_selection();
+        let existing = self.pending_content(path).unwrap_or_else(|| {
+            self.runtime
+                .block_on(
+                    self.core
+                        .read_file_in_view(&self.project_id, &selection, path),
+                )
+                .map(|file| file.content)
+                .unwrap_or_default()
+        });
+        let content = apply_truncate_update(existing, size)?;
+
+        let generation = {
+            let mut guard = self.pending_writes.lock().expect("poisoned pending_writes");
+            stage_pending_content(&mut guard, path, content.clone())
+        };
+        self.update_pending_count();
+        self.schedule_debounced_flush(path.to_string(), generation);
+        self.staged_attr_for_path(path, &content)
+    }
+
+    fn flush_pending_write(&self, path: &str) -> Result<(), i32> {
+        let pending = self
+            .pending_writes
+            .lock()
+            .expect("poisoned pending_writes")
+            .remove(path);
+        self.update_pending_count();
+
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+
+        let selection = self.current_view_selection();
+        match self.runtime.block_on(self.core.write_file_in_view(
+            &self.project_id,
+            &selection,
+            &self.project_path,
+            path,
+            &pending.content,
+        )) {
+            Ok(_) => {
+                self.runtime.block_on(async {
+                    self.runtime_status.lock().await.mark_mounted();
+                });
+                Ok(())
+            }
+            Err(err) => {
+                self.runtime.block_on(async {
+                    self.runtime_status
+                        .lock()
+                        .await
+                        .mark_degraded(format!("failed to flush pending write for {path}: {err}"));
+                });
+                Err(repo_err_to_errno(err))
+            }
         }
     }
 }
@@ -437,7 +787,14 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
+        let path = self.path_for_handle(fh);
         self.release_handle(fh);
+        if let Some(path) = path
+            && let Err(errno) = self.flush_pending_write(&path)
+        {
+            reply.error(errno);
+            return;
+        }
         reply.ok();
     }
 
@@ -456,6 +813,18 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             .path_for_handle(fh)
             .or_else(|| self.path_for_inode(ino).ok())
             .unwrap_or_default();
+        if let Some(content) = self.pending_content(&path) {
+            let start = offset.max(0) as usize;
+            let bytes = content.as_bytes();
+            let end = start.saturating_add(size as usize).min(bytes.len());
+            let data = if start >= bytes.len() {
+                &[]
+            } else {
+                &bytes[start..end]
+            };
+            reply.data(data);
+            return;
+        }
         let selection = self.current_view_selection();
         let file = match self.runtime.block_on(self.core.read_file_in_view(
             &self.project_id,
@@ -492,39 +861,9 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             .path_for_handle(fh)
             .or_else(|| self.path_for_inode(ino).ok())
             .unwrap_or_default();
-        let selection = self.current_view_selection();
-        let existing = self
-            .runtime
-            .block_on(
-                self.core
-                    .read_file_in_view(&self.project_id, &selection, &path),
-            )
-            .map(|file| file.content)
-            .unwrap_or_default();
-
-        let mut bytes = existing.into_bytes();
-        let offset = offset.max(0) as usize;
-        if bytes.len() < offset {
-            bytes.resize(offset, 0);
-        }
-        if bytes.len() < offset + data.len() {
-            bytes.resize(offset + data.len(), 0);
-        }
-        bytes[offset..offset + data.len()].copy_from_slice(data);
-        let content = match String::from_utf8(bytes) {
-            Ok(content) => content,
-            Err(_) => return reply.error(libc::EINVAL),
-        };
-
-        match self.runtime.block_on(self.core.write_file_in_view(
-            &self.project_id,
-            &selection,
-            &self.project_path,
-            &path,
-            &content,
-        )) {
-            Ok(_) => reply.written(data.len() as u32),
-            Err(err) => reply.error(repo_err_to_errno(err)),
+        match self.queue_write(&path, offset, data) {
+            Ok(written) => reply.written(written),
+            Err(errno) => reply.error(errno),
         }
     }
 
@@ -561,30 +900,9 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             .and_then(|handle| self.path_for_handle(handle))
             .or_else(|| self.path_for_inode(ino).ok())
             .unwrap_or_default();
-        let selection = self.current_view_selection();
-        let existing = match self.runtime.block_on(self.core.read_file_in_view(
-            &self.project_id,
-            &selection,
-            &path,
-        )) {
-            Ok(file) => file.content,
-            Err(err) => return reply.error(repo_err_to_errno(err)),
-        };
-        let mut bytes = existing.into_bytes();
-        bytes.resize(size as usize, 0);
-        let content = match String::from_utf8(bytes) {
-            Ok(content) => content,
-            Err(_) => return reply.error(libc::EINVAL),
-        };
-        match self.runtime.block_on(self.core.write_file_in_view(
-            &self.project_id,
-            &selection,
-            &self.project_path,
-            &path,
-            &content,
-        )) {
-            Ok(file) => reply.attr(&TTL, &file_attr_for_metadata(&file.metadata)),
-            Err(err) => reply.error(repo_err_to_errno(err)),
+        match self.queue_truncate(&path, size) {
+            Ok(attr) => reply.attr(&TTL, &attr),
+            Err(errno) => reply.error(errno),
         }
     }
 
@@ -712,6 +1030,9 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
             Err(errno) => return reply.error(errno),
         };
         let path = Self::child_path(&parent_path, name);
+        if let Err(errno) = self.flush_pending_write(&path) {
+            return reply.error(errno);
+        }
         let selection = self.current_view_selection();
         match self.runtime.block_on(self.core.delete_file_in_view(
             &self.project_id,
@@ -743,6 +1064,9 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
         };
         let from_path = Self::child_path(&from_parent, name);
         let to_path = Self::child_path(&to_parent, newname);
+        if let Err(errno) = self.flush_pending_write(&from_path) {
+            return reply.error(errno);
+        }
         let selection = self.current_view_selection();
         match self.runtime.block_on(self.core.rename_file_in_view(
             &self.project_id,
@@ -821,6 +1145,45 @@ mod tests {
     use djinn_db::{CreateSessionParams, SessionRepository};
     use tokio_util::sync::CancellationToken;
 
+    #[cfg(all(target_os = "linux", feature = "memory-mount"))]
+    async fn build_runtime_test_filesystem(
+        initial_content: &str,
+    ) -> (LinuxMemoryFilesystem, String, tempfile::TempDir) {
+        let db = create_test_db();
+        let state = AppState::new(db.clone(), CancellationToken::new());
+        let (project, project_dir) = create_test_project_with_dir(&db).await;
+        let repo = djinn_db::NoteRepository::new(db.clone(), test_events());
+        let note = repo
+            .create(
+                &project.id,
+                project_dir.path(),
+                "runtime batched note",
+                initial_content,
+                "research",
+                "[]",
+            )
+            .await
+            .expect("create runtime test note");
+        let runtime_status = std::sync::Arc::new(tokio::sync::Mutex::new(
+            MemoryMountRuntimeStatus::configured(
+                project_dir.path().join("mount"),
+                project.id.clone(),
+            ),
+        ));
+        let fs = LinuxMemoryFilesystem::new(
+            repo,
+            project.id,
+            project_dir.path().to_path_buf(),
+            state,
+            runtime_status,
+        );
+        (
+            fs,
+            djinn_db::virtual_note_path_for_permalink(&note.permalink),
+            project_dir,
+        )
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn disabled_mount_settings_skip_validation() {
         let settings = DjinnSettings::default();
@@ -876,6 +1239,204 @@ mod tests {
                 .to_string()
                 .contains("memory mount is only supported on Linux in ADR-057 wave 1")
         );
+    }
+
+    #[test]
+    fn staged_write_updates_are_coalesced_by_path_and_generation() {
+        let mut pending = HashMap::new();
+
+        let first = stage_pending_content(
+            &mut pending,
+            "research/batched-note.md",
+            "first".to_string(),
+        );
+        let second = stage_pending_content(
+            &mut pending,
+            "research/batched-note.md",
+            "second".to_string(),
+        );
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(pending.len(), 1);
+        let pending_write = pending
+            .get("research/batched-note.md")
+            .expect("pending write should be retained");
+        assert_eq!(pending_write.generation, 2);
+        assert_eq!(pending_write.content, "second");
+    }
+
+    #[test]
+    fn apply_write_update_batches_successive_write_bursts() {
+        let content = apply_write_update(String::new(), 0, b"hello").expect("initial write");
+        let content = apply_write_update(content, 5, b" world").expect("append write");
+        let content = apply_write_update(content, 6, b"Djinn").expect("overwrite write");
+
+        assert_eq!(content, "hello Djinn");
+    }
+
+    #[test]
+    fn apply_truncate_update_preserves_create_update_truncate_flow() {
+        let created = apply_write_update(String::new(), 0, b"abcdef").expect("create content");
+        let truncated = apply_truncate_update(created, 3).expect("truncate content");
+        let regrown = apply_truncate_update(truncated.clone(), 5).expect("grow content");
+
+        assert_eq!(truncated, "abc");
+        assert_eq!(regrown.as_bytes(), b"abc\0\0");
+    }
+
+    #[test]
+    fn runtime_status_tracks_pending_write_and_degraded_health_details() {
+        let mut status = MemoryMountRuntimeStatus::configured(
+            PathBuf::from("/mnt/djinn-memory"),
+            "project-123".to_string(),
+        );
+
+        status.set_pending_writes(2);
+        status.mark_degraded("debounced flush failed");
+
+        assert_eq!(
+            status.lifecycle,
+            crate::server::MemoryMountLifecycleState::Degraded
+        );
+        assert!(status.configured);
+        assert_eq!(status.pending_writes, 2);
+        assert_eq!(status.detail.as_deref(), Some("debounced flush failed"));
+        assert_eq!(status.last_error.as_deref(), Some("debounced flush failed"));
+        assert_eq!(
+            status.mount_path.as_deref(),
+            Some(std::path::Path::new("/mnt/djinn-memory"))
+        );
+        assert_eq!(status.project_id.as_deref(), Some("project-123"));
+    }
+
+    #[test]
+    fn staged_write_and_truncate_bursts_share_one_pending_entry_until_flush() {
+        let mut pending = HashMap::new();
+
+        let content = apply_write_update(String::new(), 0, b"hello").expect("initial write");
+        let first_generation =
+            stage_pending_content(&mut pending, "research/batched-note.md", content);
+        assert_eq!(first_generation, 1);
+        assert_eq!(pending.len(), 1);
+
+        let content = apply_write_update(
+            pending["research/batched-note.md"].content.clone(),
+            5,
+            b" world",
+        )
+        .expect("successive write burst");
+        let second_generation =
+            stage_pending_content(&mut pending, "research/batched-note.md", content);
+        assert_eq!(second_generation, 2);
+        assert_eq!(pending.len(), 1);
+
+        let content = apply_truncate_update(pending["research/batched-note.md"].content.clone(), 5)
+            .expect("truncate burst");
+        let third_generation =
+            stage_pending_content(&mut pending, "research/batched-note.md", content);
+        assert_eq!(third_generation, 3);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending["research/batched-note.md"].content, "hello");
+
+        let flushed = pending
+            .remove("research/batched-note.md")
+            .expect("flush removes the coalesced pending write");
+        assert_eq!(flushed.generation, 3);
+        assert_eq!(flushed.content, "hello");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn runtime_status_recovers_to_mounted_after_successful_flush() {
+        let mut status = MemoryMountRuntimeStatus::configured(
+            PathBuf::from("/mnt/djinn-memory"),
+            "project-123".to_string(),
+        );
+
+        status.set_pending_writes(1);
+        status.mark_degraded("failed to flush pending write for research/note.md: boom");
+        assert_eq!(status.pending_writes, 1);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("failed to flush pending write for research/note.md: boom")
+        );
+
+        status.set_pending_writes(0);
+        status.mark_mounted();
+
+        assert_eq!(
+            status.lifecycle,
+            crate::server::MemoryMountLifecycleState::Mounted
+        );
+        assert_eq!(status.pending_writes, 0);
+        assert_eq!(status.detail, None);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("failed to flush pending write for research/note.md: boom")
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "memory-mount"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_queue_write_and_truncate_coalesce_through_flush_path() {
+        let (fs, path, _project_dir) = build_runtime_test_filesystem("hello").await;
+
+        assert_eq!(fs.runtime_status.lock().await.pending_writes, 0);
+
+        fs.queue_write(&path, 5, b" world")
+            .expect("stage append write");
+        assert_eq!(fs.runtime_status.lock().await.pending_writes, 1);
+        assert_eq!(fs.pending_content(&path).as_deref(), Some("hello world"));
+
+        fs.queue_truncate(&path, 5).expect("stage truncate");
+        assert_eq!(fs.runtime_status.lock().await.pending_writes, 1);
+        assert_eq!(fs.pending_content(&path).as_deref(), Some("hello"));
+
+        fs.flush_pending_write(&path)
+            .expect("flush coalesced pending write");
+
+        let status = fs.runtime_status.lock().await.clone();
+        assert_eq!(status.pending_writes, 0);
+        assert_eq!(
+            status.lifecycle,
+            crate::server::MemoryMountLifecycleState::Mounted
+        );
+        assert_eq!(status.detail, None);
+
+        let file = fs
+            .core
+            .read_file_in_view(&fs.project_id, &MemoryViewSelection::Canonical, &path)
+            .await
+            .expect("read flushed file");
+        assert_eq!(file.content, "hello");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "memory-mount"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_flush_failure_updates_degraded_status_from_real_flush_logic() {
+        let (fs, path, project_dir) = build_runtime_test_filesystem("seed").await;
+        std::fs::remove_dir_all(project_dir.path()).expect("remove backing project dir");
+
+        fs.queue_write(&path, 0, b"broken")
+            .expect("stage write before failed flush");
+        assert_eq!(fs.runtime_status.lock().await.pending_writes, 1);
+
+        let errno = fs
+            .flush_pending_write(&path)
+            .expect_err("flush should fail once project path is removed");
+        assert_eq!(errno, libc::EIO);
+
+        let status = fs.runtime_status.lock().await.clone();
+        assert_eq!(status.pending_writes, 0);
+        assert_eq!(
+            status.lifecycle,
+            crate::server::MemoryMountLifecycleState::Degraded
+        );
+        let detail = status.detail.expect("degraded detail should be populated");
+        assert!(detail.contains("failed to flush pending write for"));
+        assert!(detail.contains(&path));
+        assert_eq!(status.last_error.as_deref(), Some(detail.as_str()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
