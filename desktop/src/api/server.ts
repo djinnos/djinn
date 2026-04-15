@@ -4,21 +4,16 @@ import { getServerBaseUrl } from "@/api/serverUrl";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
 
-/**
- * Notify the server of the authenticated user's identity.
- * Called after every successful Clerk auth (login, silent refresh, token rotation).
- */
-export async function setUserIdentity(email: string, userId: string): Promise<void> {
-  try {
-    // Tool removed from server — kept as no-op for call-site compatibility
-    void email; void userId;
-  } catch (e) {
-    console.warn("Failed to set user identity on server:", e);
-  }
-}
-
 async function getBaseUrl(): Promise<string> {
   return getServerBaseUrl();
+}
+
+/**
+ * No-op stub kept for AuthGate.tsx compatibility while the parallel auth
+ * migration is in flight. Delete alongside the AuthGate rework.
+ */
+export async function setUserIdentity(_email: string, _userId: string): Promise<void> {
+  return;
 }
 
 function providerDescription(provider: ProviderCatalogItem): string {
@@ -357,40 +352,6 @@ export async function updateProject(projectId: string, updates: { branch?: strin
     }));
   }
   await Promise.all(configCalls);
-}
-
-// Project commands — tools removed from server (now in .djinn/settings.json)
-// Kept as stubs for call-site compatibility.
-
-export interface ProjectCommandSpec {
-  name: string;
-  command: string;
-  timeout_secs?: number;
-}
-
-export interface ProjectCommands {
-  setup_commands: ProjectCommandSpec[];
-  verification_commands: ProjectCommandSpec[];
-}
-
-export interface CommandValidationError {
-  command_name: string;
-  exit_code: number;
-  stderr: string;
-  stdout: string;
-}
-
-export async function fetchProjectCommands(_projectPath: string): Promise<ProjectCommands> {
-  // Tools removed — settings.json is now source of truth
-  return { setup_commands: [], verification_commands: [] };
-}
-
-export async function saveProjectCommands(
-  _projectPath: string,
-  _commands: Partial<ProjectCommands>,
-): Promise<CommandValidationError[]> {
-  // Tool removed — settings.json is now source of truth
-  return [];
 }
 
 export async function removeProject(projectId: string): Promise<void> {

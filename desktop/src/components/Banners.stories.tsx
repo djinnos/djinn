@@ -4,11 +4,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import {
   Alert02Icon,
   Cancel01Icon,
-  Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { AlertCircleIcon } from "@hugeicons/core-free-icons";
-import { GitRemoteSetupBanner } from "./GitRemoteSetupBanner";
 import { Button } from "@/components/ui/button";
 import { Loading02Icon } from "@hugeicons/core-free-icons";
 
@@ -317,37 +315,6 @@ export const GenericError: StoryObj = {
   render: () => (
     <SyncHealthBannerMock errorDetails="Sync channel 'origin' failed after 5 consecutive attempts" />
   ),
-};
-
-/* ---- GitRemoteSetupBanner stories ---- */
-
-export const InitialState: StoryObj = {
-  render: () => (
-    <GitRemoteSetupBanner
-      projectPath="/home/user/projects/my-app"
-      onResolved={() => {}}
-    />
-  ),
-};
-
-export const SuccessState: StoryObj = {
-  render: () => {
-    // Render the success state directly using the same JSX as the component
-    return (
-      <Card className="mx-4 border-amber-500/30 bg-amber-500/10">
-        <CardContent className="py-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500/20">
-              <HugeiconsIcon icon={Tick02Icon} className="size-4 text-emerald-400" />
-            </div>
-            <p className="text-sm font-medium text-emerald-400">
-              Remote configured successfully!
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-    );
-  },
 };
 
 /* ---- GitHubAppBanner stories ---- */
