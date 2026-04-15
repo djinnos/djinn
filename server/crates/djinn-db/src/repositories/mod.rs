@@ -11,6 +11,7 @@ pub mod project;
 pub mod repo_graph_cache;
 pub mod repo_map_cache;
 pub mod session;
+pub mod session_auth;
 pub mod session_message;
 pub mod settings;
 pub mod task;

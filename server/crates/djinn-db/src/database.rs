@@ -214,14 +214,18 @@ impl Database {
         }
     }
 
-    pub fn pool(&self) -> &SqlitePool {
-        self.pool.as_sqlite().expect(
-            "sqlite pool requested for a mysql/dolt runtime; branch on backend_capabilities() before using sqlite-specific repository paths",
+    pub fn pool(&self) -> &MySqlPool {
+        self.pool.as_mysql().expect(
+            "mysql pool requested for a non-mysql runtime; sqlite backend is retired",
         )
     }
 
     pub fn mysql_pool(&self) -> Option<&MySqlPool> {
         self.pool.as_mysql()
+    }
+
+    pub fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        self.pool.as_sqlite()
     }
 
     pub fn pool_kind(&self) -> &DatabasePool {
@@ -350,10 +354,14 @@ impl Database {
         }
 
         if let Some(pool) = self.mysql_pool().cloned() {
+            let url = self.bootstrap.target.clone();
             self.initialized
                 .get_or_try_init(|| async move {
+                    migrations::ensure_mysql_database_exists(&url).await?;
                     let mut conn = pool.acquire().await?;
                     sqlx::query("SELECT 1").execute(&mut *conn).await?;
+                    drop(conn);
+                    migrations::ensure_mysql_schema(&pool).await?;
                     Ok::<(), DbError>(())
                 })
                 .await?;
@@ -364,7 +372,9 @@ impl Database {
             .db_path
             .clone()
             .expect("sqlite databases always retain a filesystem path");
-        let pool = self.pool().clone();
+        let sqlite_pool = self.sqlite_pool().cloned().expect(
+            "sqlite-backed Database must retain a sqlite pool for legacy initialization",
+        );
         let sqlite_vec_status = self.sqlite_vec_status.clone();
         self.initialized
             .get_or_try_init(|| async {
@@ -373,8 +383,8 @@ impl Database {
                     .expect("migration task panicked")
                     .map_err(|e| DbError::InvalidData(e.to_string()))?;
 
-                backfill_missing_content_hashes(&pool).await?;
-                let status = initialize_sqlite_vec(&pool).await;
+                backfill_missing_content_hashes(&sqlite_pool).await?;
+                let status = initialize_sqlite_vec(&sqlite_pool).await;
                 let _ = sqlite_vec_status.set(status);
 
                 Ok::<(), DbError>(())

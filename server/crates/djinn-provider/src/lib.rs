@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod completion;
 pub mod github_api;
+pub mod github_app;
 pub mod message;
 pub mod oauth;
 pub mod prompts;

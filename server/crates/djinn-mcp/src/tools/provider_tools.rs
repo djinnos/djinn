@@ -777,7 +777,12 @@ impl DjinnMcpServer {
 
         // Blocking flows (Codex, Copilot)
         let result = match flow_kind {
-            OAuthFlowKind::Codex => codex::run_codex_flow(&credential_repo).await.map(|_| ()),
+            OAuthFlowKind::Codex => {
+                let events = self.state.event_bus();
+                codex::run_codex_flow(&credential_repo, &events)
+                    .await
+                    .map(|_| ())
+            }
             OAuthFlowKind::Copilot => match copilot::start_copilot_flow().await {
                 Ok(session) => copilot::poll_copilot_flow(session, &credential_repo)
                     .await

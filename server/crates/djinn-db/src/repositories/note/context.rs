@@ -146,9 +146,9 @@ impl NoteRepository {
     async fn get_direct_neighbors(&self, project_id: &str, seed_id: &str) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT target_id FROM note_links
-             WHERE source_id = ?1
+             WHERE source_id = ?
                AND target_id IS NOT NULL
-               AND target_id IN (SELECT id FROM notes WHERE project_id = ?2)",
+               AND target_id IN (SELECT id FROM notes WHERE project_id = ?)",
         )
         .bind(seed_id)
         .bind(project_id)
@@ -252,7 +252,7 @@ impl NoteRepository {
         let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
             "SELECT id, access_count, created_at, updated_at
              FROM notes
-             WHERE project_id = ?1",
+             WHERE project_id = ?",
         )
         .bind(project_id)
         .fetch_all(self.db.pool())

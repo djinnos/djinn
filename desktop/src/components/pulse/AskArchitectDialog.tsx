@@ -20,7 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { showToast } from "@/lib/toast";
 import { recordPulseOriginatedSpike } from "@/lib/pulseProposals";
-import { useAuthStore } from "@/stores/authStore";
+import { useAuthUser } from "@/components/AuthGate";
 
 interface AskArchitectDialogProps {
   projectPath: string;
@@ -58,7 +58,7 @@ function normalizeCreatedTask(task: TaskCreateOutput): Task | null {
 
 export function AskArchitectDialog({ projectPath }: AskArchitectDialogProps) {
   const navigate = useNavigate();
-  const user = useAuthStore((state) => state.user);
+  const user = useAuthUser();
   const questionId = useId();
   const contextId = useId();
   const [open, setOpen] = useState(false);

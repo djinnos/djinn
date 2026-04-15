@@ -20,7 +20,7 @@ impl NoteRepository {
                     + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
                       AS connection_count
              FROM notes n
-             WHERE n.project_id = ?1
+             WHERE n.project_id = ?
              ORDER BY n.folder, n.title",
         )
         .bind(project_id)
@@ -30,7 +30,7 @@ impl NoteRepository {
         let edge_rows = sqlx::query_as::<_, (String, String, String)>(
             "SELECT l.source_id, l.target_id, l.target_raw
              FROM note_links l
-             JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+             JOIN notes src ON src.id = l.source_id AND src.project_id = ?
              WHERE l.target_id IS NOT NULL",
         )
         .bind(project_id)
@@ -75,12 +75,13 @@ impl NoteRepository {
         let rows = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT src.id, src.permalink, src.title, l.target_raw
              FROM note_links l
-             JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+             JOIN notes src ON src.id = l.source_id AND src.project_id = ?
              WHERE l.target_id IS NULL
-               AND (?2 IS NULL OR src.folder = ?2)
+               AND (? IS NULL OR src.folder = ?)
              ORDER BY src.permalink, l.target_raw",
         )
         .bind(project_id)
+        .bind(folder)
         .bind(folder)
         .fetch_all(self.db.pool())
         .await?;
@@ -107,15 +108,16 @@ impl NoteRepository {
         let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
             "SELECT n.id, n.permalink, n.title, n.note_type, n.folder
              FROM notes n
-             WHERE n.project_id = ?1
+             WHERE n.project_id = ?
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
-               AND (?2 IS NULL OR n.folder = ?2)
+               AND (? IS NULL OR n.folder = ?)
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
                )
              ORDER BY n.folder, n.title",
         )
         .bind(project_id)
+        .bind(folder)
         .bind(folder)
         .fetch_all(self.db.pool())
         .await?;
@@ -139,14 +141,14 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let total_notes: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
+            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?")
                 .bind(project_id)
                 .fetch_one(self.db.pool())
                 .await?;
 
         let broken_link_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM note_links l
-             JOIN notes src ON src.id = l.source_id AND src.project_id = ?1
+             JOIN notes src ON src.id = l.source_id AND src.project_id = ?
              WHERE l.target_id IS NULL",
         )
         .bind(project_id)
@@ -155,7 +157,7 @@ impl NoteRepository {
 
         let orphan_note_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM notes n
-             WHERE n.project_id = ?1
+             WHERE n.project_id = ?
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
@@ -167,8 +169,8 @@ impl NoteRepository {
 
         let stale_rows = sqlx::query_as::<_, (String, i64)>(
             "SELECT folder, COUNT(*) FROM notes
-             WHERE project_id = ?1
-               AND updated_at < datetime('now', '-30 days')
+             WHERE project_id = ?
+               AND updated_at < DATE_SUB(NOW(3), INTERVAL 30 DAY)
              GROUP BY folder ORDER BY folder",
         )
         .bind(project_id)
@@ -186,8 +188,8 @@ impl NoteRepository {
 
         let low_confidence_note_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM notes
-             WHERE project_id = ?1
-               AND confidence < ?2",
+             WHERE project_id = ?
+               AND confidence < ?",
         )
         .bind(project_id)
         .bind(STALE_CITATION)
@@ -229,7 +231,7 @@ impl NoteRepository {
                     access_count, confidence, abstract as abstract_, overview,
                     scope_paths
              FROM notes
-             WHERE project_id = ?1
+             WHERE project_id = ?
                AND note_type IN ('case', 'pattern', 'pitfall')
              ORDER BY note_type, permalink",
         )
@@ -298,7 +300,7 @@ impl NoteRepository {
                 && missing_sections.len() == required_sections.len();
             let looks_task_local = looks_task_local(&note.title, &note.content);
             let is_orphan = !sqlx::query_scalar::<_, i64>(
-                "SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = ?)",
             )
             .bind(&note.id)
             .fetch_one(self.db.pool())
@@ -421,7 +423,7 @@ impl NoteRepository {
         permalink: &str,
     ) -> Result<Option<String>> {
         Ok(sqlx::query_scalar::<_, String>(
-            "SELECT id FROM notes WHERE project_id = ?1 AND permalink = ?2 LIMIT 1",
+            "SELECT id FROM notes WHERE project_id = ? AND permalink = ? LIMIT 1",
         )
         .bind(project_id)
         .bind(permalink)
@@ -454,7 +456,7 @@ impl NoteRepository {
 
         for (id, score) in candidate_scores {
             let note_type = sqlx::query_scalar::<_, String>(
-                "SELECT note_type FROM notes WHERE id = ?1 AND project_id = ?2 LIMIT 1",
+                "SELECT note_type FROM notes WHERE id = ? AND project_id = ? LIMIT 1",
             )
             .bind(&id)
             .bind(project_id)
@@ -490,7 +492,7 @@ impl NoteRepository {
         let mut scores: HashMap<String, f64> = HashMap::new();
 
         let task_refs: Option<String> =
-            sqlx::query_scalar("SELECT memory_refs FROM tasks WHERE id = ?1 AND project_id = ?2")
+            sqlx::query_scalar("SELECT memory_refs FROM tasks WHERE id = ? AND project_id = ?")
                 .bind(task_id)
                 .bind(project_id)
                 .fetch_optional(self.db.pool())
@@ -530,7 +532,7 @@ impl NoteRepository {
             "SELECT e.memory_refs
              FROM tasks t
              JOIN epics e ON e.id = t.epic_id
-             WHERE t.id = ?1 AND t.project_id = ?2",
+             WHERE t.id = ? AND t.project_id = ?",
         )
         .bind(task_id)
         .bind(project_id)
@@ -552,7 +554,7 @@ impl NoteRepository {
             "SELECT bt.memory_refs
              FROM blockers b
              JOIN tasks bt ON bt.id = b.blocking_task_id
-             WHERE b.task_id = ?1 AND bt.project_id = ?2",
+             WHERE b.task_id = ? AND bt.project_id = ?",
         )
         .bind(task_id)
         .bind(project_id)
