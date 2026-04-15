@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use sqlx::Sqlite;
-
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
     BrokenLink, ExtractedNoteAuditReport, GraphEdge, GraphNode, GraphResponse, HealthReport, Note,

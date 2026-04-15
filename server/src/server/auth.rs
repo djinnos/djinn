@@ -10,11 +10,6 @@
 //!     repo I/O goes through installation tokens (see
 //!     `djinn_provider::github_app`).
 //!
-//! The legacy OAuth App device-code flow
-//! (`djinn_provider::oauth::github_oauth_app_legacy`) is still used by the
-//! CoordinatorActor for pushing commits as the authenticated user; that
-//! migration is tracked separately in `TODO.md`.
-//!
 //! Environment variables:
 //!   * `GITHUB_APP_CLIENT_ID`       — GitHub App client id (required).
 //!   * `GITHUB_APP_CLIENT_SECRET`   — GitHub App client secret (required).

@@ -11,8 +11,7 @@ use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::Deserialize;
 
 use super::installations::{
-    Installation, InstallationToken, get_installation_token, invalidate_cache,
-    list_installations_for_user,
+    InstallationToken, get_installation_token, invalidate_cache, list_installations_for_user,
 };
 use super::{ENV_APP_SLUG, app_id};
 
@@ -236,5 +235,3 @@ mod tests {
     }
 }
 
-#[allow(dead_code)]
-fn _assert_installation_used(_i: &Installation) {}
