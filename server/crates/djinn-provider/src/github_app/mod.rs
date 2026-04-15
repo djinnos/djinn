@@ -23,10 +23,15 @@
 //! - [`client`] — reqwest wrapper that injects installation bearer tokens.
 
 pub mod client;
+pub mod config;
 pub mod installations;
 pub mod jwt;
 
 pub use client::{GitHubAppClient, InstallationRepo, find_installation_for_repo, install_url};
+pub use config::{
+    APP_CONFIG_KEY, APP_CONFIG_PROVIDER, AppConfig, DEFAULT_PUBLIC_URL, ENV_PUBLIC_URL,
+    ENV_WEBHOOK_SECRET,
+};
 pub use installations::{
     Installation, InstallationToken, get_installation_token, list_installations_for_user,
 };

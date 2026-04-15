@@ -67,6 +67,12 @@ export interface AuthConfig {
   configured: boolean;
   missing: string[];
   setupDocUrl: string;
+  /**
+   * Path on the Djinn server (relative — no host) that kicks off the GitHub
+   * App manifest auto-provision flow. Always present; the UI only surfaces
+   * it as a button when `configured === false`.
+   */
+  createAppUrl: string | null;
 }
 
 /**
@@ -85,12 +91,22 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
     configured: boolean;
     missing: string[];
     setup_doc_url: string;
+    create_app_url?: string | null;
   };
   return {
     configured: body.configured,
     missing: body.missing,
     setupDocUrl: body.setup_doc_url,
+    createAppUrl: body.create_app_url ?? null,
   };
+}
+
+/**
+ * Navigate the browser to the server's manifest auto-provision endpoint.
+ * The server returns an HTML page that auto-submits a form to GitHub.
+ */
+export function startManifestProvision(createAppUrl: string): void {
+  window.location.assign(`${getBaseUrl()}${createAppUrl}`);
 }
 
 /**
