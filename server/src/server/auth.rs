@@ -639,18 +639,11 @@ pub(crate) fn build_manifest_json(public_url: &str) -> serde_json::Value {
     serde_json::json!({
         "name": format!("Djinn ({host})"),
         "url": public_url,
-        "hook_attributes": {
-            "url": format!("{public_url}/webhooks/github"),
-            "active": false,
-        },
         "redirect_url": format!("{public_url}/auth/github/app-manifest-callback"),
         "callback_urls": [format!("{public_url}/auth/github/callback")],
         "request_oauth_on_install": true,
         "public": false,
         "default_permissions": permissions,
-        "default_events": [
-            "pull_request", "issues", "push", "check_suite", "workflow_run"
-        ],
     })
 }
 
@@ -885,19 +878,15 @@ mod tests {
             manifest["callback_urls"][0],
             "https://djinn.example.com/auth/github/callback"
         );
-        assert_eq!(
-            manifest["hook_attributes"]["url"],
-            "https://djinn.example.com/webhooks/github"
+        assert!(
+            manifest.get("hook_attributes").is_none(),
+            "webhooks are off — omit hook_attributes so GitHub doesn't reject loopback URLs"
         );
-        assert_eq!(manifest["hook_attributes"]["active"], false);
         assert_eq!(manifest["request_oauth_on_install"], true);
         assert_eq!(manifest["public"], false);
         assert_eq!(manifest["default_permissions"]["contents"], "write");
         assert_eq!(manifest["default_permissions"]["pull_requests"], "write");
         assert_eq!(manifest["default_permissions"]["metadata"], "read");
-        let events = manifest["default_events"].as_array().unwrap();
-        assert!(events.iter().any(|v| v == "pull_request"));
-        assert!(events.iter().any(|v| v == "push"));
         // Round-trips as valid JSON.
         let s = manifest.to_string();
         let _back: serde_json::Value = serde_json::from_str(&s).unwrap();
