@@ -20,6 +20,7 @@ pub use database::{
 pub use error::{DbError as Error, DbResult as Result};
 pub use migrations::{
     mysql_notes_fulltext_prototype, mysql_schema_snapshot, sqlite_schema_snapshot,
+    staged_mysql_migrations,
 };
 pub use repositories::{
     agent::{
@@ -66,6 +67,7 @@ pub use repositories::{
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_map_cache::{CachedRepoMap, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository},
     session::{CreateSessionParams, SessionRepository},
+    session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
     task::TaskRepository,

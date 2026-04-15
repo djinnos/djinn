@@ -10,6 +10,8 @@ const SQLITE_SCHEMA_SNAPSHOT: &str = include_str!("../schema.sql");
 const MYSQL_SCHEMA_SNAPSHOT: &str = include_str!("../sql/mysql_schema.sql");
 const MYSQL_NOTES_FULLTEXT_PROTOTYPE: &str =
     include_str!("../sql/mysql_notes_fulltext_prototype.sql");
+const MYSQL_MIGRATION_V3_USER_AUTH_SESSIONS: &str =
+    include_str!("../sql/migrations_mysql/V3__user_auth_sessions.sql");
 
 /// Run migrations using refinery's built-in rusqlite runner.
 ///
@@ -37,6 +39,19 @@ pub fn mysql_schema_snapshot() -> &'static str {
 /// Return the reference MySQL FULLTEXT query prototype paired with the staged schema snapshot.
 pub fn mysql_notes_fulltext_prototype() -> &'static str {
     MYSQL_NOTES_FULLTEXT_PROTOTYPE
+}
+
+/// Return the staged MySQL migrations for the web-client GitHub OAuth session table.
+///
+/// Registered as a staging artifact alongside `mysql_schema_snapshot` so the MySQL/Dolt
+/// cutover path carries the same `user_auth_sessions` table the SQLite runtime creates
+/// via refinery. The tuple is `(version, name, sql)`.
+pub fn staged_mysql_migrations() -> &'static [(i64, &'static str, &'static str)] {
+    &[(
+        3,
+        "user_auth_sessions",
+        MYSQL_MIGRATION_V3_USER_AUTH_SESSIONS,
+    )]
 }
 
 /// Return the embedded migration list (version, name, checksum) for testing.
@@ -103,5 +118,22 @@ mod tests {
         assert!(schema.contains("CREATE TABLE notes"));
         assert!(schema.contains("CREATE TABLE sessions"));
         assert!(prototype.contains("MATCH(n.title, n.content, n.tags) AGAINST"));
+    }
+
+    #[test]
+    fn mysql_snapshot_includes_user_auth_sessions() {
+        let schema = mysql_schema_snapshot();
+        assert!(schema.contains("CREATE TABLE user_auth_sessions"));
+    }
+
+    #[test]
+    fn staged_mysql_migrations_exposes_user_auth_sessions_v3() {
+        let migrations = super::staged_mysql_migrations();
+        let (version, _, sql) = migrations
+            .iter()
+            .find(|(_, n, _)| *n == "user_auth_sessions")
+            .expect("V3 migration registered");
+        assert_eq!(*version, 3);
+        assert!(sql.contains("CREATE TABLE user_auth_sessions"));
     }
 }
