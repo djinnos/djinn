@@ -35,7 +35,6 @@ describe('settingsStore', () => {
   it('mutates model list actions', () => {
     const st = useSettingsStore.getState();
     st.addModel({ model: 'm1', provider: 'p1' });
-    st.toggleRoleForModel(0, 'lead');
     st.updateMaxSessions(0, 5);
     st.reorderModels(0, 0);
     st.removeModelsByProvider('none');
