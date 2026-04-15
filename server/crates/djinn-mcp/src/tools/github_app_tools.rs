@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use djinn_provider::github_app::{
     Installation, install_url, list_installations_for_user,
+    user_token_compat::load_user_tokens,
 };
-use djinn_provider::oauth::github_app::GitHubAppTokens;
 use djinn_provider::repos::CredentialRepository;
 
 use crate::server::DjinnMcpServer;
@@ -99,7 +99,7 @@ impl DjinnMcpServer {
         // We need a user token to call GET /user/installations. The
         // device-code-flow user token (legacy, stored at
         // __OAUTH_GITHUB_APP) is fine here — any user-to-server token works.
-        let Some(tokens) = GitHubAppTokens::load_from_db(&cred_repo).await else {
+        let Some(tokens) = load_user_tokens(&cred_repo).await else {
             return Json(GithubAppInstallationsResponse {
                 status: "error: Connect GitHub first".into(),
                 installations: vec![],

@@ -26,6 +26,7 @@
 pub mod client;
 pub mod installations;
 pub mod jwt;
+pub mod user_token_compat;
 
 pub use client::{GitHubAppClient, InstallationRepo, find_installation_for_repo, install_url};
 pub use installations::{
@@ -46,7 +47,3 @@ pub const ENV_CLIENT_ID: &str = "GITHUB_APP_CLIENT_ID";
 /// Env var: user-to-server OAuth client secret for the GitHub App.
 pub const ENV_CLIENT_SECRET: &str = "GITHUB_APP_CLIENT_SECRET";
 
-/// Legacy env var aliases kept for one release. Consuming code should log
-/// a deprecation warning when it falls back to these.
-pub const LEGACY_ENV_CLIENT_ID: &str = "GITHUB_OAUTH_CLIENT_ID";
-pub const LEGACY_ENV_CLIENT_SECRET: &str = "GITHUB_OAUTH_CLIENT_SECRET";

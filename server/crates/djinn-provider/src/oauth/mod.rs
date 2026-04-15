@@ -1,24 +1,17 @@
 pub mod codex;
 pub mod copilot;
-/// Legacy GitHub OAuth App device-code flow.
-///
-/// Retained because the CoordinatorActor still uses the resulting long-lived
-/// user token to push commits as the authenticated user. New code should
-/// prefer [`crate::github_app`] (installation-token based). The migration of
-/// CoordinatorActor is tracked in `TODO.md`.
-pub mod github_oauth_app_legacy;
-/// Backwards-compatible alias so existing
-/// `use djinn_provider::oauth::github_app::*` imports keep resolving during
-/// the transition. Prefer importing from [`crate::github_app`] in new code.
-pub use github_oauth_app_legacy as github_app;
 
 use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
 
 /// Which OAuth flow to run, determined by provider ID.
+///
+/// The historical `GitHubApp` variant backed the retired OAuth App
+/// device-code flow. The server now exposes GitHub auth exclusively through
+/// the browser-based `/auth/github/*` routes (App user-to-server OAuth) and
+/// through App installation tokens — there is no MCP-initiated flow left.
 pub enum OAuthFlowKind {
     Codex,
     Copilot,
-    GitHubApp,
 }
 
 impl OAuthFlowKind {
@@ -27,7 +20,6 @@ impl OAuthFlowKind {
         match id {
             "chatgpt-codex" | "chatgpt_codex" | "codex" | "openai-codex" => Some(Self::Codex),
             "github-copilot" | "github_copilot" | "copilot" => Some(Self::Copilot),
-            "github-app" | "github_app" | "githubapp" => Some(Self::GitHubApp),
             _ => None,
         }
     }

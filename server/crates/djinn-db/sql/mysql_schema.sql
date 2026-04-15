@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS projects (
     github_repo         VARCHAR(255) NULL,
     default_branch      VARCHAR(255) NULL,
     clone_path          VARCHAR(512) NULL,
+    -- Migration 4: cached GitHub App installation id so the push path can
+    -- mint installation tokens without discovering the installation via a
+    -- user token on every push.
+    installation_id     BIGINT       NULL,
     UNIQUE KEY uq_projects_name (name),
     UNIQUE KEY uq_projects_path (path),
     UNIQUE KEY uq_projects_github_owner_repo (github_owner, github_repo)

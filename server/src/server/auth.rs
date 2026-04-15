@@ -17,10 +17,7 @@
 //!
 //! Environment variables:
 //!   * `GITHUB_APP_CLIENT_ID`       — GitHub App client id (required).
-//!                                    Falls back to `GITHUB_OAUTH_CLIENT_ID`
-//!                                    for one release (deprecation logged).
-//!   * `GITHUB_APP_CLIENT_SECRET`   — GitHub App client secret. Falls back
-//!                                    to `GITHUB_OAUTH_CLIENT_SECRET`.
+//!   * `GITHUB_APP_CLIENT_SECRET`   — GitHub App client secret (required).
 //!   * `GITHUB_APP_SLUG`            — App slug, used when `?install=1` is
 //!                                    passed to redirect to the install
 //!                                    page post-auth.
@@ -63,25 +60,13 @@ const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
 
-/// Read a GitHub App OAuth client id/secret, falling back to the legacy
-/// `GITHUB_OAUTH_*` names for one release. Logs a deprecation warning when
-/// the legacy name is used so the operator knows to migrate their `.env`.
-fn read_github_app_oauth_env(primary: &str, legacy: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(primary) {
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
-    if let Ok(v) = std::env::var(legacy) {
-        if !v.is_empty() {
-            tracing::warn!(
-                "auth: {legacy} is deprecated — rename to {primary} in your .env. \
-                 Support will be removed in the next release."
-            );
-            return Some(v);
-        }
-    }
-    None
+/// Read a GitHub App OAuth client id/secret from the environment.
+///
+/// The legacy `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET`
+/// fallbacks were retired with the GitHub App finalization — only the
+/// App-native env var names are honoured going forward.
+fn read_github_app_oauth_env(primary: &str) -> Option<String> {
+    std::env::var(primary).ok().filter(|v| !v.is_empty())
 }
 
 pub(super) fn router() -> Router<AppState> {
@@ -184,14 +169,10 @@ struct StartQuery {
 }
 
 async fn github_start(Query(q): Query<StartQuery>) -> Response {
-    let client_id = match read_github_app_oauth_env("GITHUB_APP_CLIENT_ID", "GITHUB_OAUTH_CLIENT_ID")
-    {
+    let client_id = match read_github_app_oauth_env("GITHUB_APP_CLIENT_ID") {
         Some(v) => v,
         None => {
-            tracing::error!(
-                "auth /github/start: GITHUB_APP_CLIENT_ID not set (legacy \
-                 GITHUB_OAUTH_CLIENT_ID also unset)"
-            );
+            tracing::error!("auth /github/start: GITHUB_APP_CLIENT_ID not set");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "GitHub App OAuth is not configured",
@@ -269,14 +250,9 @@ async fn github_callback(
         return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
     }
 
-    let client_id =
-        read_github_app_oauth_env("GITHUB_APP_CLIENT_ID", "GITHUB_OAUTH_CLIENT_ID")
-            .unwrap_or_default();
-    let client_secret = read_github_app_oauth_env(
-        "GITHUB_APP_CLIENT_SECRET",
-        "GITHUB_OAUTH_CLIENT_SECRET",
-    )
-    .unwrap_or_default();
+    let client_id = read_github_app_oauth_env("GITHUB_APP_CLIENT_ID").unwrap_or_default();
+    let client_secret =
+        read_github_app_oauth_env("GITHUB_APP_CLIENT_SECRET").unwrap_or_default();
     if client_id.is_empty() || client_secret.is_empty() {
         tracing::error!("auth callback: GitHub App OAuth env vars missing");
         return (

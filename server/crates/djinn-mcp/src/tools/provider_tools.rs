@@ -702,80 +702,10 @@ impl DjinnMcpServer {
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        // GitHub App uses a non-blocking device-code flow: return the code
-        // immediately and poll in the background.
-        if matches!(flow_kind, OAuthFlowKind::GitHubApp) {
-            use djinn_provider::oauth::github_app;
-
-            // If we already have a cached token, return success immediately.
-            // OAuth App tokens are long-lived and don't expire.
-            if github_app::GitHubAppTokens::load_from_db(&credential_repo)
-                .await
-                .is_some()
-            {
-                return Json(ProviderOauthStartResponse {
-                    ok: true,
-                    success: true,
-                    provider_id: input.provider_id,
-                    builtin_id: Some(builtin_id.to_string()),
-                    legacy_builtin_id: Some(builtin_id.to_string()),
-                    oauth_supported: true,
-                    configured_keys: oauth_keys,
-                    error: None,
-                    user_code: None,
-                    verification_uri: None,
-                    pending: false,
-                });
-            }
-            return match github_app::start_device_flow().await {
-                Ok(session) => {
-                    let user_code = session.user_code.clone();
-                    let verification_uri = session
-                        .verification_uri_complete
-                        .clone()
-                        .unwrap_or_else(|| session.verification_uri.clone());
-
-                    // Spawn background polling task
-                    let bg_db = self.state.db().clone();
-                    let bg_events = self.state.event_bus();
-                    tokio::spawn(async move {
-                        let bg_repo = CredentialRepository::new(bg_db, bg_events);
-                        if let Err(e) = github_app::poll_and_store(&session, &bg_repo).await {
-                            tracing::error!("GitHubApp background poll failed: {}", e);
-                        }
-                    });
-
-                    Json(ProviderOauthStartResponse {
-                        ok: true,
-                        success: false,
-                        provider_id: input.provider_id,
-                        builtin_id: Some(builtin_id.to_string()),
-                        legacy_builtin_id: Some(builtin_id.to_string()),
-                        oauth_supported: true,
-                        configured_keys: oauth_keys,
-                        error: None,
-                        user_code: Some(user_code),
-                        verification_uri: Some(verification_uri),
-                        pending: true,
-                    })
-                }
-                Err(e) => Json(ProviderOauthStartResponse {
-                    ok: false,
-                    success: false,
-                    provider_id: input.provider_id,
-                    builtin_id: Some(builtin_id.to_string()),
-                    legacy_builtin_id: Some(builtin_id.to_string()),
-                    oauth_supported: true,
-                    configured_keys: vec![],
-                    error: Some(e.to_string()),
-                    user_code: None,
-                    verification_uri: None,
-                    pending: false,
-                }),
-            };
-        }
-
-        // Blocking flows (Codex, Copilot)
+        // Blocking flows (Codex, Copilot). The historical GitHub App
+        // device-code flow has been retired — GitHub auth goes through the
+        // browser-based `/auth/github/*` routes on the server instead, and
+        // all repo I/O uses App installation tokens.
         let result = match flow_kind {
             OAuthFlowKind::Codex => {
                 let events = self.state.event_bus();
@@ -789,7 +719,6 @@ impl DjinnMcpServer {
                     .map(|_| ()),
                 Err(e) => Err(e),
             },
-            OAuthFlowKind::GitHubApp => unreachable!(),
         };
 
         match result {
@@ -1030,12 +959,16 @@ impl DjinnMcpServer {
             // Delete the well-known OAuth DB credential keys for each OAuth key name.
             const CODEX_OAUTH_DB_KEY: &str = "__OAUTH_CHATGPT_CODEX";
             const COPILOT_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_COPILOT";
-            const GITHUB_APP_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_APP";
+            // Still cleaned up here so operators who "Remove" the GitHub
+            // integration after upgrading also drop the retired device-code
+            // credential row — it isn't written anymore, but existing rows
+            // should be wiped when the user asks.
+            const LEGACY_GITHUB_APP_OAUTH_DB_KEY: &str = "__OAUTH_GITHUB_APP";
             for key in &oauth_keys {
                 let db_key = match key.as_str() {
                     "CHATGPT_CODEX_TOKEN" => CODEX_OAUTH_DB_KEY,
                     "GITHUB_COPILOT_TOKEN" => COPILOT_OAUTH_DB_KEY,
-                    "GITHUB_APP_TOKEN" => GITHUB_APP_OAUTH_DB_KEY,
+                    "GITHUB_APP_TOKEN" => LEGACY_GITHUB_APP_OAUTH_DB_KEY,
                     _ => continue,
                 };
                 let _ = credential_repo.delete(db_key).await;

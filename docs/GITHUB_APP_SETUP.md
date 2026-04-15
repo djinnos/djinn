@@ -82,10 +82,11 @@ And from the desktop MCP client:
 
 - Installation tokens are 1-hour credentials. The server caches them
   in-process until T-5 minutes before expiry and re-mints on demand.
-- The classic OAuth App device-code flow (`oauth/github_oauth_app_legacy`)
-  is retained *only* because the CoordinatorActor still uses a long-lived
-  user token for pushes. That migration is tracked in `TODO.md`. No action
-  required from operators.
-- For now, both the new `GITHUB_APP_CLIENT_ID` / `CLIENT_SECRET` and the
-  legacy `GITHUB_OAUTH_CLIENT_ID` / `CLIENT_SECRET` are read. A deprecation
-  warning is logged when the legacy names are used.
+- The classic OAuth App device-code flow has been retired. Coordinator
+  pushes, PR creation, and repo clones all run on GitHub App installation
+  tokens, attributed to `djinn-bot[bot]`. Projects cache their
+  `installation_id` on the `projects` row at `project_add_from_github`
+  time so the push path never needs a user token.
+- Only the `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` names are
+  honoured. Previous releases accepted a `GITHUB_OAUTH_CLIENT_ID` /
+  `CLIENT_SECRET` fallback; that has been removed — rename your `.env`.

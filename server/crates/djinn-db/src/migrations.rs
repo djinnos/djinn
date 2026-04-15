@@ -39,6 +39,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "projects_github_columns",
         include_str!("../sql/migrations_mysql/V2__projects_github_columns.sql"),
     ),
+    (
+        4,
+        "projects_installation_id",
+        include_str!("../sql/migrations_mysql/V4__projects_installation_id.sql"),
+    ),
 ];
 
 /// Run migrations using refinery's built-in rusqlite runner.
