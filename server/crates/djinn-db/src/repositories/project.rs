@@ -212,6 +212,73 @@ impl ProjectRepository {
         Ok(project)
     }
 
+    /// Find a project by its GitHub owner/repo coordinates.
+    ///
+    /// Returns `Ok(None)` if no project row has both columns set to the
+    /// provided values (e.g. legacy host-path projects).
+    pub async fn get_by_github(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<Project>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote
+               FROM projects
+              WHERE github_owner = ? AND github_repo = ?",
+        )
+        .bind(owner)
+        .bind(repo)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Create a project backed by a GitHub repo the server has cloned locally.
+    ///
+    /// `clone_path` should be the absolute path inside the server container
+    /// where the repo has been cloned (e.g. `/root/.djinn/projects/acme/widgets`).
+    /// `path` is set equal to `clone_path` so existing path-keyed joins and
+    /// resolvers keep working without changes.
+    pub async fn create_from_github(
+        &self,
+        name: &str,
+        owner: &str,
+        repo: &str,
+        default_branch: &str,
+        clone_path: &str,
+    ) -> Result<Project> {
+        self.db.ensure_initialized().await?;
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO projects
+                (id, name, path, github_owner, github_repo, default_branch, clone_path, target_branch)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(clone_path)
+        .bind(owner)
+        .bind(repo)
+        .bind(default_branch)
+        .bind(clone_path)
+        .bind(default_branch)
+        .execute(self.db.pool())
+        .await?;
+
+        let project = sqlx::query_as::<_, Project>(
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        self.seed_default_roles(&id).await?;
+
+        self.events
+            .send(DjinnEventEnvelope::project_created(&project));
+        Ok(project)
+    }
+
     /// Insert 5 default agent roles (one per base_role) for a newly created project.
     /// Uses INSERT OR IGNORE so re-seeding is safe if called on an existing project.
     async fn seed_default_roles(&self, project_id: &str) -> Result<()> {

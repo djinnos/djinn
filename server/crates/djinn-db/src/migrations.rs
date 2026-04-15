@@ -26,11 +26,18 @@ const MYSQL_NOTES_FULLTEXT_PROTOTYPE: &str =
 ///      to this slice, keeping versions strictly increasing.
 ///   3. Write deterministic ALTERs — the runner fails hard on any error for
 ///      incremental migrations (unlike the idempotent initial snapshot).
-const MIGRATIONS: &[(i64, &str, &str)] = &[(
-    1,
-    "example_schema_evolution",
-    include_str!("../sql/migrations_mysql/V1__example_schema_evolution.sql"),
-)];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "example_schema_evolution",
+        include_str!("../sql/migrations_mysql/V1__example_schema_evolution.sql"),
+    ),
+    (
+        2,
+        "projects_github_columns",
+        include_str!("../sql/migrations_mysql/V2__projects_github_columns.sql"),
+    ),
+];
 
 /// Run migrations using refinery's built-in rusqlite runner.
 ///

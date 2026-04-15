@@ -219,6 +219,64 @@ export async function addProject(path: string): Promise<Project> {
   return response.project;
 }
 
+// ── GitHub-origin projects (Migration 2) ─────────────────────────────────────
+
+export interface GithubRepoEntry {
+  owner: string;
+  repo: string;
+  default_branch: string;
+  private: boolean;
+  description?: string | null;
+}
+
+/**
+ * List GitHub repositories the Djinn App can access. Backs the Add-Project
+ * picker after Migration 2: the server owns cloning, so the desktop no
+ * longer passes a local path.
+ */
+export async function listGithubRepos(perPage = 50): Promise<GithubRepoEntry[]> {
+  // Tool name not yet in the generated MCP types snapshot (Migration 2 —
+  // regenerate with `pnpm mcp:types` once the server is running).
+  const response = await callMcpTool(
+    "github_list_repos" as Parameters<typeof callMcpTool>[0],
+    { per_page: perPage },
+  );
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+  return response.repos ?? [];
+}
+
+/**
+ * Ask the server to clone a GitHub repo and register it as a project.
+ * The server clones into `/root/.djinn/projects/{owner}/{repo}` (persisted
+ * on the host via the `~/.djinn` bind mount) and returns the project record.
+ */
+export async function addProjectFromGithub(args: {
+  owner: string;
+  repo: string;
+  name?: string;
+  ref?: string;
+}): Promise<Project> {
+  // Tool name not yet in the generated MCP types snapshot (Migration 2 —
+  // regenerate with `pnpm mcp:types` once the server is running).
+  const response = await callMcpTool(
+    "project_add_from_github" as Parameters<typeof callMcpTool>[0],
+    {
+      owner: args.owner,
+      repo: args.repo,
+      ...(args.name ? { name: args.name } : {}),
+      ...(args.ref ? { ref: args.ref } : {}),
+    },
+  );
+
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+
+  return response.project;
+}
+
 // Provider configuration check
 
 export interface ProviderConfigStatus {

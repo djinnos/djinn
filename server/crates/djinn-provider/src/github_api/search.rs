@@ -281,6 +281,86 @@ impl GitHubApiClient {
             content: selected.join("\n"),
         })
     }
+
+    /// List repositories the authenticated GitHub App user has access to.
+    ///
+    /// Returns up to `per_page` (default 30, max 100) items from the first
+    /// page. Results are sorted by `pushed` descending so the caller's
+    /// recently-worked-in repos bubble to the top — useful for a UI picker.
+    ///
+    /// Each entry is `(owner, repo, default_branch, private, description)`.
+    pub async fn list_user_repos(
+        &self,
+        per_page: Option<usize>,
+    ) -> Result<Vec<UserRepoEntry>> {
+        let per_page = per_page.unwrap_or(30).clamp(1, 100);
+        let url = format!(
+            "{}/user/repos?per_page={}&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member",
+            self.base_url, per_page
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("list_user_repos failed ({}): {}", status, body));
+        }
+
+        let items: Vec<serde_json::Value> = resp.json().await?;
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let full_name = item
+                .get("full_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let Some((owner, repo)) = full_name.split_once('/') else {
+                continue;
+            };
+            out.push(UserRepoEntry {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                default_branch: item
+                    .get("default_branch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("main")
+                    .to_string(),
+                private: item.get("private").and_then(|v| v.as_bool()).unwrap_or(false),
+                description: item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// A repository entry returned by [`GitHubApiClient::list_user_repos`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRepoEntry {
+    pub owner: String,
+    pub repo: String,
+    pub default_branch: String,
+    pub private: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

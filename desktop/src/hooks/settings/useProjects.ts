@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { addProject, fetchProjects, removeProject, type Project } from '@/api/server';
+import { fetchProjects, removeProject, type Project } from '@/api/server';
 import { showToast } from '@/lib/toast';
 
 export function useProjects() {
@@ -26,23 +26,23 @@ export function useProjects() {
     void loadProjects();
   }, [loadProjects]);
 
+  // Migration 2: the server owns the filesystem — the Settings page no
+  // longer has a local-directory picker. Add Project is now triggered from
+  // the sidebar via <AddProjectFromGithubDialog>. This hook retains a stub
+  // so callers can refresh the project list after an external add and can
+  // display the "adding…" state during the refresh.
   const handleAddProject = useCallback(async () => {
     setIsAdding(true);
     setError(null);
     try {
-      // Project selection is being replaced with GitHub-repo selection
-      // (Migration 2). The web client prompts for the server-visible path.
-      const path = window.prompt(
-        'Project path (relative to the server workspace root):'
-      );
-      if (!path) return;
-      await addProject(path);
       await loadProjects();
-      showToast.success('Project added');
+      showToast.info(
+        'Add projects from the sidebar — the server clones the GitHub repo you pick.',
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to add project';
+      const message = err instanceof Error ? err.message : 'Failed to refresh projects';
       setError(message);
-      showToast.error('Could not add project', { description: message });
+      showToast.error('Could not refresh projects', { description: message });
     } finally {
       setIsAdding(false);
     }
