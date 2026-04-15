@@ -48,9 +48,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
 use djinn_db::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord};
+use djinn_provider::github_app::AppConfig as GhAppConfig;
+use djinn_provider::repos::credential::CredentialRepository;
+use std::sync::Arc;
 
 const SESSION_COOKIE: &str = "djinn_session";
 const OAUTH_STATE_COOKIE: &str = "djinn_oauth_state";
+const MANIFEST_STATE_COOKIE: &str = "djinn_app_manifest_state";
 const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
@@ -70,6 +74,11 @@ pub(super) fn router() -> Router<AppState> {
         .route("/auth/config", get(config))
         .route("/auth/github/start", get(github_start))
         .route("/auth/github/callback", get(github_callback))
+        .route("/auth/github/create-app", get(create_app_form))
+        .route(
+            "/auth/github/app-manifest-callback",
+            get(app_manifest_callback),
+        )
         .route("/auth/logout", post(logout))
 }
 
@@ -78,32 +87,44 @@ struct ConfigResponse {
     configured: bool,
     missing: Vec<&'static str>,
     setup_doc_url: &'static str,
+    /// Path the client can navigate the browser to so the server kicks off
+    /// the GitHub App manifest flow. Always populated; the client only
+    /// shows the button when `configured == false`.
+    create_app_url: &'static str,
 }
 
-/// Report which GitHub App env vars are populated so the client can render
-/// setup guidance instead of a dead-end sign-in button.
-async fn config() -> Json<ConfigResponse> {
-    let required = [
-        "GITHUB_APP_CLIENT_ID",
-        "GITHUB_APP_CLIENT_SECRET",
-        "GITHUB_APP_ID",
-        "GITHUB_APP_SLUG",
-    ];
-    let missing: Vec<&'static str> = required
-        .iter()
-        .copied()
-        .filter(|k| read_github_app_oauth_env(k).is_none())
-        .collect();
-    let private_key_set = read_github_app_oauth_env("GITHUB_APP_PRIVATE_KEY").is_some()
-        || read_github_app_oauth_env("GITHUB_APP_PRIVATE_KEY_PATH").is_some();
-    let mut missing = missing;
-    if !private_key_set {
-        missing.push("GITHUB_APP_PRIVATE_KEY");
+/// Report whether the GitHub App is configured (DB row or env), and offer
+/// a one-click manifest-flow URL so first-time operators can self-provision.
+async fn config(State(state): State<AppState>) -> Json<ConfigResponse> {
+    let active = state.app_config().await;
+    let mut missing: Vec<&'static str> = Vec::new();
+
+    if active.is_none() {
+        // Fall back to env detection so we can produce a useful "missing"
+        // list — same surface as before.
+        let required = [
+            "GITHUB_APP_CLIENT_ID",
+            "GITHUB_APP_CLIENT_SECRET",
+            "GITHUB_APP_ID",
+            "GITHUB_APP_SLUG",
+        ];
+        for k in required {
+            if read_github_app_oauth_env(k).is_none() {
+                missing.push(k);
+            }
+        }
+        let private_key_set = read_github_app_oauth_env("GITHUB_APP_PRIVATE_KEY").is_some()
+            || read_github_app_oauth_env("GITHUB_APP_PRIVATE_KEY_PATH").is_some();
+        if !private_key_set {
+            missing.push("GITHUB_APP_PRIVATE_KEY");
+        }
     }
+
     Json(ConfigResponse {
-        configured: missing.is_empty(),
+        configured: active.is_some(),
         missing,
         setup_doc_url: "https://github.com/djinnos/djinn/blob/main/docs/GITHUB_APP_SETUP.md",
+        create_app_url: "/auth/github/create-app",
     })
 }
 
@@ -203,8 +224,14 @@ struct StartQuery {
     install: Option<String>,
 }
 
-async fn github_start(Query(q): Query<StartQuery>) -> Response {
-    let client_id = match read_github_app_oauth_env("GITHUB_APP_CLIENT_ID") {
+async fn github_start(State(state): State<AppState>, Query(q): Query<StartQuery>) -> Response {
+    let active = state.app_config().await;
+    let client_id = match active
+        .as_ref()
+        .map(|c| c.client_id.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| read_github_app_oauth_env("GITHUB_APP_CLIENT_ID"))
+    {
         Some(v) => v,
         None => {
             tracing::error!("auth /github/start: GITHUB_APP_CLIENT_ID not set");
@@ -285,9 +312,16 @@ async fn github_callback(
         return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
     }
 
-    let client_id = read_github_app_oauth_env("GITHUB_APP_CLIENT_ID").unwrap_or_default();
-    let client_secret =
-        read_github_app_oauth_env("GITHUB_APP_CLIENT_SECRET").unwrap_or_default();
+    let active = state.app_config().await;
+    let (client_id, client_secret) = match active.as_ref() {
+        Some(cfg) if !cfg.client_id.is_empty() && !cfg.client_secret.is_empty() => {
+            (cfg.client_id.clone(), cfg.client_secret.clone())
+        }
+        _ => (
+            read_github_app_oauth_env("GITHUB_APP_CLIENT_ID").unwrap_or_default(),
+            read_github_app_oauth_env("GITHUB_APP_CLIENT_SECRET").unwrap_or_default(),
+        ),
+    };
     if client_id.is_empty() || client_secret.is_empty() {
         tracing::error!("auth callback: GitHub App OAuth env vars missing");
         return (
@@ -344,14 +378,21 @@ async fn github_callback(
     set_cookie(&mut resp_headers, SESSION_COOKIE, &token, SESSION_TTL_SECS);
     clear_cookie(&mut resp_headers, OAUTH_STATE_COOKIE);
     let location = if want_install {
-        match std::env::var("GITHUB_APP_SLUG") {
-            Ok(slug) if !slug.trim().is_empty() => {
-                format!(
-                    "https://github.com/apps/{}/installations/new",
-                    slug.trim()
-                )
-            }
-            _ => {
+        let slug = active
+            .as_ref()
+            .map(|c| c.slug.clone())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("GITHUB_APP_SLUG")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            });
+        match slug {
+            Some(s) => format!(
+                "https://github.com/apps/{}/installations/new",
+                s.trim()
+            ),
+            None => {
                 tracing::warn!(
                     "auth callback: install=1 requested but GITHUB_APP_SLUG is unset"
                 );
@@ -568,6 +609,214 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+// ─── GitHub App manifest auto-provision flow ──────────────────────────────────
+//
+// One-click GitHub App creation per
+// https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
+//
+// Two endpoints:
+//   1. `GET /auth/github/create-app` — set a CSRF cookie + serve an HTML
+//      page that POSTs the manifest JSON to GitHub. Browser navigates to
+//      GitHub's "Create GitHub App" page with our values pre-filled.
+//   2. `GET /auth/github/app-manifest-callback?code=&state=` — GitHub
+//      redirects here once the user confirms. We POST the temporary code
+//      to `/app-manifests/{code}/conversions` to fetch the App's id,
+//      private key, secrets, etc., persist them, swap the in-memory
+//      config, then send the user to `/auth/github/start?install=1`.
+
+/// Build the manifest JSON object for a given public URL. Pure function so
+/// tests can pin its shape.
+pub(crate) fn build_manifest_json(public_url: &str) -> serde_json::Value {
+    let host = url_host(public_url).unwrap_or_else(|| "local".to_string());
+    let permissions = serde_json::json!({
+        "contents": "write",
+        "metadata": "read",
+        "pull_requests": "write",
+        "issues": "write",
+        "actions": "read",
+        "checks": "read",
+    });
+    serde_json::json!({
+        "name": format!("Djinn ({host})"),
+        "url": public_url,
+        "hook_attributes": {
+            "url": format!("{public_url}/webhooks/github"),
+            "active": false,
+        },
+        "redirect_url": format!("{public_url}/auth/github/app-manifest-callback"),
+        "callback_urls": [format!("{public_url}/auth/github/callback")],
+        "request_oauth_on_install": true,
+        "public": false,
+        "default_permissions": permissions,
+        "default_events": [
+            "pull_request", "issues", "push", "check_suite", "workflow_run"
+        ],
+    })
+}
+
+fn url_host(s: &str) -> Option<String> {
+    // Lightweight parser: strip scheme, take up to first `/` or `:`.
+    let after_scheme = s.split("://").nth(1).unwrap_or(s);
+    let host_with_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host_with_port.split(':').next().unwrap_or(host_with_port);
+    if host.is_empty() { None } else { Some(host.to_string()) }
+}
+
+/// Render an auto-submitting HTML form that POSTs our manifest JSON to
+/// `https://github.com/settings/apps/new?state=<csrf>`.
+async fn create_app_form(State(state): State<AppState>) -> Response {
+    if state.app_config().await.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            "GitHub App is already configured; remove the existing config first",
+        )
+            .into_response();
+    }
+
+    let public = public_url();
+    let manifest = build_manifest_json(&public);
+    let manifest_json = manifest.to_string();
+    let csrf = random_token_b64();
+    let manifest_escaped = html_attr_escape(&manifest_json);
+    let csrf_escaped = html_attr_escape(&csrf);
+
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Create Djinn GitHub App</title></head>\
+         <body><p>Redirecting to GitHub to create the Djinn App…</p>\
+         <form id=\"f\" method=\"post\" action=\"https://github.com/settings/apps/new?state={csrf}\">\
+         <input type=\"hidden\" name=\"manifest\" value=\"{manifest}\" />\
+         <noscript><button type=\"submit\">Continue to GitHub</button></noscript>\
+         </form>\
+         <script>document.getElementById('f').submit();</script>\
+         </body></html>",
+        csrf = csrf_escaped,
+        manifest = manifest_escaped,
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    set_cookie(&mut headers, MANIFEST_STATE_COOKIE, &csrf, STATE_COOKIE_TTL_SECS);
+    (StatusCode::OK, headers, html).into_response()
+}
+
+#[derive(Deserialize)]
+struct ManifestCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ManifestConversion {
+    id: u64,
+    slug: String,
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    client_secret: String,
+    #[serde(default)]
+    webhook_secret: Option<String>,
+    pem: String,
+}
+
+async fn app_manifest_callback(
+    State(state): State<AppState>,
+    Query(q): Query<ManifestCallbackQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if state.app_config().await.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            "GitHub App is already configured",
+        )
+            .into_response();
+    }
+
+    let (code, state_param) = match (q.code, q.state) {
+        (Some(c), Some(s)) if !c.is_empty() && !s.is_empty() => (c, s),
+        _ => return (StatusCode::BAD_REQUEST, "missing code or state").into_response(),
+    };
+
+    let Some(cookie_state) = extract_cookie(&headers, MANIFEST_STATE_COOKIE) else {
+        return (StatusCode::BAD_REQUEST, "missing manifest state cookie").into_response();
+    };
+    if !constant_time_eq(cookie_state.as_bytes(), state_param.as_bytes()) {
+        return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
+    }
+
+    let conversion = match exchange_manifest_code(&code).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "manifest callback: conversion failed");
+            return (StatusCode::BAD_GATEWAY, "manifest conversion failed").into_response();
+        }
+    };
+
+    let cfg = GhAppConfig {
+        app_id: conversion.id,
+        slug: conversion.slug,
+        client_id: conversion.client_id,
+        client_secret: conversion.client_secret,
+        pem: conversion.pem,
+        webhook_secret: conversion.webhook_secret.unwrap_or_default(),
+        public_url: public_url(),
+    };
+
+    let repo = CredentialRepository::new(state.db().clone(), state.event_bus());
+    if let Err(e) = repo.set_github_app_config(&cfg).await {
+        tracing::error!(error = %e, "manifest callback: failed to persist App config");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    cfg.export_to_env();
+    state.set_app_config(Some(Arc::new(cfg))).await;
+
+    let mut resp_headers = HeaderMap::new();
+    clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
+    let location = "/auth/github/start?install=1";
+    resp_headers.insert(
+        header::LOCATION,
+        HeaderValue::from_static(location),
+    );
+    (StatusCode::FOUND, resp_headers).into_response()
+}
+
+async fn exchange_manifest_code(code: &str) -> Result<ManifestConversion, String> {
+    let url = format!("https://api.github.com/app-manifests/{code}/conversions");
+    let client = Client::new();
+    let resp = client
+        .post(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "djinn-server")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("manifest conversion HTTP {status}: {body}"));
+    }
+    resp.json::<ManifestConversion>()
+        .await
+        .map_err(|e| format!("manifest conversion decode: {e}"))
+}
+
+fn html_attr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,5 +870,109 @@ mod tests {
         assert!(session_expired("2000-01-01T00:00:00Z"));
         assert!(!session_expired("2099-01-01T00:00:00Z"));
         assert!(session_expired("not-a-date"));
+    }
+
+    #[test]
+    fn manifest_json_has_expected_shape() {
+        let manifest = build_manifest_json("https://djinn.example.com");
+        assert_eq!(manifest["name"], "Djinn (djinn.example.com)");
+        assert_eq!(manifest["url"], "https://djinn.example.com");
+        assert_eq!(
+            manifest["redirect_url"],
+            "https://djinn.example.com/auth/github/app-manifest-callback"
+        );
+        assert_eq!(
+            manifest["callback_urls"][0],
+            "https://djinn.example.com/auth/github/callback"
+        );
+        assert_eq!(
+            manifest["hook_attributes"]["url"],
+            "https://djinn.example.com/webhooks/github"
+        );
+        assert_eq!(manifest["hook_attributes"]["active"], false);
+        assert_eq!(manifest["request_oauth_on_install"], true);
+        assert_eq!(manifest["public"], false);
+        assert_eq!(manifest["default_permissions"]["contents"], "write");
+        assert_eq!(manifest["default_permissions"]["pull_requests"], "write");
+        assert_eq!(manifest["default_permissions"]["metadata"], "read");
+        let events = manifest["default_events"].as_array().unwrap();
+        assert!(events.iter().any(|v| v == "pull_request"));
+        assert!(events.iter().any(|v| v == "push"));
+        // Round-trips as valid JSON.
+        let s = manifest.to_string();
+        let _back: serde_json::Value = serde_json::from_str(&s).unwrap();
+    }
+
+    #[test]
+    fn manifest_url_host_handles_localhost_fallback() {
+        assert_eq!(url_host("http://127.0.0.1:8372").as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            url_host("https://djinn.example.com/path").as_deref(),
+            Some("djinn.example.com")
+        );
+        assert_eq!(url_host("not a url").as_deref(), Some("not a url"));
+    }
+
+    #[test]
+    fn html_attr_escape_neutralises_quotes_and_brackets() {
+        let raw = "<\"&'>";
+        assert_eq!(html_attr_escape(raw), "&lt;&quot;&amp;&#39;&gt;");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_app_form_refuses_when_already_configured() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        // Seed an in-memory configured state.
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let resp = create_app_form(State(state.clone())).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_callback_refuses_when_already_configured() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let q = ManifestCallbackQuery {
+            code: Some("xyz".into()),
+            state: Some("abc".into()),
+        };
+        let resp = app_manifest_callback(
+            State(state.clone()),
+            Query(q),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn csrf_state_round_trip_via_constant_time_eq() {
+        let token = random_token_b64();
+        assert!(constant_time_eq(token.as_bytes(), token.as_bytes()));
+        let mut tampered = token.clone().into_bytes();
+        tampered[0] ^= 1;
+        assert!(!constant_time_eq(token.as_bytes(), &tampered));
     }
 }

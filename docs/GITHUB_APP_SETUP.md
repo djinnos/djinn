@@ -5,9 +5,34 @@ access tokens scope what the server can see to whatever accounts/orgs have
 installed the App, and any commits created server-side are attributed to
 the bot identity `djinn-bot[bot]`.
 
+## One-click setup (recommended)
+
+The fastest path: open the Djinn web client, and on the unauthenticated
+sign-in screen click **"Create Djinn GitHub App"**. That:
+
+1. Sends you to GitHub's "Create GitHub App" page with every field already
+   filled in (callback URL, permissions, events, hook target).
+2. After you click **"Create GitHub App for &lt;account&gt;"**, GitHub
+   redirects back to Djinn carrying a one-time `code`.
+3. Djinn POSTs the code to `https://api.github.com/app-manifests/{code}/conversions`,
+   gets back the App's id, slug, client id/secret, webhook secret, and
+   private key, then **persists them in the server's encrypted credentials
+   store** under `__GITHUB_APP_CONFIG`.
+4. The new credentials are hot-loaded into the running process (no restart),
+   and you're sent straight to the GitHub install page so you can grant
+   the App access to your repos.
+
+You never touch `.env`. The persisted blob always wins over env vars on
+subsequent boots.
+
+If you'd rather wire it up by hand (corporate proxy, infra-as-code,
+reproducible compose secrets, ...), follow the manual path below.
+
+## Manual setup
+
 This takes about 10 minutes. You do it once per deployment.
 
-## 1. Create the App
+### 1. Create the App
 
 1. Visit <https://github.com/settings/apps/new> (personal) or
    `https://github.com/organizations/<org>/settings/apps/new` (org-owned).
@@ -32,7 +57,7 @@ This takes about 10 minutes. You do it once per deployment.
    want to restrict to your own org.
 9. Click **Create GitHub App**.
 
-## 2. Collect credentials
+### 2. Collect credentials
 
 On the App's settings page you now have:
 
@@ -48,7 +73,7 @@ On the App's settings page you now have:
   - paste the full PEM (with literal `\n` newlines or real line breaks)
     into `GITHUB_APP_PRIVATE_KEY` in your `.env`.
 
-## 3. Fill in `.env`
+### 3. Fill in `.env`
 
 Copy `server/.env.example` to `server/.env` and populate:
 
@@ -65,7 +90,7 @@ App, click **Connect GitHub** with `?install=1` (or use the `Install Djinn`
 button in the desktop app) to land on the install page. Grant it access to
 the repos you want Djinn to touch.
 
-## 4. Verify
+### 4. Verify
 
 ```sh
 curl -s http://127.0.0.1:8372/auth/me
