@@ -1,14 +1,17 @@
 pub mod codex;
 pub mod copilot;
-pub mod github_app;
 
 use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
 
 /// Which OAuth flow to run, determined by provider ID.
+///
+/// The historical `GitHubApp` variant backed the retired OAuth App
+/// device-code flow. The server now exposes GitHub auth exclusively through
+/// the browser-based `/auth/github/*` routes (App user-to-server OAuth) and
+/// through App installation tokens — there is no MCP-initiated flow left.
 pub enum OAuthFlowKind {
     Codex,
     Copilot,
-    GitHubApp,
 }
 
 impl OAuthFlowKind {
@@ -17,7 +20,6 @@ impl OAuthFlowKind {
         match id {
             "chatgpt-codex" | "chatgpt_codex" | "codex" | "openai-codex" => Some(Self::Codex),
             "github-copilot" | "github_copilot" | "copilot" => Some(Self::Copilot),
-            "github-app" | "github_app" | "githubapp" => Some(Self::GitHubApp),
             _ => None,
         }
     }

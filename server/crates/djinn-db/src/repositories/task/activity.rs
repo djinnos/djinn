@@ -15,7 +15,7 @@ impl TaskRepository {
         sqlx::query(
             "INSERT INTO activity_log
                 (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(task_id)
@@ -27,7 +27,7 @@ impl TaskRepository {
         .await?;
         let entry = sqlx::query_as::<_, ActivityEntry>(
             "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
-             FROM activity_log WHERE id = ?1",
+             FROM activity_log WHERE id = ?",
         )
         .bind(&id)
         .fetch_one(&mut *tx)
@@ -49,7 +49,7 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, ActivityEntry>(
             "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
-             FROM activity_log WHERE task_id = ?1 AND archived = 0 ORDER BY created_at",
+             FROM activity_log WHERE task_id = ? AND archived = 0 ORDER BY created_at",
         )
         .bind(task_id)
         .fetch_all(self.db.pool())
@@ -114,8 +114,8 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT payload FROM activity_log
-             WHERE task_id = ?1 AND event_type = 'status_changed'
-               AND json_extract(payload, '$.to_status') = 'in_task_review'
+             WHERE task_id = ? AND event_type = 'status_changed'
+               AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.to_status')) = 'in_task_review'
                AND archived = 0
              ORDER BY created_at DESC LIMIT 1",
         )
@@ -134,7 +134,7 @@ impl TaskRepository {
     pub async fn archive_activity_for_task(&self, task_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
         let result =
-            sqlx::query("UPDATE activity_log SET archived = 1 WHERE task_id = ?1 AND archived = 0")
+            sqlx::query("UPDATE activity_log SET archived = 1 WHERE task_id = ? AND archived = 0")
                 .bind(task_id)
                 .execute(self.db.pool())
                 .await?;

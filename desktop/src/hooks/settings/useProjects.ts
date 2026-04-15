@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { addProject, fetchProjects, removeProject, type Project } from '@/api/server';
+import { fetchProjects, removeProject, type Project } from '@/api/server';
 import { showToast } from '@/lib/toast';
-import { selectDirectory, syncGithubTokens } from '@/electron/commands';
 
 export function useProjects() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -27,30 +26,23 @@ export function useProjects() {
     void loadProjects();
   }, [loadProjects]);
 
+  // Migration 2: the server owns the filesystem — the Settings page no
+  // longer has a local-directory picker. Add Project is now triggered from
+  // the sidebar via <AddProjectFromGithubDialog>. This hook retains a stub
+  // so callers can refresh the project list after an external add and can
+  // display the "adding…" state during the refresh.
   const handleAddProject = useCallback(async () => {
     setIsAdding(true);
     setError(null);
     try {
-      const path = await selectDirectory('Select Project Directory');
-      if (!path) return;
-      try {
-        await addProject(path);
-      } catch (err) {
-        // If the server doesn't have GitHub tokens yet, re-sync and retry once.
-        const msg = err instanceof Error ? err.message : '';
-        if (msg.includes('Connect GitHub first')) {
-          await syncGithubTokens();
-          await addProject(path);
-        } else {
-          throw err;
-        }
-      }
       await loadProjects();
-      showToast.success('Project added');
+      showToast.info(
+        'Add projects from the sidebar — the server clones the GitHub repo you pick.',
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to add project';
+      const message = err instanceof Error ? err.message : 'Failed to refresh projects';
       setError(message);
-      showToast.error('Could not add project', { description: message });
+      showToast.error('Could not refresh projects', { description: message });
     } finally {
       setIsAdding(false);
     }

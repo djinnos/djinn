@@ -41,6 +41,21 @@ Instead of juggling terminal windows and manually switching between models and r
   </a>
 </p>
 
+## Quick start
+
+Requires Docker.
+
+    docker compose up
+
+This starts:
+- djinn-server on http://127.0.0.1:8372
+- Dolt (MySQL-compatible) on 127.0.0.1:3306
+- Qdrant on 127.0.0.1:6333 (HTTP) + 6334 (gRPC)
+
+Run Claude Code — the `djinn` plugin (configured for HTTP) connects automatically.
+
+See [DEPLOY.md](DEPLOY.md) for deployment details, data persistence, and remote-server configuration.
+
 ## How It Works
 
 ```
@@ -57,39 +72,23 @@ Instead of juggling terminal windows and manually switching between models and r
 
 ## Install
 
-Download the latest release for your platform:
+Djinn ships as a Dockerized server plus a web client. The previous
+Electron desktop build has been retired.
 
-<table>
-  <tr>
-    <td>🍎 <strong>macOS</strong></td>
-    <td><a href="https://djinnai.io/api/download?platform=mac-arm64">Apple Silicon (.dmg)</a></td>
-  </tr>
-  <tr>
-    <td>🐧 <strong>Linux</strong></td>
-    <td><a href="https://djinnai.io/api/download?platform=linux-appimage">AppImage</a> · <a href="https://djinnai.io/api/download?platform=linux-deb">.deb</a></td>
-  </tr>
-  <tr>
-    <td>🪟 <strong>Windows</strong></td>
-    <td><a href="https://djinnai.io/api/download?platform=windows">Installer (.exe)</a></td>
-  </tr>
-</table>
+```bash
+# 1. Start the server (runs on http://127.0.0.1:8372)
+docker compose up -d
+
+# 2. Run the web client
+cd desktop
+pnpm install
+pnpm dev   # opens http://127.0.0.1:1420
+```
+
+Set `VITE_DJINN_SERVER_URL` when running `pnpm dev` / `pnpm build` if the
+server is on a different host or port.
 
 > Works with any LLM provider supported by [OpenCode](https://opencode.ai) — use your existing subscription plans or API keys.
-
-<details>
-<summary>Linux install instructions</summary>
-
-**AppImage:**
-```bash
-chmod +x Djinn-*.AppImage
-./Djinn-*.AppImage
-```
-
-**Debian/Ubuntu:**
-```bash
-sudo dpkg -i Djinn-*.deb
-```
-</details>
 
 ## Features
 
@@ -119,15 +118,13 @@ Everything runs on your machine. Your code never touches external servers. Agent
 
 ## Using Djinn with Your Own Tools
 
-Djinn runs a background daemon (`djinn-server`) that exposes task management and persistent memory as MCP tools. The daemon starts automatically and stays running between sessions — Djinn Desktop does not need to be open.
+Djinn runs a Dockerized server (`djinn-server`) that exposes task management and persistent memory as MCP tools. The server is the single source of truth — the web client is just one consumer.
 
-Any MCP-compatible tool can connect via the `djinn-server --mcp-connect` stdio bridge, which auto-discovers and auto-starts the daemon.
-
-> **Note:** Djinn Desktop must have been launched at least once to install `djinn-server` on your PATH.
+Any MCP-compatible tool can connect via the `djinn-server --mcp-connect` stdio bridge, which auto-discovers and auto-starts the daemon when installed on the host.
 
 ### Claude Code
 
-Djinn Desktop automatically installs a [Claude Code plugin](https://code.claude.com/docs/en/plugins) when it detects Claude Code on your system. No manual setup required — just have both installed.
+Djinn ships a [Claude Code plugin](https://code.claude.com/docs/en/plugins) under `plugin/` that you can register against Claude Code directly — no Electron host required.
 
 The plugin gives you:
 - The `djinn` skill — auto-activates when you work with tasks, memory, or execution
@@ -256,6 +253,12 @@ Filesystem-first usage guidance:
 | **Projects** | `projects_list`, `projects_add` | Multi-project management |
 | **Settings** | `settings_get`, `settings_save` | Configuration management |
 | **Execution** | `execution_start`, `execution_pause` | Control the task executor |
+
+## Configuration
+
+- [GitHub App setup](docs/GITHUB_APP_SETUP.md) — one-time steps to connect
+  the server to a GitHub App so repo operations (clone, push, PRs) run
+  under installation tokens and commits are attributed to `djinn-bot[bot]`.
 
 ## Community
 

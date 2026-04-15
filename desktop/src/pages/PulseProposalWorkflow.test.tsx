@@ -7,7 +7,18 @@ import { callMcpTool } from "@/api/mcpClient";
 import { projectStore } from "@/stores/projectStore";
 import { epicStore } from "@/stores/epicStore";
 import { taskStore } from "@/stores/taskStore";
-import { useAuthStore } from "@/stores/authStore";
+vi.mock("@/components/AuthGate", async () => {
+  const actual = await vi.importActual<typeof import("@/components/AuthGate")>("@/components/AuthGate");
+  return {
+    ...actual,
+    useAuthUser: () => ({
+      id: "user-1",
+      login: "fernando",
+      name: "Fernando",
+      avatarUrl: null,
+    }),
+  };
+});
 
 const { mockNavigate } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
@@ -68,12 +79,6 @@ describe("Pulse architect proposal workflow", () => {
       projects: [{ id: "project-a", name: "Project Alpha", path: "/tmp/project-alpha" }],
       selectedProjectId: "project-a",
       lastViewPerProject: {},
-    });
-    useAuthStore.setState({
-      isAuthenticated: true,
-      user: { sub: "user-1", email: "fernando@example.com", name: "Fernando" },
-      isLoading: false,
-      error: null,
     });
   });
 

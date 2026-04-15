@@ -59,7 +59,14 @@ pub async fn dispatch_chat_tool(
         "read" => handlers::call_read(state, &arguments, &effective_root).await,
         "lsp" => handlers::call_lsp(state, &arguments, &effective_root).await,
         "code_graph" => handlers::call_code_graph(state, &arguments, &effective_root_str).await,
-        "github_search" => handlers::call_github_search(state, &arguments).await,
+        "github_search" => {
+            let project_id = {
+                let repo =
+                    djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+                repo.resolve(&effective_root_str).await.ok().flatten()
+            };
+            handlers::call_github_search(state, &arguments, project_id.as_deref()).await
+        }
         _ => Err(format!("unknown chat extension tool: {name}")),
     }
 }
