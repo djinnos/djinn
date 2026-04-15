@@ -36,9 +36,6 @@ mod transport;
 mod types;
 
 use reqwest::Client;
-use std::sync::Arc;
-
-use crate::repos::CredentialRepository;
 
 pub use types::{
     ActionsJob, ActionsJobStep, CheckAnnotation, CheckRun, CheckRunsResponse, CreatePrParams,
@@ -55,19 +52,16 @@ pub const GITHUB_API_BASE: &str = "https://api.github.com";
 /// tokens, and an optional override for the API base URL (used in tests).
 /// How the GitHub API client authenticates outbound requests.
 ///
-/// The legacy flow reads a cached OAuth App user token from the credential
-/// DB (under `__OAUTH_GITHUB_APP`). The preferred GitHub-App flow carries a
-/// cached installation id and mints fresh installation tokens on demand —
-/// these tokens attribute API actions to `djinn-bot[bot]` without requiring
-/// any user sign-in on the server side.
+/// The legacy user-token path has been removed — every MCP request now
+/// threads the caller's GitHub access token through the
+/// `djinn_core::auth_context::SESSION_USER_TOKEN` task-local, and
+/// non-user server paths must go through the `Installation` variant (which
+/// mints App installation tokens attributed to `djinn-bot[bot]`).
 #[derive(Clone)]
 pub(super) enum AuthMode {
-    /// Read `GitHubAppTokens` (user-to-server OAuth token) from the
-    /// credential DB on each call. Retained for compatibility with existing
-    /// call sites; prefer `Installation` for new code.
-    UserToken {
-        cred_repo: Arc<CredentialRepository>,
-    },
+    /// Read the authenticated user's GitHub access token from the
+    /// per-request task-local. Used by MCP tools invoked via HTTP.
+    SessionUser,
     /// Mint a GitHub App installation token for each call.
     Installation { installation_id: u64 },
 }
@@ -81,14 +75,11 @@ pub struct GitHubApiClient {
 }
 
 impl GitHubApiClient {
-    /// Create a client that authenticates with the cached user OAuth token.
-    pub fn new(cred_repo: Arc<CredentialRepository>) -> Self {
-        Self::with_base_url(cred_repo, GITHUB_API_BASE.to_string())
-    }
-
-    /// Create a client with a custom API base URL (useful for tests).
-    pub fn with_base_url(cred_repo: Arc<CredentialRepository>, base_url: String) -> Self {
-        Self::build(AuthMode::UserToken { cred_repo }, base_url)
+    /// Create a client that reads the caller's GitHub user access token from
+    /// the per-request task-local (`SESSION_USER_TOKEN`). Requests made
+    /// outside an active MCP scope will fail with a "sign in" error.
+    pub fn for_session_user() -> Self {
+        Self::build(AuthMode::SessionUser, GITHUB_API_BASE.to_string())
     }
 
     /// Create a client that authenticates as a GitHub App installation.

@@ -22,13 +22,31 @@ The GitHub App migration landed in `feat/github-app` and was finalised on
 - Provider OAuth MCP flow for `github-app` is gone — the device-code
   variant was retired.
 
-## Follow-ups (out of scope for this branch)
+## GitHub App migration complete
 
-- [ ] Thread the authenticated user's GitHub token from
-  `user_auth_sessions` into MCP calls so `github_app_installations` /
-  `github_list_repos` stop reading the legacy `__OAUTH_GITHUB_APP`
-  credential row. Today those tools still fall back to the compat shim
-  because MCP handlers don't carry the HTTP session context.
-- [ ] One-shot ops cleanup pass to `DELETE FROM credentials WHERE
-  key_name = '__OAUTH_GITHUB_APP'` after all deployed servers have
-  stopped needing the compat shim.
+Finalised on `feat/github-app-cleanup`:
+
+- HTTP MCP handler authenticates the incoming request and scopes the
+  dispatch under a `tokio::task_local!` (`djinn_core::auth_context::
+  SESSION_USER_TOKEN`) carrying the session's `github_access_token`.
+- MCP tools (`github_app_installations`, `github_list_repos`,
+  `project_add_from_github`, `github_search`, `github_fetch_file`) read
+  that task-local via `current_user_token()`. No task-local → clear
+  "sign in with GitHub required" error.
+- `djinn-provider::github_app::user_token_compat` is deleted. The
+  `GitHubApiClient::new(cred_repo)` / `with_base_url(cred_repo, _)`
+  constructors are replaced by `for_session_user()` and the
+  installation-scoped `for_installation[_with_base_url]`; the
+  `AuthMode::UserToken { cred_repo }` variant is gone.
+- Old host-path `project_add` MCP tool + `addProject(path)` desktop
+  helper retired (no UI callers remained).
+- `catalog::builtin::is_oauth_key_present` no longer recognises
+  `GITHUB_APP_TOKEN` — the device-code flow is fully gone.
+
+## Ops note
+
+Existing deployments may still carry a stale `__OAUTH_GITHUB_APP` row in
+the `credentials` table. It's unused and harmless; operators who want to
+clean up can run `DELETE FROM credentials WHERE key_name =
+'__OAUTH_GITHUB_APP'`. The `provider_remove` flow for `github_app` also
+scrubs this row as a best-effort on user-initiated removal.

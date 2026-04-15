@@ -5,17 +5,12 @@
 //! tokens — those are server-internal and used by clone/fetch/push paths in
 //! [`crate::tools::project_tools`].
 
-use std::sync::Arc;
-
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use djinn_provider::github_app::{
-    Installation, install_url, list_installations_for_user,
-    user_token_compat::load_user_tokens,
-};
-use djinn_provider::repos::CredentialRepository;
+use djinn_core::auth_context::current_user_token;
+use djinn_provider::github_app::{Installation, install_url, list_installations_for_user};
 
 use crate::server::DjinnMcpServer;
 
@@ -91,23 +86,18 @@ impl DjinnMcpServer {
         &self,
         Parameters(_): Parameters<GithubAppInstallationsParams>,
     ) -> Json<GithubAppInstallationsResponse> {
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.event_bus(),
-        ));
-
-        // We need a user token to call GET /user/installations. The
-        // device-code-flow user token (legacy, stored at
-        // __OAUTH_GITHUB_APP) is fine here — any user-to-server token works.
-        let Some(tokens) = load_user_tokens(&cred_repo).await else {
+        // We need a user token to call GET /user/installations. The token
+        // is threaded in via the `SESSION_USER_TOKEN` task-local, set by
+        // the HTTP MCP handler after resolving the `djinn_session` cookie.
+        let Some(access_token) = current_user_token() else {
             return Json(GithubAppInstallationsResponse {
-                status: "error: Connect GitHub first".into(),
+                status: "error: sign in with GitHub required".into(),
                 installations: vec![],
                 install_url: install_url(),
             });
         };
 
-        match list_installations_for_user(&tokens.access_token).await {
+        match list_installations_for_user(&access_token).await {
             Ok(list) => {
                 let installations: Vec<InstallationEntry> =
                     list.into_iter().map(installation_to_entry).collect();

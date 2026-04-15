@@ -1,17 +1,34 @@
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
+use djinn_core::auth_context::SESSION_USER_TOKEN;
 use serde_json::Value;
 
 use super::AppState;
+use super::auth::authenticate;
 
 pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> impl IntoResponse {
+    let headers = req.headers().clone();
     let worktree_root = req
         .headers()
         .get("x-djinn-worktree-root")
         .and_then(|value| value.to_str().ok())
         .map(std::path::PathBuf::from)
         .filter(|path| path.join(".git").exists());
+
+    // Resolve the authenticated user's GitHub access token (if any) and
+    // thread it through MCP dispatch via a tokio task-local. Tools that
+    // need to call user-scoped GitHub endpoints read this via
+    // `djinn_core::auth_context::current_user_token()`.
+    let user_token: Option<String> = match authenticate(&state, &headers).await {
+        Ok(Some(user)) => Some(user.github_access_token),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!(error = %err, "mcp_handler: authenticate failed; proceeding unauth");
+            None
+        }
+    };
+
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Ok(body) => body,
         Err(err) => {
@@ -34,7 +51,29 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
         }
     };
 
-    let response = match payload.get("method").and_then(Value::as_str) {
+    // `notifications/initialized` has no response body — handle it directly.
+    if payload.get("method").and_then(Value::as_str) == Some("notifications/initialized") {
+        return StatusCode::ACCEPTED.into_response();
+    }
+
+    let response = SESSION_USER_TOKEN
+        .scope(user_token, dispatch(state.clone(), worktree_root, payload.clone()))
+        .await;
+
+    let mut resp = axum::Json(response).into_response();
+    if payload.get("method").and_then(Value::as_str) == Some("initialize") {
+        resp.headers_mut()
+            .insert("mcp-session-id", HeaderValue::from_static("test-session"));
+    }
+    resp
+}
+
+async fn dispatch(
+    state: AppState,
+    worktree_root: Option<std::path::PathBuf>,
+    payload: Value,
+) -> Value {
+    match payload.get("method").and_then(Value::as_str) {
         Some("initialize") => {
             serde_json::json!({
                 "jsonrpc": "2.0",
@@ -48,9 +87,6 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
                     }
                 }
             })
-        }
-        Some("notifications/initialized") => {
-            return StatusCode::ACCEPTED.into_response();
         }
         Some("tools/call") => {
             let params = payload.get("params").cloned().unwrap_or(Value::Null);
@@ -97,12 +133,5 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
             "id": payload.get("id").cloned().unwrap_or(Value::Null),
             "error": { "code": -32600, "message": "missing method" }
         }),
-    };
-
-    let mut resp = axum::Json(response).into_response();
-    if payload.get("method").and_then(Value::as_str) == Some("initialize") {
-        resp.headers_mut()
-            .insert("mcp-session-id", HeaderValue::from_static("test-session"));
     }
-    resp
 }

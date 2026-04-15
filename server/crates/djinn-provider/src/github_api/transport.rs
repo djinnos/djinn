@@ -17,14 +17,8 @@ impl GitHubApiClient {
     /// configured [`AuthMode`].
     pub(super) async fn bearer_token(&self) -> Result<String> {
         match &self.auth {
-            AuthMode::UserToken { cred_repo } => {
-                let tokens = crate::github_app::user_token_compat::load_user_tokens(cred_repo)
-                    .await
-                    .ok_or_else(|| {
-                        anyhow!("No GitHub App user token found — please authenticate first")
-                    })?;
-                Ok(tokens.access_token)
-            }
+            AuthMode::SessionUser => djinn_core::auth_context::current_user_token()
+                .ok_or_else(|| anyhow!("sign in with GitHub required")),
             AuthMode::Installation { installation_id } => {
                 let tok = crate::github_app::get_installation_token(*installation_id)
                     .await
@@ -62,7 +56,7 @@ impl GitHubApiClient {
         }
 
         match &self.auth {
-            AuthMode::UserToken { .. } => Err(anyhow!(
+            AuthMode::SessionUser => Err(anyhow!(
                 "GitHub API returned 401 — token may have been revoked, please re-authenticate"
             )),
             AuthMode::Installation { installation_id } => {

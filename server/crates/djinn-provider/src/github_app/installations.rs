@@ -97,6 +97,19 @@ fn rfc3339_duration_until(ts: &str) -> Option<Duration> {
     Some(Duration::from_secs(d.whole_seconds().max(0) as u64))
 }
 
+/// Test-only: prime the installation-token cache with a fake token. Lets
+/// tests exercise the installation auth path without hitting GitHub.
+#[doc(hidden)]
+pub fn prime_cache_for_tests(installation_id: u64, token_value: &str) {
+    let token = InstallationToken {
+        token: token_value.to_string(),
+        expires_at: "2099-01-01T00:00:00Z".into(),
+        permissions: Default::default(),
+        repositories_url: None,
+    };
+    cache_put(installation_id, token);
+}
+
 /// Clear a cached installation token (e.g. after a 401 response).
 pub fn invalidate_cache(installation_id: u64) {
     if let Ok(mut guard) = cache().lock() {

@@ -63,11 +63,7 @@ pub(super) async fn call_ci_job_log(
         })?
     };
 
-    let cred_repo = Arc::new(CredentialRepository::new(
-        state.db.clone(),
-        state.event_bus.clone(),
-    ));
-    let gh_client = GitHubApiClient::new(cred_repo);
+    let gh_client = GitHubApiClient::for_session_user();
 
     let raw_log = gh_client
         .get_job_logs(&owner, &repo, p.job_id)
