@@ -238,6 +238,24 @@ impl ProjectRepository {
         }))
     }
 
+    /// Return the cached GitHub App installation id for a project, if any.
+    ///
+    /// Returns `Ok(None)` when the project row has no cached installation
+    /// (legacy host-path projects, Migration-2 rows written before Migration
+    /// 4, or the project id is unknown). The push/PR-create path uses this
+    /// to mint an installation token without discovering the installation
+    /// at request time.
+    pub async fn get_installation_id(&self, project_id: &str) -> Result<Option<u64>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<Option<i64>> = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT installation_id FROM projects WHERE id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row.flatten().map(|v| v as u64))
+    }
+
     /// Find a project by its GitHub owner/repo coordinates.
     ///
     /// Returns `Ok(None)` if no project row has both columns set to the
@@ -265,6 +283,11 @@ impl ProjectRepository {
     /// where the repo has been cloned (e.g. `/root/.djinn/projects/acme/widgets`).
     /// `path` is set equal to `clone_path` so existing path-keyed joins and
     /// resolvers keep working without changes.
+    ///
+    /// `installation_id` is the GitHub App installation id that grants
+    /// access to the repo; caching it here lets every later push/PR-create
+    /// path mint installation tokens without walking the authenticated
+    /// user's installations first (Migration 4).
     pub async fn create_from_github(
         &self,
         name: &str,
@@ -272,13 +295,17 @@ impl ProjectRepository {
         repo: &str,
         default_branch: &str,
         clone_path: &str,
+        installation_id: Option<u64>,
     ) -> Result<Project> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
+        // SQLite stores u64 as i64; cast lossily (installation IDs fit in i64
+        // comfortably — GitHub uses ~8-digit values today).
+        let installation_id_i64: Option<i64> = installation_id.map(|v| v as i64);
         sqlx::query(
             "INSERT INTO projects
-                (id, name, path, github_owner, github_repo, default_branch, clone_path, target_branch)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (id, name, path, github_owner, github_repo, default_branch, clone_path, target_branch, installation_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(name)
@@ -288,6 +315,7 @@ impl ProjectRepository {
         .bind(default_branch)
         .bind(clone_path)
         .bind(default_branch)
+        .bind(installation_id_i64)
         .execute(self.db.pool())
         .await?;
 

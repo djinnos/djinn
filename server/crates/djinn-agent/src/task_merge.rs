@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 
 use crate::context::AgentContext;
 use crate::knowledge_promotion::{
@@ -12,10 +11,8 @@ use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 use djinn_git::GitError;
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
 use djinn_provider::github_app::{
-    find_installation_for_repo, get_installation_token, installations::invalidate_cache,
+    app_id as github_app_id, get_installation_token, installations::invalidate_cache,
 };
-use djinn_provider::oauth::github_oauth_app_legacy::GitHubAppTokens;
-use djinn_provider::repos::CredentialRepository;
 
 /// Build the HTTPS push URL for a GitHub repo authenticated by a GitHub App
 /// **installation** access token.
@@ -107,24 +104,17 @@ async fn try_create_github_pr(
     project_id: &str,
     app_state: &AgentContext,
 ) -> Result<Option<String>, String> {
-    let cred_repo = Arc::new(CredentialRepository::new(
-        app_state.db.clone(),
-        app_state.event_bus.clone(),
-    ));
-
-    // Load the legacy user OAuth token — still required to open the PR via
-    // the REST API and to discover which App installation covers this repo.
-    // Push authentication uses a freshly-minted installation token instead
-    // (see below). If the user hasn't connected GitHub yet, skip the
-    // PR-creation path entirely so the caller can fall back.
-    let Some(user_tokens) = GitHubAppTokens::load_from_db(&cred_repo).await else {
+    // The GitHub App must be configured for any PR-creation path to work.
+    // Fall back to direct-push if the server is running without an App
+    // (e.g. local dev): callers treat `Ok(None)` as "no App available".
+    if github_app_id().is_err() {
         return Ok(None);
-    };
+    }
 
-    // Resolve owner/repo from the persisted project row (set at
-    // `project_add_from_github` time). Legacy rows from before Migration 2
-    // leave these NULL and are not pushable through the App; fail cleanly
-    // rather than falling back to a user-token push.
+    // Resolve owner/repo + installation id from the persisted project row
+    // (set at `project_add_from_github` time, Migrations 2 + 4). Legacy
+    // rows without either column are not pushable through the App; fail
+    // cleanly rather than falling back to a user-token push.
     let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let (owner, repo_name) = match project_repo.get_github_coords(project_id).await {
         Ok(Some(coords)) => coords,
@@ -142,17 +132,24 @@ async fn try_create_github_pr(
         }
     };
 
-    // Resolve the App installation that covers this repo, then mint a
-    // 1-hour installation access token for the push URL. Both calls are
-    // cached in-process (see `github_app::installations`).
-    let installation_id =
-        find_installation_for_repo(&user_tokens.access_token, &owner, &repo_name)
-            .await
-            .map_err(|e| {
-                format!(
-                    "could not find a Djinn App installation for {owner}/{repo_name}: {e}"
-                )
-            })?;
+    let installation_id = match project_repo.get_installation_id(project_id).await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return Err(format!(
+                "project {project_id} ({owner}/{repo_name}) has no cached installation_id — \
+                 re-add this project via `project_add_from_github` so the Djinn GitHub \
+                 App installation is persisted on the row"
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to read installation_id for project {project_id}: {e}"
+            ));
+        }
+    };
+
+    // Mint a 1-hour installation access token for the push URL (cached in
+    // process — see `github_app::installations`).
     let install_token = get_installation_token(installation_id)
         .await
         .map_err(|e| format!("could not mint installation token: {e}"))?;
@@ -302,7 +299,10 @@ async fn try_create_github_pr(
     };
     let pr_title = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
-    let github_client = GitHubApiClient::new(cred_repo);
+    // PR creation goes through the same installation token used for the
+    // push, so the PR and its commits are attributed to the App bot instead
+    // of an authenticated user.
+    let github_client = GitHubApiClient::for_installation(installation_id);
     let head_ref = format!("{owner}:{base_branch}");
 
     // Before creating a new PR, check if one already exists (open or closed)

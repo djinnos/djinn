@@ -2,8 +2,12 @@ use djinn_core::events::EventBus;
 use djinn_db::Database;
 use std::sync::Arc;
 
-use crate::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 use crate::repos::CredentialRepository;
+
+/// Credential-DB key used by the retired OAuth App device-code flow. The
+/// user-token compat shim still reads rows written under this key, so tests
+/// seed the DB here to exercise the default `AuthMode::UserToken` path.
+const LEGACY_OAUTH_APP_DB_KEY: &str = "__OAUTH_GITHUB_APP";
 
 mod checks;
 mod pull_requests;
@@ -21,7 +25,7 @@ pub async fn seed_tokens(repo: &CredentialRepository, access_token: &str) {
         "user_login": "djinn-test",
     })
     .to_string();
-    repo.set("github_app", GITHUB_APP_OAUTH_DB_KEY, &json)
+    repo.set("github_app", LEGACY_OAUTH_APP_DB_KEY, &json)
         .await
         .unwrap();
 }

@@ -9,7 +9,7 @@ use tokio::fs;
 use crate::server::DjinnMcpServer;
 use djinn_db::{ProjectRepository, VerificationRule};
 use djinn_provider::github_api::GitHubApiClient;
-use djinn_provider::oauth::github_app::GitHubAppTokens;
+use djinn_provider::github_app::user_token_compat::load_user_tokens;
 use djinn_provider::repos::CredentialRepository;
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
@@ -185,7 +185,7 @@ async fn validate_github_remote(
     })?;
 
     // 3. Check that we have GitHub tokens.
-    let has_tokens = GitHubAppTokens::load_from_db(&cred_repo).await.is_some();
+    let has_tokens = load_user_tokens(&cred_repo).await.is_some();
     if !has_tokens {
         return Err("Connect GitHub first".to_string());
     }
@@ -640,7 +640,7 @@ impl DjinnMcpServer {
 
         // 1. Must have GitHub App tokens loaded (user OAuth token, used
         //    server-side to discover installations).
-        let Some(user_tokens) = GitHubAppTokens::load_from_db(&cred_repo).await else {
+        let Some(user_tokens) = load_user_tokens(&cred_repo).await else {
             return Json(ProjectAddResponse {
                 status: "error: Connect GitHub first".into(),
                 project: ProjectInfo {
@@ -808,9 +808,17 @@ impl DjinnMcpServer {
             let _ = fs::write(&gitignore_path, DJINN_GITIGNORE).await;
         }
 
-        // 7. Record the project row.
+        // 7. Record the project row (caching the installation id so the push
+        //    path doesn't need to rediscover it on every PR create).
         match repo_db
-            .create_from_github(&display_name, &owner, &repo, &default_branch, &clone_path)
+            .create_from_github(
+                &display_name,
+                &owner,
+                &repo,
+                &default_branch,
+                &clone_path,
+                Some(installation_id),
+            )
             .await
         {
             Ok(project) => Json(ProjectAddResponse {
@@ -852,7 +860,7 @@ impl DjinnMcpServer {
             self.state.db().clone(),
             self.state.event_bus(),
         ));
-        let Some(tokens) = GitHubAppTokens::load_from_db(&cred_repo).await else {
+        let Some(tokens) = load_user_tokens(&cred_repo).await else {
             return Json(GithubListReposResponse {
                 status: "error: Connect GitHub first".into(),
                 repos: vec![],

@@ -53,22 +53,64 @@ pub const GITHUB_API_BASE: &str = "https://api.github.com";
 ///
 /// Holds a reference to the credential repository for loading cached OAuth
 /// tokens, and an optional override for the API base URL (used in tests).
+/// How the GitHub API client authenticates outbound requests.
+///
+/// The legacy flow reads a cached OAuth App user token from the credential
+/// DB (under `__OAUTH_GITHUB_APP`). The preferred GitHub-App flow carries a
+/// cached installation id and mints fresh installation tokens on demand —
+/// these tokens attribute API actions to `djinn-bot[bot]` without requiring
+/// any user sign-in on the server side.
+#[derive(Clone)]
+pub(super) enum AuthMode {
+    /// Read `GitHubAppTokens` (user-to-server OAuth token) from the
+    /// credential DB on each call. Retained for compatibility with existing
+    /// call sites; prefer `Installation` for new code.
+    UserToken {
+        cred_repo: Arc<CredentialRepository>,
+    },
+    /// Mint a GitHub App installation token for each call.
+    Installation { installation_id: u64 },
+}
+
 #[derive(Clone)]
 pub struct GitHubApiClient {
     pub(super) http: Client,
-    pub(super) cred_repo: Arc<CredentialRepository>,
+    pub(super) auth: AuthMode,
     /// Override for the GitHub API base URL (default: `GITHUB_API_BASE`).
     pub(super) base_url: String,
 }
 
 impl GitHubApiClient {
-    /// Create a new client backed by `cred_repo`.
+    /// Create a client that authenticates with the cached user OAuth token.
     pub fn new(cred_repo: Arc<CredentialRepository>) -> Self {
         Self::with_base_url(cred_repo, GITHUB_API_BASE.to_string())
     }
 
-    /// Create a new client with a custom API base URL (useful for tests).
+    /// Create a client with a custom API base URL (useful for tests).
     pub fn with_base_url(cred_repo: Arc<CredentialRepository>, base_url: String) -> Self {
+        Self::build(AuthMode::UserToken { cred_repo }, base_url)
+    }
+
+    /// Create a client that authenticates as a GitHub App installation.
+    ///
+    /// Each call mints (or reuses) an installation access token via
+    /// [`crate::github_app::get_installation_token`], so actions are
+    /// attributed to the App's bot identity (`djinn-bot[bot]`) rather than
+    /// to an authenticated user.
+    pub fn for_installation(installation_id: u64) -> Self {
+        Self::build(
+            AuthMode::Installation { installation_id },
+            GITHUB_API_BASE.to_string(),
+        )
+    }
+
+    /// Installation-token constructor with a custom base URL (useful for
+    /// tests and self-hosted GitHub Enterprise).
+    pub fn for_installation_with_base_url(installation_id: u64, base_url: String) -> Self {
+        Self::build(AuthMode::Installation { installation_id }, base_url)
+    }
+
+    fn build(auth: AuthMode, base_url: String) -> Self {
         let http = Client::builder()
             .user_agent("djinn-server/0.1 (+https://github.com/djinnos/server)")
             .build()
@@ -76,7 +118,7 @@ impl GitHubApiClient {
 
         Self {
             http,
-            cred_repo,
+            auth,
             base_url,
         }
     }

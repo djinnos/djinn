@@ -1,7 +1,6 @@
 use super::*;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
-use djinn_provider::oauth::github_app::{GITHUB_APP_OAUTH_DB_KEY, load_pending_orgs};
 
 pub(super) async fn board_health_impl(
     server: &DjinnMcpServer,
@@ -39,29 +38,14 @@ pub(super) async fn board_health_impl(
                     }
                 }
 
-                // Check for GitHub OAuth credential existence (ADR-039).
-                {
-                    let cred_repo = djinn_provider::repos::CredentialRepository::new(
-                        server.state.db().clone(),
-                        server.state.event_bus(),
-                    );
-                    let has_token = cred_repo
-                        .exists(GITHUB_APP_OAUTH_DB_KEY)
-                        .await
-                        .unwrap_or(false);
-                    if !has_token {
-                        let warnings = parsed.warnings.get_or_insert_with(Vec::new);
-                        warnings.push("github_not_connected".to_string());
-                    } else {
-                        // Check for pending org access.
-                        let pending = load_pending_orgs(&cred_repo).await;
-                        if !pending.is_empty() {
-                            let warnings = parsed.warnings.get_or_insert_with(Vec::new);
-                            for org in &pending {
-                                warnings.push(format!("github_org_access_pending:{org}"));
-                            }
-                        }
-                    }
+                // Surface whether the GitHub App is configured (ADR-039).
+                // Per-org "pending OAuth App approval" warnings belonged to
+                // the retired device-code flow and are gone; the modern
+                // install model surfaces missing installations at the UI
+                // level (see `github_app_installations`).
+                if djinn_provider::github_app::app_id().is_err() {
+                    let warnings = parsed.warnings.get_or_insert_with(Vec::new);
+                    warnings.push("github_app_not_configured".to_string());
                 }
 
                 // Surface LSP server warnings (missing binaries).
