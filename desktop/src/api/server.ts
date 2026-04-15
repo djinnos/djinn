@@ -254,6 +254,29 @@ export async function addProjectFromGithub(args: {
   return response.project;
 }
 
+/**
+ * List local git branches for a project's server-owned clone. Used by the
+ * Titlebar branch picker to avoid the blind "type anything" UX.
+ */
+export async function fetchProjectBranches(
+  projectId: string,
+): Promise<{ branches: string[]; current: string | null }> {
+  // Tool name not yet in the generated MCP types snapshot — regenerate with
+  // `pnpm mcp:types` once the server is running to drop this cast.
+  const response = (await callMcpTool(
+    "project_branches" as Parameters<typeof callMcpTool>[0],
+    { project_id: projectId },
+  )) as { status: string; branches?: string[]; current?: string | null };
+
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+  return {
+    branches: response.branches ?? [],
+    current: response.current ?? null,
+  };
+}
+
 // Provider configuration check
 
 export interface ProviderConfigStatus {

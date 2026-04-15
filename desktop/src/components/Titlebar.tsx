@@ -9,7 +9,8 @@ import { useSelectedProject, useIsAllProjects, projectStore } from "@/stores/use
 import { useProjectRoute } from "@/hooks/useProjectRoute";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useExecutionStatus } from "@/hooks/useExecutionStatus";
-import { updateProject, fetchProjects } from "@/api/server";
+import { updateProject, fetchProjects, fetchProjectBranches } from "@/api/server";
+import { useQuery } from "@tanstack/react-query";
 import {
   Combobox,
   ComboboxContent,
@@ -51,9 +52,17 @@ function BranchIndicator() {
   const isAll = useIsAllProjects();
   const [open, setOpen] = useState(false);
   const [inputValue, setInputValue] = useState("");
-  // Git branch enumeration used to shell out via Electron; the web client
-  // relies on whatever the user types (still validated server-side on save).
-  const branches: string[] = [];
+
+  // Fetch branches from the server-owned clone. Enabled only when a project
+  // is selected; stays in cache across open/close of the combobox.
+  const { data: branchesData } = useQuery({
+    queryKey: ["project", selected?.id, "branches"],
+    queryFn: () => fetchProjectBranches(selected!.id),
+    enabled: !!selected?.id,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+  const branches: string[] = branchesData?.branches ?? [];
 
   const branch = selected?.branch ?? "main";
 

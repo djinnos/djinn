@@ -276,6 +276,19 @@ pub struct ProjectConfigGetParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ProjectBranchesParams {
+    /// Project UUID to resolve the server-owned clone path for.
+    pub project_id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectBranchesResponse {
+    pub status: String,
+    pub branches: Vec<String>,
+    pub current: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ProjectConfigSetParams {
     pub project: String,
     pub key: String,
@@ -360,6 +373,31 @@ struct StrictDjinnSettings {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Sort local branches alphabetically and hoist `current` (if any) to the front.
+fn order_branches(mut branches: Vec<String>, current: Option<&str>) -> Vec<String> {
+    branches.sort();
+    branches.dedup();
+    if let Some(cur) = current {
+        if let Some(pos) = branches.iter().position(|b| b == cur) {
+            let c = branches.remove(pos);
+            branches.insert(0, c);
+        }
+    }
+    branches
+}
+
+/// Parse the output of `git branch --list --format=%(refname:short)` into a
+/// clean `Vec<String>`. Empty lines and lines starting with `(` (detached
+/// HEAD marker) are skipped.
+fn parse_branch_list(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('('))
+        .map(|l| l.to_string())
+        .collect()
+}
 
 /// Parse a JSON-encoded `verification_rules` string into `Vec<VerificationRuleDto>`.
 /// Returns an empty vec on any parse error (safe default).
@@ -911,6 +949,128 @@ impl DjinnMcpServer {
             }),
         }
     }
+    /// List local git branches in a project's server-owned clone.
+    #[tool(
+        description = "List local git branches in the server-owned clone for a project. Returns branches sorted alphabetically with the currently checked-out branch first."
+    )]
+    pub async fn project_branches(
+        &self,
+        Parameters(input): Parameters<ProjectBranchesParams>,
+    ) -> Json<ProjectBranchesResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let project = match repo.get(&input.project_id).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: project not found: {}", input.project_id),
+                    branches: vec![],
+                    current: None,
+                });
+            }
+            Err(e) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: {e}"),
+                    branches: vec![],
+                    current: None,
+                });
+            }
+        };
+
+        // `path` is set equal to `clone_path` for github-cloned rows and to the
+        // user-supplied path for legacy rows, so it's the right column either way.
+        let path = project.path;
+        if !Path::new(&path).join(".git").exists() {
+            return Json(ProjectBranchesResponse {
+                status: format!("error: not a git repository: {path}"),
+                branches: vec![],
+                current: None,
+            });
+        }
+
+        // 1. Current branch via `git rev-parse --abbrev-ref HEAD`.
+        let mut head_cmd = std::process::Command::new("git");
+        head_cmd
+            .args(["-C", &path, "rev-parse", "--abbrev-ref", "HEAD"]);
+        let head_fut = crate::process::output(head_cmd);
+        let head_out = match tokio::time::timeout(std::time::Duration::from_secs(30), head_fut).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: git rev-parse failed: {e}"),
+                    branches: vec![],
+                    current: None,
+                });
+            }
+            Err(_) => {
+                return Json(ProjectBranchesResponse {
+                    status: "error: git rev-parse timed out after 30s".into(),
+                    branches: vec![],
+                    current: None,
+                });
+            }
+        };
+        let current = if head_out.status.success() {
+            let raw = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+            // Detached HEAD surfaces as "HEAD" — treat as no current branch.
+            if raw.is_empty() || raw == "HEAD" {
+                None
+            } else {
+                Some(raw)
+            }
+        } else {
+            None
+        };
+
+        // 2. Local branch list.
+        let mut list_cmd = std::process::Command::new("git");
+        list_cmd.args([
+            "-C",
+            &path,
+            "branch",
+            "--list",
+            "--format=%(refname:short)",
+        ]);
+        let list_fut = crate::process::output(list_cmd);
+        let list_out = match tokio::time::timeout(std::time::Duration::from_secs(30), list_fut).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: git branch failed: {e}"),
+                    branches: vec![],
+                    current,
+                });
+            }
+            Err(_) => {
+                return Json(ProjectBranchesResponse {
+                    status: "error: git branch timed out after 30s".into(),
+                    branches: vec![],
+                    current,
+                });
+            }
+        };
+        if !list_out.status.success() {
+            return Json(ProjectBranchesResponse {
+                status: format!(
+                    "error: git branch failed: {}",
+                    String::from_utf8_lossy(&list_out.stderr).trim()
+                ),
+                branches: vec![],
+                current,
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&list_out.stdout);
+        let parsed = parse_branch_list(&stdout);
+        let branches = order_branches(parsed, current.as_deref());
+
+        Json(ProjectBranchesResponse {
+            status: "ok".into(),
+            branches,
+            current,
+        })
+    }
+
     #[tool(description = "Validate .djinn/settings.json syntax and schema in a worktree.")]
     pub async fn project_settings_validate(
         &self,
@@ -1039,5 +1199,37 @@ mod tests {
     #[test]
     fn parse_non_github_with_user_prefix_returns_none() {
         assert!(parse_github_owner_repo("https://user@gitlab.com/acme/widgets.git").is_none());
+    }
+
+    #[test]
+    fn parse_branch_list_skips_empty_and_detached_marker() {
+        let raw = "main\n\nfeature/x\n(HEAD detached at abc123)\nrelease/1.0\n";
+        let parsed = parse_branch_list(raw);
+        assert_eq!(parsed, vec!["main", "feature/x", "release/1.0"]);
+    }
+
+    #[test]
+    fn order_branches_hoists_current_and_sorts() {
+        let branches = vec![
+            "release/1.0".to_string(),
+            "main".to_string(),
+            "feature/x".to_string(),
+        ];
+        let ordered = order_branches(branches, Some("feature/x"));
+        assert_eq!(ordered, vec!["feature/x", "main", "release/1.0"]);
+    }
+
+    #[test]
+    fn order_branches_without_current_just_sorts() {
+        let branches = vec!["b".to_string(), "a".to_string(), "c".to_string()];
+        let ordered = order_branches(branches, None);
+        assert_eq!(ordered, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn order_branches_current_not_in_list_is_noop() {
+        let branches = vec!["a".to_string(), "b".to_string()];
+        let ordered = order_branches(branches, Some("missing"));
+        assert_eq!(ordered, vec!["a", "b"]);
     }
 }
