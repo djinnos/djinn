@@ -212,6 +212,32 @@ impl ProjectRepository {
         Ok(project)
     }
 
+    /// Resolve the GitHub owner/repo coordinates persisted for a project.
+    ///
+    /// Returns `Ok(None)` if the project exists but was created before
+    /// Migration 2 (legacy host-path rows leave `github_owner`/`github_repo`
+    /// NULL) or if the project id is unknown. Callers use the presence of
+    /// these coordinates to decide whether GitHub-App-authenticated pushes
+    /// are possible at all for this project.
+    pub async fn get_github_coords(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT github_owner, github_repo FROM projects WHERE id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row.and_then(|(o, r)| match (o, r) {
+            (Some(owner), Some(repo)) if !owner.is_empty() && !repo.is_empty() => {
+                Some((owner, repo))
+            }
+            _ => None,
+        }))
+    }
+
     /// Find a project by its GitHub owner/repo coordinates.
     ///
     /// Returns `Ok(None)` if no project row has both columns set to the
