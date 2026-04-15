@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
-import type { AuthUser } from "@/electron/commands";
+import type { AuthUser } from "@/api/auth";
 import { callMcpTool } from "@/api/mcpClient";
 import type { ProposeAdrListOutput } from "@/api/generated/mcp-tools.gen";
 

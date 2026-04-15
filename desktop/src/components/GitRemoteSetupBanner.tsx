@@ -10,8 +10,18 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Loading02Icon } from "@hugeicons/core-free-icons";
-import { checkGitRemote, setupGitRemote } from "@/electron/commands";
 import { showToast } from "@/lib/toast";
+
+// Git remote provisioning used to shell out via the Electron host.
+// Until the server exposes equivalent HTTP endpoints these are placeholders
+// that let the banner continue to render without crashing.
+async function checkGitRemote(_projectPath: string): Promise<string | null> {
+  return "placeholder"; // assume a remote exists so the banner stays hidden
+}
+
+async function setupGitRemote(_projectPath: string, _remoteUrl: string): Promise<string> {
+  throw new Error("Git remote setup is not yet available in the web client.");
+}
 
 type BannerState = "info" | "running" | "success" | "error";
 
