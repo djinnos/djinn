@@ -1,6 +1,16 @@
 pub mod codex;
 pub mod copilot;
-pub mod github_app;
+/// Legacy GitHub OAuth App device-code flow.
+///
+/// Retained because the CoordinatorActor still uses the resulting long-lived
+/// user token to push commits as the authenticated user. New code should
+/// prefer [`crate::github_app`] (installation-token based). The migration of
+/// CoordinatorActor is tracked in `TODO.md`.
+pub mod github_oauth_app_legacy;
+/// Backwards-compatible alias so existing
+/// `use djinn_provider::oauth::github_app::*` imports keep resolving during
+/// the transition. Prefer importing from [`crate::github_app`] in new code.
+pub use github_oauth_app_legacy as github_app;
 
 use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
 

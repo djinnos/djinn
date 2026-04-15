@@ -243,6 +243,11 @@ pub struct ProjectAddFromGithubParams {
     /// default branch as reported by the GitHub API.
     #[serde(default, rename = "ref")]
     pub git_ref: Option<String>,
+    /// GitHub App installation id that has access to this repo. When
+    /// omitted, the server scans the user's installations and picks one
+    /// that contains `owner/repo`.
+    #[serde(default)]
+    pub installation_id: Option<u64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -260,6 +265,12 @@ pub struct GithubRepoEntry {
     pub private: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// GitHub App installation id that surfaced this repo. Pass this back
+    /// to [`project_add_from_github`] to pin the clone to the same
+    /// installation without re-scanning.
+    pub installation_id: u64,
+    /// Login of the account (user or org) the installation is scoped to.
+    pub account_login: String,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -627,8 +638,9 @@ impl DjinnMcpServer {
             .name
             .unwrap_or_else(|| format!("{owner}/{repo}"));
 
-        // 1. Must have GitHub App tokens loaded.
-        if GitHubAppTokens::load_from_db(&cred_repo).await.is_none() {
+        // 1. Must have GitHub App tokens loaded (user OAuth token, used
+        //    server-side to discover installations).
+        let Some(user_tokens) = GitHubAppTokens::load_from_db(&cred_repo).await else {
             return Json(ProjectAddResponse {
                 status: "error: Connect GitHub first".into(),
                 project: ProjectInfo {
@@ -637,23 +649,30 @@ impl DjinnMcpServer {
                     path: String::new(),
                 },
             });
-        }
+        };
 
-        // 2. Verify App access + discover default branch via GitHub REST.
-        let client = GitHubApiClient::new(cred_repo.clone());
-        if let Err(e) = client.check_repo_access(&owner, &repo).await {
-            return Json(ProjectAddResponse {
-                status: format!(
-                    "error: GitHub App cannot access {owner}/{repo}: {e}. \
-                     Install the Djinn app at https://github.com/apps/djinn-ai-bot/installations/new",
-                ),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: display_name,
-                    path: String::new(),
-                },
-            });
-        }
+        // 2. Resolve the installation id — either trust the caller's input
+        //    or scan installations to find one that has the repo.
+        use djinn_provider::github_app::{
+            find_installation_for_repo, get_installation_token,
+        };
+        let installation_id = if let Some(id) = input.installation_id {
+            id
+        } else {
+            match find_installation_for_repo(&user_tokens.access_token, &owner, &repo).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return Json(ProjectAddResponse {
+                        status: format!("error: {e}"),
+                        project: ProjectInfo {
+                            id: String::new(),
+                            name: display_name,
+                            path: String::new(),
+                        },
+                    });
+                }
+            }
+        };
 
         let default_branch = input
             .git_ref
@@ -688,13 +707,18 @@ impl DjinnMcpServer {
         }
 
         // 5. Shallow-ish clone (blob filter keeps history light).
-        //    Token auth via https URL keeps this self-contained; the token
-        //    lifecycle is the same one used by all REST calls.
-        let tokens = match GitHubAppTokens::load_from_db(&cred_repo).await {
-            Some(t) => t,
-            None => {
+        //    We mint a fresh 1-hour installation token for the clone URL.
+        //    Subsequent `git fetch` calls go through `git_fetch_in`, which
+        //    re-uses the cached credential helper only if configured; we
+        //    therefore re-request a token per clone attempt rather than
+        //    relying on the remote URL embedding a long-lived secret.
+        let install_token = match get_installation_token(installation_id).await {
+            Ok(t) => t,
+            Err(e) => {
                 return Json(ProjectAddResponse {
-                    status: "error: GitHub token vanished between checks".into(),
+                    status: format!(
+                        "error: could not mint installation token for {owner}/{repo}: {e}"
+                    ),
                     project: ProjectInfo {
                         id: String::new(),
                         name: display_name,
@@ -705,7 +729,7 @@ impl DjinnMcpServer {
         };
         let remote_url = format!(
             "https://x-access-token:{}@github.com/{owner}/{repo}.git",
-            tokens.access_token
+            install_token.token
         );
 
         if !std::path::Path::new(&clone_path).join(".git").exists() {
@@ -749,6 +773,33 @@ impl DjinnMcpServer {
             }
         }
 
+        // 5b. Configure git user.name/user.email so any commits created by
+        //     the server/agents are attributed to the App's bot identity
+        //     (`djinn-bot[bot]`). The `<app-id>+djinn-bot[bot]@users.noreply.github.com`
+        //     form is GitHub's canonical no-reply email for apps.
+        if let Ok(app_id) = djinn_provider::github_app::app_id() {
+            let email = format!("{app_id}+djinn-bot[bot]@users.noreply.github.com");
+            for (key, value) in [
+                ("user.name", "djinn-bot[bot]"),
+                ("user.email", email.as_str()),
+            ] {
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["-C", &clone_path, "config", key, value]);
+                if let Err(e) = crate::process::output(cmd).await {
+                    tracing::warn!(
+                        path = %clone_path, key, error = %e,
+                        "project_add_from_github: failed to set git config"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "project_add_from_github: GITHUB_APP_ID unset — skipping \
+                 djinn-bot[bot] identity config on {}",
+                clone_path
+            );
+        }
+
         // 6. Seed .djinn/ conveniences.
         let djinn_dir = std::path::Path::new(&clone_path).join(".djinn");
         let _ = fs::create_dir_all(&djinn_dir).await;
@@ -781,45 +832,84 @@ impl DjinnMcpServer {
         }
     }
 
-    /// List GitHub repositories the authenticated GitHub App user can access,
-    /// sorted by most-recently-pushed. Intended for the desktop UI picker.
+    /// List GitHub repositories the authenticated user can access through
+    /// the Djinn GitHub **App**'s installations. Iterates each installation
+    /// surfaced by `GET /user/installations`, calls
+    /// `GET /installation/repositories` with that installation's token, and
+    /// merges + dedupes the results.
     #[tool(
-        description = "List GitHub repositories the Djinn App can access (sorted by recent activity). Use to populate an Add-Project picker."
+        description = "List GitHub repositories accessible via the Djinn App's installations. Each entry includes an installation_id and account_login; pass these to project_add_from_github to clone. Populate an Add-Project picker from this tool."
     )]
     pub async fn github_list_repos(
         &self,
         Parameters(input): Parameters<GithubListReposParams>,
     ) -> Json<GithubListReposResponse> {
+        use djinn_provider::github_app::{
+            GitHubAppClient, list_installations_for_user,
+        };
+
         let cred_repo = Arc::new(CredentialRepository::new(
             self.state.db().clone(),
             self.state.event_bus(),
         ));
-        if GitHubAppTokens::load_from_db(&cred_repo).await.is_none() {
+        let Some(tokens) = GitHubAppTokens::load_from_db(&cred_repo).await else {
             return Json(GithubListReposResponse {
                 status: "error: Connect GitHub first".into(),
                 repos: vec![],
             });
-        }
-        let client = GitHubApiClient::new(cred_repo);
-        match client.list_user_repos(input.per_page).await {
-            Ok(entries) => Json(GithubListReposResponse {
-                status: "ok".into(),
-                repos: entries
-                    .into_iter()
-                    .map(|e| GithubRepoEntry {
-                        owner: e.owner,
-                        repo: e.repo,
-                        default_branch: e.default_branch,
-                        private: e.private,
-                        description: e.description,
-                    })
-                    .collect(),
-            }),
-            Err(e) => Json(GithubListReposResponse {
-                status: format!("error: {e}"),
+        };
+
+        let installations = match list_installations_for_user(&tokens.access_token).await {
+            Ok(list) => list,
+            Err(e) => {
+                return Json(GithubListReposResponse {
+                    status: format!("error: list installations failed: {e}"),
+                    repos: vec![],
+                });
+            }
+        };
+        if installations.is_empty() {
+            return Json(GithubListReposResponse {
+                status: "error: no GitHub App installations — install the Djinn App first".into(),
                 repos: vec![],
-            }),
+            });
         }
+
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut out: Vec<GithubRepoEntry> = Vec::new();
+        for install in installations {
+            let client = GitHubAppClient::new(install.id);
+            let repos = match client.list_repositories(input.per_page).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        installation_id = install.id,
+                        error = %e,
+                        "github_list_repos: installation listing failed; skipping"
+                    );
+                    continue;
+                }
+            };
+            for r in repos {
+                if !seen.insert(r.full_name.clone()) {
+                    continue;
+                }
+                out.push(GithubRepoEntry {
+                    owner: r.owner,
+                    repo: r.repo,
+                    default_branch: r.default_branch,
+                    private: r.private,
+                    description: r.description,
+                    installation_id: install.id,
+                    account_login: install.account_login.clone(),
+                });
+            }
+        }
+
+        Json(GithubListReposResponse {
+            status: "ok".into(),
+            repos: out,
+        })
     }
 
     #[tool(description = "Get project config fields for a project path.")]

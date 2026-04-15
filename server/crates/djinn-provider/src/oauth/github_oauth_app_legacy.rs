@@ -1,4 +1,13 @@
-//! GitHub OAuth App — Device Code flow.
+//! GitHub **OAuth App** — Device Code flow (LEGACY).
+//!
+//! DEPRECATED: this module implements the classic OAuth App device-code flow.
+//! It is retained because the `CoordinatorActor` still uses the resulting
+//! long-lived user token to push commits as the authenticated user. All
+//! read/list/clone operations should now go through
+//! [`crate::github_app`], which uses GitHub App installation tokens and
+//! commits as `djinn-bot[bot]`.
+//!
+//! Tracking: see `TODO.md` for migrating the CoordinatorActor push flow.
 //!
 //! Uses the device code flow (no client_secret required) for user authentication:
 //!  1. Request a device code from GitHub.
