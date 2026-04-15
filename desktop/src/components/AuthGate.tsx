@@ -5,7 +5,12 @@ import { GithubIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import logoSvg from "@/assets/logo.svg";
 import { LoadingScreen } from "@/components/LoadingScreen";
-import { fetchCurrentUser, startGithubLogin, type User } from "@/api/auth";
+import {
+  fetchAuthConfig,
+  fetchCurrentUser,
+  startGithubLogin,
+  type User,
+} from "@/api/auth";
 
 const AuthUserContext = createContext<User | null>(null);
 
@@ -33,12 +38,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   if (!data) {
-    const errorMessage = isError
-      ? error instanceof Error
-        ? error.message
-        : "Could not reach the Djinn server."
-      : null;
-
     return (
       <main className="flex min-h-screen items-center justify-center bg-background text-foreground">
         <div className="flex w-full max-w-md flex-col items-center gap-6 p-8 text-center">
@@ -54,21 +53,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
             />
           </div>
 
-          <div className="space-y-2">
-            <h2 className="text-lg font-semibold">Sign in required</h2>
-            <p className="text-sm text-muted-foreground">
-              {errorMessage ?? "Please sign in to continue to Djinn."}
-            </p>
-          </div>
-
-          <Button
-            onClick={() => startGithubLogin()}
-            variant="outline"
-            className="!bg-white !text-black hover:!bg-gray-100 !border-gray-300 gap-2 px-6 h-11 text-base"
-          >
-            <HugeiconsIcon icon={GithubIcon} size={20} />
-            Sign in with GitHub
-          </Button>
+          <AuthBody
+            isError={isError}
+            errorMessage={
+              error instanceof Error
+                ? error.message
+                : "Could not reach the Djinn server."
+            }
+          />
 
           <p className="text-xs text-muted-foreground">
             By continuing you agree to our{" "}
@@ -98,5 +90,124 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   return (
     <AuthUserContext.Provider value={data}>{children}</AuthUserContext.Provider>
+  );
+}
+
+function AuthBody({
+  isError,
+  errorMessage,
+}: {
+  isError: boolean;
+  errorMessage: string;
+}) {
+  const { data: cfg, isLoading } = useQuery({
+    queryKey: ["auth", "config"],
+    queryFn: fetchAuthConfig,
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  if (isLoading) {
+    return (
+      <p className="text-sm text-muted-foreground">Checking server configuration…</p>
+    );
+  }
+
+  // Server is reachable and GitHub App is configured → normal sign-in.
+  if (cfg?.configured) {
+    return (
+      <>
+        <div className="space-y-2">
+          <h2 className="text-lg font-semibold">Sign in required</h2>
+          <p className="text-sm text-muted-foreground">
+            Please sign in to continue to Djinn.
+          </p>
+        </div>
+        <Button
+          onClick={() => startGithubLogin()}
+          variant="outline"
+          className="!bg-white !text-black hover:!bg-gray-100 !border-gray-300 gap-2 px-6 h-11 text-base"
+        >
+          <HugeiconsIcon icon={GithubIcon} size={20} />
+          Sign in with GitHub
+        </Button>
+      </>
+    );
+  }
+
+  // Server unreachable and no config response.
+  if (!cfg) {
+    return (
+      <div className="space-y-2">
+        <h2 className="text-lg font-semibold">Can't reach the server</h2>
+        <p className="text-sm text-muted-foreground">
+          {isError ? errorMessage : "The Djinn server did not respond."}
+        </p>
+      </div>
+    );
+  }
+
+  // Server reachable but GitHub App is not fully configured.
+  return (
+    <div className="w-full space-y-5 text-left">
+      <div className="space-y-2 text-center">
+        <h2 className="text-lg font-semibold">Finish setup</h2>
+        <p className="text-sm text-muted-foreground">
+          Djinn needs a GitHub App before it can sign you in. It takes about
+          10 minutes.
+        </p>
+      </div>
+
+      <ol className="list-decimal space-y-3 rounded-md border border-border bg-card/40 p-4 pl-8 text-sm text-muted-foreground">
+        <li>
+          Create a GitHub App at{" "}
+          <a
+            className="underline hover:text-foreground"
+            href="https://github.com/settings/apps/new"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            github.com/settings/apps/new
+          </a>
+          . Callback URL:{" "}
+          <code className="rounded bg-muted px-1 font-mono text-xs">
+            {`${window.location.origin.replace(/5173/, "8372")}/auth/github/callback`}
+          </code>
+          . Enable "Request user authorization (OAuth) during installation".
+        </li>
+        <li>
+          Set the following environment variables in the server's{" "}
+          <code className="rounded bg-muted px-1 font-mono text-xs">.env</code>{" "}
+          (missing now):
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            {cfg.missing.map((k) => (
+              <li key={k}>
+                <code className="rounded bg-muted px-1 font-mono text-xs">
+                  {k}
+                </code>
+              </li>
+            ))}
+          </ul>
+        </li>
+        <li>
+          Restart the stack:{" "}
+          <code className="rounded bg-muted px-1 font-mono text-xs">
+            docker compose up -d
+          </code>
+          . Then reload this page.
+        </li>
+      </ol>
+
+      <div className="flex justify-center">
+        <a
+          href={cfg.setupDocUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-9 items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium ring-offset-background transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          Full setup guide →
+        </a>
+      </div>
+    </div>
   );
 }

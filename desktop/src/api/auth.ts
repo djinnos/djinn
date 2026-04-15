@@ -63,6 +63,36 @@ export function startGithubLogin(redirect?: string): void {
   window.location.assign(url);
 }
 
+export interface AuthConfig {
+  configured: boolean;
+  missing: string[];
+  setupDocUrl: string;
+}
+
+/**
+ * Report which GitHub App env vars are present on the server, so the sign-in
+ * screen can show setup guidance instead of a dead-end button.
+ */
+export async function fetchAuthConfig(): Promise<AuthConfig> {
+  const res = await fetch(`${getBaseUrl()}/auth/config`, {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch auth config: ${res.status}`);
+  }
+  const body = (await res.json()) as {
+    configured: boolean;
+    missing: string[];
+    setup_doc_url: string;
+  };
+  return {
+    configured: body.configured,
+    missing: body.missing,
+    setupDocUrl: body.setup_doc_url,
+  };
+}
+
 /**
  * Log out and reload so every query refetches under the new (unauth) session.
  */

@@ -67,9 +67,44 @@ fn read_github_app_oauth_env(primary: &str) -> Option<String> {
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/auth/me", get(me))
+        .route("/auth/config", get(config))
         .route("/auth/github/start", get(github_start))
         .route("/auth/github/callback", get(github_callback))
         .route("/auth/logout", post(logout))
+}
+
+#[derive(Serialize)]
+struct ConfigResponse {
+    configured: bool,
+    missing: Vec<&'static str>,
+    setup_doc_url: &'static str,
+}
+
+/// Report which GitHub App env vars are populated so the client can render
+/// setup guidance instead of a dead-end sign-in button.
+async fn config() -> Json<ConfigResponse> {
+    let required = [
+        "GITHUB_APP_CLIENT_ID",
+        "GITHUB_APP_CLIENT_SECRET",
+        "GITHUB_APP_ID",
+        "GITHUB_APP_SLUG",
+    ];
+    let missing: Vec<&'static str> = required
+        .iter()
+        .copied()
+        .filter(|k| read_github_app_oauth_env(k).is_none())
+        .collect();
+    let private_key_set = read_github_app_oauth_env("GITHUB_APP_PRIVATE_KEY").is_some()
+        || read_github_app_oauth_env("GITHUB_APP_PRIVATE_KEY_PATH").is_some();
+    let mut missing = missing;
+    if !private_key_set {
+        missing.push("GITHUB_APP_PRIVATE_KEY");
+    }
+    Json(ConfigResponse {
+        configured: missing.is_empty(),
+        missing,
+        setup_doc_url: "https://github.com/djinnos/djinn/blob/main/docs/GITHUB_APP_SETUP.md",
+    })
 }
 
 // ─── Extractor ────────────────────────────────────────────────────────────────
