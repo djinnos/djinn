@@ -24,3 +24,11 @@ dev: ## Start the Vite web client (assumes `make up` was run)
 watch: ## Rebuild + restart djinn-server on Rust source changes (cargo-watch)
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch: cargo install cargo-watch"; exit 1; }
 	cd $(SERVER_DIR) && cargo watch -w crates -w src -s 'cd $(CURDIR) && docker compose up -d --build djinn-server'
+
+sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (requires `make up` + sqlx-cli)
+	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
+	cd $(SERVER_DIR) && DATABASE_URL=mysql://root@127.0.0.1:3306/djinn cargo sqlx prepare --workspace
+
+sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (CI)
+	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
+	cd $(SERVER_DIR) && DATABASE_URL=mysql://root@127.0.0.1:3306/djinn cargo sqlx prepare --check --workspace
