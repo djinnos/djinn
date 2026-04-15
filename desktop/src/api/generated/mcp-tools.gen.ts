@@ -1077,6 +1077,62 @@ export namespace ExecutionStatusOutputSchema {
 
 }
 export type ExecutionStatusOutput = ExecutionStatusOutputSchema.ExecutionStatusOutput;
+export namespace GithubAppInstallUrlInputSchema {
+  export interface GithubAppInstallUrlInput {
+  [k: string]: any
+  }
+
+}
+export type GithubAppInstallUrlInput = GithubAppInstallUrlInputSchema.GithubAppInstallUrlInput;
+export namespace GithubAppInstallUrlOutputSchema {
+  export interface GithubAppInstallUrlOutput {
+  status: string
+  url?: string
+  [k: string]: any
+  }
+
+}
+export type GithubAppInstallUrlOutput = GithubAppInstallUrlOutputSchema.GithubAppInstallUrlOutput;
+export namespace GithubAppInstallationsInputSchema {
+  export interface GithubAppInstallationsInput {
+  [k: string]: any
+  }
+
+}
+export type GithubAppInstallationsInput = GithubAppInstallationsInputSchema.GithubAppInstallationsInput;
+export namespace GithubAppInstallationsOutputSchema {
+  export interface GithubAppInstallationsOutput {
+  /**
+   * URL to install the App when the user has no installations (or
+   * wants to add one). Always populated if `GITHUB_APP_SLUG` is set.
+   */
+  install_url?: string
+  installations: InstallationEntry[]
+  status: string
+  [k: string]: any
+  }
+  export interface InstallationEntry {
+  /**
+   * `login` of the account (user or org) the App is installed on.
+   */
+  account_login: string
+  /**
+   * Either "User" or "Organization".
+   */
+  account_type: string
+  /**
+   * Numeric installation ID (used for scoping API calls server-side).
+   */
+  id: number
+  /**
+   * Direct URL to review/configure this installation.
+   */
+  install_url: string
+  [k: string]: any
+  }
+
+}
+export type GithubAppInstallationsOutput = GithubAppInstallationsOutputSchema.GithubAppInstallationsOutput;
 export namespace GithubFetchFileInputSchema {
   export interface GithubFetchFileInput {
   /**
@@ -1129,8 +1185,18 @@ export namespace GithubListReposOutputSchema {
   [k: string]: any
   }
   export interface GithubRepoEntry {
+  /**
+   * Login of the account (user or org) the installation is scoped to.
+   */
+  account_login: string
   default_branch: string
   description?: string
+  /**
+   * GitHub App installation id that surfaced this repo. Pass this back
+   * to [`project_add_from_github`] to pin the clone to the same
+   * installation without re-scanning.
+   */
+  installation_id: number
   owner: string
   private: boolean
   repo: string
@@ -1992,6 +2058,12 @@ export namespace ProjectAddOutputSchema {
 export type ProjectAddOutput = ProjectAddOutputSchema.ProjectAddOutput;
 export namespace ProjectAddFromGithubInputSchema {
   export interface ProjectAddFromGithubInput {
+  /**
+   * GitHub App installation id that has access to this repo. When
+   * omitted, the server scans the user's installations and picks one
+   * that contains `owner/repo`.
+   */
+  installation_id?: number
   /**
    * Optional project display name. Defaults to `{owner}/{repo}`.
    */
@@ -3806,7 +3878,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3834,6 +3906,8 @@ export interface McpToolMap {
   "execution_resume": { input: ExecutionResumeInput; output: ExecutionResumeOutput };
   "execution_start": { input: ExecutionStartInput; output: ExecutionStartOutput };
   "execution_status": { input: ExecutionStatusInput; output: ExecutionStatusOutput };
+  "github_app_install_url": { input: GithubAppInstallUrlInput; output: GithubAppInstallUrlOutput };
+  "github_app_installations": { input: GithubAppInstallationsInput; output: GithubAppInstallationsOutput };
   "github_fetch_file": { input: GithubFetchFileInput; output: GithubFetchFileOutput };
   "github_list_repos": { input: GithubListReposInput; output: GithubListReposOutput };
   "github_search": { input: GithubSearchInput; output: GithubSearchOutput };
