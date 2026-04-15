@@ -1077,6 +1077,102 @@ export namespace ExecutionStatusOutputSchema {
 
 }
 export type ExecutionStatusOutput = ExecutionStatusOutputSchema.ExecutionStatusOutput;
+export namespace GithubFetchFileInputSchema {
+  export interface GithubFetchFileInput {
+  /**
+   * Last line to return (1-based, inclusive). Omit for end of file.
+   */
+  end_line?: number
+  /**
+   * File path within the repository (e.g. "src/lib.rs").
+   */
+  path: string
+  /**
+   * Branch, tag, or commit SHA (default: HEAD / default branch).
+   */
+  ref?: string
+  /**
+   * Repository in "owner/repo" format (e.g. "tokio-rs/tokio").
+   */
+  repo: string
+  /**
+   * First line to return (1-based, inclusive). Omit for start of file.
+   */
+  start_line?: number
+  [k: string]: any
+  }
+
+}
+export type GithubFetchFileInput = GithubFetchFileInputSchema.GithubFetchFileInput;
+export namespace GithubFetchFileOutputSchema {
+  export interface GithubFetchFileOutput {
+  [k: string]: any
+  }
+
+}
+export type GithubFetchFileOutput = GithubFetchFileOutputSchema.GithubFetchFileOutput;
+export namespace GithubListReposInputSchema {
+  export interface GithubListReposInput {
+  /**
+   * Max number of repositories to return (1..=100). Defaults to 30.
+   */
+  per_page?: number
+  [k: string]: any
+  }
+
+}
+export type GithubListReposInput = GithubListReposInputSchema.GithubListReposInput;
+export namespace GithubListReposOutputSchema {
+  export interface GithubListReposOutput {
+  repos: GithubRepoEntry[]
+  status: string
+  [k: string]: any
+  }
+  export interface GithubRepoEntry {
+  default_branch: string
+  description?: string
+  owner: string
+  private: boolean
+  repo: string
+  [k: string]: any
+  }
+
+}
+export type GithubListReposOutput = GithubListReposOutputSchema.GithubListReposOutput;
+export namespace GithubSearchInputSchema {
+  export interface GithubSearchInput {
+  /**
+   * Programming language filter (e.g. "Rust", "Python", "TypeScript").
+   */
+  language?: string
+  /**
+   * Maximum number of results to return (1–100, default 15).
+   */
+  limit?: number
+  /**
+   * Path filter to search within specific directories (e.g. "src/").
+   */
+  path?: string
+  /**
+   * Search query string. Supports GitHub code search syntax.
+   */
+  query: string
+  /**
+   * Repository filter in "owner/repo" format (e.g. "tokio-rs/tokio").
+   */
+  repo?: string
+  [k: string]: any
+  }
+
+}
+export type GithubSearchInput = GithubSearchInputSchema.GithubSearchInput;
+export namespace GithubSearchOutputSchema {
+  export interface GithubSearchOutput {
+  [k: string]: any
+  }
+
+}
+export type GithubSearchOutput = GithubSearchOutputSchema.GithubSearchOutput;
 export namespace MemoryAssociationsInputSchema {
   export interface MemoryAssociationsInput {
   /**
@@ -1375,6 +1471,47 @@ export namespace MemoryEditOutputSchema {
 
 }
 export type MemoryEditOutput = MemoryEditOutputSchema.MemoryEditOutput;
+export namespace MemoryExtractedAuditInputSchema {
+  export interface MemoryExtractedAuditInput {
+  project: string
+  [k: string]: any
+  }
+
+}
+export type MemoryExtractedAuditInput = MemoryExtractedAuditInputSchema.MemoryExtractedAuditInput;
+export namespace MemoryExtractedAuditOutputSchema {
+  /**
+   * Classification assigned during ADR-054 extracted-note corpus audits.
+   */
+  export type ExtractedNoteAuditCategory = ("merge_candidate" | "underspecified" | "demote_to_working_spec" | "archive_candidate")
+
+  export interface MemoryExtractedAuditOutput {
+  archive_candidates?: ExtractedNoteAuditFinding[]
+  demote_to_working_spec?: ExtractedNoteAuditFinding[]
+  error?: string
+  merge_candidates?: ExtractedNoteAuditFinding[]
+  rerun_hint?: string
+  scanned_note_count?: number
+  underspecified?: ExtractedNoteAuditFinding[]
+  [k: string]: any
+  }
+  /**
+   * A single extracted note flagged by the ADR-054 audit.
+   */
+  export interface ExtractedNoteAuditFinding {
+  category: ExtractedNoteAuditCategory
+  folder: string
+  note_id: string
+  note_type: string
+  permalink: string
+  reasons: string[]
+  related_note_ids: string[]
+  title: string
+  [k: string]: any
+  }
+
+}
+export type MemoryExtractedAuditOutput = MemoryExtractedAuditOutputSchema.MemoryExtractedAuditOutput;
 export namespace MemoryGraphInputSchema {
   export interface MemoryGraphInput {
   project: string
@@ -1431,8 +1568,11 @@ export type MemoryHealthInput = MemoryHealthInputSchema.MemoryHealthInput;
 export namespace MemoryHealthOutputSchema {
   export interface MemoryHealthOutput {
   broken_link_count?: number
+  duplicate_cluster_count?: number
   error?: string
+  low_confidence_note_count?: number
   orphan_note_count?: number
+  stale_note_count?: number
   stale_notes_by_folder?: StaleFolder[]
   total_notes?: number
   [k: string]: any
@@ -1850,6 +1990,45 @@ export namespace ProjectAddOutputSchema {
 
 }
 export type ProjectAddOutput = ProjectAddOutputSchema.ProjectAddOutput;
+export namespace ProjectAddFromGithubInputSchema {
+  export interface ProjectAddFromGithubInput {
+  /**
+   * Optional project display name. Defaults to `{owner}/{repo}`.
+   */
+  name?: string
+  /**
+   * GitHub owner (user or organization).
+   */
+  owner: string
+  /**
+   * Optional branch to check out after cloning. Defaults to the repo's
+   * default branch as reported by the GitHub API.
+   */
+  ref?: string
+  /**
+   * GitHub repository name.
+   */
+  repo: string
+  [k: string]: any
+  }
+
+}
+export type ProjectAddFromGithubInput = ProjectAddFromGithubInputSchema.ProjectAddFromGithubInput;
+export namespace ProjectAddFromGithubOutputSchema {
+  export interface ProjectAddFromGithubOutput {
+  project: ProjectInfo
+  status: string
+  [k: string]: any
+  }
+  export interface ProjectInfo {
+  id: string
+  name: string
+  path: string
+  [k: string]: any
+  }
+
+}
+export type ProjectAddFromGithubOutput = ProjectAddFromGithubOutputSchema.ProjectAddFromGithubOutput;
 export namespace ProjectConfigGetInputSchema {
   export interface ProjectConfigGetInput {
   project: string
@@ -2746,6 +2925,14 @@ export namespace SettingsGetOutputSchema {
   [k: string]: number
   }
   /**
+   * Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
+   */
+  memory_mount_enabled?: boolean
+  /**
+   * Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.
+   */
+  memory_mount_path?: string
+  /**
    * Ordered list of models available to agents, e.g. `["openai/gpt-4o"]`.
    */
   models?: string[]
@@ -2794,6 +2981,14 @@ export namespace SettingsSetInputSchema {
   max_sessions?: {
   [k: string]: number
   }
+  /**
+   * Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
+   */
+  memory_mount_enabled?: boolean
+  /**
+   * Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.
+   */
+  memory_mount_path?: string
   /**
    * Ordered list of models available to all agents (e.g. ["openai/gpt-4o"]). Omit to keep current value.
    */
@@ -3590,7 +3785,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_add_from_github" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3618,6 +3813,9 @@ export interface McpToolMap {
   "execution_resume": { input: ExecutionResumeInput; output: ExecutionResumeOutput };
   "execution_start": { input: ExecutionStartInput; output: ExecutionStartOutput };
   "execution_status": { input: ExecutionStatusInput; output: ExecutionStatusOutput };
+  "github_fetch_file": { input: GithubFetchFileInput; output: GithubFetchFileOutput };
+  "github_list_repos": { input: GithubListReposInput; output: GithubListReposOutput };
+  "github_search": { input: GithubSearchInput; output: GithubSearchOutput };
   "memory_associations": { input: MemoryAssociationsInput; output: MemoryAssociationsOutput };
   "memory_broken_links": { input: MemoryBrokenLinksInput; output: MemoryBrokenLinksOutput };
   "memory_build_context": { input: MemoryBuildContextInput; output: MemoryBuildContextOutput };
@@ -3626,6 +3824,7 @@ export interface McpToolMap {
   "memory_delete": { input: MemoryDeleteInput; output: MemoryDeleteOutput };
   "memory_diff": { input: MemoryDiffInput; output: MemoryDiffOutput };
   "memory_edit": { input: MemoryEditInput; output: MemoryEditOutput };
+  "memory_extracted_audit": { input: MemoryExtractedAuditInput; output: MemoryExtractedAuditOutput };
   "memory_graph": { input: MemoryGraphInput; output: MemoryGraphOutput };
   "memory_health": { input: MemoryHealthInput; output: MemoryHealthOutput };
   "memory_history": { input: MemoryHistoryInput; output: MemoryHistoryOutput };
@@ -3640,6 +3839,7 @@ export interface McpToolMap {
   "memory_write": { input: MemoryWriteInput; output: MemoryWriteOutput };
   "model_health": { input: ModelHealthInput; output: ModelHealthOutput };
   "project_add": { input: ProjectAddInput; output: ProjectAddOutput };
+  "project_add_from_github": { input: ProjectAddFromGithubInput; output: ProjectAddFromGithubOutput };
   "project_config_get": { input: ProjectConfigGetInput; output: ProjectConfigGetOutput };
   "project_config_set": { input: ProjectConfigSetInput; output: ProjectConfigSetOutput };
   "project_list": { input: ProjectListInput; output: ProjectListOutput };

@@ -222,12 +222,7 @@ export interface GithubRepoEntry {
  * longer passes a local path.
  */
 export async function listGithubRepos(perPage = 50): Promise<GithubRepoEntry[]> {
-  // Tool name not yet in the generated MCP types snapshot (Migration 2 —
-  // regenerate with `pnpm mcp:types` once the server is running).
-  const response = await callMcpTool(
-    "github_list_repos" as Parameters<typeof callMcpTool>[0],
-    { per_page: perPage },
-  );
+  const response = await callMcpTool("github_list_repos", { per_page: perPage });
   if (response.status.startsWith("error")) {
     throw new Error(response.status.replace(/^error:\s*/, ""));
   }
@@ -245,17 +240,12 @@ export async function addProjectFromGithub(args: {
   name?: string;
   ref?: string;
 }): Promise<Project> {
-  // Tool name not yet in the generated MCP types snapshot (Migration 2 —
-  // regenerate with `pnpm mcp:types` once the server is running).
-  const response = await callMcpTool(
-    "project_add_from_github" as Parameters<typeof callMcpTool>[0],
-    {
-      owner: args.owner,
-      repo: args.repo,
-      ...(args.name ? { name: args.name } : {}),
-      ...(args.ref ? { ref: args.ref } : {}),
-    },
-  );
+  const response = await callMcpTool("project_add_from_github", {
+    owner: args.owner,
+    repo: args.repo,
+    ...(args.name ? { name: args.name } : {}),
+    ...(args.ref ? { ref: args.ref } : {}),
+  });
 
   if (response.status.startsWith("error")) {
     throw new Error(response.status.replace(/^error:\s*/, ""));
