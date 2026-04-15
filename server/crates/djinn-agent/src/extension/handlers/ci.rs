@@ -63,7 +63,29 @@ pub(super) async fn call_ci_job_log(
         })?
     };
 
-    let gh_client = GitHubApiClient::for_session_user();
+    // ci_job_log runs in background (worker) scope, so we cannot read the
+    // session-user task-local. Resolve an installation-scoped client via
+    // the task's project, or fall back to the owner/repo extracted from
+    // activity metadata (covers legacy projects where `project_id` on the
+    // task row is set but the project's `installation_id` column is NULL).
+    let project_repo = djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+    let gh_client = match resolve_installation_client_for_task(
+        &task_repo,
+        &project_repo,
+        task_id,
+        &owner,
+        &repo,
+    )
+    .await
+    {
+        Some(c) => c,
+        None => {
+            return Err(format!(
+                "ci_job_log: no GitHub App installation found for task {task_id} (owner={owner}, repo={repo}). \
+                 Re-register the project through the GitHub App flow to enable background log fetches."
+            ));
+        }
+    };
 
     let raw_log = gh_client
         .get_job_logs(&owner, &repo, p.job_id)
@@ -85,6 +107,36 @@ pub(super) async fn call_ci_job_log(
     };
 
     Ok(serde_json::Value::String(output))
+}
+
+/// Build an installation-scoped GitHub API client for a `ci_job_log` call.
+///
+/// Resolution order:
+/// 1. The task row's `project_id` → `projects.installation_id`.
+/// 2. Fallback: look up a project by the `owner/repo` pair recorded in the
+///    CI activity entry and read its `installation_id`.
+///
+/// Returns `None` if neither path yields an installation.
+async fn resolve_installation_client_for_task(
+    task_repo: &TaskRepository,
+    project_repo: &djinn_db::ProjectRepository,
+    task_id: &str,
+    owner: &str,
+    repo: &str,
+) -> Option<GitHubApiClient> {
+    if let Ok(Some(task)) = task_repo.get(task_id).await
+        && let Ok(Some(id)) = project_repo.get_installation_id(&task.project_id).await
+    {
+        return Some(GitHubApiClient::for_installation(id));
+    }
+
+    if let Ok(Some(project)) = project_repo.get_by_github(owner, repo).await
+        && let Ok(Some(id)) = project_repo.get_installation_id(&project.id).await
+    {
+        return Some(GitHubApiClient::for_installation(id));
+    }
+
+    None
 }
 
 /// Strip GitHub Actions noise from a raw job log.
