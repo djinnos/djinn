@@ -1,4 +1,5 @@
 import { useServerHealth } from "@/hooks/useServerHealth";
+import { getServerBaseUrl } from "@/api/serverUrl";
 import { AlertCircleIcon, Loading02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
@@ -10,13 +11,13 @@ import { Button } from "@/components/ui/button";
  * `docker compose up` in the repo root — there is no in-app setup flow.
  */
 export function ServerUnreachableBanner() {
-  const { status, baseUrl, error, retry, isRetrying } = useServerHealth();
+  const { status, error, retry, isRetrying } = useServerHealth();
 
   if (status === "connected" || status === "loading") {
     return null;
   }
 
-  const displayUrl = baseUrl ?? "http://localhost:8372";
+  const displayUrl = getServerBaseUrl();
 
   return (
     <div className="border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20 px-4 py-3">
