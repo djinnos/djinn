@@ -26,7 +26,6 @@
 pub mod client;
 pub mod installations;
 pub mod jwt;
-pub mod user_token_compat;
 
 pub use client::{GitHubAppClient, InstallationRepo, find_installation_for_repo, install_url};
 pub use installations::{

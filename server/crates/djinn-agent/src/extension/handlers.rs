@@ -2,7 +2,6 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::Json;
@@ -33,7 +32,6 @@ use djinn_mcp::tools::task_tools::{
     update_task as shared_update_task,
 };
 use djinn_provider::github_api::GitHubApiClient;
-use djinn_provider::repos::CredentialRepository;
 
 use super::fuzzy::fuzzy_replace;
 use super::helpers::*;

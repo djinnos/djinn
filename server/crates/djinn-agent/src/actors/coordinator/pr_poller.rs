@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
 use djinn_core::models::TransitionAction;
 use djinn_db::ActivityQuery;
 use djinn_provider::github_api::{
     CheckRun, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState,
 };
-use djinn_provider::repos::CredentialRepository;
 
 use super::*;
 
@@ -59,11 +56,11 @@ impl CoordinatorActor {
     /// - Approved + mergeable → squash merge, `PrMerge` → closed.
     /// - Pending reviews → wait.
     pub(super) async fn poll_pr_statuses(&mut self) {
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        ));
-        let gh_client = GitHubApiClient::new(cred_repo);
+        // NOTE: PR polling runs outside any MCP request scope, so there is
+        // no `SESSION_USER_TOKEN` task-local to read. This will fail with a
+        // sign-in error until pr_poller is refactored to build an
+        // installation-scoped client per task/project (follow-up).
+        let gh_client = GitHubApiClient::for_session_user();
 
         self.poll_pr_draft_tasks(&gh_client).await;
         self.poll_pr_review_tasks(&gh_client).await;

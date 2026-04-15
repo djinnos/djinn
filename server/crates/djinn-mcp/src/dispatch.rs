@@ -24,7 +24,7 @@ use crate::tools::memory_tools::{
     ReindexParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::project_tools::{
-    ProjectAddParams, ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
+    ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
     ProjectSettingsValidateParams,
 };
 use crate::tools::proposal_tools::{
@@ -218,11 +218,6 @@ impl DjinnMcpServer {
             "session_for_task" => map_json(
                 name,
                 self.session_for_task(Parameters(decode_args::<SessionForTaskParams>(name, args)?))
-                    .await,
-            ),
-            "project_add" => map_json(
-                name,
-                self.project_add(Parameters(decode_args::<ProjectAddParams>(name, args)?))
                     .await,
             ),
             "project_remove" => map_json(

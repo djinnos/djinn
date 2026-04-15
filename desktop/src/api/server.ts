@@ -191,21 +191,6 @@ export async function fetchProjects(): Promise<Project[]> {
   return projects;
 }
 
-export async function addProject(path: string): Promise<Project> {
-  const segments = path.split(/[\\/]/).filter(Boolean);
-  const inferredName = segments[segments.length - 1] ?? "project";
-  const response = await callMcpTool("project_add", {
-    name: inferredName,
-    path,
-  });
-
-  if (response.status.startsWith("error")) {
-    throw new Error(response.status.replace(/^error:\s*/, ""));
-  }
-
-  return response.project;
-}
-
 // ── GitHub-origin projects (Migration 2) ─────────────────────────────────────
 
 export interface GithubRepoEntry {

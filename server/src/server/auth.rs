@@ -94,6 +94,10 @@ pub struct AuthenticatedUser {
     /// The raw cookie token, for callers that want to refresh or revoke it.
     #[serde(skip)]
     pub session_token: String,
+    /// The GitHub user access token, used to call user-scoped GitHub APIs
+    /// (e.g. `GET /user/installations`). Never serialised to clients.
+    #[serde(skip)]
+    pub github_access_token: String,
 }
 
 impl From<UserAuthSessionRecord> for AuthenticatedUser {
@@ -104,6 +108,7 @@ impl From<UserAuthSessionRecord> for AuthenticatedUser {
             name: row.github_name,
             avatar_url: row.github_avatar_url,
             session_token: row.token,
+            github_access_token: row.github_access_token,
         }
     }
 }

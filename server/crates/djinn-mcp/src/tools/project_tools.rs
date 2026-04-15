@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::Arc;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
@@ -7,86 +6,10 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::server::DjinnMcpServer;
+use djinn_core::auth_context::current_user_token;
 use djinn_db::{ProjectRepository, VerificationRule};
-use djinn_provider::github_api::GitHubApiClient;
-use djinn_provider::github_app::user_token_compat::load_user_tokens;
-use djinn_provider::repos::CredentialRepository;
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
-
-/// Ensure the project directory is a git repo with at least one commit.
-///
-/// Handles:
-/// 1. Not a git repo → `git init`.
-/// 2. No commits on HEAD → stage `.djinn/.gitignore` and create initial commit.
-/// 3. Already has commits → no-op.
-async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
-    let project_path = std::path::PathBuf::from(path);
-    let git_dir = project_path.join(".git");
-
-    // 1. Initialize git repo if needed.
-    if !git_dir.exists() {
-        tracing::info!(path, "project_add: initializing git repo");
-        let mut cmd = std::process::Command::new("git");
-        cmd.args(["init"]).current_dir(&project_path);
-        let output = crate::process::output(cmd)
-            .await
-            .map_err(|e| format!("git init failed: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "git init failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-    }
-
-    // 2. Check if HEAD points to a valid commit.
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["rev-parse", "--verify", "--quiet", "HEAD"])
-        .current_dir(&project_path);
-    let rev_parse = crate::process::output(cmd)
-        .await
-        .map_err(|e| format!("git rev-parse failed: {e}"))?;
-
-    if rev_parse.status.success() {
-        return Ok(()); // Already has commits.
-    }
-
-    // 3. Stage .djinn/.gitignore and create initial commit.
-    tracing::info!(path, "project_add: creating initial commit");
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["add", ".djinn/.gitignore"])
-        .current_dir(&project_path);
-    let add = crate::process::output(cmd)
-        .await
-        .map_err(|e| format!("git add failed: {e}"))?;
-    if !add.status.success() {
-        return Err(format!(
-            "git add .djinn/.gitignore failed: {}",
-            String::from_utf8_lossy(&add.stderr).trim()
-        ));
-    }
-
-    let mut cmd = std::process::Command::new("git");
-    cmd.args([
-        "commit",
-        "--no-verify",
-        "-m",
-        "chore: initialize repository",
-    ])
-    .current_dir(&project_path);
-    let commit = crate::process::output(cmd)
-        .await
-        .map_err(|e| format!("git commit failed: {e}"))?;
-    if !commit.status.success() {
-        return Err(format!(
-            "initial commit failed: {}",
-            String::from_utf8_lossy(&commit.stderr).trim()
-        ));
-    }
-
-    Ok(())
-}
 
 /// Run `git fetch --all --prune` inside `path`. Best-effort refresh for an
 /// existing server-managed clone.
@@ -105,122 +28,8 @@ async fn git_fetch_in(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse `owner` and `repo` from a GitHub remote URL.
-///
-/// Supports both HTTPS (`https://github.com/owner/repo.git`) and SSH
-/// (`git@github.com:owner/repo.git`) formats.
-fn parse_github_owner_repo(remote_url: &str) -> Option<(String, String)> {
-    // Normalize: strip user@ from HTTPS URLs (e.g. https://user@github.com/...)
-    let url = if let Some(rest) = remote_url.strip_prefix("https://") {
-        if let Some(at_pos) = rest.find('@') {
-            format!("https://{}", &rest[at_pos + 1..])
-        } else {
-            remote_url.to_string()
-        }
-    } else if let Some(rest) = remote_url.strip_prefix("http://") {
-        if let Some(at_pos) = rest.find('@') {
-            format!("http://{}", &rest[at_pos + 1..])
-        } else {
-            remote_url.to_string()
-        }
-    } else {
-        remote_url.to_string()
-    };
-
-    // SSH: git@github.com:owner/repo.git
-    if let Some(path) = url.strip_prefix("git@github.com:") {
-        return split_owner_repo(path);
-    }
-    // HTTPS: https://github.com/owner/repo.git or http://
-    for prefix in &["https://github.com/", "http://github.com/"] {
-        if let Some(path) = url.strip_prefix(prefix) {
-            return split_owner_repo(path);
-        }
-    }
-    None
-}
-
-fn split_owner_repo(path: &str) -> Option<(String, String)> {
-    let path = path.trim_end_matches(".git");
-    let mut parts = path.splitn(2, '/');
-    let owner = parts.next()?.to_string();
-    let repo = parts.next()?.to_string();
-    if owner.is_empty() || repo.is_empty() {
-        return None;
-    }
-    Some((owner, repo))
-}
-
-/// Validate that the project has a GitHub origin remote and that the Djinn
-/// GitHub App can access the repository.
-///
-/// Returns `Ok((owner, repo))` on success or `Err(message)` with a
-/// user-facing error.
-async fn validate_github_remote(
-    path: &str,
-    cred_repo: Arc<CredentialRepository>,
-) -> Result<(String, String), String> {
-    // 1. Read the origin remote URL.
-    let project_path = std::path::PathBuf::from(path);
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["remote", "get-url", "origin"])
-        .current_dir(&project_path);
-    let output = crate::process::output(cmd)
-        .await
-        .map_err(|e| format!("git remote get-url origin failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(
-            "Project must have a GitHub remote. Add one with `git remote add origin git@github.com:owner/repo.git`"
-                .to_string(),
-        );
-    }
-
-    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    // 2. Parse owner/repo from the URL.
-    let (owner, repo) = parse_github_owner_repo(&remote_url).ok_or_else(|| {
-        "Project must have a GitHub remote. Add one with `git remote add origin git@github.com:owner/repo.git`"
-            .to_string()
-    })?;
-
-    // 3. Check that we have GitHub tokens.
-    let has_tokens = load_user_tokens(&cred_repo).await.is_some();
-    if !has_tokens {
-        return Err("Connect GitHub first".to_string());
-    }
-
-    // 4. Validate the GitHub App can access the repo (best-effort).
-    // This may fail if the installation token cannot be derived yet (e.g. app
-    // not installed on the org). We log a warning but still allow the project
-    // to be added — the board_health check will surface the issue later.
-    let github_client = GitHubApiClient::new(cred_repo);
-    match github_client.check_repo_access(&owner, &repo).await {
-        Ok(()) => {
-            tracing::info!(owner = %owner, repo = %repo, "project_add: GitHub access verified");
-        }
-        Err(e) => {
-            tracing::warn!(
-                owner = %owner,
-                repo = %repo,
-                error = %e,
-                "project_add: GitHub repo access check failed — install the Djinn app on {owner} at https://github.com/apps/djinn-ai-bot/installations/new",
-            );
-        }
-    }
-
-    Ok((owner, repo))
-}
 
 // ── Param structs ────────────────────────────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ProjectAddParams {
-    /// Human-readable project name (unique identifier).
-    pub name: String,
-    /// Absolute path to the project directory.
-    pub path: String,
-}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ProjectRemoveParams {
@@ -427,104 +236,6 @@ fn parse_verification_rules(json: &str) -> Vec<VerificationRuleDto> {
 
 #[tool_router(router = project_tool_router, vis = "pub")]
 impl DjinnMcpServer {
-    /// Register a project directory with Djinn.
-    #[tool(
-        description = "Add a project to the Djinn registry. Validates that the path exists. Idempotent: re-adding the same name+path is a no-op."
-    )]
-    pub async fn project_add(
-        &self,
-        Parameters(input): Parameters<ProjectAddParams>,
-    ) -> Json<ProjectAddResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let path = input.path.trim_end_matches('/');
-
-        // Validate path exists
-        if !Path::new(path).is_dir() {
-            return Json(ProjectAddResponse {
-                status: format!("error: path does not exist or is not a directory: {path}"),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: input.name,
-                    path: path.to_string(),
-                },
-            });
-        }
-
-        // Ensure .djinn/ directory and .gitignore exist
-        let djinn_dir = Path::new(path).join(".djinn");
-        let _ = fs::create_dir_all(&djinn_dir).await;
-        let gitignore_path = djinn_dir.join(".gitignore");
-        if !gitignore_path.exists() {
-            let _ = fs::write(&gitignore_path, DJINN_GITIGNORE).await;
-        }
-
-        // Ensure the project is a git repo with at least one commit.
-        if let Err(e) = ensure_git_repo_ready(path).await {
-            tracing::warn!(path, error = %e, "project_add: git bootstrap failed");
-        }
-
-        // Validate GitHub remote: origin must point to a GitHub repo the App can access.
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.event_bus(),
-        ));
-        if let Err(msg) = validate_github_remote(path, cred_repo).await {
-            return Json(ProjectAddResponse {
-                status: format!("error: {msg}"),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: input.name,
-                    path: path.to_string(),
-                },
-            });
-        }
-
-        // Idempotent: if same name+path already exists, return it
-        if let Ok(Some(existing)) = repo.get_by_path(path).await {
-            if existing.name == input.name {
-                return Json(ProjectAddResponse {
-                    status: "ok".to_string(),
-                    project: ProjectInfo {
-                        id: existing.id,
-                        name: existing.name,
-                        path: existing.path,
-                    },
-                });
-            }
-            // Path exists but under a different name
-            return Json(ProjectAddResponse {
-                status: format!(
-                    "error: path already registered under name '{}'",
-                    existing.name
-                ),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: input.name,
-                    path: path.to_string(),
-                },
-            });
-        }
-
-        match repo.create(&input.name, path).await {
-            Ok(project) => Json(ProjectAddResponse {
-                status: "ok".to_string(),
-                project: ProjectInfo {
-                    id: project.id,
-                    name: project.name,
-                    path: project.path,
-                },
-            }),
-            Err(e) => Json(ProjectAddResponse {
-                status: format!("error: {e}"),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: input.name,
-                    path: path.to_string(),
-                },
-            }),
-        }
-    }
-
     /// Unregister a project from Djinn.
     #[tool(
         description = "Remove a project from the Djinn registry by name and path. Both name and path must match exactly to prevent accidental deletion when duplicate names exist."
@@ -617,10 +328,6 @@ impl DjinnMcpServer {
         Parameters(input): Parameters<ProjectAddFromGithubParams>,
     ) -> Json<ProjectAddResponse> {
         let repo_db = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.event_bus(),
-        ));
 
         let owner = input.owner.trim().to_string();
         let repo = input.repo.trim().to_string();
@@ -638,11 +345,11 @@ impl DjinnMcpServer {
             .name
             .unwrap_or_else(|| format!("{owner}/{repo}"));
 
-        // 1. Must have GitHub App tokens loaded (user OAuth token, used
-        //    server-side to discover installations).
-        let Some(user_tokens) = load_user_tokens(&cred_repo).await else {
+        // 1. Must have a session user token from the task-local (set by the
+        //    HTTP MCP handler after resolving the `djinn_session` cookie).
+        let Some(user_access_token) = current_user_token() else {
             return Json(ProjectAddResponse {
-                status: "error: Connect GitHub first".into(),
+                status: "error: sign in with GitHub required".into(),
                 project: ProjectInfo {
                     id: String::new(),
                     name: display_name,
@@ -659,7 +366,7 @@ impl DjinnMcpServer {
         let installation_id = if let Some(id) = input.installation_id {
             id
         } else {
-            match find_installation_for_repo(&user_tokens.access_token, &owner, &repo).await {
+            match find_installation_for_repo(&user_access_token, &owner, &repo).await {
                 Ok(id) => id,
                 Err(e) => {
                     return Json(ProjectAddResponse {
@@ -856,18 +563,14 @@ impl DjinnMcpServer {
             GitHubAppClient, list_installations_for_user,
         };
 
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.event_bus(),
-        ));
-        let Some(tokens) = load_user_tokens(&cred_repo).await else {
+        let Some(user_access_token) = current_user_token() else {
             return Json(GithubListReposResponse {
-                status: "error: Connect GitHub first".into(),
+                status: "error: sign in with GitHub required".into(),
                 repos: vec![],
             });
         };
 
-        let installations = match list_installations_for_user(&tokens.access_token).await {
+        let installations = match list_installations_for_user(&user_access_token).await {
             Ok(list) => list,
             Err(e) => {
                 return Json(GithubListReposResponse {
@@ -1227,77 +930,6 @@ impl DjinnMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_ssh_remote() {
-        let (owner, repo) = parse_github_owner_repo("git@github.com:acme/widgets.git").unwrap();
-        assert_eq!(owner, "acme");
-        assert_eq!(repo, "widgets");
-    }
-
-    #[test]
-    fn parse_https_remote_with_dot_git() {
-        let (owner, repo) = parse_github_owner_repo("https://github.com/acme/widgets.git").unwrap();
-        assert_eq!(owner, "acme");
-        assert_eq!(repo, "widgets");
-    }
-
-    #[test]
-    fn parse_https_remote_without_dot_git() {
-        let (owner, repo) = parse_github_owner_repo("https://github.com/acme/widgets").unwrap();
-        assert_eq!(owner, "acme");
-        assert_eq!(repo, "widgets");
-    }
-
-    #[test]
-    fn parse_http_remote() {
-        let (owner, repo) = parse_github_owner_repo("http://github.com/acme/widgets.git").unwrap();
-        assert_eq!(owner, "acme");
-        assert_eq!(repo, "widgets");
-    }
-
-    #[test]
-    fn parse_non_github_remote_returns_none() {
-        assert!(parse_github_owner_repo("git@gitlab.com:acme/widgets.git").is_none());
-        assert!(parse_github_owner_repo("https://gitlab.com/acme/widgets.git").is_none());
-    }
-
-    #[test]
-    fn parse_empty_owner_or_repo_returns_none() {
-        assert!(parse_github_owner_repo("git@github.com:/widgets.git").is_none());
-        assert!(parse_github_owner_repo("git@github.com:acme/").is_none());
-    }
-
-    #[test]
-    fn parse_https_with_user_prefix() {
-        let (owner, repo) = parse_github_owner_repo(
-            "https://CroosALt@github.com/getalternative/svc-accounts-payable.git",
-        )
-        .unwrap();
-        assert_eq!(owner, "getalternative");
-        assert_eq!(repo, "svc-accounts-payable");
-    }
-
-    #[test]
-    fn parse_https_with_user_prefix_no_dot_git() {
-        let (owner, repo) =
-            parse_github_owner_repo("https://user@github.com/acme/widgets").unwrap();
-        assert_eq!(owner, "acme");
-        assert_eq!(repo, "widgets");
-    }
-
-    #[test]
-    fn parse_http_with_user_prefix() {
-        let (owner, repo) =
-            parse_github_owner_repo("http://user@github.com/acme/widgets.git").unwrap();
-        assert_eq!(owner, "acme");
-        assert_eq!(repo, "widgets");
-    }
-
-    #[test]
-    fn parse_non_github_with_user_prefix_returns_none() {
-        assert!(parse_github_owner_repo("https://user@gitlab.com/acme/widgets.git").is_none());
-    }
 
     #[test]
     fn parse_branch_list_skips_empty_and_detached_marker() {
