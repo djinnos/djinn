@@ -1,41 +1,53 @@
 import { useState, useEffect, useCallback } from "react";
-import { checkServerAvailable } from "@/electron/commands";
+import { getServerBaseUrl } from "@/api/serverUrl";
 
 export type ConnectionStatus = "loading" | "connected" | "error";
 
 export interface ServerHealthState {
   status: ConnectionStatus;
-  baseUrl: string | null;
+  port: number | null;
   error: string | null;
   retry: () => Promise<void>;
   isRetrying: boolean;
+  serverVersion: string | null;
+  updateAvailable: boolean;
 }
 
-const POLL_INTERVAL_MS = 3000;
+const POLL_INTERVAL_MS = 2000;
+const REQUEST_TIMEOUT_MS = 3000;
 
-/**
- * Poll the server /health endpoint. When the server runs via docker-compose
- * on localhost:8372 this should be healthy; when it's not running we show a
- * banner instructing the user to run `docker compose up`.
- */
+async function pingServer(): Promise<{ version: string | null }> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${getServerBaseUrl()}/health`, { signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`Health check failed: ${res.status}`);
+    }
+    const json = (await res.json().catch(() => ({}))) as { version?: string };
+    return { version: json?.version ?? null };
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export function useServerHealth(): ServerHealthState {
   const [status, setStatus] = useState<ConnectionStatus>("loading");
-  const [baseUrl, setBaseUrl] = useState<string | null>(null);
+  const [port] = useState<number | null>(() => {
+    const url = new URL(getServerBaseUrl());
+    return Number(url.port) || null;
+  });
   const [error, setError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
 
   const checkStatus = useCallback(async () => {
     try {
-      const result = await checkServerAvailable();
-      setBaseUrl(result.baseUrl);
-      if (result.ok) {
-        setStatus("connected");
-        setError(null);
-        return true;
-      }
-      setStatus("error");
-      setError(result.error ?? `Server not reachable at ${result.baseUrl}`);
-      return false;
+      const result = await pingServer();
+      setStatus("connected");
+      setError(null);
+      setServerVersion(result.version);
+      return true;
     } catch (err) {
       setStatus("error");
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -56,15 +68,22 @@ export function useServerHealth(): ServerHealthState {
 
   useEffect(() => {
     void checkStatus();
-
-    const intervalId = setInterval(() => {
-      void checkStatus();
+    const intervalId = window.setInterval(() => {
+      if (status !== "connected") {
+        void checkStatus();
+      }
     }, POLL_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [checkStatus, status]);
 
-    return () => {
-      clearInterval(intervalId);
-    };
-  }, [checkStatus]);
-
-  return { status, baseUrl, error, retry, isRetrying };
+  return {
+    status,
+    port,
+    error,
+    retry,
+    isRetrying,
+    serverVersion,
+    // Update detection required the Electron host; not applicable in the web client.
+    updateAvailable: false,
+  };
 }

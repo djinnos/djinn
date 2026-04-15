@@ -1,42 +1,28 @@
 /**
- * Server URL resolution.
+ * Server URL configuration for the web client.
  *
- * The Djinn server runs via docker-compose on localhost:8372 by default.
- * The URL can be overridden at build time via VITE_DJINN_SERVER_URL for
- * pointing the Electron shell at a different host (e.g. a remote dev server).
+ * The Djinn server runs in Docker on the host at 127.0.0.1:8372.
+ * Override with `VITE_DJINN_SERVER_URL` at build/dev time if needed.
  */
 
 const DEFAULT_SERVER_URL = "http://127.0.0.1:8372";
 
-function stripTrailingSlash(url: string): string {
-  return url.replace(/\/+$/, "");
-}
-
-function readViteEnvOverride(): string | null {
-  try {
-    const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
-    const override = env?.VITE_DJINN_SERVER_URL;
-    if (typeof override === "string" && override.length > 0) {
-      return stripTrailingSlash(override);
-    }
-  } catch {
-    // import.meta.env not available (e.g. Jest) — fall through.
-  }
-  return null;
-}
-
-/** Synchronous base URL resolution — safe to call from any context. */
 export function getServerBaseUrl(): string {
-  return readViteEnvOverride() ?? DEFAULT_SERVER_URL;
+  const envUrl = (import.meta.env?.VITE_DJINN_SERVER_URL as string | undefined)?.trim();
+  const fromEnv = envUrl && envUrl.length > 0 ? envUrl : DEFAULT_SERVER_URL;
+  return fromEnv.replace(/\/+$/, "");
 }
 
-/** Convenience helper: extract the port portion of the configured URL. */
-export function getServerPort(): number {
-  try {
-    const url = new URL(getServerBaseUrl());
-    const port = url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
-    return port || 8372;
-  } catch {
-    return 8372;
-  }
+/**
+ * Return the default server port — kept for backwards compatibility
+ * with call-sites that previously fetched a dynamic port from Electron.
+ */
+export async function getServerPort(): Promise<number> {
+  const url = new URL(getServerBaseUrl());
+  return Number(url.port) || (url.protocol === "https:" ? 443 : 80);
+}
+
+/** Return the full server base URL (async wrapper for call-site compat). */
+export async function getServerUrl(): Promise<string> {
+  return getServerBaseUrl();
 }

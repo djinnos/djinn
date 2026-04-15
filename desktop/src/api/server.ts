@@ -1,6 +1,6 @@
 import { callMcpTool } from "@/api/mcpClient";
-import { getServerBaseUrl } from "@/api/serverUrl";
 import type { McpToolOutput, ProjectListOutputSchema } from "@/api/generated/mcp-tools.gen";
+import { getServerBaseUrl } from "@/api/serverUrl";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
 

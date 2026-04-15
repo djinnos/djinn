@@ -1,4 +1,5 @@
 DESKTOP_DIR := $(CURDIR)/desktop
+SERVER_DIR := $(CURDIR)/server
 
 .PHONY: help up down logs dev
 
@@ -14,5 +15,5 @@ down: ## Stop the docker compose stack (volumes persist)
 logs: ## Tail djinn-server logs
 	docker compose logs -f djinn-server
 
-dev: ## Launch Electron UI in dev mode (assumes `make up` was run)
-	cd $(DESKTOP_DIR) && pnpm electron:start
+dev: ## Start the Vite web client (assumes `make up` was run)
+	cd $(DESKTOP_DIR) && pnpm dev

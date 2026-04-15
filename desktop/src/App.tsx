@@ -11,7 +11,7 @@ import { ChatPage } from "@/pages/ChatPage";
 import { MemoryPage } from "@/pages/MemoryPage";
 import { PulsePage } from "@/pages/PulsePage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
-import { ServerUnreachableBanner } from "@/components/ServerUnreachableBanner";
+import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { AuthGate } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
@@ -29,7 +29,7 @@ function MainLayout() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Titlebar />
         <div className="flex min-h-0 flex-1 flex-col">
-          <ServerUnreachableBanner />
+          <ConnectionBanner />
           <SyncHealthBanner />
           <Routes>
             {/* Global views (All Projects) */}
@@ -86,8 +86,9 @@ function AuthenticatedApp() {
     }
   }, [status, refreshGate, refreshModelGate]);
 
-  // If server disconnects after first connect, still show MainLayout so the
-  // user sees the unreachable banner and can access Settings.
+  // If the server has been reached once and then drops, keep rendering the
+  // shell so the ConnectionBanner can surface the outage without forcing the
+  // user back to a blocking overlay.
   if (status !== 'connected' && hasConnectedOnce.current) {
     return <MainLayout />;
   }
@@ -104,7 +105,7 @@ function AuthenticatedApp() {
 }
 
 export default function App() {
-  // Gate 1: GitHub authentication (requires server, but no local server setup flow)
+  // Gate 1: Authentication (currently passthrough until server exposes /auth)
   return (
     <AuthGate>
       {/* Gate 2 & 3: Provider + Model onboarding, then main app */}

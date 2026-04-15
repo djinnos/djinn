@@ -151,7 +151,6 @@ export function useEventSource(projectId?: string | null) {
 
         const eventTypes = [
           "lagged",
-          "oauth.open_browser",
           "task_created",
           "task_updated",
           "task_deleted",
@@ -191,32 +190,6 @@ export function useEventSource(projectId?: string | null) {
               if (eventType === "lagged") {
                 const currentPath = projectStore.getState().getSelectedProject()?.path ?? selectedProjectPath;
                 void hydrateSnapshot(currentPath);
-                return;
-              }
-
-              if (eventType === "oauth.open_browser") {
-                try {
-                  // Envelope shape: { entity_type, action, payload: { url, provider }, ... }
-                  const envelope = JSON.parse(event.data) as {
-                    payload?: { url?: unknown; provider?: unknown };
-                  };
-                  const url =
-                    typeof envelope.payload?.url === "string" ? envelope.payload.url : "";
-                  const provider =
-                    typeof envelope.payload?.provider === "string"
-                      ? envelope.payload.provider
-                      : "";
-                  console.info("SSE oauth.open_browser received", { url, provider });
-                  if (url) {
-                    void window.electronAPI
-                      ?.invoke("oauth:open-browser", { url, provider })
-                      .catch((err: unknown) => {
-                        console.error("Failed to open OAuth URL:", err);
-                      });
-                  }
-                } catch (err) {
-                  console.error("Failed to parse oauth.open_browser event:", err);
-                }
                 return;
               }
 
@@ -264,11 +237,11 @@ export function useEventSource(projectId?: string | null) {
 
           reconnectTimerRef.current = setTimeout(async () => {
             if (!isActive) return;
-            // Reset the MCP client cache so it reconnects on next call.
+            // Reset MCP client so the next tool call reconnects cleanly.
             try {
               await resetMcpClient();
             } catch {
-              // Best-effort; connect() will retry regardless.
+              // ignore — connect() below will surface any failure
             }
             connect();
           }, delay);

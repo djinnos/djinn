@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { addProject, fetchProjects, removeProject, type Project } from '@/api/server';
 import { showToast } from '@/lib/toast';
-import { selectDirectory, syncGithubTokens } from '@/electron/commands';
 
 export function useProjects() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -31,20 +30,13 @@ export function useProjects() {
     setIsAdding(true);
     setError(null);
     try {
-      const path = await selectDirectory('Select Project Directory');
+      // Project selection is being replaced with GitHub-repo selection
+      // (Migration 2). The web client prompts for the server-visible path.
+      const path = window.prompt(
+        'Project path (relative to the server workspace root):'
+      );
       if (!path) return;
-      try {
-        await addProject(path);
-      } catch (err) {
-        // If the server doesn't have GitHub tokens yet, re-sync and retry once.
-        const msg = err instanceof Error ? err.message : '';
-        if (msg.includes('Connect GitHub first')) {
-          await syncGithubTokens();
-          await addProject(path);
-        } else {
-          throw err;
-        }
-      }
+      await addProject(path);
       await loadProjects();
       showToast.success('Project added');
     } catch (err) {

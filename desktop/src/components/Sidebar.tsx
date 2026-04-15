@@ -32,7 +32,6 @@ import { useProjectRoute } from '@/hooks/useProjectRoute';
 import { useStore } from 'zustand';
 import { verificationStore, type VerificationRun } from '@/stores/verificationStore';
 import { addProject, fetchProjects } from '@/api/server';
-import { selectDirectory } from '@/electron/commands';
 import { showToast } from '@/lib/toast';
 import { HealthCheckPanel } from '@/components/HealthCheckPanel';
 import {
@@ -506,7 +505,12 @@ export function Sidebar() {
   const handleAddProject = useCallback(async () => {
     setIsAddingProject(true);
     try {
-      const path = await selectDirectory('Select Project Directory');
+      // Project selection is being replaced with GitHub-repo selection
+      // (Migration 2). In the interim, accept a project path via prompt
+      // so local dev against the Docker-mounted workspace still works.
+      const path = window.prompt(
+        'Project path (relative to the server workspace root, e.g. /workspace/my-project):'
+      );
       if (!path) return;
       await addProject(path);
       const projects = await fetchProjects();

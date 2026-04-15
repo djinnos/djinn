@@ -5,7 +5,7 @@ import {
   authLogout,
   type AuthState,
   type AuthUser,
-} from "@/electron/commands";
+} from "@/api/auth";
 
 interface AuthStore {
   isAuthenticated: boolean;
@@ -13,11 +13,11 @@ interface AuthStore {
   isLoading: boolean;
   error: string | null;
 
-  /** Fetch auth state from the Rust backend. */
+  /** Fetch auth state from the server. */
   fetchState: () => Promise<void>;
-  /** Update auth state from an IPC event payload. */
+  /** Update auth state directly. */
   setState: (state: AuthState) => void;
-  /** Initiate OAuth login flow. */
+  /** Initiate login flow. */
   login: () => Promise<void>;
   /** Log out and clear state. */
   logout: () => Promise<void>;
