@@ -1,3 +1,6 @@
+-- MySQL/Dolt initial schema (flattened). Single source of truth for fresh installs.
+-- Managed by sqlx::migrate!. DO NOT MODIFY after commit — add a new V{N}__{slug}.sql instead.
+
 -- ADR-055 Dolt/MySQL schema snapshot for djinn-db.
 --
 -- This snapshot is the full-port of the SQLite refinery migration chain into

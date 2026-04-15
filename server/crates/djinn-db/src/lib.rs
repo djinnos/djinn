@@ -18,10 +18,6 @@ pub use database::{
     NoteSearchBackend, NoteVectorBackend, SqliteDatabaseConfig, SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
-pub use migrations::{
-    mysql_notes_fulltext_prototype, mysql_schema_snapshot, sqlite_schema_snapshot,
-    staged_mysql_migrations,
-};
 pub use repositories::{
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,

@@ -162,7 +162,6 @@ static SQLITE_VEC_DISABLED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Debug)]
 pub struct Database {
     pool: DatabasePool,
-    db_path: Option<std::path::PathBuf>,
     readonly: bool,
     bootstrap: DatabaseBootstrapInfo,
     capabilities: DatabaseBackendCapabilities,
@@ -285,7 +284,6 @@ impl Database {
 
         Ok(Self {
             pool: DatabasePool::Sqlite(pool),
-            db_path: Some(config.path.clone()),
             readonly: config.readonly,
             bootstrap: DatabaseBootstrapInfo {
                 backend_kind: DatabaseBackendKind::Sqlite,
@@ -325,7 +323,6 @@ impl Database {
         let backend_label = config.display_backend().to_owned();
         Ok(Self {
             pool: DatabasePool::Mysql(pool),
-            db_path: None,
             readonly: false,
             bootstrap: DatabaseBootstrapInfo {
                 backend_kind: DatabaseBackendKind::Mysql,
@@ -358,30 +355,30 @@ impl Database {
             self.initialized
                 .get_or_try_init(|| async move {
                     migrations::ensure_mysql_database_exists(&url).await?;
-                    let mut conn = pool.acquire().await?;
-                    sqlx::query("SELECT 1").execute(&mut *conn).await?;
-                    drop(conn);
-                    migrations::ensure_mysql_schema(&pool).await?;
+                    sqlx::migrate!("./migrations_mysql")
+                        .run(&pool)
+                        .await
+                        .map_err(|e: sqlx::migrate::MigrateError| {
+                            DbError::InvalidData(e.to_string())
+                        })?;
                     Ok::<(), DbError>(())
                 })
                 .await?;
             return Ok(());
         }
 
-        let db_path = self
-            .db_path
-            .clone()
-            .expect("sqlite databases always retain a filesystem path");
         let sqlite_pool = self.sqlite_pool().cloned().expect(
             "sqlite-backed Database must retain a sqlite pool for legacy initialization",
         );
         let sqlite_vec_status = self.sqlite_vec_status.clone();
         self.initialized
             .get_or_try_init(|| async {
-                tokio::task::spawn_blocking(move || migrations::run(&db_path))
+                sqlx::migrate!("./migrations_sqlite")
+                    .run(&sqlite_pool)
                     .await
-                    .expect("migration task panicked")
-                    .map_err(|e| DbError::InvalidData(e.to_string()))?;
+                    .map_err(|e: sqlx::migrate::MigrateError| {
+                        DbError::InvalidData(e.to_string())
+                    })?;
 
                 backfill_missing_content_hashes(&sqlite_pool).await?;
                 let status = initialize_sqlite_vec(&sqlite_pool).await;
@@ -539,68 +536,6 @@ pub(crate) fn test_tempdir() -> DbResult<tempfile::TempDir> {
         .map_err(|e| DbError::InvalidData(e.to_string()))
 }
 
-#[cfg(test)]
-pub(crate) fn create_legacy_note_fixture_db(path: &Path) -> DbResult<LegacyNoteFixture> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| DbError::InvalidData(e.to_string()))?;
-    }
-
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|e| DbError::InvalidData(e.to_string()))?;
-    }
-
-    migrations::run_until(path, "add_note_content_hash")
-        .map_err(|e| DbError::InvalidData(e.to_string()))?;
-
-    let conn = rusqlite::Connection::open(path).map_err(|e| DbError::InvalidData(e.to_string()))?;
-
-    let project_id = uuid::Uuid::nil().to_string();
-    let note_id = uuid::Uuid::from_u128(1).to_string();
-    let project_path = path.with_extension("project");
-    if project_path.exists() {
-        std::fs::remove_dir_all(&project_path).map_err(|e| DbError::InvalidData(e.to_string()))?;
-    }
-    std::fs::create_dir_all(&project_path).map_err(|e| DbError::InvalidData(e.to_string()))?;
-    let note_file = project_path.join("legacy-note.md");
-    let note_content = "Legacy fixture body\n";
-    std::fs::write(&note_file, note_content).map_err(|e| DbError::InvalidData(e.to_string()))?;
-
-    conn.execute(
-        "INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)",
-        rusqlite::params![
-            project_id,
-            "legacy-project",
-            project_path.display().to_string()
-        ],
-    )
-    .map_err(|e| DbError::InvalidData(e.to_string()))?;
-
-    conn.execute(
-        "INSERT INTO notes (
-            id, project_id, permalink, title, file_path, storage, note_type, folder, tags, content
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        rusqlite::params![
-            note_id,
-            project_id,
-            "reference/legacy-note",
-            "Legacy Note",
-            note_file.display().to_string(),
-            "file",
-            "reference",
-            "reference",
-            "[]",
-            note_content,
-        ],
-    )
-    .map_err(|e| DbError::InvalidData(e.to_string()))?;
-
-    Ok(LegacyNoteFixture { note_id })
-}
-
-#[cfg(test)]
-pub(crate) struct LegacyNoteFixture {
-    pub note_id: String,
-}
 
 fn workspace_test_tmp_dir() -> DbResult<PathBuf> {
     // Prefer an explicit override for constrained CI/dev environments.
@@ -733,61 +668,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn legacy_note_fixture_is_accepted_by_current_initialization() {
-        let dir = crate::database::test_tempdir().unwrap();
-        let db_path = dir.path().join("legacy.db");
-        let fixture = create_legacy_note_fixture_db(&db_path).unwrap();
-
-        let pre_migration_columns: Vec<String> = {
-            let conn = rusqlite::Connection::open(&db_path).unwrap();
-            let mut query = conn.prepare("PRAGMA table_info(notes)").unwrap();
-            query
-                .query_map([], |row| row.get::<_, String>(1))
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
-        };
-        assert!(
-            !pre_migration_columns
-                .iter()
-                .any(|column| column == "content_hash")
-        );
-
-        let db = Database::open(&db_path).unwrap();
-        db.ensure_initialized().await.unwrap();
-
-        let content_hash: Option<String> =
-            sqlx::query_scalar("SELECT content_hash FROM notes WHERE id = ?1")
-                .bind(&fixture.note_id)
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
-
-        let normalized_fixture_hash = crate::note_hash::note_content_hash("Legacy fixture body\n");
-        assert_eq!(
-            content_hash.as_deref(),
-            Some(normalized_fixture_hash.as_str()),
-            "ensure_initialized should backfill content_hash for legacy notes"
-        );
-
-        let migration_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM refinery_schema_history WHERE name = 'add_note_content_hash'",
-        )
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(migration_count, 1);
-
-        let index_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'notes_project_content_hash_idx'",
-        )
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(index_count, 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sqlite_vec_status_reports_available_or_graceful_fallback() {
         set_sqlite_vec_disabled_for_tests(false);
         let db = Database::open_in_memory().unwrap();
@@ -805,57 +685,6 @@ mod tests {
             assert!(status.version.is_some());
         } else {
             assert!(status.detail.is_some());
-        }
-    }
-
-    /// Guard against modifying already-applied migrations.
-    ///
-    /// Refinery stores a checksum of each migration when it is first applied.
-    /// If someone later edits an already-applied .sql file, the embedded
-    /// checksum diverges from the DB record and **every** database operation
-    /// fails at runtime (see: V20260409000001 incident).
-    ///
-    /// This test applies all migrations to a fresh DB, then compares the
-    /// checksums refinery recorded with the checksums of the embedded files.
-    /// A mismatch means a migration was edited after being committed —
-    /// split the change into a new migration instead.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn migration_checksums_are_stable_after_apply() {
-        use crate::migrations::embedded_checksums;
-
-        // Apply all migrations to a fresh in-memory database.
-        let db = Database::open_in_memory().unwrap();
-        db.ensure_initialized().await.unwrap();
-
-        // Read what refinery recorded in the schema history table.
-        // Refinery stores checksum as TEXT in SQLite, so we parse it.
-        let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT version, checksum FROM refinery_schema_history ORDER BY version",
-        )
-        .fetch_all(db.pool())
-        .await
-        .unwrap();
-        let applied: Vec<(i64, u64)> = rows
-            .into_iter()
-            .map(|(v, c)| (v, c.parse::<u64>().expect("checksum should be a u64")))
-            .collect();
-
-        // Compare against the embedded (compile-time) checksums.
-        let embedded = embedded_checksums();
-        for (version, recorded_checksum) in &applied {
-            let entry = embedded
-                .iter()
-                .find(|(v, _, _)| *v == *version)
-                .unwrap_or_else(|| {
-                    panic!("applied migration V{version} not found in embedded migrations")
-                });
-            assert_eq!(
-                *recorded_checksum, entry.2,
-                "Migration V{}_{} has been modified after it was applied! \
-                 Do NOT edit existing migrations — create a new one instead. \
-                 (recorded checksum {recorded_checksum} != embedded checksum {})",
-                version, entry.1, entry.2
-            );
         }
     }
 
