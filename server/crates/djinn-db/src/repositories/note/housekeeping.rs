@@ -30,7 +30,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT id, content FROM notes WHERE project_id = ?1 AND content_hash IS NULL",
+            "SELECT id, content FROM notes WHERE project_id = ? AND content_hash IS NULL",
         )
         .bind(project_id)
         .fetch_all(self.db.pool())
@@ -39,9 +39,9 @@ impl NoteRepository {
         let mut tx = self.db.pool().begin().await?;
         for (id, content) in &rows {
             let hash = note_content_hash(content);
-            sqlx::query("UPDATE notes SET content_hash = ?2 WHERE id = ?1")
-                .bind(id)
+            sqlx::query("UPDATE notes SET content_hash = ? WHERE id = ?")
                 .bind(hash)
+                .bind(id)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -64,9 +64,9 @@ impl NoteRepository {
                         access_count, confidence, abstract as abstract_, overview,
                         scope_paths
              FROM notes n
-             WHERE n.project_id = ?1
+             WHERE n.project_id = ?
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
-               AND n.last_accessed < datetime('now', '-30 days')
+               AND n.last_accessed < DATE_SUB(NOW(3), INTERVAL 30 DAY)
                AND n.access_count = 0
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
@@ -104,7 +104,7 @@ impl NoteRepository {
                     l.target_raw as target_raw
              FROM note_links l
              JOIN notes src ON src.id = l.source_id
-             WHERE src.project_id = ?1
+             WHERE src.project_id = ?
                AND l.target_id IS NULL
              ORDER BY src.id, l.target_raw",
         )
@@ -147,7 +147,7 @@ impl NoteRepository {
         min_score: f64,
     ) -> Result<Option<String>> {
         let exact_title = sqlx::query_scalar::<_, String>(
-            "SELECT title FROM notes WHERE project_id = ?1 AND title = ?2 LIMIT 1",
+            "SELECT title FROM notes WHERE project_id = ? AND title = ? LIMIT 1",
         )
         .bind(project_id)
         .bind(target_raw)

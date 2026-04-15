@@ -51,7 +51,7 @@ impl NoteRepository {
 
         let clamped = value.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING);
 
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
+        sqlx::query("UPDATE notes SET confidence = ? WHERE id = ?")
             .bind(clamped)
             .bind(note_id)
             .execute(self.db.pool())
@@ -63,14 +63,14 @@ impl NoteRepository {
     pub async fn update_confidence(&self, note_id: &str, signal: f64) -> Result<f64> {
         self.db.ensure_initialized().await?;
 
-        let prior = sqlx::query_scalar::<_, f64>("SELECT confidence FROM notes WHERE id = ?1")
+        let prior = sqlx::query_scalar::<_, f64>("SELECT confidence FROM notes WHERE id = ?")
             .bind(note_id)
             .fetch_one(self.db.pool())
             .await?;
 
         let posterior = bayesian_update(prior, signal);
 
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
+        sqlx::query("UPDATE notes SET confidence = ? WHERE id = ?")
             .bind(posterior)
             .bind(note_id)
             .execute(self.db.pool())
@@ -159,7 +159,7 @@ impl NoteRepository {
         }
 
         let project_id =
-            sqlx::query_scalar::<_, String>("SELECT project_id FROM notes WHERE id = ?1 LIMIT 1")
+            sqlx::query_scalar::<_, String>("SELECT project_id FROM notes WHERE id = ? LIMIT 1")
                 .bind(&seed_ids[0])
                 .fetch_optional(self.db.pool())
                 .await?
@@ -171,7 +171,7 @@ impl NoteRepository {
 
         let link_edges: Vec<(String, String)> = sqlx::query_as(
             "SELECT source_id, target_id FROM note_links WHERE target_id IS NOT NULL AND source_id IN (
-                SELECT id FROM notes WHERE project_id = ?1
+                SELECT id FROM notes WHERE project_id = ?
             )",
         )
         .bind(&project_id)
@@ -181,11 +181,12 @@ impl NoteRepository {
         let association_edges: Vec<(String, String, f64)> = sqlx::query_as(
             "SELECT note_a_id, note_b_id, weight
              FROM note_associations
-             WHERE weight >= ?1
-               AND note_a_id IN (SELECT id FROM notes WHERE project_id = ?2)
-               AND note_b_id IN (SELECT id FROM notes WHERE project_id = ?2)",
+             WHERE weight >= ?
+               AND note_a_id IN (SELECT id FROM notes WHERE project_id = ?)
+               AND note_b_id IN (SELECT id FROM notes WHERE project_id = ?)",
         )
         .bind(MIN_ASSOCIATION_WEIGHT)
+        .bind(&project_id)
         .bind(&project_id)
         .fetch_all(self.db.pool())
         .await?;

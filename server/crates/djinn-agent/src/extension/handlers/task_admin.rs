@@ -195,7 +195,7 @@ pub(super) async fn call_task_reset_counters(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
     sqlx::query(
-        "UPDATE tasks SET reopen_count = 0, continuation_count = 0, intervention_count = intervention_count + 1, last_intervention_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1"
+        "UPDATE tasks SET reopen_count = 0, continuation_count = 0, intervention_count = intervention_count + 1, last_intervention_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'), updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?"
     )
     .bind(&task.id)
     .execute(state.db.pool())

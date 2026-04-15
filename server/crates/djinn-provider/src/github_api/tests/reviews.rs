@@ -3,13 +3,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::github_api::GitHubApiClient;
 
-use super::{make_repo, seed_tokens};
+use super::seed_installation_token;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_pull_request_reviews_success() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls/42/comments"))
@@ -29,7 +29,7 @@ async fn list_pull_request_reviews_success() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let comments = client
         .list_pull_request_reviews("djinnos", "server", 42)
         .await
@@ -43,8 +43,8 @@ async fn list_pull_request_reviews_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fetch_pr_review_feedback_aggregates_change_requests_and_comments() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls/42/reviews"))
@@ -87,7 +87,7 @@ async fn fetch_pr_review_feedback_aggregates_change_requests_and_comments() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let feedback = client
         .fetch_pr_review_feedback(
             "djinnos",

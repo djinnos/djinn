@@ -304,3 +304,17 @@ CREATE TABLE consolidation_run_metrics (
 
 CREATE INDEX idx_consolidation_run_metrics_project_note_type_started_at
     ON consolidation_run_metrics(project_id, note_type, started_at DESC);
+
+CREATE TABLE user_auth_sessions (
+    token              TEXT NOT NULL PRIMARY KEY,
+    user_id            TEXT NOT NULL,
+    github_login       TEXT NOT NULL,
+    github_name        TEXT,
+    github_avatar_url  TEXT,
+    github_access_token TEXT NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at         TEXT NOT NULL
+);
+
+CREATE INDEX idx_user_auth_sessions_user_id ON user_auth_sessions(user_id);
+CREATE INDEX idx_user_auth_sessions_expires_at ON user_auth_sessions(expires_at);

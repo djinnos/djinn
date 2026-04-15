@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::MySqlPool;
 
 use crate::database::Database;
 use crate::{Error, Result};
@@ -56,7 +56,7 @@ mod tests {
     async fn make_project(db: &Database) -> Project {
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?, ?, ?)")
             .bind(&id)
             .bind("task-project")
             .bind("/tmp/task-project")
@@ -65,7 +65,7 @@ mod tests {
             .unwrap();
         sqlx::query_as::<_, Project>(
             "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote \
-             FROM projects WHERE id = ?1",
+             FROM projects WHERE id = ?",
         )
         .bind(&id)
         .fetch_one(db.pool())
@@ -77,7 +77,7 @@ mod tests {
         let epic_id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&epic_id)
         .bind(project_id)
@@ -650,7 +650,7 @@ pub(super) const TASK_SELECT_WHERE_ID: &str =
             intervention_count, last_intervention_at,
             created_at, updated_at, closed_at,
             close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-     FROM tasks WHERE id = ?1";
+     FROM tasks WHERE id = ?";
 
 pub(super) fn short_id_from_uuid(id: &uuid::Uuid) -> String {
     let bytes = id.as_bytes();
@@ -689,11 +689,11 @@ pub(super) fn extract_constraint_name(db_err: &dyn sqlx::error::DatabaseError) -
 }
 
 pub(super) async fn short_id_exists(
-    pool: &SqlitePool,
+    pool: &MySqlPool,
     table: &str,
     short_id: &str,
 ) -> Result<bool> {
-    let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = ?1)");
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = ?)");
     Ok(sqlx::query_scalar::<_, i64>(&sql)
         .bind(short_id)
         .fetch_one(pool)
@@ -709,7 +709,7 @@ pub(super) async fn maybe_reopen_epic(
     epic_id: &str,
 ) -> Result<()> {
     let closed: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?1 AND status = 'closed'")
+        sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ? AND `status` = 'closed'")
             .bind(epic_id)
             .fetch_one(db.pool())
             .await?;
@@ -719,19 +719,19 @@ pub(super) async fn maybe_reopen_epic(
     }
 
     sqlx::query(
-        "UPDATE epics SET status = 'open', closed_at = NULL,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?1",
+        "UPDATE epics SET `status` = 'open', closed_at = NULL,
+             updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+         WHERE id = ?",
     )
     .bind(epic_id)
     .execute(db.pool())
     .await?;
 
     if let Some(epic) = sqlx::query_as::<_, djinn_core::models::Epic>(
-        "SELECT id, project_id, short_id, title, description, emoji, color, status,
+        "SELECT id, project_id, short_id, title, description, emoji, color, `status`,
                 owner, created_at, updated_at, closed_at, memory_refs,
                 auto_breakdown, originating_adr_id
-         FROM epics WHERE id = ?1",
+         FROM epics WHERE id = ?",
     )
     .bind(epic_id)
     .fetch_optional(db.pool())

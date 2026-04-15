@@ -39,7 +39,7 @@ impl RepoGraphCacheRepository {
         Ok(sqlx::query_as::<_, CachedRepoGraph>(
             "SELECT project_id, commit_sha, graph_blob, built_at
              FROM repo_graph_cache
-             WHERE project_id = ?1 AND commit_sha = ?2",
+             WHERE project_id = ? AND commit_sha = ?",
         )
         .bind(project_id)
         .bind(commit_sha)
@@ -50,9 +50,10 @@ impl RepoGraphCacheRepository {
     pub async fn upsert(&self, entry: RepoGraphCacheInsert<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "INSERT OR REPLACE INTO repo_graph_cache
+            "INSERT INTO repo_graph_cache
              (project_id, commit_sha, graph_blob)
-             VALUES (?1, ?2, ?3)",
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE graph_blob=VALUES(graph_blob)",
         )
         .bind(entry.project_id)
         .bind(entry.commit_sha)

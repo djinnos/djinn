@@ -29,7 +29,7 @@ impl SessionMessageRepository {
 
         sqlx::query(
             "INSERT INTO session_messages (id, session_id, role, content_json, token_count)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(session_id)
@@ -41,7 +41,7 @@ impl SessionMessageRepository {
 
         let msg = sqlx::query_as::<_, SessionMessage>(
             "SELECT id, session_id, role, content_json, token_count, created_at
-             FROM session_messages WHERE id = ?1",
+             FROM session_messages WHERE id = ?",
         )
         .bind(&id)
         .fetch_one(self.db.pool())
@@ -84,7 +84,7 @@ impl SessionMessageRepository {
 
             sqlx::query(
                 "INSERT INTO session_messages (id, session_id, role, content_json)
-                 VALUES (?1, ?2, ?3, ?4)",
+                 VALUES (?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(session_id)
@@ -117,7 +117,7 @@ impl SessionMessageRepository {
         let rows = sqlx::query_as::<_, SessionMessage>(
             "SELECT id, session_id, role, content_json, token_count, created_at
              FROM session_messages
-             WHERE session_id = ?1
+             WHERE session_id = ?
              ORDER BY created_at ASC",
         )
         .bind(session_id)
@@ -153,7 +153,7 @@ impl SessionMessageRepository {
         self.db.ensure_initialized().await?;
 
         // Build placeholders: (?1, ?2, ?3, ...)
-        let placeholders: Vec<String> = (1..=session_ids.len()).map(|i| format!("?{i}")).collect();
+        let placeholders: Vec<String> = (0..session_ids.len()).map(|_| "?".to_string()).collect();
         let sql = format!(
             "SELECT session_id, role, content_json, created_at \
              FROM session_messages \
@@ -173,7 +173,7 @@ impl SessionMessageRepository {
     /// Delete all messages for a session (used by compaction to replace with summary).
     pub async fn delete_conversation(&self, session_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let result = sqlx::query("DELETE FROM session_messages WHERE session_id = ?1")
+        let result = sqlx::query("DELETE FROM session_messages WHERE session_id = ?")
             .bind(session_id)
             .execute(self.db.pool())
             .await?;
@@ -216,8 +216,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, memory_refs)
-             VALUES (?1, ?2, ?3, ?4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+                                issue_type, priority, owner, `status`, continuation_count, memory_refs)
+             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
         )
         .bind(&task_id)
         .bind(&epic.project_id)
