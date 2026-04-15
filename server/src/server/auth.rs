@@ -377,6 +377,9 @@ async fn github_callback(
     let mut resp_headers = HeaderMap::new();
     set_cookie(&mut resp_headers, SESSION_COOKIE, &token, SESSION_TTL_SECS);
     clear_cookie(&mut resp_headers, OAUTH_STATE_COOKIE);
+    let path = sanitize_redirect(Some(&redirect));
+    let web_base = web_url();
+    let local_fallback = format!("{}{}", web_base.trim_end_matches('/'), path);
     let location = if want_install {
         let slug = active
             .as_ref()
@@ -396,11 +399,11 @@ async fn github_callback(
                 tracing::warn!(
                     "auth callback: install=1 requested but GITHUB_APP_SLUG is unset"
                 );
-                sanitize_redirect(Some(&redirect))
+                local_fallback
             }
         }
     } else {
-        sanitize_redirect(Some(&redirect))
+        local_fallback
     };
     resp_headers.insert(
         header::LOCATION,
@@ -505,6 +508,18 @@ async fn fetch_github_user(access_token: &str) -> Result<GhUser, String> {
 
 fn public_url() -> String {
     std::env::var("DJINN_PUBLIC_URL").unwrap_or_else(|_| DEFAULT_PUBLIC_URL.to_string())
+}
+
+/// Where to send the browser after a completed OAuth/install flow.
+///
+/// Defaults to `DJINN_PUBLIC_URL`. Set `DJINN_WEB_URL` separately when the
+/// web client is served on a different origin (e.g. Vite dev server on
+/// `:1420` while the API server runs on `:8372`).
+fn web_url() -> String {
+    std::env::var("DJINN_WEB_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(public_url)
 }
 
 fn cookie_secure() -> bool {

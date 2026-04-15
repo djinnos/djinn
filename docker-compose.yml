@@ -56,6 +56,17 @@ services:
       DJINN_VECTOR_BACKEND: qdrant
       QDRANT_URL: http://qdrant:6334
       RUST_LOG: ${RUST_LOG:-info}
+      # URL where GitHub (and users' browsers) reach the API server. Must
+      # match the callback URL registered on the GitHub App.
+      DJINN_PUBLIC_URL: ${DJINN_PUBLIC_URL:-http://127.0.0.1:8372}
+      # URL where the web client is served (Vite dev server in development).
+      # Post-OAuth redirects land here. Defaults to DJINN_PUBLIC_URL.
+      DJINN_WEB_URL: ${DJINN_WEB_URL:-http://127.0.0.1:1420}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
     volumes:
       - ${HOME}/.djinn:/root/.djinn
       - ${DJINN_WORKSPACE_ROOT:-${HOME}}:/workspace:rw
