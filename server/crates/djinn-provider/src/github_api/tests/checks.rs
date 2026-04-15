@@ -3,17 +3,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::github_api::GitHubApiClient;
 
-use super::{make_repo, seed_tokens};
+use super::seed_installation_token;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_run_jobs_success() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/actions/runs/123/jobs"))
-        .and(header("Authorization", "Bearer ghu_user"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "jobs": [{
                 "id": 7,
@@ -33,7 +33,7 @@ async fn list_run_jobs_success() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let jobs = client
         .list_run_jobs("djinnos", "server", 123)
         .await
@@ -47,8 +47,8 @@ async fn list_run_jobs_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_check_run_annotations_success() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/check-runs/555/annotations"))
@@ -65,7 +65,7 @@ async fn get_check_run_annotations_success() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let annotations = client
         .get_check_run_annotations("djinnos", "server", 555)
         .await
@@ -78,8 +78,8 @@ async fn get_check_run_annotations_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_job_logs_success() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/actions/jobs/77/logs"))
@@ -87,7 +87,7 @@ async fn get_job_logs_success() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let logs = client.get_job_logs("djinnos", "server", 77).await.unwrap();
 
     assert!(logs.contains("line 1"));

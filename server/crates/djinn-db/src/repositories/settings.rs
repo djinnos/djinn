@@ -17,7 +17,7 @@ impl SettingsRepository {
     pub async fn get(&self, key: &str) -> Result<Option<Setting>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Setting>(
-            "SELECT key, value, updated_at FROM settings WHERE key = ?1",
+            "SELECT `key`, `value`, updated_at FROM settings WHERE `key` = ?",
         )
         .bind(key)
         .fetch_optional(self.db.pool())
@@ -27,7 +27,7 @@ impl SettingsRepository {
     pub async fn list(&self) -> Result<Vec<Setting>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Setting>(
-            "SELECT key, value, updated_at FROM settings ORDER BY key ASC",
+            "SELECT `key`, `value`, updated_at FROM settings ORDER BY `key` ASC",
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -37,18 +37,18 @@ impl SettingsRepository {
     pub async fn set(&self, key: &str, value: &str) -> Result<Setting> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "INSERT INTO settings (key, value, updated_at)
-             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             ON CONFLICT(key) DO UPDATE SET
-               value = excluded.value,
-               updated_at = excluded.updated_at",
+            "INSERT INTO settings (`key`, `value`, updated_at)
+             VALUES (?, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
+             ON DUPLICATE KEY UPDATE
+               `value` = VALUES(`value`),
+               updated_at = VALUES(updated_at)",
         )
         .bind(key)
         .bind(value)
         .execute(self.db.pool())
         .await?;
         let setting = sqlx::query_as::<_, Setting>(
-            "SELECT key, value, updated_at FROM settings WHERE key = ?1",
+            "SELECT `key`, `value`, updated_at FROM settings WHERE `key` = ?",
         )
         .bind(key)
         .fetch_one(self.db.pool())
@@ -69,7 +69,7 @@ impl SettingsRepository {
     /// Delete a setting. Emits `SettingUpdated` tombstone event with empty value.
     pub async fn delete(&self, key: &str) -> Result<bool> {
         self.db.ensure_initialized().await?;
-        let res = sqlx::query("DELETE FROM settings WHERE key = ?1")
+        let res = sqlx::query("DELETE FROM settings WHERE `key` = ?")
             .bind(key)
             .execute(self.db.pool())
             .await?;

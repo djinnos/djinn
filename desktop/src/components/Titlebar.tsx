@@ -1,8 +1,4 @@
-import { getCurrentWindow } from "@/electron/shims/window";
 import {
-  Cancel01Icon,
-  MinusSignIcon,
-  SquareIcon,
   ArrowRight01Icon,
   Layers01Icon,
   GitBranchIcon,
@@ -13,8 +9,8 @@ import { useSelectedProject, useIsAllProjects, projectStore } from "@/stores/use
 import { useProjectRoute } from "@/hooks/useProjectRoute";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useExecutionStatus } from "@/hooks/useExecutionStatus";
-import { updateProject, fetchProjects } from "@/api/server";
-import { listGitBranches } from "@/electron/commands";
+import { updateProject, fetchProjects, fetchProjectBranches } from "@/api/server";
+import { useQuery } from "@tanstack/react-query";
 import {
   Combobox,
   ComboboxContent,
@@ -23,35 +19,6 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox";
-
-const appWindow = getCurrentWindow();
-
-function TitlebarButton({
-  onClick,
-  label,
-  children,
-  variant = "default",
-}: {
-  onClick: () => void;
-  label: string;
-  children: React.ReactNode;
-  variant?: "default" | "close";
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      className={`flex h-full w-10 items-center justify-center transition-colors ${
-        variant === "close"
-          ? "hover:bg-red-500/90 hover:text-white"
-          : "hover:bg-muted"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
 
 const VIEW_LABELS: Record<string, string> = {
   kanban: "Kanban",
@@ -84,16 +51,20 @@ function BranchIndicator() {
   const selected = useSelectedProject();
   const isAll = useIsAllProjects();
   const [open, setOpen] = useState(false);
-  const [branches, setBranches] = useState<string[]>([]);
   const [inputValue, setInputValue] = useState("");
 
-  const branch = selected?.branch ?? "main";
+  // Fetch branches from the server-owned clone. Enabled only when a project
+  // is selected; stays in cache across open/close of the combobox.
+  const { data: branchesData } = useQuery({
+    queryKey: ["project", selected?.id, "branches"],
+    queryFn: () => fetchProjectBranches(selected!.id),
+    enabled: !!selected?.id,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+  const branches: string[] = branchesData?.branches ?? [];
 
-  // Fetch branches when dropdown opens
-  useEffect(() => {
-    if (!open || !selected?.path) return;
-    listGitBranches(selected.path).then(setBranches).catch(() => setBranches([]));
-  }, [open, selected?.path]);
+  const branch = selected?.branch ?? "main";
 
   const selectBranch = useCallback(
     async (val: string | null) => {
@@ -271,18 +242,6 @@ export function Titlebar() {
         <ExecutionIndicator />
       </div>
 
-      {/* Right: Window controls */}
-      <div className="flex h-full items-center">
-        <TitlebarButton onClick={() => appWindow.minimize()} label="Minimize">
-          <HugeiconsIcon icon={MinusSignIcon} size={14} className="pointer-events-none" />
-        </TitlebarButton>
-        <TitlebarButton onClick={() => appWindow.toggleMaximize()} label="Maximize">
-          <HugeiconsIcon icon={SquareIcon} size={12} className="pointer-events-none" />
-        </TitlebarButton>
-        <TitlebarButton onClick={() => appWindow.close()} label="Close" variant="close">
-          <HugeiconsIcon icon={Cancel01Icon} size={14} className="pointer-events-none" />
-        </TitlebarButton>
-      </div>
     </div>
   );
 }

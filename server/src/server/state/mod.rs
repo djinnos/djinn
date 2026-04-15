@@ -20,6 +20,7 @@ use djinn_db::{
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 
 mod canonical_graph_refresh_planner;
 mod settings;
@@ -125,6 +126,11 @@ struct Inner {
     /// by the spawned task in its completion branch.
     pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
     pub memory_mount: Mutex<Option<MountedMemoryFilesystem>>,
+    /// Active GitHub App configuration (DB row → env fallback). Populated
+    /// lazily on first read; hot-swapped by the manifest auto-provision
+    /// callback so subsequent requests pick up new credentials without a
+    /// process restart.
+    pub app_config: tokio::sync::RwLock<Option<Arc<GitHubAppConfig>>>,
 }
 
 impl AppState {
@@ -176,8 +182,40 @@ impl AppState {
                 chat_warmed_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 memory_mount: Mutex::new(None),
+                app_config: tokio::sync::RwLock::new(None),
             }),
         }
+    }
+
+    /// Read-only snapshot of the active GitHub App configuration, if any.
+    pub async fn app_config(&self) -> Option<Arc<GitHubAppConfig>> {
+        self.inner.app_config.read().await.clone()
+    }
+
+    /// Hot-swap the in-memory GitHub App configuration. Called after the
+    /// manifest auto-provision flow persists fresh credentials.
+    pub async fn set_app_config(&self, cfg: Option<Arc<GitHubAppConfig>>) {
+        *self.inner.app_config.write().await = cfg;
+    }
+
+    /// Initialise the in-memory App config from DB → env on startup.
+    /// Called during server bootstrap; safe to call again to refresh.
+    pub async fn init_app_config(&self) {
+        let cfg = GitHubAppConfig::load(self.db(), self.event_bus()).await;
+        if cfg.is_some() {
+            tracing::info!("github_app: loaded persisted/env App configuration");
+        } else {
+            tracing::debug!(
+                "github_app: no persisted or env App configuration on startup"
+            );
+        }
+        // Mirror to env so consumers that still read env vars (the JWT
+        // minter, the GitHubAppClient install URL helper, etc.) see the
+        // same values without a code-wide refactor.
+        if let Some(ref c) = cfg {
+            c.export_to_env();
+        }
+        *self.inner.app_config.write().await = cfg.map(Arc::new);
     }
 
     /// Server-wide single-flight gate for SCIP indexer subprocess

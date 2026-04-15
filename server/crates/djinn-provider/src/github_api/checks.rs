@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 
 use crate::github_api::transport::handle_rate_limit;
 use crate::github_api::types::ActionsJobsResponse;
-use crate::github_api::{ActionsJob, CheckAnnotation, CheckRunsResponse, GitHubApiClient};
+use crate::github_api::{ActionsJob, CheckAnnotation, GitHubApiClient};
 
 impl GitHubApiClient {
     /// Fetch annotations for a check run.
@@ -117,5 +117,3 @@ impl GitHubApiClient {
     }
 }
 
-#[allow(dead_code)]
-fn _keep_public_type(_checks: CheckRunsResponse) {}

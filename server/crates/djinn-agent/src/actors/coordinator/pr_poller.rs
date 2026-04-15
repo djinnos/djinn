@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
 use djinn_core::models::TransitionAction;
 use djinn_db::ActivityQuery;
 use djinn_provider::github_api::{
     CheckRun, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState,
 };
-use djinn_provider::repos::CredentialRepository;
 
 use super::*;
 
@@ -59,21 +56,24 @@ impl CoordinatorActor {
     /// - Approved + mergeable → squash merge, `PrMerge` → closed.
     /// - Pending reviews → wait.
     pub(super) async fn poll_pr_statuses(&mut self) {
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        ));
-        let gh_client = GitHubApiClient::new(cred_repo);
-
-        self.poll_pr_draft_tasks(&gh_client).await;
-        self.poll_pr_review_tasks(&gh_client).await;
+        // PR polling runs outside any MCP request scope, so there is no
+        // `SESSION_USER_TOKEN` task-local to read. Each task's GitHub client
+        // is built from its project's GitHub App installation token
+        // (resolved per-task inside the loops below).
+        self.poll_pr_draft_tasks().await;
+        self.poll_pr_review_tasks().await;
     }
 
     // ── pr_draft polling (CI monitoring) ─────────────────────────────────────
 
     /// Poll tasks in `pr_draft` status: wait for CI to pass, then undraft the PR.
-    async fn poll_pr_draft_tasks(&mut self, gh_client: &GitHubApiClient) {
+    async fn poll_pr_draft_tasks(&mut self) {
         let task_repo = self.task_repo();
+        let project_repo =
+            djinn_db::ProjectRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
         let pr_draft_tasks = match task_repo.list_by_status("pr_draft").await {
             Ok(tasks) => tasks,
             Err(e) => {
@@ -124,6 +124,20 @@ impl CoordinatorActor {
                 );
                 continue;
             };
+
+            let gh_client = match resolve_installation_client(&project_repo, &task.project_id).await
+            {
+                Some(c) => c,
+                None => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        project_id = %task.project_id,
+                        "PR poller: no installation_id on project row; skipping (legacy project?)"
+                    );
+                    continue;
+                }
+            };
+            let gh_client = &gh_client;
 
             // Fetch current PR state + CI check runs.
             let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
@@ -275,8 +289,13 @@ impl CoordinatorActor {
     // ── pr_review polling (review monitoring) ────────────────────────────────
 
     /// Poll tasks in `pr_review` status: wait for reviewer approval or changes, then merge.
-    async fn poll_pr_review_tasks(&mut self, gh_client: &GitHubApiClient) {
+    async fn poll_pr_review_tasks(&mut self) {
         let task_repo = self.task_repo();
+        let project_repo =
+            djinn_db::ProjectRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
         let pr_review_tasks = match task_repo.list_by_status("pr_review").await {
             Ok(tasks) => tasks,
             Err(e) => {
@@ -310,6 +329,20 @@ impl CoordinatorActor {
                 );
                 continue;
             };
+
+            let gh_client = match resolve_installation_client(&project_repo, &task.project_id).await
+            {
+                Some(c) => c,
+                None => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        project_id = %task.project_id,
+                        "PR poller: no installation_id on project row; skipping (legacy project?)"
+                    );
+                    continue;
+                }
+            };
+            let gh_client = &gh_client;
 
             // Fetch current PR state + CI check runs.
             let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
@@ -1109,6 +1142,28 @@ impl CoordinatorActor {
                 error = %e,
                 "PR poller: failed to log CI failure comment"
             );
+        }
+    }
+}
+
+/// Resolve a project's `installation_id` and build a GitHub API client
+/// authenticating as that GitHub App installation. Returns `None` when the
+/// project row has no installation (legacy pre-Migration-2 rows) or the
+/// lookup fails.
+async fn resolve_installation_client(
+    project_repo: &djinn_db::ProjectRepository,
+    project_id: &str,
+) -> Option<GitHubApiClient> {
+    match project_repo.get_installation_id(project_id).await {
+        Ok(Some(id)) => Some(GitHubApiClient::for_installation(id)),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                project_id,
+                error = %e,
+                "PR poller: failed to read installation_id for project"
+            );
+            None
         }
     }
 }

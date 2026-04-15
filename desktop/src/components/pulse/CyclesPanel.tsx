@@ -4,6 +4,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/com
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { callMcpTool } from "@/api/mcpClient";
+import { showToast } from "@/lib/toast";
 import { parseCycles, truncatePathLeft, isPathExcluded } from "./pulseTypes";
 
 interface CyclesPanelProps {
@@ -25,8 +26,10 @@ type CyclesKind = "file" | "symbol";
 const MEMBERS_VISIBLE_PER_GROUP = 20;
 
 function openMember(displayName: string) {
-  // TODO: wire to in-app editor open when an editor integration exists.
-  console.log("[pulse] open cycle member:", displayName);
+  void navigator.clipboard?.writeText(displayName);
+  showToast.info("Copied path to clipboard", {
+    description: "Open it in your editor to inspect the cycle member.",
+  });
 }
 
 export function CyclesPanel({ projectPath, excludedPaths }: CyclesPanelProps) {

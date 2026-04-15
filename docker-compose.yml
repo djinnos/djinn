@@ -1,0 +1,72 @@
+# Full djinn stack: server + dolt + qdrant.
+#
+# Usage:
+#   docker compose up                                       # core stack
+#   docker compose --profile observability up               # + langfuse
+#
+# Host paths:
+#   ~/.djinn/                       -> /root/.djinn         (logs, tokens, data)
+#   ${DJINN_WORKSPACE_ROOT:-$HOME}  -> /workspace           (user codebases)
+
+services:
+  dolt:
+    image: dolthub/dolt-sql-server:latest
+    container_name: djinn-dolt
+    restart: unless-stopped
+    environment:
+      DOLT_ROOT_PASSWORD: ""
+      DOLT_ROOT_HOST: "%"
+      DOLT_DATABASE: djinn
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - ${HOME}/.djinn/dolt:/var/lib/dolt
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: djinn-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - ${HOME}/.djinn/qdrant:/qdrant/storage
+
+  djinn-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: djinn-server:local
+    container_name: djinn-server
+    restart: unless-stopped
+    depends_on:
+      dolt:
+        condition: service_started
+      qdrant:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8372:8372"
+      # OAuth callback (Codex, Copilot). Browser redirects to localhost:1455
+      # and docker forwards into the server container.
+      - "127.0.0.1:1455:1455"
+    environment:
+      DJINN_DB_BACKEND: dolt
+      DJINN_MYSQL_URL: mysql://root@dolt:3306/djinn
+      DJINN_MYSQL_FLAVOR: dolt
+      DJINN_VECTOR_BACKEND: qdrant
+      QDRANT_URL: http://qdrant:6334
+      RUST_LOG: ${RUST_LOG:-info}
+      # URL where GitHub (and users' browsers) reach the API server. Must
+      # match the callback URL registered on the GitHub App.
+      DJINN_PUBLIC_URL: ${DJINN_PUBLIC_URL:-http://127.0.0.1:8372}
+      # URL where the web client is served (Vite dev server in development).
+      # Post-OAuth redirects land here. Defaults to DJINN_PUBLIC_URL.
+      DJINN_WEB_URL: ${DJINN_WEB_URL:-http://127.0.0.1:1420}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+    volumes:
+      - ${HOME}/.djinn:/root/.djinn
+      - ${DJINN_WORKSPACE_ROOT:-${HOME}}:/workspace:rw
