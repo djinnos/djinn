@@ -88,6 +88,23 @@ async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Run `git fetch --all --prune` inside `path`. Best-effort refresh for an
+/// existing server-managed clone.
+async fn git_fetch_in(path: &str) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["fetch", "--all", "--prune"]).current_dir(path);
+    let output = crate::process::output(cmd)
+        .await
+        .map_err(|e| format!("git fetch failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Parse `owner` and `repo` from a GitHub remote URL.
 ///
 /// Supports both HTTPS (`https://github.com/owner/repo.git`) and SSH
@@ -211,6 +228,44 @@ pub struct ProjectRemoveParams {
     pub name: String,
     /// Absolute path of the project to remove. Must match the registered path exactly.
     pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectAddFromGithubParams {
+    /// GitHub owner (user or organization).
+    pub owner: String,
+    /// GitHub repository name.
+    pub repo: String,
+    /// Optional project display name. Defaults to `{owner}/{repo}`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional branch to check out after cloning. Defaults to the repo's
+    /// default branch as reported by the GitHub API.
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GithubListReposParams {
+    /// Max number of repositories to return (1..=100). Defaults to 30.
+    #[serde(default)]
+    pub per_page: Option<usize>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct GithubRepoEntry {
+    pub owner: String,
+    pub repo: String,
+    pub default_branch: String,
+    pub private: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct GithubListReposResponse {
+    pub status: String,
+    pub repos: Vec<GithubRepoEntry>,
 }
 
 // ── Response structs ─────────────────────────────────────────────────────────
@@ -499,6 +554,233 @@ impl DjinnMcpServer {
                     .collect(),
             }),
             Err(_) => Json(ProjectListResponse { projects: vec![] }),
+        }
+    }
+
+    /// Register a project by cloning a GitHub repo into the server's
+    /// managed storage. Supersedes `project_add` for the Docker-hosted
+    /// deployment where the host filesystem is not visible to the server.
+    #[tool(
+        description = "Add a project by cloning a GitHub repo the Djinn App can access. The server clones into /root/.djinn/projects/{owner}/{repo} (persisted on the host via the ~/.djinn bind mount). Idempotent: re-adding runs `git fetch` instead of cloning again."
+    )]
+    pub async fn project_add_from_github(
+        &self,
+        Parameters(input): Parameters<ProjectAddFromGithubParams>,
+    ) -> Json<ProjectAddResponse> {
+        let repo_db = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let cred_repo = Arc::new(CredentialRepository::new(
+            self.state.db().clone(),
+            self.state.event_bus(),
+        ));
+
+        let owner = input.owner.trim().to_string();
+        let repo = input.repo.trim().to_string();
+        if owner.is_empty() || repo.is_empty() {
+            return Json(ProjectAddResponse {
+                status: "error: owner and repo must be non-empty".into(),
+                project: ProjectInfo {
+                    id: String::new(),
+                    name: input.name.unwrap_or_default(),
+                    path: String::new(),
+                },
+            });
+        }
+        let display_name = input
+            .name
+            .unwrap_or_else(|| format!("{owner}/{repo}"));
+
+        // 1. Must have GitHub App tokens loaded.
+        if GitHubAppTokens::load_from_db(&cred_repo).await.is_none() {
+            return Json(ProjectAddResponse {
+                status: "error: Connect GitHub first".into(),
+                project: ProjectInfo {
+                    id: String::new(),
+                    name: display_name,
+                    path: String::new(),
+                },
+            });
+        }
+
+        // 2. Verify App access + discover default branch via GitHub REST.
+        let client = GitHubApiClient::new(cred_repo.clone());
+        if let Err(e) = client.check_repo_access(&owner, &repo).await {
+            return Json(ProjectAddResponse {
+                status: format!(
+                    "error: GitHub App cannot access {owner}/{repo}: {e}. \
+                     Install the Djinn app at https://github.com/apps/djinn-ai-bot/installations/new",
+                ),
+                project: ProjectInfo {
+                    id: String::new(),
+                    name: display_name,
+                    path: String::new(),
+                },
+            });
+        }
+
+        let default_branch = input
+            .git_ref
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+
+        // 3. Choose clone_path under the server-managed projects root.
+        let clone_path = format!("/root/.djinn/projects/{owner}/{repo}");
+
+        // Idempotent: if already registered, fast-path to `git fetch`.
+        if let Ok(Some(existing)) = repo_db.get_by_github(&owner, &repo).await {
+            let _ = fs::create_dir_all(&existing.path).await;
+            if let Err(e) = git_fetch_in(&existing.path).await {
+                tracing::warn!(
+                    owner = %owner, repo = %repo, error = %e,
+                    "project_add_from_github: fetch refresh failed",
+                );
+            }
+            return Json(ProjectAddResponse {
+                status: "ok".into(),
+                project: ProjectInfo {
+                    id: existing.id,
+                    name: existing.name,
+                    path: existing.path,
+                },
+            });
+        }
+
+        // 4. Ensure parent dir exists.
+        if let Some(parent) = std::path::Path::new(&clone_path).parent() {
+            let _ = fs::create_dir_all(parent).await;
+        }
+
+        // 5. Shallow-ish clone (blob filter keeps history light).
+        //    Token auth via https URL keeps this self-contained; the token
+        //    lifecycle is the same one used by all REST calls.
+        let tokens = match GitHubAppTokens::load_from_db(&cred_repo).await {
+            Some(t) => t,
+            None => {
+                return Json(ProjectAddResponse {
+                    status: "error: GitHub token vanished between checks".into(),
+                    project: ProjectInfo {
+                        id: String::new(),
+                        name: display_name,
+                        path: clone_path,
+                    },
+                });
+            }
+        };
+        let remote_url = format!(
+            "https://x-access-token:{}@github.com/{owner}/{repo}.git",
+            tokens.access_token
+        );
+
+        if !std::path::Path::new(&clone_path).join(".git").exists() {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args([
+                "clone",
+                "--filter=blob:none",
+                &remote_url,
+                &clone_path,
+            ]);
+            let output = match crate::process::output(cmd).await {
+                Ok(o) => o,
+                Err(e) => {
+                    return Json(ProjectAddResponse {
+                        status: format!("error: git clone failed: {e}"),
+                        project: ProjectInfo {
+                            id: String::new(),
+                            name: display_name,
+                            path: clone_path,
+                        },
+                    });
+                }
+            };
+            if !output.status.success() {
+                return Json(ProjectAddResponse {
+                    status: format!(
+                        "error: git clone failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    project: ProjectInfo {
+                        id: String::new(),
+                        name: display_name,
+                        path: clone_path,
+                    },
+                });
+            }
+        } else {
+            // Directory already present from a previous partial add — refresh it.
+            if let Err(e) = git_fetch_in(&clone_path).await {
+                tracing::warn!(path = %clone_path, error = %e, "pre-existing clone fetch failed");
+            }
+        }
+
+        // 6. Seed .djinn/ conveniences.
+        let djinn_dir = std::path::Path::new(&clone_path).join(".djinn");
+        let _ = fs::create_dir_all(&djinn_dir).await;
+        let gitignore_path = djinn_dir.join(".gitignore");
+        if !gitignore_path.exists() {
+            let _ = fs::write(&gitignore_path, DJINN_GITIGNORE).await;
+        }
+
+        // 7. Record the project row.
+        match repo_db
+            .create_from_github(&display_name, &owner, &repo, &default_branch, &clone_path)
+            .await
+        {
+            Ok(project) => Json(ProjectAddResponse {
+                status: "ok".into(),
+                project: ProjectInfo {
+                    id: project.id,
+                    name: project.name,
+                    path: project.path,
+                },
+            }),
+            Err(e) => Json(ProjectAddResponse {
+                status: format!("error: {e}"),
+                project: ProjectInfo {
+                    id: String::new(),
+                    name: display_name,
+                    path: clone_path,
+                },
+            }),
+        }
+    }
+
+    /// List GitHub repositories the authenticated GitHub App user can access,
+    /// sorted by most-recently-pushed. Intended for the desktop UI picker.
+    #[tool(
+        description = "List GitHub repositories the Djinn App can access (sorted by recent activity). Use to populate an Add-Project picker."
+    )]
+    pub async fn github_list_repos(
+        &self,
+        Parameters(input): Parameters<GithubListReposParams>,
+    ) -> Json<GithubListReposResponse> {
+        let cred_repo = Arc::new(CredentialRepository::new(
+            self.state.db().clone(),
+            self.state.event_bus(),
+        ));
+        if GitHubAppTokens::load_from_db(&cred_repo).await.is_none() {
+            return Json(GithubListReposResponse {
+                status: "error: Connect GitHub first".into(),
+                repos: vec![],
+            });
+        }
+        let client = GitHubApiClient::new(cred_repo);
+        match client.list_user_repos(input.per_page).await {
+            Ok(entries) => Json(GithubListReposResponse {
+                status: "ok".into(),
+                repos: entries
+                    .into_iter()
+                    .map(|e| GithubRepoEntry {
+                        owner: e.owner,
+                        repo: e.repo,
+                        default_branch: e.default_branch,
+                        private: e.private,
+                        description: e.description,
+                    })
+                    .collect(),
+            }),
+            Err(e) => Json(GithubListReposResponse {
+                status: format!("error: {e}"),
+                repos: vec![],
+            }),
         }
     }
 

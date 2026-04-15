@@ -29,8 +29,16 @@ CREATE TABLE IF NOT EXISTS projects (
     sync_enabled        BOOLEAN      NOT NULL DEFAULT FALSE,
     sync_remote         VARCHAR(512) NULL,
     verification_rules  LONGTEXT     NOT NULL,
+    -- Migration 2: GitHub-origin projects. For server-cloned repos these
+    -- columns carry the source-of-truth metadata; `path` mirrors
+    -- `clone_path`. The legacy host-path flow leaves them NULL.
+    github_owner        VARCHAR(255) NULL,
+    github_repo         VARCHAR(255) NULL,
+    default_branch      VARCHAR(255) NULL,
+    clone_path          VARCHAR(512) NULL,
     UNIQUE KEY uq_projects_name (name),
-    UNIQUE KEY uq_projects_path (path)
+    UNIQUE KEY uq_projects_path (path),
+    UNIQUE KEY uq_projects_github_owner_repo (github_owner, github_repo)
 );
 
 -- ── epics ────────────────────────────────────────────────────────────────────

@@ -61,6 +61,9 @@ vi.mock("@/lib/toast", () => ({
 vi.mock("@/components/HealthCheckPanel", () => ({
   HealthCheckPanel: () => null,
 }));
+vi.mock("@/components/AddProjectFromGithubDialog", () => ({
+  AddProjectFromGithubDialog: () => null,
+}));
 // Mock hugeicons to avoid import issues
 vi.mock("@hugeicons/core-free-icons", () => ({
   KanbanIcon: "KanbanIcon",

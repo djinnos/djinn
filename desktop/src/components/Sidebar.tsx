@@ -31,9 +31,9 @@ import { ALL_PROJECTS, projectStore } from '@/stores/projectStore';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
 import { useStore } from 'zustand';
 import { verificationStore, type VerificationRun } from '@/stores/verificationStore';
-import { addProject, fetchProjects } from '@/api/server';
-import { selectDirectory } from '@/electron/commands';
+import { fetchProjects } from '@/api/server';
 import { showToast } from '@/lib/toast';
+import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDialog';
 import { HealthCheckPanel } from '@/components/HealthCheckPanel';
 import {
   AlertDialog,
@@ -503,18 +503,23 @@ export function Sidebar() {
     }
   }, [pulseProposalsQuery.data, user]);
 
-  const handleAddProject = useCallback(async () => {
+  const [isAddProjectDialogOpen, setIsAddProjectDialogOpen] = useState(false);
+
+  // Migration 2: the server owns the filesystem. Opening the Add-Project row
+  // now launches a GitHub repo picker (`project_add_from_github`) instead of
+  // a local-directory picker.
+  const handleAddProject = useCallback(() => {
+    setIsAddProjectDialogOpen(true);
+  }, []);
+
+  const handleProjectAdded = useCallback(async () => {
     setIsAddingProject(true);
     try {
-      const path = await selectDirectory('Select Project Directory');
-      if (!path) return;
-      await addProject(path);
       const projects = await fetchProjects();
       projectStore.getState().setProjects(projects);
-      showToast.success('Project added');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to add project';
-      showToast.error('Could not add project', { description: message });
+      const message = err instanceof Error ? err.message : 'Failed to refresh projects';
+      showToast.error('Project added but list refresh failed', { description: message });
     } finally {
       setIsAddingProject(false);
     }
@@ -610,8 +615,8 @@ export function Sidebar() {
           <div
             role="button"
             tabIndex={0}
-            onClick={() => !isAddingProject && void handleAddProject()}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isAddingProject) void handleAddProject(); } }}
+            onClick={() => !isAddingProject && handleAddProject()}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isAddingProject) handleAddProject(); } }}
             className={cn(
               'flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors cursor-pointer',
               'text-muted-foreground hover:bg-white/[0.04] hover:text-foreground',
@@ -639,6 +644,12 @@ export function Sidebar() {
         />
         <UserFooter />
       </div>
+
+      <AddProjectFromGithubDialog
+        open={isAddProjectDialogOpen}
+        onOpenChange={setIsAddProjectDialogOpen}
+        onAdded={() => void handleProjectAdded()}
+      />
     </aside>
   );
 }
