@@ -1,57 +1,80 @@
 /**
- * Auth client for the web frontend.
+ * GitHub-backed authentication client.
  *
- * The prior Electron host owned the GitHub OAuth device-code flow
- * and persisted tokens locally. That plumbing was removed in the
- * Electron-strip migration. The Dockerized Rust server exposes its
- * own OAuth callback on port :1455, but the HTTP endpoints that the
- * desktop UI would call (`auth_get_state`, `start_github_login`,
- * `auth_login`, `auth_logout`) are not yet plumbed over HTTP.
- *
- * Until those endpoints exist, we operate in an "auth-disabled" mode:
- * the user is treated as authenticated with an anonymous profile so
- * the UI can render. Real auth needs a follow-up once the server
- * exposes `/auth/state`, `/auth/start`, `/auth/logout` routes.
+ * The server owns the OAuth flow end-to-end: we ask it who we are (GET /auth/me),
+ * navigate the browser to its GitHub OAuth kickoff endpoint, and let it set a
+ * session cookie via its callback. All requests forward credentials so the
+ * session cookie flows both ways.
  */
+import { getBaseUrl } from "@/api/serverUrl";
 
-export interface AuthUser {
-  sub: string;
-  name?: string;
-  email?: string;
-  picture?: string;
+export interface User {
+  id: string;
+  login: string;
+  name: string | null;
+  avatarUrl: string | null;
 }
 
-export interface AuthState {
-  isAuthenticated: boolean;
-  user: AuthUser | null;
+interface ServerUser {
+  id: string | number;
+  login: string;
+  name?: string | null;
+  avatar_url?: string | null;
 }
 
-export interface DeviceCodeInfo {
-  userCode: string;
-  verificationUri: string;
+function mapUser(raw: ServerUser): User {
+  return {
+    id: String(raw.id),
+    login: raw.login,
+    name: raw.name ?? null,
+    avatarUrl: raw.avatar_url ?? null,
+  };
 }
 
-const ANON_USER: AuthUser = {
-  sub: "local-user",
-  name: "Local User",
-};
-
-export async function authGetState(): Promise<AuthState> {
-  return { isAuthenticated: true, user: ANON_USER };
+/**
+ * Fetch the currently authenticated user from the server.
+ * Returns null on 401 (unauthenticated); throws on network or server errors.
+ */
+export async function fetchCurrentUser(): Promise<User | null> {
+  const res = await fetch(`${getBaseUrl()}/auth/me`, {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+  });
+  if (res.status === 401) return null;
+  if (!res.ok) {
+    throw new Error(`Failed to fetch current user: ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as ServerUser;
+  return mapUser(body);
 }
 
-export async function authLogin(): Promise<void> {
-  // no-op placeholder — server does not yet expose a login HTTP endpoint.
+function defaultRedirect(): string {
+  if (typeof window === "undefined") return "/";
+  return `${window.location.pathname}${window.location.search}`;
 }
 
-export async function authLogout(): Promise<void> {
-  // no-op placeholder.
+/**
+ * Navigate the browser to the server's GitHub OAuth kickoff endpoint.
+ * The server will 302 to GitHub; after the callback it redirects back to `redirect`.
+ */
+export function startGithubLogin(redirect?: string): void {
+  const target = redirect ?? defaultRedirect();
+  const url = `${getBaseUrl()}/auth/github/start?redirect=${encodeURIComponent(target)}`;
+  window.location.assign(url);
 }
 
-export async function startGithubLogin(): Promise<DeviceCodeInfo> {
-  throw new Error("GitHub login is not yet available in the web client.");
-}
-
-export async function attemptSilentAuth(): Promise<boolean> {
-  return true;
+/**
+ * Log out and reload so every query refetches under the new (unauth) session.
+ */
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${getBaseUrl()}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } finally {
+    if (typeof window !== "undefined") {
+      window.location.reload();
+    }
+  }
 }

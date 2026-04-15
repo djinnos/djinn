@@ -1,5 +1,6 @@
 import { useSidebarStore } from '@/stores/sidebarStore';
-import { useAuthStore } from '@/stores/authStore';
+import { useAuthUser } from '@/components/AuthGate';
+import { logout } from '@/api/auth';
 import { Button } from '@/components/ui/button';
 import { Kbd } from '@/components/ui/kbd';
 import { cn } from '@/lib/utils';
@@ -369,24 +370,25 @@ function ProjectRow({
 }
 
 function UserFooter() {
-  const { user, logout } = useAuthStore();
+  const user = useAuthUser();
 
   if (!user) return null;
 
+  const displayName = user.name || user.login;
+  const initial = (user.name?.[0] || user.login?.[0] || '?').toUpperCase();
+
   return (
     <div className="flex items-center gap-2.5 rounded-md px-2 py-2">
-      {user.picture ? (
-        <img src={user.picture} alt="" className="h-7 w-7 shrink-0 rounded-full" />
+      {user.avatarUrl ? (
+        <img src={user.avatarUrl} alt="" className="h-7 w-7 shrink-0 rounded-full" />
       ) : (
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium">
-          {(user.name?.[0] || user.email?.[0] || '?').toUpperCase()}
+          {initial}
         </div>
       )}
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-sidebar-foreground">{user.name || 'User'}</p>
-        {user.email && (
-          <p className="truncate text-[11px] text-muted-foreground">{user.email}</p>
-        )}
+        <p className="truncate text-sm font-medium text-sidebar-foreground">{displayName}</p>
+        <p className="truncate text-[11px] text-muted-foreground">@{user.login}</p>
       </div>
       <button
         type="button"
@@ -409,7 +411,7 @@ export function Sidebar() {
   const selectedProjectId = useSelectedProjectId();
   const isAll = selectedProjectId === ALL_PROJECTS;
   const { navigateToProject, navigateToView } = useProjectRoute();
-  const user = useAuthStore((state) => state.user);
+  const user = useAuthUser();
   const selectedProjectPath = projects.find((project) => project.id === selectedProjectId)?.path ?? '';
   const pulseProposalsQuery = useQuery({
     ...pulseProposalListQueryOptions(selectedProjectPath),

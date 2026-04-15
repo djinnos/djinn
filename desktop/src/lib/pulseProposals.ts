@@ -1,5 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
-import type { AuthUser } from "@/api/auth";
+import type { User } from "@/api/auth";
+
+type UserLike = Pick<User, "id" | "login" | "name"> | { sub?: string; email?: string; name?: string } | null | undefined;
 import { callMcpTool } from "@/api/mcpClient";
 import type { ProposeAdrListOutput } from "@/api/generated/mcp-tools.gen";
 
@@ -28,12 +30,20 @@ export function pulseProposalListQueryOptions(projectPath: string) {
   });
 }
 
-function originatorKey(user: AuthUser | null | undefined): string | null {
+function originatorKey(user: UserLike): string | null {
   if (!user) return null;
-  return user.sub ?? user.email ?? user.name ?? null;
+  const anyUser = user as Record<string, string | null | undefined>;
+  return (
+    anyUser.id ??
+    anyUser.login ??
+    anyUser.sub ??
+    anyUser.email ??
+    anyUser.name ??
+    null
+  );
 }
 
-export function recordPulseOriginatedSpike(spikeId: string, user: AuthUser | null | undefined): void {
+export function recordPulseOriginatedSpike(spikeId: string, user: UserLike): void {
   const key = originatorKey(user);
   if (!spikeId || !key) return;
   pulseSpikeOriginators.set(spikeId, key);
@@ -41,7 +51,7 @@ export function recordPulseOriginatedSpike(spikeId: string, user: AuthUser | nul
 
 export function shouldNotifyForProposalDraft(
   proposal: Pick<PulseProposalSummary, "id" | "originating_spike_id">,
-  user: AuthUser | null | undefined,
+  user: UserLike,
 ): boolean {
   const key = originatorKey(user);
   if (!key || !proposal.id || !proposal.originating_spike_id) return false;
