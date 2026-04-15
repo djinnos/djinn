@@ -35,7 +35,6 @@ import { addProject, fetchProjects } from '@/api/server';
 import { selectDirectory } from '@/electron/commands';
 import { showToast } from '@/lib/toast';
 import { HealthCheckPanel } from '@/components/HealthCheckPanel';
-import { ConnectionStatusBadge } from '@/components/ConnectionStatusBadge';
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -533,7 +532,6 @@ export function Sidebar() {
             Djinn
           </span>
         </div>
-        <ConnectionStatusBadge />
       </div>
 
       {/* Navigation */}

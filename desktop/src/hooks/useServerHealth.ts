@@ -1,48 +1,40 @@
 import { useState, useEffect, useCallback } from "react";
-import { getServerStatus, retryServerConnection } from "@/electron/commands";
-import { listen } from "@/electron/shims/event";
+import { checkServerAvailable } from "@/electron/commands";
 
 export type ConnectionStatus = "loading" | "connected" | "error";
 
 export interface ServerHealthState {
   status: ConnectionStatus;
-  port: number | null;
+  baseUrl: string | null;
   error: string | null;
   retry: () => Promise<void>;
   isRetrying: boolean;
-  serverVersion: string | null;
-  updateAvailable: boolean;
 }
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 3000;
 
+/**
+ * Poll the server /health endpoint. When the server runs via docker-compose
+ * on localhost:8372 this should be healthy; when it's not running we show a
+ * banner instructing the user to run `docker compose up`.
+ */
 export function useServerHealth(): ServerHealthState {
   const [status, setStatus] = useState<ConnectionStatus>("loading");
-  const [port, setPort] = useState<number | null>(null);
+  const [baseUrl, setBaseUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
-  const [serverVersion, setServerVersion] = useState<string | null>(null);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
 
   const checkStatus = useCallback(async () => {
     try {
-      const serverStatus = await getServerStatus();
-
-      if (serverStatus.is_healthy && serverStatus.port) {
-        setPort(serverStatus.port);
+      const result = await checkServerAvailable();
+      setBaseUrl(result.baseUrl);
+      if (result.ok) {
         setStatus("connected");
         setError(null);
-        setServerVersion(serverStatus.server_version);
-        setUpdateAvailable(serverStatus.update_available);
         return true;
       }
-
-      if (serverStatus.has_error) {
-        setStatus("error");
-        setError(serverStatus.error_message || "Failed to connect to server");
-        return false;
-      }
-
+      setStatus("error");
+      setError(result.error ?? `Server not reachable at ${result.baseUrl}`);
       return false;
     } catch (err) {
       setStatus("error");
@@ -56,47 +48,23 @@ export function useServerHealth(): ServerHealthState {
     try {
       setStatus("loading");
       setError(null);
-      await retryServerConnection();
-      // Wait a moment then check status
-      await new Promise(resolve => setTimeout(resolve, 1000));
       await checkStatus();
-    } catch (err) {
-      setStatus("error");
-      setError(err instanceof Error ? err.message : "Failed to retry connection");
     } finally {
       setIsRetrying(false);
     }
   }, [checkStatus]);
 
   useEffect(() => {
-    // Initial check
-    checkStatus();
+    void checkStatus();
 
-    // Poll while not connected
     const intervalId = setInterval(() => {
-      if (status !== "connected") {
-        checkStatus();
-      }
+      void checkStatus();
     }, POLL_INTERVAL_MS);
-
-    // Listen for backend health monitor events
-    const unlistenReconnected = listen<number>("server:reconnected", (event) => {
-      setPort(event.payload);
-      setStatus("connected");
-      setError(null);
-    });
-
-    const unlistenDisconnected = listen("server:disconnected", () => {
-      setStatus("error");
-      setError("Server connection lost. Attempting to reconnect...");
-    });
 
     return () => {
       clearInterval(intervalId);
-      unlistenReconnected.then((fn) => fn());
-      unlistenDisconnected.then((fn) => fn());
     };
-  }, [checkStatus, status]);
+  }, [checkStatus]);
 
-  return { status, port, error, retry, isRetrying, serverVersion, updateAvailable };
+  return { status, baseUrl, error, retry, isRetrying };
 }

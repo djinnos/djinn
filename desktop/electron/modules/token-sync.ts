@@ -5,9 +5,8 @@
  * Token synchronization between local storage and server credential vault
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { homedir } from "node:os";
+// Server URL resolution: docker-compose on localhost.
+// Optional override via DJINN_SERVER_URL env var.
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -43,42 +42,15 @@ interface ServerGitHubAppTokens {
 // ---------------------------------------------------------------------------
 
 /**
- * Read `~/.djinn/active_connection.json` for the server base URL,
- * falling back to `~/.djinn/daemon.json` for backward compatibility.
+ * Resolve the server base URL. The server runs via docker-compose on
+ * localhost:8372 by default; callers may override with DJINN_SERVER_URL.
  */
 export function resolveServerBaseUrl(): string | null {
-  const home = homedir();
-  const djinnDir = path.join(home, ".djinn");
-
-  // Prefer active_connection.json — written for all connection modes.
-  try {
-    const content = fs.readFileSync(
-      path.join(djinnDir, "active_connection.json"),
-      "utf-8",
-    );
-    const json = JSON.parse(content);
-    if (typeof json.base_url === "string" && json.base_url) {
-      return json.base_url;
-    }
-  } catch {
-    // File missing or unreadable — fall through.
+  const override = process.env.DJINN_SERVER_URL;
+  if (override && override.length > 0) {
+    return override.replace(/\/+$/, "");
   }
-
-  // Fallback: daemon.json (local daemon mode only, backward compat).
-  try {
-    const content = fs.readFileSync(
-      path.join(djinnDir, "daemon.json"),
-      "utf-8",
-    );
-    const json = JSON.parse(content);
-    if (typeof json.port === "number") {
-      return `http://127.0.0.1:${json.port}`;
-    }
-  } catch {
-    // File missing or unreadable.
-  }
-
-  return null;
+  return "http://127.0.0.1:8372";
 }
 
 // ---------------------------------------------------------------------------

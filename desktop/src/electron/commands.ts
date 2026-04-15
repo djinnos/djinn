@@ -3,6 +3,9 @@
  *
  * All invoke() calls go through this module. Never call invoke() directly
  * in components - always use these wrapper functions.
+ *
+ * The server now runs via docker-compose on localhost:8372, so these
+ * wrappers are thin — no daemon lifecycle, no SSH, no binary download.
  */
 
 import { invoke } from "./shims/invoke";
@@ -49,46 +52,15 @@ export async function getServerUrl(): Promise<string> {
 }
 
 /**
- * Get the server status from the Electron backend.
- * @returns The current server status including health and error state
+ * Probe the server /health endpoint.
+ * @returns Object describing whether the configured server URL is reachable.
  */
-export async function getServerStatus(): Promise<{
-  base_url: string | null;
-  port: number | null;
-  is_healthy: boolean;
-  has_error: boolean;
-  error_message: string | null;
-  server_version: string | null;
-  update_available: boolean;
+export async function checkServerAvailable(): Promise<{
+  ok: boolean;
+  baseUrl: string;
+  error?: string;
 }> {
-  return invoke("get_server_status");
-}
-
-/**
- * Retry connecting to the server (embedded or remote).
- * Called when the user clicks the retry button in the error state.
- * @returns The base URL the server is reachable at
- */
-export async function retryServerConnection(): Promise<string> {
-  return invoke("retry_server_connection");
-}
-
-export async function retryServerDiscovery(): Promise<number> {
-  return invoke("retry_server_discovery");
-}
-
-export type ConnectionMode =
-  | { type: "daemon" }
-  | { type: "remote"; url: string }
-  | { type: "ssh"; host_id: string }
-  | { type: "wsl" };
-
-export async function getConnectionMode(): Promise<ConnectionMode> {
-  return invoke("get_connection_mode");
-}
-
-export async function setConnectionMode(mode: ConnectionMode): Promise<void> {
-  return invoke("set_connection_mode", { mode });
+  return invoke("check_server_available");
 }
 
 /**
@@ -160,80 +132,6 @@ export async function authLogout(): Promise<void> {
   await invoke("auth_logout");
 }
 
-// --- Connection Settings Types ---
-
-export interface SshHost {
-  id: string;
-  label: string;
-  hostname: string;
-  user: string;
-  port: number;
-  key_path: string | null;
-  remote_daemon_port: number;
-  deployed: boolean;
-  server_version: string | null;
-}
-
-export type TunnelStatus =
-  | { status: "disconnected" }
-  | { status: "connecting" }
-  | { status: "connected"; local_port: number }
-  | { status: "reconnecting" }
-  | { status: "error"; message: string };
-
-// --- Connection Settings Commands ---
-
-/**
- * Get saved SSH hosts from the backend.
- */
-export async function getSshHosts(): Promise<SshHost[]> {
-  return invoke<SshHost[]>("get_ssh_hosts");
-}
-
-/**
- * Save (create or update) an SSH host configuration.
- */
-export async function saveSshHost(host: SshHost): Promise<void> {
-  return invoke<void>("save_ssh_host", { host });
-}
-
-/**
- * Remove an SSH host configuration by ID.
- */
-export async function removeSshHost(id: string): Promise<void> {
-  return invoke<void>("remove_ssh_host", { id });
-}
-
-/**
- * Test SSH connectivity to a saved host.
- * @returns A success message or throws on failure.
- */
-export async function testSshConnection(hostId: string): Promise<string> {
-  return invoke<string>("test_ssh_connection", { hostId });
-}
-
-/**
- * Get the current SSH tunnel status.
- */
-export async function getTunnelStatus(): Promise<TunnelStatus> {
-  return invoke<TunnelStatus>("get_tunnel_status");
-}
-
-/**
- * Deploy the djinn-server binary to a remote host via SSH.
- * @returns A status message.
- */
-export async function deployServerToHost(hostId: string): Promise<string> {
-  return invoke<string>("deploy_server_to_host", { hostId });
-}
-
-/**
- * Check if WSL is available on this machine.
- */
-export async function checkWslAvailable(): Promise<boolean> {
-  return invoke<boolean>("check_wsl_available");
-}
-
 /**
  * Open a native file picker dialog.
  * @param title Optional dialog title
@@ -241,21 +139,6 @@ export async function checkWslAvailable(): Promise<boolean> {
  */
 export async function selectFile(title?: string): Promise<string | null> {
   return invoke<string | null>("select_file", { title });
-}
-
-/**
- * Download the server binary from GitHub releases.
- * @returns The path to the downloaded binary
- */
-export async function downloadServerBinary(): Promise<string> {
-  return invoke<string>("download_server_binary");
-}
-
-/**
- * Check if a saved connection mode exists (first-launch detection).
- */
-export async function hasSavedConnectionMode(): Promise<boolean> {
-  return invoke<boolean>("has_saved_connection_mode");
 }
 
 /**

@@ -6,7 +6,6 @@ import { InlineError } from '@/components/InlineError';
 import { EmptyState } from '@/components/EmptyState';
 import { AgentConfig } from '@/components/AgentConfig';
 import { ConfirmButton } from '@/components/ConfirmButton';
-import { ConnectionSettings } from '@/components/ConnectionSettings';
 import { LangfuseConfig } from '@/components/LangfuseConfig';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useProviders } from '@/hooks/settings/useProviders';
@@ -101,10 +100,6 @@ function ModelsTab() {
 function GeneralTab() {
   return (
     <div className="flex flex-col gap-6 flex-1 min-h-0">
-      <ConnectionSettings />
-
-      <div className="border-t border-border" />
-
       <LangfuseConfig />
     </div>
   );

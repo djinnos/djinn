@@ -3,41 +3,57 @@
  *
  * Maps every frontend `invoke(command, args)` call to the corresponding
  * Node.js module function that registers all IPC handlers.
+ *
+ * Since the server runs via docker-compose on localhost, this handler is a
+ * thin shell: auth/token management, window controls, dialogs, git helpers,
+ * and a simple server-health probe.
  */
 
 import { ipcMain, dialog, shell, BrowserWindow, type IpcMainInvokeEvent } from "electron";
 import { execSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { homedir } from "node:os";
 
 import * as auth from "./modules/auth.js";
 import * as tokenRefresh from "./modules/token-refresh.js";
 import * as tokenSync from "./modules/token-sync.js";
-import * as server from "./modules/server.js";
-import * as ssh from "./modules/ssh.js";
-import * as deploy from "./modules/deploy.js";
-import * as connectionMode from "./modules/connection-mode.js";
-import * as wsl from "./modules/wsl.js";
+
+// ---------------------------------------------------------------------------
+// Server URL — static for docker-compose topology
+// ---------------------------------------------------------------------------
+
+const DEFAULT_SERVER_URL = "http://127.0.0.1:8372";
+
+function serverBaseUrl(): string {
+  const override = process.env.DJINN_SERVER_URL;
+  if (override && override.length > 0) {
+    return override.replace(/\/+$/, "");
+  }
+  return DEFAULT_SERVER_URL;
+}
+
+function serverPort(): number {
+  try {
+    const url = new URL(serverBaseUrl());
+    const port = url.port ? Number(url.port) : (url.protocol === "https:" ? 443 : 80);
+    return port || 8372;
+  } catch {
+    return 8372;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+type SendEvent = (event: string, payload?: unknown) => void;
+
 /** Shortcut to send events to the renderer. */
-function makeSendEvent(win: BrowserWindow): server.SendEvent {
+function makeSendEvent(win: BrowserWindow): SendEvent {
   return (event: string, payload?: unknown) => {
     if (!win.isDestroyed()) {
       win.webContents.send(event, payload);
     }
   };
 }
-
-// ---------------------------------------------------------------------------
-// Shared state
-// ---------------------------------------------------------------------------
-
-const serverState = new server.ServerState();
 
 // ---------------------------------------------------------------------------
 // Registration
@@ -239,92 +255,41 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     return true;
   });
 
-  // ── Server ───────────────────────────────────────────────────────────
+  // ── Server (static — docker-compose on localhost) ────────────────────
 
   ipcMain.handle("greet", async (_e: IpcMainInvokeEvent, args: { name: string }) => {
     return `Hello, ${args.name}! You've been greeted from Electron!`;
   });
 
   ipcMain.handle("get_server_port", async () => {
-    return serverState.port;
+    return serverPort();
   });
 
   ipcMain.handle("get_server_url", async () => {
-    return serverState.baseUrl;
+    return serverBaseUrl();
   });
 
-  ipcMain.handle("get_server_status", async () => {
-    return serverState.toStatus();
-  });
-
-  ipcMain.handle("retry_server_connection", async () => {
-    return server.retryConnection(serverState, sendEvent);
-  });
-
-  // ── Connection mode ──────────────────────────────────────────────────
-
-  ipcMain.handle("get_connection_mode", async () => {
-    return connectionMode.load();
-  });
-
-  ipcMain.handle("set_connection_mode", async (_e: IpcMainInvokeEvent, args: { mode: connectionMode.ConnectionMode }) => {
-    connectionMode.save(args.mode);
-  });
-
-  ipcMain.handle("has_saved_connection_mode", async () => {
+  /**
+   * Probe the server /health endpoint. Used by the renderer to show an
+   * "unreachable" banner when the user has not started docker-compose.
+   */
+  ipcMain.handle("check_server_available", async () => {
+    const baseUrl = serverBaseUrl();
     try {
-      return fs.existsSync(path.join(homedir(), ".djinn", "connection_mode.json"));
-    } catch {
-      return false;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      const response = await fetch(`${baseUrl}/health`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return { ok: response.ok, baseUrl };
+    } catch (err) {
+      return {
+        ok: false,
+        baseUrl,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
-  });
-
-  // ── SSH / Tunnel ─────────────────────────────────────────────────────
-
-  ipcMain.handle("get_ssh_hosts", async () => {
-    return ssh.loadHosts();
-  });
-
-  ipcMain.handle("save_ssh_host", async (_e: IpcMainInvokeEvent, args: { host: ssh.SshHost }) => {
-    ssh.addHost(args.host);
-  });
-
-  ipcMain.handle("remove_ssh_host", async (_e: IpcMainInvokeEvent, args: { id: string }) => {
-    ssh.removeHost(args.id);
-  });
-
-  ipcMain.handle("test_ssh_connection", async (_e: IpcMainInvokeEvent, args: { hostId: string }) => {
-    const host = ssh.findHost(args.hostId);
-    if (!host) throw new Error(`SSH host not found: ${args.hostId}`);
-    return ssh.testConnection(host);
-  });
-
-  ipcMain.handle("get_tunnel_status", async (): Promise<ssh.TunnelStatus> => {
-    if (!ssh.activeTunnelHostId()) {
-      return { status: "disconnected" };
-    }
-    if (ssh.isActiveTunnelAlive()) {
-      const port = ssh.activeTunnelLocalPort();
-      return { status: "connected", local_port: port! };
-    }
-    return { status: "disconnected" };
-  });
-
-  ipcMain.handle("deploy_server_to_host", async (_e: IpcMainInvokeEvent, args: { hostId: string }) => {
-    const host = ssh.findHost(args.hostId);
-    if (!host) throw new Error(`SSH host not found: ${args.hostId}`);
-    const result = await deploy.deployToHost(host);
-    return `Deployed v${result.version} (${result.arch})`;
-  });
-
-  // ── Platform ─────────────────────────────────────────────────────────
-
-  ipcMain.handle("check_wsl_available", async () => {
-    return wsl.isAvailable();
-  });
-
-  ipcMain.handle("download_server_binary", async () => {
-    return server.downloadServerBinary();
   });
 
   // ── Git ──────────────────────────────────────────────────────────────
@@ -397,6 +362,47 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle("shell:open-external", async (_e: IpcMainInvokeEvent, args: { url: string }) => {
     await shell.openExternal(args.url);
   });
+
+  // Allowlist of hosts the server-initiated OAuth "open_browser" event is
+  // allowed to route to. Rejects file://, javascript:, and any off-list host
+  // so a compromised/misbehaving server can't hand us an arbitrary URL.
+  const OAUTH_URL_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
+    "auth.openai.com",
+    "chat.openai.com",
+    "chatgpt.com",
+    "platform.openai.com",
+    "api.anthropic.com",
+    "claude.ai",
+    "console.anthropic.com",
+    "github.com",
+    "api.github.com",
+  ]);
+
+  function isAllowedOAuthUrl(rawUrl: string): boolean {
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return false;
+      }
+      const host = parsed.hostname.toLowerCase();
+      return OAUTH_URL_ALLOWED_HOSTS.has(host);
+    } catch {
+      return false;
+    }
+  }
+
+  ipcMain.handle(
+    "oauth:open-browser",
+    async (_e: IpcMainInvokeEvent, args: { url: string; provider?: string }) => {
+      const url = args?.url ?? "";
+      if (!isAllowedOAuthUrl(url)) {
+        console.warn(`oauth:open-browser rejected URL (not in allowlist): ${url}`);
+        return { ok: false, error: "URL not in allowlist" };
+      }
+      await shell.openExternal(url);
+      return { ok: true };
+    },
+  );
 
   // ── Dialogs ──────────────────────────────────────────────────────────
 

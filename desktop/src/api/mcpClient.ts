@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { McpToolInput, McpToolName, McpToolOutput } from "@/api/generated/mcp-tools.gen";
-import { getServerPort } from "@/electron/commands";
+import { getServerBaseUrl } from "@/api/serverUrl";
 
 type ToolCallResult = {
   content?: Array<{ type?: string; text?: string }>;
@@ -51,8 +51,7 @@ function extractToolPayload<T>(result: ToolCallResult): T {
 }
 
 async function getMcpUrl(): Promise<string> {
-  const port = await getServerPort();
-  return `http://127.0.0.1:${port}/mcp`;
+  return `${getServerBaseUrl()}/mcp`;
 }
 
 async function connectClient(forceReconnect = false): Promise<Client> {

@@ -41,6 +41,21 @@ Instead of juggling terminal windows and manually switching between models and r
   </a>
 </p>
 
+## Quick start
+
+Requires Docker.
+
+    docker compose up
+
+This starts:
+- djinn-server on http://127.0.0.1:8372
+- Dolt (MySQL-compatible) on 127.0.0.1:3306
+- Qdrant on 127.0.0.1:6333 (HTTP) + 6334 (gRPC)
+
+Run Claude Code — the `djinn` plugin (configured for HTTP) connects automatically.
+
+See [DEPLOY.md](DEPLOY.md) for deployment details, data persistence, and remote-server configuration.
+
 ## How It Works
 
 ```

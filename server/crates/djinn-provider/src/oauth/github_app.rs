@@ -10,6 +10,7 @@
 //! `__OAUTH_GITHUB_APP`.
 
 use anyhow::{Result, anyhow};
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -366,18 +367,6 @@ async fn poll_device_flow(session: &DeviceCodeSession) -> Result<TokenResponse> 
     ))
 }
 
-fn open_browser(url: &str) {
-    #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/c", "start", url])
-        .spawn();
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    tracing::info!("Please open this URL in your browser: {}", url);
-}
 
 /// Fetch the authenticated user's login from the GitHub API.
 async fn fetch_user_login(access_token: &str) -> Option<String> {
@@ -406,7 +395,10 @@ async fn fetch_user_login(access_token: &str) -> Option<String> {
 /// 2. Otherwise runs the device code flow.
 ///
 /// Tokens are persisted to the encrypted credential DB on success.
-pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAppTokens> {
+pub async fn run_github_app_flow(
+    repo: &CredentialRepository,
+    events: &EventBus,
+) -> Result<GitHubAppTokens> {
     // Return cached token — OAuth App tokens are long-lived.
     if let Some(cached) = GitHubAppTokens::load_from_db(repo).await {
         tracing::debug!("GitHubApp: using cached access token");
@@ -427,7 +419,12 @@ pub async fn run_github_app_flow(repo: &CredentialRepository) -> Result<GitHubAp
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&session.verification_uri);
-    open_browser(browser_url);
+    // The desktop (Electron) is responsible for opening the browser via
+    // shell.openExternal. The server never shells out to xdg-open/open.
+    events.send(DjinnEventEnvelope::oauth_open_browser(
+        "github_app",
+        browser_url,
+    ));
 
     // 3. Poll until user authorizes
     let tr = poll_device_flow(&session).await?;

@@ -138,12 +138,12 @@ impl TaskRepository {
     pub async fn list_ready(&self, query: ReadyQuery) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
         let mut clauses: Vec<String> = vec![
-            "t.status = 'open'".to_owned(),
+            "t.`status` = 'open'".to_owned(),
             "NOT EXISTS (
                  SELECT 1 FROM blockers b2
                  JOIN tasks bt ON bt.id = b2.blocking_task_id
                  WHERE b2.task_id = t.id
-                    AND bt.status != 'closed'
+                    AND bt.`status` != 'closed'
              )"
             .to_owned(),
         ];
@@ -164,7 +164,7 @@ impl TaskRepository {
             }
         }
         if let Some(lbl) = &query.label {
-            clauses.push("EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)".to_owned());
+            clauses.push("JSON_CONTAINS(t.labels, JSON_QUOTE(?), '$')".to_owned());
             params.push(SqlParam::Text(lbl.clone()));
         }
         if let Some(owner) = &query.owner {
@@ -179,7 +179,7 @@ impl TaskRepository {
         let where_sql = clauses.join(" AND ");
         let sql = format!(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                    t.issue_type, t.status, t.priority, t.owner, t.labels,
+                    t.issue_type, t.`status`, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.total_reopen_count, t.total_verification_failure_count,
@@ -220,12 +220,12 @@ impl TaskRepository {
 
         // Build the same WHERE as list_ready, then LIMIT 1 for the claim.
         let mut clauses: Vec<String> = vec![
-            "t.status = 'open'".to_owned(),
+            "t.`status` = 'open'".to_owned(),
             "NOT EXISTS (
                  SELECT 1 FROM blockers b2
                  JOIN tasks bt ON bt.id = b2.blocking_task_id
                  WHERE b2.task_id = t.id
-                    AND bt.status != 'closed'
+                    AND bt.`status` != 'closed'
              )"
             .to_owned(),
         ];
@@ -246,7 +246,7 @@ impl TaskRepository {
             }
         }
         if let Some(lbl) = &query.label {
-            clauses.push("EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)".to_owned());
+            clauses.push("JSON_CONTAINS(t.labels, JSON_QUOTE(?), '$')".to_owned());
             params.push(SqlParam::Text(lbl.clone()));
         }
         if let Some(owner) = &query.owner {
@@ -261,7 +261,7 @@ impl TaskRepository {
         let where_sql = clauses.join(" AND ");
         let sql = format!(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                    t.issue_type, t.status, t.priority, t.owner, t.labels,
+                    t.issue_type, t.`status`, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.total_reopen_count, t.total_verification_failure_count,
@@ -293,9 +293,9 @@ impl TaskRepository {
 
         // Apply Start transition: open → in_progress.
         sqlx::query(
-            "UPDATE tasks SET status = 'in_progress',
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            "UPDATE tasks SET `status` = 'in_progress',
+                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
         .bind(&task.id)
         .execute(&mut *tx)
@@ -310,7 +310,7 @@ impl TaskRepository {
         sqlx::query(
             "INSERT INTO activity_log
                 (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES (?1, ?2, ?3, ?4, 'status_changed', ?5)",
+             VALUES (?, ?, ?, ?, 'status_changed', ?)",
         )
         .bind(&activity_id)
         .bind(&task.id)
@@ -367,7 +367,7 @@ impl TaskRepository {
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
                     (SELECT COUNT(*) FROM blockers b
                      JOIN tasks bt ON b.blocking_task_id = bt.id
-                     WHERE b.task_id = tasks.id AND bt.status != 'closed') AS unresolved_blocker_count
+                     WHERE b.task_id = tasks.id AND bt.`status` != 'closed') AS unresolved_blocker_count
              FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
         );
         let mut task_q = sqlx::query_as::<_, Task>(&sql);
@@ -405,7 +405,7 @@ impl TaskRepository {
         match query.group_by.as_deref() {
             Some(gb) => {
                 let col = match gb {
-                    "status" => "status",
+                    "status" => "`status`",
                     "priority" => "priority",
                     "issue_type" => "issue_type",
                     "epic" => "epic_id",
@@ -414,7 +414,7 @@ impl TaskRepository {
                     }
                 };
                 let sql = format!(
-                    "SELECT COALESCE(CAST({col} AS TEXT), ''), COUNT(*)
+                    "SELECT COALESCE(CAST({col} AS CHAR), ''), COUNT(*)
                      FROM tasks WHERE {where_sql}
                      GROUP BY {col} ORDER BY COUNT(*) DESC"
                 );
@@ -455,14 +455,14 @@ impl TaskRepository {
         let epic_rows = sqlx::query(
             "SELECT e.id, e.short_id, e.title,
                     COUNT(t.id) AS total,
-                    SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS closed,
-                    SUM(CASE WHEN t.status IN (
+                    SUM(CASE WHEN t.`status` = 'closed' THEN 1 ELSE 0 END) AS closed,
+                    SUM(CASE WHEN t.`status` IN (
                         'needs_task_review','in_task_review','closed'
                     ) THEN 1 ELSE 0 END) AS in_review,
-                    MIN(CASE WHEN t.status IN (
+                    MIN(CASE WHEN t.`status` IN (
                         'needs_task_review','in_task_review','closed'
                     ) THEN t.updated_at ELSE NULL END) AS oldest_review_at,
-                    SUM(CASE WHEN t.status IN ('approved','pr_draft','pr_review') THEN 1 ELSE 0 END) AS pr_ready
+                    SUM(CASE WHEN t.`status` IN ('approved','pr_draft','pr_review') THEN 1 ELSE 0 END) AS pr_ready
              FROM epics e
              LEFT JOIN tasks t ON t.epic_id = e.id
              GROUP BY e.id
@@ -500,12 +500,12 @@ impl TaskRepository {
 
         // Stale tasks: in_progress longer than the threshold.
         let stale_sql = format!(
-            "SELECT t.id, t.short_id, t.title, t.status, t.updated_at, t.owner,
+            "SELECT t.id, t.short_id, t.title, t.`status`, t.updated_at, t.owner,
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
-             WHERE t.status = 'in_progress'
-               AND t.updated_at < datetime('now', '-{stale_hours} hours')
+             WHERE t.`status` = 'in_progress'
+               AND t.updated_at < DATE_SUB(NOW(3), INTERVAL {stale_hours} HOUR)
              ORDER BY t.updated_at ASC"
         );
         let stale_rows = sqlx::query(&stale_sql).fetch_all(self.db.pool()).await?;
@@ -527,11 +527,11 @@ impl TaskRepository {
 
         // Review queue: tasks waiting in any review status.
         let review_rows = sqlx::query(
-            "SELECT t.id, t.short_id, t.title, t.status, t.updated_at,
+            "SELECT t.id, t.short_id, t.title, t.`status`, t.updated_at,
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
-             WHERE t.status IN ('needs_task_review','in_task_review','approved','pr_draft','pr_review','closed')
+             WHERE t.`status` IN ('needs_task_review','in_task_review','approved','pr_draft','pr_review','closed')
              ORDER BY t.updated_at ASC",
         )
         .fetch_all(self.db.pool())
@@ -571,7 +571,7 @@ impl TaskRepository {
 
             let session_count = session_repo.count_for_task(&task.id).await.unwrap_or(0);
             let epic_short_id = if let Some(epic_id) = &task.epic_id {
-                sqlx::query_scalar::<_, String>("SELECT short_id FROM epics WHERE id = ?1")
+                sqlx::query_scalar::<_, String>("SELECT short_id FROM epics WHERE id = ?")
                     .bind(epic_id)
                     .fetch_optional(self.db.pool())
                     .await?
@@ -617,15 +617,15 @@ impl TaskRepository {
         let mut tx = self.db.pool().begin().await?;
         let sql = format!(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status, priority, owner, labels, acceptance_criteria,
+                    `status`, priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
              FROM tasks
-             WHERE status = 'in_progress'
-               AND updated_at < datetime('now', '-{stale_hours} hours')"
+             WHERE `status` = 'in_progress'
+               AND updated_at < DATE_SUB(NOW(3), INTERVAL {stale_hours} HOUR)"
         );
         let stale: Vec<Task> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
 
@@ -633,9 +633,9 @@ impl TaskRepository {
         for task in stale {
             sqlx::query(
                 "UPDATE tasks
-                 SET status = 'open',
-                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE id = ?1",
+                 SET `status` = 'open',
+                     updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                 WHERE id = ?",
             )
             .bind(&task.id)
             .execute(&mut *tx)
@@ -651,7 +651,7 @@ impl TaskRepository {
             sqlx::query(
                 "INSERT INTO activity_log
                     (id, task_id, actor_id, actor_role, event_type, payload)
-                 VALUES (?1, ?2, 'system', 'system', 'status_changed', ?3)",
+                 VALUES (?, ?, 'system', 'system', 'status_changed', ?)",
             )
             .bind(&activity_id)
             .bind(&task.id)
@@ -704,7 +704,7 @@ pub(super) fn build_where(
     }
 
     if let Some(s) = status {
-        clauses.push("status = ?".to_owned());
+        clauses.push("`status` = ?".to_owned());
         params.push(SqlParam::Text(s.clone()));
     }
 
@@ -724,7 +724,7 @@ pub(super) fn build_where(
     }
 
     if let Some(lbl) = label {
-        clauses.push("EXISTS (SELECT 1 FROM json_each(labels) WHERE value = ?)".to_owned());
+        clauses.push("JSON_CONTAINS(labels, JSON_QUOTE(?), '$')".to_owned());
         params.push(SqlParam::Text(lbl.clone()));
     }
 

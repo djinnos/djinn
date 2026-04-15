@@ -87,7 +87,7 @@ pub trait NoteVectorStore: Send + Sync {
 
     async fn delete_branch(&self, repo: &NoteRepository, branch: &str) -> Result<u64> {
         let note_ids: Vec<String> =
-            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?1")
+            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?")
                 .bind(canonical_embedding_branch(branch))
                 .fetch_all(repo.db.pool())
                 .await?;
@@ -307,11 +307,11 @@ async fn upsert_embedding_metadata(
 
     sqlx::query(
         "INSERT INTO note_embeddings (note_id, embedding, embedding_dim, updated_at)
-         VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-         ON CONFLICT(note_id) DO UPDATE SET
-             embedding = excluded.embedding,
-             embedding_dim = excluded.embedding_dim,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+         VALUES (?, ?, ?, NOW(3))
+         ON DUPLICATE KEY UPDATE
+             embedding = VALUES(embedding),
+             embedding_dim = VALUES(embedding_dim),
+             updated_at = NOW(3)",
     )
     .bind(input.note_id)
     .bind(embedding_blob)
@@ -323,15 +323,15 @@ async fn upsert_embedding_metadata(
         "INSERT INTO note_embedding_meta (
             note_id, content_hash, embedded_at, model_version, embedding_dim, extension_state, branch
          ) VALUES (
-            ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?3, ?4, ?5, ?6
+            ?, ?, NOW(3), ?, ?, ?, ?
          )
-         ON CONFLICT(note_id) DO UPDATE SET
-            content_hash = excluded.content_hash,
-            embedded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-            model_version = excluded.model_version,
-            embedding_dim = excluded.embedding_dim,
-            extension_state = excluded.extension_state,
-            branch = excluded.branch",
+         ON DUPLICATE KEY UPDATE
+            content_hash = VALUES(content_hash),
+            embedded_at = NOW(3),
+            model_version = VALUES(model_version),
+            embedding_dim = VALUES(embedding_dim),
+            extension_state = VALUES(extension_state),
+            branch = VALUES(branch)",
     )
     .bind(input.note_id)
     .bind(input.content_hash)
@@ -350,11 +350,11 @@ async fn upsert_embedding_metadata(
 
 async fn delete_embedding_metadata(repo: &NoteRepository, note_id: &str) -> Result<()> {
     let mut tx = repo.db.pool().begin().await?;
-    sqlx::query("DELETE FROM note_embeddings WHERE note_id = ?1")
+    sqlx::query("DELETE FROM note_embeddings WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM note_embedding_meta WHERE note_id = ?1")
+    sqlx::query("DELETE FROM note_embedding_meta WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut *tx)
         .await?;
@@ -764,7 +764,7 @@ impl NoteVectorStore for QdrantNoteVectorStore {
         let from_branch = canonical_embedding_branch(from_branch);
         let to_branch = canonical_embedding_branch(to_branch);
         let note_ids: Vec<String> =
-            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?1")
+            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?")
                 .bind(&from_branch)
                 .fetch_all(repo.db.pool())
                 .await?;
@@ -783,7 +783,7 @@ impl NoteVectorStore for QdrantNoteVectorStore {
     async fn delete_branch(&self, repo: &NoteRepository, branch: &str) -> Result<u64> {
         let branch = canonical_embedding_branch(branch);
         let note_ids: Vec<String> =
-            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?1")
+            sqlx::query_scalar("SELECT note_id FROM note_embedding_meta WHERE branch = ?")
                 .bind(&branch)
                 .fetch_all(repo.db.pool())
                 .await?;
@@ -874,7 +874,7 @@ impl NoteRepository {
                         m.content_hash, m.model_version, m.branch
                  FROM notes n
                  LEFT JOIN note_embedding_meta m ON m.note_id = n.id
-                 WHERE n.project_id = ?1",
+                 WHERE n.project_id = ?",
         )
         .bind(project_id)
         .fetch_all(self.db.pool())
@@ -934,7 +934,7 @@ impl NoteRepository {
                     e.updated_at, m.extension_state, m.branch
              FROM note_embedding_meta m
              JOIN note_embeddings e ON e.note_id = m.note_id
-             WHERE m.note_id = ?1",
+             WHERE m.note_id = ?",
         )
         .bind(note_id)
         .fetch_optional(self.db.pool())
@@ -970,11 +970,11 @@ impl NoteRepository {
             .await?;
         let result = sqlx::query(
             "UPDATE note_embedding_meta
-             SET branch = ?2
-             WHERE branch = ?1",
+             SET branch = ?
+             WHERE branch = ?",
         )
-        .bind(canonical_embedding_branch(from_branch))
         .bind(canonical_embedding_branch(to_branch))
+        .bind(canonical_embedding_branch(from_branch))
         .execute(self.db.pool())
         .await?;
         Ok(result.rows_affected().max(promoted))

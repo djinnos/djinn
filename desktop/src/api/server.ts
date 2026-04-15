@@ -1,6 +1,6 @@
 import { callMcpTool } from "@/api/mcpClient";
+import { getServerBaseUrl } from "@/api/serverUrl";
 import type { McpToolOutput, ProjectListOutputSchema } from "@/api/generated/mcp-tools.gen";
-import { getServerPort } from "@/electron/commands";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
 
@@ -18,8 +18,7 @@ export async function setUserIdentity(email: string, userId: string): Promise<vo
 }
 
 async function getBaseUrl(): Promise<string> {
-  const port = await getServerPort();
-  return `http://127.0.0.1:${port}`;
+  return getServerBaseUrl();
 }
 
 function providerDescription(provider: ProviderCatalogItem): string {

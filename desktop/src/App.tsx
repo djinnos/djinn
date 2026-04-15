@@ -11,9 +11,7 @@ import { ChatPage } from "@/pages/ChatPage";
 import { MemoryPage } from "@/pages/MemoryPage";
 import { PulsePage } from "@/pages/PulsePage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
-import { ConnectionBanner } from "@/components/ConnectionBanner";
-import { ServerUpdateBanner } from "@/components/ServerUpdateBanner";
-import { ServerOnboarding } from "@/components/ServerOnboarding";
+import { ServerUnreachableBanner } from "@/components/ServerUnreachableBanner";
 import { AuthGate } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
@@ -31,8 +29,7 @@ function MainLayout() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Titlebar />
         <div className="flex min-h-0 flex-1 flex-col">
-          <ConnectionBanner />
-          <ServerUpdateBanner />
+          <ServerUnreachableBanner />
           <SyncHealthBanner />
           <Routes>
             {/* Global views (All Projects) */}
@@ -89,8 +86,8 @@ function AuthenticatedApp() {
     }
   }, [status, refreshGate, refreshModelGate]);
 
-  // After initial onboarding, if server disconnects show MainLayout
-  // with ConnectionBanner so user can access Settings.
+  // If server disconnects after first connect, still show MainLayout so the
+  // user sees the unreachable banner and can access Settings.
   if (status !== 'connected' && hasConnectedOnce.current) {
     return <MainLayout />;
   }
@@ -107,14 +104,11 @@ function AuthenticatedApp() {
 }
 
 export default function App() {
-  // Gate 1: Server connection
+  // Gate 1: GitHub authentication (requires server, but no local server setup flow)
   return (
-    <ServerOnboarding>
-      {/* Gate 2: GitHub authentication (requires server) */}
-      <AuthGate>
-        {/* Gate 3 & 4: Provider + Model onboarding, then main app */}
-        <AuthenticatedApp />
-      </AuthGate>
-    </ServerOnboarding>
+    <AuthGate>
+      {/* Gate 2 & 3: Provider + Model onboarding, then main app */}
+      <AuthenticatedApp />
+    </AuthGate>
   );
 }

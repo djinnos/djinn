@@ -69,8 +69,15 @@ impl ProjectRepository {
 
     pub async fn list(&self) -> Result<Vec<Project>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects ORDER BY name",
+        Ok(sqlx::query_as!(
+            Project,
+            r#"SELECT id, name, path,
+                      CAST(created_at AS CHAR) as "created_at!: String",
+                      target_branch,
+                      auto_merge as "auto_merge: bool",
+                      sync_enabled as "sync_enabled: bool",
+                      sync_remote
+               FROM projects ORDER BY name"#,
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -78,20 +85,34 @@ impl ProjectRepository {
 
     pub async fn get(&self, id: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
+        Ok(sqlx::query_as!(
+            Project,
+            r#"SELECT id, name, path,
+                      CAST(created_at AS CHAR) as "created_at!: String",
+                      target_branch,
+                      auto_merge as "auto_merge: bool",
+                      sync_enabled as "sync_enabled: bool",
+                      sync_remote
+               FROM projects WHERE id = ?"#,
+            id,
         )
-        .bind(id)
         .fetch_optional(self.db.pool())
         .await?)
     }
 
     pub async fn get_by_path(&self, path: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE path = ?1",
+        Ok(sqlx::query_as!(
+            Project,
+            r#"SELECT id, name, path,
+                      CAST(created_at AS CHAR) as "created_at!: String",
+                      target_branch,
+                      auto_merge as "auto_merge: bool",
+                      sync_enabled as "sync_enabled: bool",
+                      sync_remote
+               FROM projects WHERE path = ?"#,
+            path,
         )
-        .bind(path)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -101,7 +122,7 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         let normalized = project_path.trim_end_matches('/');
         Ok(
-            sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?1")
+            sqlx::query_scalar::<_, String>("SELECT id FROM projects WHERE path = ?")
                 .bind(normalized)
                 .fetch_optional(self.db.pool())
                 .await?,
@@ -161,7 +182,7 @@ impl ProjectRepository {
     pub async fn get_path(&self, id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         Ok(
-            sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?1")
+            sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?")
                 .bind(id)
                 .fetch_optional(self.db.pool())
                 .await?,
@@ -171,14 +192,14 @@ impl ProjectRepository {
     pub async fn create(&self, name: &str, path: &str) -> Result<Project> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?, ?, ?)")
             .bind(&id)
             .bind(name)
             .bind(path)
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?",
         )
         .bind(&id)
         .fetch_one(self.db.pool())
@@ -219,9 +240,9 @@ impl ProjectRepository {
         for (base_role, description) in DEFAULT_ROLES {
             let role_id = uuid::Uuid::now_v7().to_string();
             sqlx::query(
-                "INSERT OR IGNORE INTO agents
-                    (id, project_id, name, base_role, description, is_default)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                "INSERT IGNORE INTO agents
+                    (id, project_id, `name`, base_role, description, is_default)
+                 VALUES (?, ?, ?, ?, ?, 1)",
             )
             .bind(&role_id)
             .bind(project_id)
@@ -236,14 +257,14 @@ impl ProjectRepository {
 
     pub async fn update(&self, id: &str, name: &str, path: &str) -> Result<Project> {
         self.db.ensure_initialized().await?;
-        sqlx::query("UPDATE projects SET name = ?2, path = ?3 WHERE id = ?1")
-            .bind(id)
+        sqlx::query("UPDATE projects SET name = ?, path = ? WHERE id = ?")
             .bind(name)
             .bind(path)
+            .bind(id)
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?1",
+            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE id = ?",
         )
         .bind(id)
         .fetch_one(self.db.pool())
@@ -257,7 +278,7 @@ impl ProjectRepository {
     pub async fn get_config(&self, id: &str) -> Result<Option<ProjectConfig>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, ProjectConfig>(
-            "SELECT target_branch, auto_merge, sync_enabled, sync_remote, verification_rules FROM projects WHERE id = ?1",
+            "SELECT target_branch, auto_merge, sync_enabled, sync_remote, verification_rules FROM projects WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(self.db.pool())
@@ -273,33 +294,33 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         match key {
             "target_branch" => {
-                sqlx::query("UPDATE projects SET target_branch = ?2 WHERE id = ?1")
-                    .bind(id)
+                sqlx::query("UPDATE projects SET target_branch = ? WHERE id = ?")
                     .bind(value)
+                    .bind(id)
                     .execute(self.db.pool())
                     .await?;
             }
             "auto_merge" => {
                 let v = matches!(value, "true" | "1");
-                sqlx::query("UPDATE projects SET auto_merge = ?2 WHERE id = ?1")
-                    .bind(id)
+                sqlx::query("UPDATE projects SET auto_merge = ? WHERE id = ?")
                     .bind(v)
+                    .bind(id)
                     .execute(self.db.pool())
                     .await?;
             }
             "sync_enabled" => {
                 let v = matches!(value, "true" | "1");
-                sqlx::query("UPDATE projects SET sync_enabled = ?2 WHERE id = ?1")
-                    .bind(id)
+                sqlx::query("UPDATE projects SET sync_enabled = ? WHERE id = ?")
                     .bind(v)
+                    .bind(id)
                     .execute(self.db.pool())
                     .await?;
             }
             "sync_remote" => {
                 let val = if value.is_empty() { None } else { Some(value) };
-                sqlx::query("UPDATE projects SET sync_remote = ?2 WHERE id = ?1")
-                    .bind(id)
+                sqlx::query("UPDATE projects SET sync_remote = ? WHERE id = ?")
                     .bind(val)
+                    .bind(id)
                     .execute(self.db.pool())
                     .await?;
             }
@@ -311,9 +332,9 @@ impl ProjectRepository {
                     ))
                 })?;
                 validate_verification_rules(&rules).map_err(crate::error::DbError::InvalidData)?;
-                sqlx::query("UPDATE projects SET verification_rules = ?2 WHERE id = ?1")
-                    .bind(id)
+                sqlx::query("UPDATE projects SET verification_rules = ? WHERE id = ?")
                     .bind(value)
+                    .bind(id)
                     .execute(self.db.pool())
                     .await?;
             }
@@ -331,8 +352,15 @@ impl ProjectRepository {
     /// List all projects with `sync_enabled = true` (SYNC-07).
     pub async fn list_sync_enabled(&self) -> Result<Vec<Project>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Project>(
-            "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote FROM projects WHERE sync_enabled = 1 ORDER BY name",
+        Ok(sqlx::query_as!(
+            Project,
+            r#"SELECT id, name, path,
+                      CAST(created_at AS CHAR) as "created_at!: String",
+                      target_branch,
+                      auto_merge as "auto_merge: bool",
+                      sync_enabled as "sync_enabled: bool",
+                      sync_remote
+               FROM projects WHERE sync_enabled = 1 ORDER BY name"#,
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -351,8 +379,9 @@ impl ProjectRepository {
 
         // 1. Exact match by path or name.
         let exact = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM projects WHERE path = ?1 OR name = ?1 LIMIT 1",
+            "SELECT id FROM projects WHERE path = ? OR name = ? LIMIT 1",
         )
+        .bind(normalized)
         .bind(normalized)
         .fetch_optional(self.db.pool())
         .await?;
@@ -387,7 +416,7 @@ impl ProjectRepository {
 
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query("DELETE FROM projects WHERE id = ?1")
+        sqlx::query("DELETE FROM projects WHERE id = ?")
             .bind(id)
             .execute(self.db.pool())
             .await?;
@@ -519,7 +548,7 @@ mod tests {
         let project = repo.create("seeded", "/seeded").await.unwrap();
 
         let rows: Vec<(String, String, i64)> = sqlx::query_as(
-            "SELECT name, base_role, is_default FROM agents WHERE project_id = ?1 ORDER BY base_role",
+            "SELECT `name`, base_role, is_default FROM agents WHERE project_id = ? ORDER BY base_role",
         )
         .bind(&project.id)
         .fetch_all(db.pool())
