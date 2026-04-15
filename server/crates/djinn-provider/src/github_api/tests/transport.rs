@@ -15,13 +15,9 @@ async fn send_with_retry_returns_reauth_error_on_401() {
         "user_login": "djinn-test",
     })
     .to_string();
-    repo.set(
-        "github_app",
-        crate::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY,
-        &json,
-    )
-    .await
-    .unwrap();
+    repo.set("github_app", "__OAUTH_GITHUB_APP", &json)
+        .await
+        .unwrap();
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls/1"))

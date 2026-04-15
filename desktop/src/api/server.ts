@@ -1,25 +1,11 @@
 import { callMcpTool } from "@/api/mcpClient";
 import type { McpToolOutput, ProjectListOutputSchema } from "@/api/generated/mcp-tools.gen";
-import { getServerPort } from "@/electron/commands";
+import { getServerBaseUrl } from "@/api/serverUrl";
 import type { Epic, Task } from "@/api/types";
 import { projectStore } from "@/stores/projectStore";
 
-/**
- * Notify the server of the authenticated user's identity.
- * Called after every successful Clerk auth (login, silent refresh, token rotation).
- */
-export async function setUserIdentity(email: string, userId: string): Promise<void> {
-  try {
-    // Tool removed from server — kept as no-op for call-site compatibility
-    void email; void userId;
-  } catch (e) {
-    console.warn("Failed to set user identity on server:", e);
-  }
-}
-
 async function getBaseUrl(): Promise<string> {
-  const port = await getServerPort();
-  return `http://127.0.0.1:${port}`;
+  return getServerBaseUrl();
 }
 
 function providerDescription(provider: ProviderCatalogItem): string {
@@ -220,6 +206,136 @@ export async function addProject(path: string): Promise<Project> {
   return response.project;
 }
 
+// ── GitHub-origin projects (Migration 2) ─────────────────────────────────────
+
+export interface GithubRepoEntry {
+  owner: string;
+  repo: string;
+  default_branch: string;
+  private: boolean;
+  description?: string | null;
+  /**
+   * GitHub App installation id that surfaced this repo. Pass back to
+   * `project_add_from_github` so the server can scope the clone to the
+   * same installation without re-scanning.
+   */
+  installation_id: number;
+  /** Login of the account (user or org) the installation is scoped to. */
+  account_login: string;
+}
+
+/**
+ * A single GitHub App installation the authenticated user can act as.
+ * Returned by {@link listGithubInstallations}.
+ */
+export interface Installation {
+  id: number;
+  accountLogin: string;
+  accountType: string;
+  installUrl: string;
+}
+
+/**
+ * List GitHub repositories the Djinn App can access. Backs the Add-Project
+ * picker after Migration 2: the server owns cloning, so the desktop no
+ * longer passes a local path.
+ */
+export async function listGithubRepos(perPage = 50): Promise<GithubRepoEntry[]> {
+  const response = await callMcpTool("github_list_repos", { per_page: perPage });
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+  return (response.repos ?? []) as GithubRepoEntry[];
+}
+
+/**
+ * List GitHub App installations reachable for the signed-in user.
+ *
+ * Returns the installations plus an `installUrl` the UI can deep-link to
+ * when the user has no installations (or wants another one). `installUrl`
+ * is only populated server-side when `GITHUB_APP_SLUG` is configured.
+ */
+export async function listGithubInstallations(): Promise<{
+  installations: Installation[];
+  installUrl: string | null;
+}> {
+  const response = await callMcpTool("github_app_installations", {});
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+  const installations: Installation[] = (response.installations ?? []).map((entry) => ({
+    id: entry.id,
+    accountLogin: entry.account_login,
+    accountType: entry.account_type,
+    installUrl: entry.install_url,
+  }));
+  return {
+    installations,
+    installUrl: response.install_url ?? null,
+  };
+}
+
+/**
+ * Fetch a standalone install URL for the Djinn GitHub App. Use this to
+ * power a bare "Install Djinn" button that doesn't care whether the user
+ * currently has installations. Throws when the server has no
+ * `GITHUB_APP_SLUG` configured (i.e. no public install URL).
+ */
+export async function getGithubInstallUrl(): Promise<string> {
+  const response = await callMcpTool("github_app_install_url", {});
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+  if (!response.url) {
+    throw new Error("GitHub App install URL is not configured on the server");
+  }
+  return response.url;
+}
+
+/**
+ * Ask the server to clone a GitHub repo and register it as a project.
+ * The server clones into `/root/.djinn/projects/{owner}/{repo}` (persisted
+ * on the host via the `~/.djinn` bind mount) and returns the project record.
+ */
+export async function addProjectFromGithub(args: {
+  owner: string;
+  repo: string;
+  name?: string;
+  ref?: string;
+  installation_id?: number;
+}): Promise<Project> {
+  const response = await callMcpTool("project_add_from_github", {
+    owner: args.owner,
+    repo: args.repo,
+    ...(args.name ? { name: args.name } : {}),
+    ...(args.ref ? { ref: args.ref } : {}),
+    ...(args.installation_id !== undefined ? { installation_id: args.installation_id } : {}),
+  });
+
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+
+  return response.project;
+}
+
+/**
+ * List local git branches for a project's server-owned clone. Used by the
+ * Titlebar branch picker to avoid the blind "type anything" UX.
+ */
+export async function fetchProjectBranches(
+  projectId: string,
+): Promise<{ branches: string[]; current: string | null }> {
+  const response = await callMcpTool("project_branches", { project_id: projectId });
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+  return {
+    branches: response.branches ?? [],
+    current: response.current ?? null,
+  };
+}
+
 // Provider configuration check
 
 export interface ProviderConfigStatus {
@@ -300,40 +416,6 @@ export async function updateProject(projectId: string, updates: { branch?: strin
     }));
   }
   await Promise.all(configCalls);
-}
-
-// Project commands — tools removed from server (now in .djinn/settings.json)
-// Kept as stubs for call-site compatibility.
-
-export interface ProjectCommandSpec {
-  name: string;
-  command: string;
-  timeout_secs?: number;
-}
-
-export interface ProjectCommands {
-  setup_commands: ProjectCommandSpec[];
-  verification_commands: ProjectCommandSpec[];
-}
-
-export interface CommandValidationError {
-  command_name: string;
-  exit_code: number;
-  stderr: string;
-  stdout: string;
-}
-
-export async function fetchProjectCommands(_projectPath: string): Promise<ProjectCommands> {
-  // Tools removed — settings.json is now source of truth
-  return { setup_commands: [], verification_commands: [] };
-}
-
-export async function saveProjectCommands(
-  _projectPath: string,
-  _commands: Partial<ProjectCommands>,
-): Promise<CommandValidationError[]> {
-  // Tool removed — settings.json is now source of truth
-  return [];
 }
 
 export async function removeProject(projectId: string): Promise<void> {

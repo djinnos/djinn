@@ -1,19 +1,17 @@
-# Djinn Desktop
+# Djinn Web Client
 
-Electron + React + TypeScript + Vite + shadcn/ui
+React + TypeScript + Vite + shadcn/ui
 
-This is a desktop application built with Electron, React, TypeScript, Vite, and shadcn/ui with Tailwind CSS 4.x.
+The Djinn desktop UI is a plain web application that talks to the Djinn
+server over HTTP and SSE. The Electron wrapper was removed; the server
+now runs in Docker and is reached at `http://127.0.0.1:8372` by default.
 
-## Features
+## Tech Stack
 
-- **Electron**: Cross-platform desktop app framework
-- **React 19**: Modern React with TypeScript
-- **Tailwind CSS 4.x**: Utility-first styling with violet/zinc dark theme
-- **shadcn/ui**: Accessible UI components
-
-## Recommended IDE Setup
-
-- [VS Code](https://code.visualstudio.com/)
+- **React 19** with TypeScript
+- **Vite** for dev server and production bundling
+- **Tailwind CSS 4.x** with a violet/zinc dark theme
+- **shadcn/ui** accessible components
 
 ## Development
 
@@ -21,9 +19,18 @@ This is a desktop application built with Electron, React, TypeScript, Vite, and 
 # Install dependencies
 pnpm install
 
-# Run frontend only (browser)
+# Dev server (defaults to port 1420)
 pnpm dev
 
-# Run full Electron desktop app
-pnpm electron:start
+# Production build
+pnpm build
+
+# Preview the production build
+pnpm preview
 ```
+
+## Configuration
+
+- `VITE_DJINN_SERVER_URL` — override the server base URL (defaults to
+  `http://127.0.0.1:8372`). Set this at `pnpm dev` / `pnpm build` time
+  if you run the server on a different host or port.

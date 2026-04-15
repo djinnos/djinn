@@ -1,0 +1,94 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, name, path,\n                      CAST(created_at AS CHAR) as \"created_at!: String\",\n                      target_branch,\n                      auto_merge as \"auto_merge: bool\",\n                      sync_enabled as \"sync_enabled: bool\",\n                      sync_remote\n               FROM projects WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "path",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at!: String",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "target_branch",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "auto_merge: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "sync_enabled: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "sync_remote",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 2048
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "2bd673ba3bd1c473e862aa4c6e993a62ff9c1530331d5dabad2816b058c5bfd9"
+}

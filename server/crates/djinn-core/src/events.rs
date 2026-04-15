@@ -375,6 +375,25 @@ impl DjinnEventEnvelope {
         Self { entity_type: "activity", action: "logged", payload: serde_json::to_value(serde_json::json!({"task_id": task_id, "action": action, "actor": actor, "actor_role": actor_role, "payload": payload})).unwrap(), id: None, project_id: None, from_sync: false }
     }
 
+    /// Emitted by OAuth flows so the Electron desktop app can open the
+    /// authorization URL in the user's default browser. Necessary because the
+    /// server runs inside a Docker container and can't `xdg-open` anything
+    /// itself.
+    pub fn oauth_open_browser(provider: &str, url: &str) -> Self {
+        Self {
+            entity_type: "oauth",
+            action: "open_browser",
+            payload: serde_json::to_value(serde_json::json!({
+                "provider": provider,
+                "url": url,
+            }))
+            .expect("serializing DjinnEventEnvelope payload to Value should not fail"),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+
     /// Emitted by agent Write/Edit/ApplyPatch tools after a successful file
     /// mutation so that the repo-map watcher can trigger a targeted SCIP refresh
     /// for just the affected worktree instead of relying on the filesystem watcher.

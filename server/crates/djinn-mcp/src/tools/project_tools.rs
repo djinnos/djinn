@@ -9,7 +9,7 @@ use tokio::fs;
 use crate::server::DjinnMcpServer;
 use djinn_db::{ProjectRepository, VerificationRule};
 use djinn_provider::github_api::GitHubApiClient;
-use djinn_provider::oauth::github_app::GitHubAppTokens;
+use djinn_provider::github_app::user_token_compat::load_user_tokens;
 use djinn_provider::repos::CredentialRepository;
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
@@ -85,6 +85,23 @@ async fn ensure_git_repo_ready(path: &str) -> Result<(), String> {
         ));
     }
 
+    Ok(())
+}
+
+/// Run `git fetch --all --prune` inside `path`. Best-effort refresh for an
+/// existing server-managed clone.
+async fn git_fetch_in(path: &str) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["fetch", "--all", "--prune"]).current_dir(path);
+    let output = crate::process::output(cmd)
+        .await
+        .map_err(|e| format!("git fetch failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     Ok(())
 }
 
@@ -168,7 +185,7 @@ async fn validate_github_remote(
     })?;
 
     // 3. Check that we have GitHub tokens.
-    let has_tokens = GitHubAppTokens::load_from_db(&cred_repo).await.is_some();
+    let has_tokens = load_user_tokens(&cred_repo).await.is_some();
     if !has_tokens {
         return Err("Connect GitHub first".to_string());
     }
@@ -213,11 +230,73 @@ pub struct ProjectRemoveParams {
     pub path: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectAddFromGithubParams {
+    /// GitHub owner (user or organization).
+    pub owner: String,
+    /// GitHub repository name.
+    pub repo: String,
+    /// Optional project display name. Defaults to `{owner}/{repo}`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional branch to check out after cloning. Defaults to the repo's
+    /// default branch as reported by the GitHub API.
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>,
+    /// GitHub App installation id that has access to this repo. When
+    /// omitted, the server scans the user's installations and picks one
+    /// that contains `owner/repo`.
+    #[serde(default)]
+    pub installation_id: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GithubListReposParams {
+    /// Max number of repositories to return (1..=100). Defaults to 30.
+    #[serde(default)]
+    pub per_page: Option<usize>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct GithubRepoEntry {
+    pub owner: String,
+    pub repo: String,
+    pub default_branch: String,
+    pub private: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// GitHub App installation id that surfaced this repo. Pass this back
+    /// to [`project_add_from_github`] to pin the clone to the same
+    /// installation without re-scanning.
+    pub installation_id: u64,
+    /// Login of the account (user or org) the installation is scoped to.
+    pub account_login: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct GithubListReposResponse {
+    pub status: String,
+    pub repos: Vec<GithubRepoEntry>,
+}
+
 // ── Response structs ─────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ProjectConfigGetParams {
     pub project: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectBranchesParams {
+    /// Project UUID to resolve the server-owned clone path for.
+    pub project_id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectBranchesResponse {
+    pub status: String,
+    pub branches: Vec<String>,
+    pub current: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -305,6 +384,31 @@ struct StrictDjinnSettings {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Sort local branches alphabetically and hoist `current` (if any) to the front.
+fn order_branches(mut branches: Vec<String>, current: Option<&str>) -> Vec<String> {
+    branches.sort();
+    branches.dedup();
+    if let Some(cur) = current {
+        if let Some(pos) = branches.iter().position(|b| b == cur) {
+            let c = branches.remove(pos);
+            branches.insert(0, c);
+        }
+    }
+    branches
+}
+
+/// Parse the output of `git branch --list --format=%(refname:short)` into a
+/// clean `Vec<String>`. Empty lines and lines starting with `(` (detached
+/// HEAD marker) are skipped.
+fn parse_branch_list(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('('))
+        .map(|l| l.to_string())
+        .collect()
+}
 
 /// Parse a JSON-encoded `verification_rules` string into `Vec<VerificationRuleDto>`.
 /// Returns an empty vec on any parse error (safe default).
@@ -502,6 +606,320 @@ impl DjinnMcpServer {
         }
     }
 
+    /// Register a project by cloning a GitHub repo into the server's
+    /// managed storage. Supersedes `project_add` for the Docker-hosted
+    /// deployment where the host filesystem is not visible to the server.
+    #[tool(
+        description = "Add a project by cloning a GitHub repo the Djinn App can access. The server clones into /root/.djinn/projects/{owner}/{repo} (persisted on the host via the ~/.djinn bind mount). Idempotent: re-adding runs `git fetch` instead of cloning again."
+    )]
+    pub async fn project_add_from_github(
+        &self,
+        Parameters(input): Parameters<ProjectAddFromGithubParams>,
+    ) -> Json<ProjectAddResponse> {
+        let repo_db = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let cred_repo = Arc::new(CredentialRepository::new(
+            self.state.db().clone(),
+            self.state.event_bus(),
+        ));
+
+        let owner = input.owner.trim().to_string();
+        let repo = input.repo.trim().to_string();
+        if owner.is_empty() || repo.is_empty() {
+            return Json(ProjectAddResponse {
+                status: "error: owner and repo must be non-empty".into(),
+                project: ProjectInfo {
+                    id: String::new(),
+                    name: input.name.unwrap_or_default(),
+                    path: String::new(),
+                },
+            });
+        }
+        let display_name = input
+            .name
+            .unwrap_or_else(|| format!("{owner}/{repo}"));
+
+        // 1. Must have GitHub App tokens loaded (user OAuth token, used
+        //    server-side to discover installations).
+        let Some(user_tokens) = load_user_tokens(&cred_repo).await else {
+            return Json(ProjectAddResponse {
+                status: "error: Connect GitHub first".into(),
+                project: ProjectInfo {
+                    id: String::new(),
+                    name: display_name,
+                    path: String::new(),
+                },
+            });
+        };
+
+        // 2. Resolve the installation id — either trust the caller's input
+        //    or scan installations to find one that has the repo.
+        use djinn_provider::github_app::{
+            find_installation_for_repo, get_installation_token,
+        };
+        let installation_id = if let Some(id) = input.installation_id {
+            id
+        } else {
+            match find_installation_for_repo(&user_tokens.access_token, &owner, &repo).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return Json(ProjectAddResponse {
+                        status: format!("error: {e}"),
+                        project: ProjectInfo {
+                            id: String::new(),
+                            name: display_name,
+                            path: String::new(),
+                        },
+                    });
+                }
+            }
+        };
+
+        let default_branch = input
+            .git_ref
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+
+        // 3. Choose clone_path under the server-managed projects root.
+        let clone_path = format!("/root/.djinn/projects/{owner}/{repo}");
+
+        // Idempotent: if already registered, fast-path to `git fetch`.
+        if let Ok(Some(existing)) = repo_db.get_by_github(&owner, &repo).await {
+            let _ = fs::create_dir_all(&existing.path).await;
+            if let Err(e) = git_fetch_in(&existing.path).await {
+                tracing::warn!(
+                    owner = %owner, repo = %repo, error = %e,
+                    "project_add_from_github: fetch refresh failed",
+                );
+            }
+            return Json(ProjectAddResponse {
+                status: "ok".into(),
+                project: ProjectInfo {
+                    id: existing.id,
+                    name: existing.name,
+                    path: existing.path,
+                },
+            });
+        }
+
+        // 4. Ensure parent dir exists.
+        if let Some(parent) = std::path::Path::new(&clone_path).parent() {
+            let _ = fs::create_dir_all(parent).await;
+        }
+
+        // 5. Shallow-ish clone (blob filter keeps history light).
+        //    We mint a fresh 1-hour installation token for the clone URL.
+        //    Subsequent `git fetch` calls go through `git_fetch_in`, which
+        //    re-uses the cached credential helper only if configured; we
+        //    therefore re-request a token per clone attempt rather than
+        //    relying on the remote URL embedding a long-lived secret.
+        let install_token = match get_installation_token(installation_id).await {
+            Ok(t) => t,
+            Err(e) => {
+                return Json(ProjectAddResponse {
+                    status: format!(
+                        "error: could not mint installation token for {owner}/{repo}: {e}"
+                    ),
+                    project: ProjectInfo {
+                        id: String::new(),
+                        name: display_name,
+                        path: clone_path,
+                    },
+                });
+            }
+        };
+        let remote_url = format!(
+            "https://x-access-token:{}@github.com/{owner}/{repo}.git",
+            install_token.token
+        );
+
+        if !std::path::Path::new(&clone_path).join(".git").exists() {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args([
+                "clone",
+                "--filter=blob:none",
+                &remote_url,
+                &clone_path,
+            ]);
+            let output = match crate::process::output(cmd).await {
+                Ok(o) => o,
+                Err(e) => {
+                    return Json(ProjectAddResponse {
+                        status: format!("error: git clone failed: {e}"),
+                        project: ProjectInfo {
+                            id: String::new(),
+                            name: display_name,
+                            path: clone_path,
+                        },
+                    });
+                }
+            };
+            if !output.status.success() {
+                return Json(ProjectAddResponse {
+                    status: format!(
+                        "error: git clone failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    project: ProjectInfo {
+                        id: String::new(),
+                        name: display_name,
+                        path: clone_path,
+                    },
+                });
+            }
+        } else {
+            // Directory already present from a previous partial add — refresh it.
+            if let Err(e) = git_fetch_in(&clone_path).await {
+                tracing::warn!(path = %clone_path, error = %e, "pre-existing clone fetch failed");
+            }
+        }
+
+        // 5b. Configure git user.name/user.email so any commits created by
+        //     the server/agents are attributed to the App's bot identity
+        //     (`djinn-bot[bot]`). The `<app-id>+djinn-bot[bot]@users.noreply.github.com`
+        //     form is GitHub's canonical no-reply email for apps.
+        if let Ok(app_id) = djinn_provider::github_app::app_id() {
+            let email = format!("{app_id}+djinn-bot[bot]@users.noreply.github.com");
+            for (key, value) in [
+                ("user.name", "djinn-bot[bot]"),
+                ("user.email", email.as_str()),
+            ] {
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["-C", &clone_path, "config", key, value]);
+                if let Err(e) = crate::process::output(cmd).await {
+                    tracing::warn!(
+                        path = %clone_path, key, error = %e,
+                        "project_add_from_github: failed to set git config"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "project_add_from_github: GITHUB_APP_ID unset — skipping \
+                 djinn-bot[bot] identity config on {}",
+                clone_path
+            );
+        }
+
+        // 6. Seed .djinn/ conveniences.
+        let djinn_dir = std::path::Path::new(&clone_path).join(".djinn");
+        let _ = fs::create_dir_all(&djinn_dir).await;
+        let gitignore_path = djinn_dir.join(".gitignore");
+        if !gitignore_path.exists() {
+            let _ = fs::write(&gitignore_path, DJINN_GITIGNORE).await;
+        }
+
+        // 7. Record the project row (caching the installation id so the push
+        //    path doesn't need to rediscover it on every PR create).
+        match repo_db
+            .create_from_github(
+                &display_name,
+                &owner,
+                &repo,
+                &default_branch,
+                &clone_path,
+                Some(installation_id),
+            )
+            .await
+        {
+            Ok(project) => Json(ProjectAddResponse {
+                status: "ok".into(),
+                project: ProjectInfo {
+                    id: project.id,
+                    name: project.name,
+                    path: project.path,
+                },
+            }),
+            Err(e) => Json(ProjectAddResponse {
+                status: format!("error: {e}"),
+                project: ProjectInfo {
+                    id: String::new(),
+                    name: display_name,
+                    path: clone_path,
+                },
+            }),
+        }
+    }
+
+    /// List GitHub repositories the authenticated user can access through
+    /// the Djinn GitHub **App**'s installations. Iterates each installation
+    /// surfaced by `GET /user/installations`, calls
+    /// `GET /installation/repositories` with that installation's token, and
+    /// merges + dedupes the results.
+    #[tool(
+        description = "List GitHub repositories accessible via the Djinn App's installations. Each entry includes an installation_id and account_login; pass these to project_add_from_github to clone. Populate an Add-Project picker from this tool."
+    )]
+    pub async fn github_list_repos(
+        &self,
+        Parameters(input): Parameters<GithubListReposParams>,
+    ) -> Json<GithubListReposResponse> {
+        use djinn_provider::github_app::{
+            GitHubAppClient, list_installations_for_user,
+        };
+
+        let cred_repo = Arc::new(CredentialRepository::new(
+            self.state.db().clone(),
+            self.state.event_bus(),
+        ));
+        let Some(tokens) = load_user_tokens(&cred_repo).await else {
+            return Json(GithubListReposResponse {
+                status: "error: Connect GitHub first".into(),
+                repos: vec![],
+            });
+        };
+
+        let installations = match list_installations_for_user(&tokens.access_token).await {
+            Ok(list) => list,
+            Err(e) => {
+                return Json(GithubListReposResponse {
+                    status: format!("error: list installations failed: {e}"),
+                    repos: vec![],
+                });
+            }
+        };
+        if installations.is_empty() {
+            return Json(GithubListReposResponse {
+                status: "error: no GitHub App installations — install the Djinn App first".into(),
+                repos: vec![],
+            });
+        }
+
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut out: Vec<GithubRepoEntry> = Vec::new();
+        for install in installations {
+            let client = GitHubAppClient::new(install.id);
+            let repos = match client.list_repositories(input.per_page).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        installation_id = install.id,
+                        error = %e,
+                        "github_list_repos: installation listing failed; skipping"
+                    );
+                    continue;
+                }
+            };
+            for r in repos {
+                if !seen.insert(r.full_name.clone()) {
+                    continue;
+                }
+                out.push(GithubRepoEntry {
+                    owner: r.owner,
+                    repo: r.repo,
+                    default_branch: r.default_branch,
+                    private: r.private,
+                    description: r.description,
+                    installation_id: install.id,
+                    account_login: install.account_login.clone(),
+                });
+            }
+        }
+
+        Json(GithubListReposResponse {
+            status: "ok".into(),
+            repos: out,
+        })
+    }
+
     #[tool(description = "Get project config fields for a project path.")]
     pub async fn project_config_get(
         &self,
@@ -629,6 +1047,128 @@ impl DjinnMcpServer {
             }),
         }
     }
+    /// List local git branches in a project's server-owned clone.
+    #[tool(
+        description = "List local git branches in the server-owned clone for a project. Returns branches sorted alphabetically with the currently checked-out branch first."
+    )]
+    pub async fn project_branches(
+        &self,
+        Parameters(input): Parameters<ProjectBranchesParams>,
+    ) -> Json<ProjectBranchesResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let project = match repo.get(&input.project_id).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: project not found: {}", input.project_id),
+                    branches: vec![],
+                    current: None,
+                });
+            }
+            Err(e) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: {e}"),
+                    branches: vec![],
+                    current: None,
+                });
+            }
+        };
+
+        // `path` is set equal to `clone_path` for github-cloned rows and to the
+        // user-supplied path for legacy rows, so it's the right column either way.
+        let path = project.path;
+        if !Path::new(&path).join(".git").exists() {
+            return Json(ProjectBranchesResponse {
+                status: format!("error: not a git repository: {path}"),
+                branches: vec![],
+                current: None,
+            });
+        }
+
+        // 1. Current branch via `git rev-parse --abbrev-ref HEAD`.
+        let mut head_cmd = std::process::Command::new("git");
+        head_cmd
+            .args(["-C", &path, "rev-parse", "--abbrev-ref", "HEAD"]);
+        let head_fut = crate::process::output(head_cmd);
+        let head_out = match tokio::time::timeout(std::time::Duration::from_secs(30), head_fut).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: git rev-parse failed: {e}"),
+                    branches: vec![],
+                    current: None,
+                });
+            }
+            Err(_) => {
+                return Json(ProjectBranchesResponse {
+                    status: "error: git rev-parse timed out after 30s".into(),
+                    branches: vec![],
+                    current: None,
+                });
+            }
+        };
+        let current = if head_out.status.success() {
+            let raw = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+            // Detached HEAD surfaces as "HEAD" — treat as no current branch.
+            if raw.is_empty() || raw == "HEAD" {
+                None
+            } else {
+                Some(raw)
+            }
+        } else {
+            None
+        };
+
+        // 2. Local branch list.
+        let mut list_cmd = std::process::Command::new("git");
+        list_cmd.args([
+            "-C",
+            &path,
+            "branch",
+            "--list",
+            "--format=%(refname:short)",
+        ]);
+        let list_fut = crate::process::output(list_cmd);
+        let list_out = match tokio::time::timeout(std::time::Duration::from_secs(30), list_fut).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: git branch failed: {e}"),
+                    branches: vec![],
+                    current,
+                });
+            }
+            Err(_) => {
+                return Json(ProjectBranchesResponse {
+                    status: "error: git branch timed out after 30s".into(),
+                    branches: vec![],
+                    current,
+                });
+            }
+        };
+        if !list_out.status.success() {
+            return Json(ProjectBranchesResponse {
+                status: format!(
+                    "error: git branch failed: {}",
+                    String::from_utf8_lossy(&list_out.stderr).trim()
+                ),
+                branches: vec![],
+                current,
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&list_out.stdout);
+        let parsed = parse_branch_list(&stdout);
+        let branches = order_branches(parsed, current.as_deref());
+
+        Json(ProjectBranchesResponse {
+            status: "ok".into(),
+            branches,
+            current,
+        })
+    }
+
     #[tool(description = "Validate .djinn/settings.json syntax and schema in a worktree.")]
     pub async fn project_settings_validate(
         &self,
@@ -757,5 +1297,37 @@ mod tests {
     #[test]
     fn parse_non_github_with_user_prefix_returns_none() {
         assert!(parse_github_owner_repo("https://user@gitlab.com/acme/widgets.git").is_none());
+    }
+
+    #[test]
+    fn parse_branch_list_skips_empty_and_detached_marker() {
+        let raw = "main\n\nfeature/x\n(HEAD detached at abc123)\nrelease/1.0\n";
+        let parsed = parse_branch_list(raw);
+        assert_eq!(parsed, vec!["main", "feature/x", "release/1.0"]);
+    }
+
+    #[test]
+    fn order_branches_hoists_current_and_sorts() {
+        let branches = vec![
+            "release/1.0".to_string(),
+            "main".to_string(),
+            "feature/x".to_string(),
+        ];
+        let ordered = order_branches(branches, Some("feature/x"));
+        assert_eq!(ordered, vec!["feature/x", "main", "release/1.0"]);
+    }
+
+    #[test]
+    fn order_branches_without_current_just_sorts() {
+        let branches = vec!["b".to_string(), "a".to_string(), "c".to_string()];
+        let ordered = order_branches(branches, None);
+        assert_eq!(ordered, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn order_branches_current_not_in_list_is_noop() {
+        let branches = vec!["a".to_string(), "b".to_string()];
+        let ordered = order_branches(branches, Some("missing"));
+        assert_eq!(ordered, vec!["a", "b"]);
     }
 }

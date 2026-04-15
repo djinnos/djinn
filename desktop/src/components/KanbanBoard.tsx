@@ -7,10 +7,6 @@ import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
-import {
-  GitRemoteSetupBanner,
-  useGitRemoteCheck,
-} from "@/components/GitRemoteSetupBanner";
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
 import { GitHubAppBanner } from "@/components/GitHubAppBanner";
 import {
@@ -389,11 +385,6 @@ export function KanbanBoard({
   };
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
-  const {
-    hasRemote,
-    check: checkRemote,
-    setHasRemote,
-  } = useGitRemoteCheck(selectedProject?.path);
 
   const handleRefresh = useCallback(async () => {
     if (refreshing) return;
@@ -422,7 +413,6 @@ export function KanbanBoard({
   useEffect(() => {
     setEpicFilters([]);
     setSelectedTask(null);
-    checkRemote();
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -723,13 +713,6 @@ export function KanbanBoard({
             : projects.map((p) => p.path)
         }
       />
-
-      {hasRemote === false && selectedProject?.path && (
-        <GitRemoteSetupBanner
-          projectPath={selectedProject.path}
-          onResolved={() => setHasRemote(true)}
-        />
-      )}
 
       <div className="flex min-h-0 flex-1 overflow-x-auto pb-1">
         {STATUS_COLUMNS.map((column, colIdx) => {

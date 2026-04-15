@@ -77,10 +77,10 @@ impl NoteRepository {
                     if let Ok(Some((existing_id, existing_permalink))) =
                         sqlx::query_as::<_, (String, String)>(
                             "SELECT id, permalink FROM notes
-                             WHERE project_id = ?1
+                             WHERE project_id = ?
                                AND storage = 'db'
-                               AND title = ?2
-                               AND note_type = ?3
+                               AND title = ?
+                               AND note_type = ?
                              LIMIT 1",
                         )
                         .bind(project_id)
@@ -137,7 +137,7 @@ impl NoteRepository {
             "INSERT INTO notes
                 (id, project_id, permalink, title, file_path,
                  storage, note_type, folder, tags, content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(project_id)
@@ -198,22 +198,22 @@ impl NoteRepository {
 
         sqlx::query(
             "UPDATE notes SET
-                title = ?2,
-                file_path = ?3,
-                note_type = ?4,
-                folder = ?5,
-                tags = ?6,
-                content = ?7,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+                title = ?,
+                file_path = ?,
+                note_type = ?,
+                folder = ?,
+                tags = ?,
+                content = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(title)
         .bind(file_path)
         .bind(note_type)
         .bind(folder)
         .bind(tags)
         .bind(content)
+        .bind(id)
         .execute(&mut *tx)
         .await?;
 
@@ -480,12 +480,12 @@ pub(super) fn extract_wikilinks(content: &str) -> Vec<(String, Option<String>)> 
 /// Deletes existing link rows for the note then re-inserts them, resolving
 /// each target by title or permalink within the same project.
 pub(super) async fn index_links_for_note(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     source_id: &str,
     project_id: &str,
     content: &str,
 ) -> Result<()> {
-    sqlx::query("DELETE FROM note_links WHERE source_id = ?1")
+    sqlx::query("DELETE FROM note_links WHERE source_id = ?")
         .bind(source_id)
         .execute(&mut **tx)
         .await?;
@@ -498,16 +498,18 @@ pub(super) async fn index_links_for_note(
     for (target_raw, display_text) in links {
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
-            "INSERT OR IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)
-             VALUES (?1, ?2,
+            "INSERT IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)
+             VALUES (?, ?,
                      (SELECT id FROM notes
-                      WHERE project_id = ?3 AND (title = ?4 OR permalink = ?4)
+                      WHERE project_id = ? AND (title = ? OR permalink = ?)
                       LIMIT 1),
-                     ?4, ?5)",
+                     ?, ?)",
         )
         .bind(&id)
         .bind(source_id)
         .bind(project_id)
+        .bind(&target_raw)
+        .bind(&target_raw)
         .bind(&target_raw)
         .bind(display_text.as_deref())
         .execute(&mut **tx)
@@ -519,7 +521,7 @@ pub(super) async fn index_links_for_note(
 /// After a note is created or its title/permalink changes, resolve any
 /// previously-broken links in the project that now match this note.
 pub(super) async fn resolve_links_for_note(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     note_id: &str,
     title: &str,
     permalink: &str,
@@ -527,10 +529,10 @@ pub(super) async fn resolve_links_for_note(
 ) -> Result<()> {
     sqlx::query(
         "UPDATE note_links
-         SET target_id = ?1
+         SET target_id = ?
          WHERE target_id IS NULL
-           AND (target_raw = ?2 OR target_raw = ?3)
-           AND source_id IN (SELECT id FROM notes WHERE project_id = ?4)",
+           AND (target_raw = ? OR target_raw = ?)
+           AND source_id IN (SELECT id FROM notes WHERE project_id = ?)",
     )
     .bind(note_id)
     .bind(title)

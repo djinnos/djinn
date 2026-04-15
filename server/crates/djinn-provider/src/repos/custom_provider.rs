@@ -51,13 +51,13 @@ impl CustomProviderRepository {
 
         ensure_db!(self.db);
         sqlx::query(
-            "INSERT INTO custom_providers (id, name, base_url, env_var, seed_models)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(id) DO UPDATE SET
-               name        = excluded.name,
-               base_url    = excluded.base_url,
-               env_var     = excluded.env_var,
-               seed_models = excluded.seed_models",
+            "INSERT INTO custom_providers (id, `name`, base_url, env_var, seed_models)
+             VALUES (?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+               `name`      = VALUES(`name`),
+               base_url    = VALUES(base_url),
+               env_var     = VALUES(env_var),
+               seed_models = VALUES(seed_models)",
         )
         .bind(&id)
         .bind(&name)
@@ -74,7 +74,7 @@ impl CustomProviderRepository {
     /// Delete a custom provider by ID. Returns true if a row was removed.
     pub async fn delete(&self, id: &str) -> Result<bool> {
         ensure_db!(self.db);
-        let result = sqlx::query("DELETE FROM custom_providers WHERE id = ?1")
+        let result = sqlx::query("DELETE FROM custom_providers WHERE id = ?")
             .bind(id)
             .execute(self.db.pool())
             .await?;
@@ -91,7 +91,7 @@ impl CustomProviderRepository {
         ensure_db!(self.db);
         let row = sqlx::query_as::<_, (String, String, String, String, String, String)>(
             "SELECT id, name, base_url, env_var, seed_models, created_at
-             FROM custom_providers WHERE id = ?1",
+             FROM custom_providers WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(self.db.pool())

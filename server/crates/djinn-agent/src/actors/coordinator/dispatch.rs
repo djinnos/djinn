@@ -5,7 +5,6 @@ use djinn_core::models::task::{IssueType, PRIORITY_CRITICAL};
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
-use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 
 /// Result of a single `try_dispatch_to_pool` attempt.
 enum DispatchOutcome {
@@ -214,10 +213,12 @@ impl CoordinatorActor {
         }
     }
 
-    /// Check whether GitHub OAuth credentials exist in the credential DB.
-    /// This is a lightweight existence check — no decryption or API calls.
-    /// In test builds the check is always true so dispatch tests don't need
-    /// to seed OAuth credentials.
+    /// Check whether the GitHub App is configured on this server.
+    ///
+    /// A configured App is the gate for dispatch because the merge path mints
+    /// installation tokens via `djinn_provider::github_app`. Without it every
+    /// completed task's PR creation would fail. In test builds we short-circuit
+    /// to `true` so dispatch tests don't need to plumb env vars.
     async fn has_github_credentials(&self) -> bool {
         #[cfg(test)]
         {
@@ -225,27 +226,22 @@ impl CoordinatorActor {
         }
         #[cfg(not(test))]
         {
-            let cred_repo = djinn_provider::repos::CredentialRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            );
-            cred_repo
-                .exists(GITHUB_APP_OAUTH_DB_KEY)
-                .await
-                .unwrap_or(false)
+            djinn_provider::github_app::app_id().is_ok()
         }
     }
 
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
     pub(super) async fn dispatch_ready_tasks(&mut self, project_filter: Option<&str>) {
-        // Gate: do not dispatch if GitHub OAuth credentials are missing (ADR-039).
-        // PR creation will fail without a token, causing a dispatch-fail-retry loop.
+        // Gate: do not dispatch if the GitHub App isn't configured (ADR-039).
+        // PR creation depends on minting installation tokens, which requires
+        // GITHUB_APP_ID + private key; without them every dispatch would
+        // fail-retry at merge time.
         if !self.has_github_credentials().await {
             tracing::warn!(
-                "CoordinatorActor: GitHub OAuth credentials not found (key '{}'), skipping dispatch. \
-                 Connect GitHub first via the OAuth flow.",
-                GITHUB_APP_OAUTH_DB_KEY,
+                "CoordinatorActor: GitHub App not configured (GITHUB_APP_ID unset or \
+                 private key missing), skipping dispatch. Configure the App env vars \
+                 before starting execution."
             );
             return;
         }

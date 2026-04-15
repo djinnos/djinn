@@ -24,7 +24,7 @@ impl VerificationCacheRepository {
     ) -> Result<Option<CachedVerification>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, CachedVerification>(
-            "SELECT output, duration_ms, created_at FROM verification_cache WHERE project_id = ?1 AND commit_sha = ?2",
+            "SELECT output, duration_ms, created_at FROM verification_cache WHERE project_id = ? AND commit_sha = ?",
         )
         .bind(project_id)
         .bind(commit_sha)
@@ -41,7 +41,8 @@ impl VerificationCacheRepository {
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "INSERT OR REPLACE INTO verification_cache (project_id, commit_sha, output, duration_ms) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO verification_cache (project_id, commit_sha, output, duration_ms) VALUES (?, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE output=VALUES(output), duration_ms=VALUES(duration_ms)",
         )
         .bind(project_id)
         .bind(commit_sha)
@@ -54,7 +55,7 @@ impl VerificationCacheRepository {
 
     pub async fn invalidate_project(&self, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query("DELETE FROM verification_cache WHERE project_id = ?1")
+        sqlx::query("DELETE FROM verification_cache WHERE project_id = ?")
             .bind(project_id)
             .execute(self.db.pool())
             .await?;
@@ -64,7 +65,7 @@ impl VerificationCacheRepository {
     pub async fn prune_older_than(&self, days: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "DELETE FROM verification_cache WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ?1 || ' days')",
+            "DELETE FROM verification_cache WHERE created_at < DATE_SUB(NOW(3), INTERVAL ? DAY)",
         )
         .bind(days)
         .execute(self.db.pool())
@@ -123,7 +124,7 @@ mod tests {
 
         repo.insert("p1", "old", "[]", 1).await.expect("insert old");
         sqlx::query(
-            "UPDATE verification_cache SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 days') WHERE project_id = ?1 AND commit_sha = ?2",
+            "UPDATE verification_cache SET created_at = DATE_SUB(NOW(3), INTERVAL 10 DAY) WHERE project_id = ? AND commit_sha = ?",
         )
         .bind("p1")
         .bind("old")
