@@ -214,6 +214,25 @@ export interface GithubRepoEntry {
   default_branch: string;
   private: boolean;
   description?: string | null;
+  /**
+   * GitHub App installation id that surfaced this repo. Pass back to
+   * `project_add_from_github` so the server can scope the clone to the
+   * same installation without re-scanning.
+   */
+  installation_id: number;
+  /** Login of the account (user or org) the installation is scoped to. */
+  account_login: string;
+}
+
+/**
+ * A single GitHub App installation the authenticated user can act as.
+ * Returned by {@link listGithubInstallations}.
+ */
+export interface Installation {
+  id: number;
+  accountLogin: string;
+  accountType: string;
+  installUrl: string;
 }
 
 /**
@@ -226,7 +245,51 @@ export async function listGithubRepos(perPage = 50): Promise<GithubRepoEntry[]> 
   if (response.status.startsWith("error")) {
     throw new Error(response.status.replace(/^error:\s*/, ""));
   }
-  return response.repos ?? [];
+  return (response.repos ?? []) as GithubRepoEntry[];
+}
+
+/**
+ * List GitHub App installations reachable for the signed-in user.
+ *
+ * Returns the installations plus an `installUrl` the UI can deep-link to
+ * when the user has no installations (or wants another one). `installUrl`
+ * is only populated server-side when `GITHUB_APP_SLUG` is configured.
+ */
+export async function listGithubInstallations(): Promise<{
+  installations: Installation[];
+  installUrl: string | null;
+}> {
+  const response = await callMcpTool("github_app_installations", {});
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+  const installations: Installation[] = (response.installations ?? []).map((entry) => ({
+    id: entry.id,
+    accountLogin: entry.account_login,
+    accountType: entry.account_type,
+    installUrl: entry.install_url,
+  }));
+  return {
+    installations,
+    installUrl: response.install_url ?? null,
+  };
+}
+
+/**
+ * Fetch a standalone install URL for the Djinn GitHub App. Use this to
+ * power a bare "Install Djinn" button that doesn't care whether the user
+ * currently has installations. Throws when the server has no
+ * `GITHUB_APP_SLUG` configured (i.e. no public install URL).
+ */
+export async function getGithubInstallUrl(): Promise<string> {
+  const response = await callMcpTool("github_app_install_url", {});
+  if (response.status.startsWith("error")) {
+    throw new Error(response.status.replace(/^error:\s*/, ""));
+  }
+  if (!response.url) {
+    throw new Error("GitHub App install URL is not configured on the server");
+  }
+  return response.url;
 }
 
 /**
@@ -239,12 +302,14 @@ export async function addProjectFromGithub(args: {
   repo: string;
   name?: string;
   ref?: string;
+  installation_id?: number;
 }): Promise<Project> {
   const response = await callMcpTool("project_add_from_github", {
     owner: args.owner,
     repo: args.repo,
     ...(args.name ? { name: args.name } : {}),
     ...(args.ref ? { ref: args.ref } : {}),
+    ...(args.installation_id !== undefined ? { installation_id: args.installation_id } : {}),
   });
 
   if (response.status.startsWith("error")) {
