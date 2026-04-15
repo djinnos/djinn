@@ -254,6 +254,12 @@ Filesystem-first usage guidance:
 | **Settings** | `settings_get`, `settings_save` | Configuration management |
 | **Execution** | `execution_start`, `execution_pause` | Control the task executor |
 
+## Configuration
+
+- [GitHub App setup](docs/GITHUB_APP_SETUP.md) — one-time steps to connect
+  the server to a GitHub App so repo operations (clone, push, PRs) run
+  under installation tokens and commits are attributed to `djinn-bot[bot]`.
+
 ## Community
 
 - [GitHub Issues](https://github.com/djinnos/djinn/issues) — Bug reports and feature requests

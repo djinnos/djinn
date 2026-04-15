@@ -1,21 +1,34 @@
-//! GitHub user-OAuth HTTP routes (`/auth/*`).
+//! GitHub App user-to-server OAuth HTTP routes (`/auth/*`).
 //!
 //! Implements the browser redirect flow used by the web client to force users
-//! to sign in with their GitHub account. Distinct from the device-code flow
-//! used by the desktop provider (`djinn_provider::oauth::github_app`) — that
-//! one caches a long-lived access token for repo operations; this module
-//! mints per-browser session cookies backed by rows in `user_auth_sessions`.
+//! to sign in. This is now the GitHub **App**'s user-to-server OAuth — not
+//! the classic OAuth App flow. Key differences:
+//!   * No `scope` parameter. GitHub App permissions come from the App's
+//!     declared manifest, not from OAuth scopes.
+//!   * The user token is retained so the server can look up which
+//!     installations the user can see (`GET /user/installations`); all
+//!     repo I/O goes through installation tokens (see
+//!     `djinn_provider::github_app`).
+//!
+//! The legacy OAuth App device-code flow
+//! (`djinn_provider::oauth::github_oauth_app_legacy`) is still used by the
+//! CoordinatorActor for pushing commits as the authenticated user; that
+//! migration is tracked separately in `TODO.md`.
 //!
 //! Environment variables:
-//!   * `GITHUB_OAUTH_CLIENT_ID`     — OAuth App client id (required).
-//!   * `GITHUB_OAUTH_CLIENT_SECRET` — OAuth App client secret (required).
-//!   * `DJINN_PUBLIC_URL`           — Public base URL used to build the OAuth
-//!                                    callback (defaults to
+//!   * `GITHUB_APP_CLIENT_ID`       — GitHub App client id (required).
+//!                                    Falls back to `GITHUB_OAUTH_CLIENT_ID`
+//!                                    for one release (deprecation logged).
+//!   * `GITHUB_APP_CLIENT_SECRET`   — GitHub App client secret. Falls back
+//!                                    to `GITHUB_OAUTH_CLIENT_SECRET`.
+//!   * `GITHUB_APP_SLUG`            — App slug, used when `?install=1` is
+//!                                    passed to redirect to the install
+//!                                    page post-auth.
+//!   * `DJINN_PUBLIC_URL`           — Public base URL used to build the
+//!                                    OAuth callback (defaults to
 //!                                    `http://127.0.0.1:8372`).
-//!   * `DJINN_COOKIE_SECURE`        — `true` to force `Secure` on the session
-//!                                    cookie; if unset, `Secure` is implied
-//!                                    when `DJINN_PUBLIC_URL` starts with
-//!                                    `https://`.
+//!   * `DJINN_COOKIE_SECURE`        — `true` to force `Secure` on the
+//!                                    session cookie.
 //!
 //! The flow:
 //!   1. `GET /auth/github/start?redirect=<path>` — mint a random `state` value,
@@ -49,7 +62,27 @@ const OAUTH_STATE_COOKIE: &str = "djinn_oauth_state";
 const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
-const OAUTH_SCOPES: &str = "read:user user:email repo";
+
+/// Read a GitHub App OAuth client id/secret, falling back to the legacy
+/// `GITHUB_OAUTH_*` names for one release. Logs a deprecation warning when
+/// the legacy name is used so the operator knows to migrate their `.env`.
+fn read_github_app_oauth_env(primary: &str, legacy: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(primary) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    if let Ok(v) = std::env::var(legacy) {
+        if !v.is_empty() {
+            tracing::warn!(
+                "auth: {legacy} is deprecated — rename to {primary} in your .env. \
+                 Support will be removed in the next release."
+            );
+            return Some(v);
+        }
+    }
+    None
+}
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -143,32 +176,46 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
 struct StartQuery {
     #[serde(default)]
     redirect: Option<String>,
+    /// When `install=1`, after user auth completes we 302 the browser to the
+    /// GitHub App's install page instead of the requested `redirect`. Useful
+    /// for a "Connect" button when the user has no installations yet.
+    #[serde(default)]
+    install: Option<String>,
 }
 
 async fn github_start(Query(q): Query<StartQuery>) -> Response {
-    let client_id = match std::env::var("GITHUB_OAUTH_CLIENT_ID") {
-        Ok(v) if !v.is_empty() => v,
-        _ => {
-            tracing::error!("auth /github/start: GITHUB_OAUTH_CLIENT_ID not set");
+    let client_id = match read_github_app_oauth_env("GITHUB_APP_CLIENT_ID", "GITHUB_OAUTH_CLIENT_ID")
+    {
+        Some(v) => v,
+        None => {
+            tracing::error!(
+                "auth /github/start: GITHUB_APP_CLIENT_ID not set (legacy \
+                 GITHUB_OAUTH_CLIENT_ID also unset)"
+            );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "GitHub OAuth is not configured",
+                "GitHub App OAuth is not configured",
             )
                 .into_response();
         }
     };
     let redirect = sanitize_redirect(q.redirect.as_deref());
+    let want_install = matches!(q.install.as_deref(), Some("1") | Some("true"));
     let state_token = random_token_b64();
-    // Encode `state_token|redirect` in the state cookie so the callback can
-    // verify both without database writes.
-    let cookie_value = format!("{state_token}|{redirect}");
+    // Encode `state_token|want_install|redirect` in the state cookie so the
+    // callback can verify all three without database writes. The `i1`/`i0`
+    // prefix encodes the install flag.
+    let install_flag = if want_install { "i1" } else { "i0" };
+    let cookie_value = format!("{state_token}|{install_flag}|{redirect}");
 
     let callback = format!("{}/auth/github/callback", public_url());
+    // GitHub Apps do not use OAuth scopes — permissions come from the App's
+    // manifest. We pass `allow_signup=true` so new GH users can still sign
+    // in without bouncing to signup first.
     let auth_url = format!(
-        "https://github.com/login/oauth/authorize?client_id={cid}&redirect_uri={cb}&scope={scope}&state={st}",
+        "https://github.com/login/oauth/authorize?client_id={cid}&redirect_uri={cb}&state={st}&allow_signup=true",
         cid = urlencode(&client_id),
         cb = urlencode(&callback),
-        scope = urlencode(OAUTH_SCOPES),
         st = urlencode(&state_token),
     );
 
@@ -206,21 +253,35 @@ async fn github_callback(
     let Some(cookie_raw) = extract_cookie(&headers, OAUTH_STATE_COOKIE) else {
         return (StatusCode::BAD_REQUEST, "missing state cookie").into_response();
     };
-    let (cookie_state, redirect) = match cookie_raw.split_once('|') {
-        Some((s, r)) => (s.to_string(), r.to_string()),
-        None => (cookie_raw, "/".to_string()),
+    // Cookie format: `<state>|i0|<redirect>` or `<state>|i1|<redirect>`.
+    // Legacy format (`<state>|<redirect>`) is accepted for in-flight
+    // sign-ins during the rollout.
+    let mut parts = cookie_raw.splitn(3, '|');
+    let cookie_state = parts.next().unwrap_or("").to_string();
+    let (want_install, redirect) = match (parts.next(), parts.next()) {
+        (Some("i1"), Some(r)) => (true, r.to_string()),
+        (Some("i0"), Some(r)) => (false, r.to_string()),
+        // Legacy 2-part encoding.
+        (Some(r), None) => (false, r.to_string()),
+        _ => (false, "/".to_string()),
     };
     if !constant_time_eq(cookie_state.as_bytes(), state_param.as_bytes()) {
         return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
     }
 
-    let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID").unwrap_or_default();
-    let client_secret = std::env::var("GITHUB_OAUTH_CLIENT_SECRET").unwrap_or_default();
+    let client_id =
+        read_github_app_oauth_env("GITHUB_APP_CLIENT_ID", "GITHUB_OAUTH_CLIENT_ID")
+            .unwrap_or_default();
+    let client_secret = read_github_app_oauth_env(
+        "GITHUB_APP_CLIENT_SECRET",
+        "GITHUB_OAUTH_CLIENT_SECRET",
+    )
+    .unwrap_or_default();
     if client_id.is_empty() || client_secret.is_empty() {
-        tracing::error!("auth callback: GitHub OAuth env vars missing");
+        tracing::error!("auth callback: GitHub App OAuth env vars missing");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub OAuth is not configured",
+            "GitHub App OAuth is not configured",
         )
             .into_response();
     }
@@ -265,10 +326,30 @@ async fn github_callback(
     }
 
     // 4. Build redirect response with cookies.
+    //    If `?install=1` was passed to /start, we send the user to the App's
+    //    install page instead of the app home. Otherwise, honour the
+    //    site-local redirect.
     let mut resp_headers = HeaderMap::new();
     set_cookie(&mut resp_headers, SESSION_COOKIE, &token, SESSION_TTL_SECS);
     clear_cookie(&mut resp_headers, OAUTH_STATE_COOKIE);
-    let location = sanitize_redirect(Some(&redirect));
+    let location = if want_install {
+        match std::env::var("GITHUB_APP_SLUG") {
+            Ok(slug) if !slug.trim().is_empty() => {
+                format!(
+                    "https://github.com/apps/{}/installations/new",
+                    slug.trim()
+                )
+            }
+            _ => {
+                tracing::warn!(
+                    "auth callback: install=1 requested but GITHUB_APP_SLUG is unset"
+                );
+                sanitize_redirect(Some(&redirect))
+            }
+        }
+    } else {
+        sanitize_redirect(Some(&redirect))
+    };
     resp_headers.insert(
         header::LOCATION,
         HeaderValue::from_str(&location).unwrap_or_else(|_| HeaderValue::from_static("/")),
