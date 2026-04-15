@@ -212,8 +212,12 @@ where
             let root_str = root.to_string_lossy().into_owned();
             call_code_graph(state, &call.arguments, &root_str).await
         }
-        "github_search" => call_github_search(state, &call.arguments).await,
-        "github_fetch_file" => call_github_fetch_file(state, &call.arguments).await,
+        "github_search" => {
+            call_github_search(state, &call.arguments, project_id.as_deref()).await
+        }
+        "github_fetch_file" => {
+            call_github_fetch_file(state, &call.arguments, project_id.as_deref()).await
+        }
         other => {
             if let Some(registry) = mcp_registry
                 && registry.has_tool(other)

@@ -1,18 +1,22 @@
 //! GitHub code search — thin wrapper around djinn-provider's GitHubApiClient.
 //!
-//! These helpers are invoked from MCP extension handlers, which run under
-//! the `SESSION_USER_TOKEN` task-local scoped by the HTTP MCP handler.
+//! These helpers are invoked from the agent-side extension dispatcher, which
+//! runs inside worker sessions. Worker sessions are background contexts with
+//! no `SESSION_USER_TOKEN` task-local, so the client must be authenticated as
+//! a GitHub App installation. The caller is responsible for resolving the
+//! `installation_id` from the task/project scope before invoking.
 
 use djinn_provider::github_api::GitHubApiClient;
 
 /// Execute a code search against the GitHub Code Search API.
 pub(crate) async fn search(
+    installation_id: u64,
     query: &str,
     language: Option<&str>,
     repo: Option<&str>,
     path: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    let client = GitHubApiClient::for_session_user();
+    let client = GitHubApiClient::for_installation(installation_id);
     let result = client
         .search_code(query, language, repo, path, None)
         .await
@@ -22,13 +26,14 @@ pub(crate) async fn search(
 
 /// Fetch the contents of a file from a GitHub repository.
 pub(crate) async fn fetch_file(
+    installation_id: u64,
     repo: &str,
     path: &str,
     git_ref: Option<&str>,
     start_line: Option<u32>,
     end_line: Option<u32>,
 ) -> Result<serde_json::Value, String> {
-    let client = GitHubApiClient::for_session_user();
+    let client = GitHubApiClient::for_installation(installation_id);
     let result = client
         .fetch_file(repo, path, git_ref, start_line, end_line)
         .await
