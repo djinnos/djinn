@@ -55,7 +55,7 @@ impl SessionAuthRepository {
             "INSERT INTO user_auth_sessions
                 (token, user_id, github_login, github_name, github_avatar_url,
                  github_access_token, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(params.token)
         .bind(params.user_id)
@@ -68,7 +68,7 @@ impl SessionAuthRepository {
         .await?;
 
         let row = sqlx::query_as::<_, UserAuthSessionRecord>(&format!(
-            "SELECT {COLS} FROM user_auth_sessions WHERE token = ?1"
+            "SELECT {COLS} FROM user_auth_sessions WHERE token = ?"
         ))
         .bind(params.token)
         .fetch_one(self.db.pool())
@@ -80,7 +80,7 @@ impl SessionAuthRepository {
     pub async fn get_by_token(&self, token: &str) -> Result<Option<UserAuthSessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, UserAuthSessionRecord>(&format!(
-            "SELECT {COLS} FROM user_auth_sessions WHERE token = ?1"
+            "SELECT {COLS} FROM user_auth_sessions WHERE token = ?"
         ))
         .bind(token)
         .fetch_optional(self.db.pool())
@@ -89,7 +89,7 @@ impl SessionAuthRepository {
 
     pub async fn delete_by_token(&self, token: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let res = sqlx::query("DELETE FROM user_auth_sessions WHERE token = ?1")
+        let res = sqlx::query("DELETE FROM user_auth_sessions WHERE token = ?")
             .bind(token)
             .execute(self.db.pool())
             .await?;
@@ -99,7 +99,7 @@ impl SessionAuthRepository {
     /// Delete any session rows whose `expires_at` is <= `now` (RFC3339).
     pub async fn delete_expired(&self, now_rfc3339: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let res = sqlx::query("DELETE FROM user_auth_sessions WHERE expires_at <= ?1")
+        let res = sqlx::query("DELETE FROM user_auth_sessions WHERE expires_at <= ?")
             .bind(now_rfc3339)
             .execute(self.db.pool())
             .await?;
