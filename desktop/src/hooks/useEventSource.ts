@@ -12,7 +12,7 @@
 
 import { useEffect, useRef } from "react";
 import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
-import { getServerPort, retryServerConnection } from "@/electron/commands";
+import { getServerBaseUrl } from "@/api/serverUrl";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
 import { useSelectedProject } from "@/stores/useProjectStore";
@@ -20,7 +20,6 @@ import { projectStore, ALL_PROJECTS } from "@/stores/projectStore";
 import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
-import { listen } from "@/electron/shims/event";
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -123,10 +122,8 @@ export function useEventSource(projectId?: string | null) {
       try {
         await hydrateSnapshot(selectedProjectPath);
 
-        const port = await getServerPort();
-        
         // Build URL with Last-Event-ID if available
-        let url = `http://127.0.0.1:${port}/events`;
+        let url = `${getServerBaseUrl()}/events`;
         if (projectId && !isAll) {
           url += `?project_id=${encodeURIComponent(projectId)}`;
         }
@@ -240,12 +237,11 @@ export function useEventSource(projectId?: string | null) {
 
           reconnectTimerRef.current = setTimeout(async () => {
             if (!isActive) return;
-            // Re-discover daemon port from daemon.json (handles server restart on new port)
+            // Reset MCP client so the next tool call reconnects cleanly.
             try {
-              await retryServerConnection();
               await resetMcpClient();
             } catch {
-              // Discovery failed — server might not be up yet, connect() will fail and retry
+              // ignore — connect() below will surface any failure
             }
             connect();
           }, delay);
@@ -259,31 +255,6 @@ export function useEventSource(projectId?: string | null) {
     };
 
     connect();
-
-    // Listen for server reconnection (e.g. after server restart with new port).
-    // Reset MCP client cache and force SSE to reconnect to the new port.
-    const unlistenReconnected = listen<number>("server:reconnected", async () => {
-      if (!isActive) return;
-
-      // Reset MCP client so it picks up the new port
-      await resetMcpClient();
-
-      // Close existing SSE and reconnect
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-
-      // Reset reconnect attempt counter so we get a fresh start
-      sseStore.getState().resetReconnectAttempt();
-      sseStore.getState().setConnectionStatus("reconnecting");
-
-      connect();
-    });
 
     return () => {
       isActive = false;
@@ -302,8 +273,6 @@ export function useEventSource(projectId?: string | null) {
         cleanupHandlersRef.current();
         cleanupHandlersRef.current = null;
       }
-
-      unlistenReconnected.then((fn) => fn());
     };
   }, [projectId, selectedProjectPath]);
 

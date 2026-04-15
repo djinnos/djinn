@@ -42,7 +42,7 @@ impl TaskRepository {
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let project_id =
-            sqlx::query_scalar::<_, String>("SELECT project_id FROM epics WHERE id = ?1")
+            sqlx::query_scalar::<_, String>("SELECT project_id FROM epics WHERE id = ?")
                 .bind(epic_id)
                 .fetch_optional(self.db.pool())
                 .await?
@@ -83,8 +83,8 @@ impl TaskRepository {
         sqlx::query(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, status, acceptance_criteria)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'open'), ?12)",
+                 issue_type, priority, owner, `status`, acceptance_criteria)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?)",
         )
         .bind(&id)
         .bind(project_id)
@@ -129,8 +129,8 @@ impl TaskRepository {
         sqlx::query(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, status, continuation_count, memory_refs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, '[]')",
+                 issue_type, priority, owner, `status`, continuation_count, memory_refs)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]')",
         )
         .bind(id)
         .bind(project_id)
@@ -170,13 +170,12 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE tasks SET
-                title = ?2, description = ?3, design = ?4,
-                priority = ?5, owner = ?6, labels = ?7,
-                acceptance_criteria = ?8,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+                title = ?, description = ?, design = ?,
+                priority = ?, owner = ?, labels = ?,
+                acceptance_criteria = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(title)
         .bind(description)
         .bind(design)
@@ -184,6 +183,7 @@ impl TaskRepository {
         .bind(owner)
         .bind(labels)
         .bind(acceptance_criteria)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
         let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
@@ -198,7 +198,7 @@ impl TaskRepository {
 
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query("DELETE FROM tasks WHERE id = ?1")
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(id)
             .execute(self.db.pool())
             .await?;
@@ -211,12 +211,12 @@ impl TaskRepository {
     pub async fn set_merge_commit_sha(&self, id: &str, sha: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "UPDATE tasks SET merge_commit_sha = ?2,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            "UPDATE tasks SET merge_commit_sha = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(sha)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -237,12 +237,12 @@ impl TaskRepository {
     pub async fn set_pr_url(&self, id: &str, url: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "UPDATE tasks SET pr_url = ?2,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            "UPDATE tasks SET pr_url = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(url)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -267,12 +267,12 @@ impl TaskRepository {
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "UPDATE tasks SET merge_conflict_metadata = ?2,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            "UPDATE tasks SET merge_conflict_metadata = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(metadata)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -291,8 +291,8 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE tasks SET continuation_count = continuation_count + 1,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
         .bind(id)
         .execute(self.db.pool())
@@ -312,12 +312,12 @@ impl TaskRepository {
     pub async fn update_agent_type(&self, id: &str, agent_type: Option<&str>) -> Result<Task> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "UPDATE tasks SET agent_type = ?2,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            "UPDATE tasks SET agent_type = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(agent_type)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
         let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
@@ -334,12 +334,12 @@ impl TaskRepository {
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "UPDATE tasks SET memory_refs = ?2,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            "UPDATE tasks SET memory_refs = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(memory_refs_json)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
         let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)

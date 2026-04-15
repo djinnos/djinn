@@ -9,10 +9,12 @@ use tower_http::cors::CorsLayer;
 use crate::sse;
 
 mod agents;
+mod auth;
 mod chat;
 mod mcp_handler;
 mod project_tools;
 mod state;
+pub use auth::{AuthenticatedUser, authenticate};
 pub use state::AppState;
 
 /// Build the application router.
@@ -24,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/chat/completions", post(chat::completions_handler))
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
+        .merge(auth::router())
         .merge(project_tools::router())
         .layer(CorsLayer::permissive())
         .with_state(state)

@@ -94,11 +94,11 @@ impl TaskRepository {
             || action == TransitionAction::ForceClose;
         if apply.set_closed_at && !work_landed {
             let downstream = sqlx::query_as::<_, BlockerRef>(
-                "SELECT t.id AS task_id, t.short_id, t.title, t.status
+                "SELECT t.id AS task_id, t.short_id, t.title, t.`status`
                  FROM blockers b
                  JOIN tasks t ON t.id = b.task_id
-                 WHERE b.blocking_task_id = ?1
-                   AND t.status != 'closed'",
+                 WHERE b.blocking_task_id = ?
+                   AND t.`status` != 'closed'",
             )
             .bind(id)
             .fetch_all(&mut *tx)
@@ -133,8 +133,8 @@ impl TaskRepository {
             let count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM blockers b
                  JOIN tasks bt ON b.blocking_task_id = bt.id
-                 WHERE b.task_id = ?1
-                   AND bt.status != 'closed'",
+                 WHERE b.task_id = ?
+                   AND bt.`status` != 'closed'",
             )
             .bind(id)
             .fetch_one(&mut *tx)
@@ -167,49 +167,54 @@ impl TaskRepository {
         let conflict_meta_ref = effective_conflict_metadata.as_deref();
 
         // Apply all side effects atomically.
+        let reopen_inc_val: i64 = if apply.increment_reopen { 1 } else { 0 };
         sqlx::query(
             "UPDATE tasks SET
-                status = ?2,
-                reopen_count = reopen_count + ?3,
-                total_reopen_count = total_reopen_count + ?3,
-                continuation_count = CASE WHEN ?4 THEN 0 WHEN ?5 THEN continuation_count + 1 ELSE continuation_count END,
-                verification_failure_count = CASE WHEN ?10 THEN 0 WHEN ?11 THEN verification_failure_count + 1 ELSE verification_failure_count END,
-                total_verification_failure_count = total_verification_failure_count + CASE WHEN ?11 THEN 1 ELSE 0 END,
-                intervention_count = CASE WHEN ?15 THEN intervention_count + 1 ELSE intervention_count END,
-                last_intervention_at = CASE WHEN ?15 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE last_intervention_at END,
+                `status` = ?,
+                reopen_count = reopen_count + ?,
+                total_reopen_count = total_reopen_count + ?,
+                continuation_count = CASE WHEN ? THEN 0 WHEN ? THEN continuation_count + 1 ELSE continuation_count END,
+                verification_failure_count = CASE WHEN ? THEN 0 WHEN ? THEN verification_failure_count + 1 ELSE verification_failure_count END,
+                total_verification_failure_count = total_verification_failure_count + CASE WHEN ? THEN 1 ELSE 0 END,
+                intervention_count = CASE WHEN ? THEN intervention_count + 1 ELSE intervention_count END,
+                last_intervention_at = CASE WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') ELSE last_intervention_at END,
                 closed_at = CASE
-                    WHEN ?6 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    WHEN ?7 THEN NULL
+                    WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                    WHEN ? THEN NULL
                     ELSE closed_at
                 END,
                 close_reason = CASE
-                    WHEN ?8 IS NOT NULL THEN ?8
-                    WHEN ?9 THEN NULL
+                    WHEN ? IS NOT NULL THEN ?
+                    WHEN ? THEN NULL
                     ELSE close_reason
                 END,
                 merge_conflict_metadata = CASE
-                    WHEN ?12 THEN NULL
-                    WHEN ?13 THEN ?14
+                    WHEN ? THEN NULL
+                    WHEN ? THEN ?
                     ELSE merge_conflict_metadata
                 END,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(to_str)
-        .bind(if apply.increment_reopen { 1i64 } else { 0 })
+        .bind(reopen_inc_val)
+        .bind(reopen_inc_val)
         .bind(apply.reset_continuation)
         .bind(apply.increment_continuation)
+        .bind(apply.reset_verification_failure)
+        .bind(apply.increment_verification_failure)
+        .bind(apply.increment_verification_failure)
+        .bind(apply.record_intervention)
+        .bind(apply.record_intervention)
         .bind(apply.set_closed_at)
         .bind(apply.clear_closed_at)
         .bind(apply.close_reason)
+        .bind(apply.close_reason)
         .bind(apply.clear_close_reason)
-        .bind(apply.reset_verification_failure)
-        .bind(apply.increment_verification_failure)
         .bind(apply.clear_merge_conflict_metadata)
         .bind(apply.set_merge_conflict_metadata)
         .bind(conflict_meta_ref)
-        .bind(apply.record_intervention)
+        .bind(id)
         .execute(&mut *tx)
         .await?;
 
@@ -230,7 +235,7 @@ impl TaskRepository {
         sqlx::query(
             "INSERT INTO activity_log
                 (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&activity_id)
         .bind(id)
@@ -269,7 +274,7 @@ impl TaskRepository {
             .fetch_one(self.db.pool())
             .await?;
         let closed_at_sql = if status == "closed" {
-            "closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),"
+            "closed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),"
         } else {
             ""
         };
@@ -280,15 +285,16 @@ impl TaskRepository {
             0
         };
         sqlx::query(&format!(
-            "UPDATE tasks SET status = ?2, {closed_at_sql}
-                reopen_count = reopen_count + ?3,
-                total_reopen_count = total_reopen_count + ?3,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1"
+            "UPDATE tasks SET `status` = ?, {closed_at_sql}
+                reopen_count = reopen_count + ?,
+                total_reopen_count = total_reopen_count + ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?"
         ))
-        .bind(id)
         .bind(status)
         .bind(reopen_inc)
+        .bind(reopen_inc)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
         let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
@@ -343,25 +349,28 @@ impl TaskRepository {
         };
         sqlx::query(
             "UPDATE tasks SET
-                status = ?2,
+                `status` = ?,
                 closed_at = CASE
-                    WHEN ?2 = 'closed' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    WHEN status = 'closed' THEN NULL
+                    WHEN ? = 'closed' THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                    WHEN `status` = 'closed' THEN NULL
                     ELSE closed_at
                 END,
-                reopen_count = reopen_count + ?3,
-                total_reopen_count = total_reopen_count + ?3,
+                reopen_count = reopen_count + ?,
+                total_reopen_count = total_reopen_count + ?,
                 close_reason = CASE
-                    WHEN ?2 = 'closed' THEN ?4
+                    WHEN ? = 'closed' THEN ?
                     ELSE NULL
                 END,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
+        .bind(status)
         .bind(status)
         .bind(reopen_inc)
+        .bind(reopen_inc)
+        .bind(status)
         .bind(close_reason)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -396,12 +405,12 @@ impl TaskRepository {
     pub async fn move_to_epic(&self, id: &str, new_epic_id: Option<&str>) -> Result<Task> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "UPDATE tasks SET epic_id = ?2,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+            "UPDATE tasks SET epic_id = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
         )
-        .bind(id)
         .bind(new_epic_id)
+        .bind(id)
         .execute(self.db.pool())
         .await?;
         let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)

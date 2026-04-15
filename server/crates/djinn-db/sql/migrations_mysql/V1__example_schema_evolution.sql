@@ -1,0 +1,28 @@
+-- V1__example_schema_evolution.sql
+--
+-- Template / no-op migration. This file exists to document the convention for
+-- incremental ALTER migrations against the MySQL/Dolt schema.
+--
+-- Convention:
+--   * Filename:   V{N}__{slug}.sql where N is a monotonically increasing
+--                 positive integer (version 0 is reserved for the initial
+--                 snapshot in sql/mysql_schema.sql).
+--   * Location:   server/crates/djinn-db/sql/migrations_mysql/
+--   * Registry:   Add an `include_str!` entry to the MIGRATIONS slice in
+--                 server/crates/djinn-db/src/migrations.rs. The runner does
+--                 NOT auto-discover files; the compile-time slice is the
+--                 source of truth for ordering.
+--   * Determinism: Migrations must be deterministic ALTERs. The runner does
+--                 NOT tolerate "already exists" errors for incremental
+--                 migrations (only for the initial snapshot). If a statement
+--                 fails, the migration is NOT recorded and the server refuses
+--                 to boot.
+--   * Statements: Split on top-level `;`. Each statement runs independently;
+--                 MySQL/Dolt commit DDL implicitly so partial failure leaves
+--                 the database partially migrated — recover by hand + add a
+--                 follow-up migration.
+--
+-- This particular migration is intentionally a no-op so the incremental
+-- pipeline always has at least one entry to exercise on a fresh deploy.
+
+SELECT 1;

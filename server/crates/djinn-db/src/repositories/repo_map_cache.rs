@@ -45,13 +45,14 @@ impl RepoMapCacheRepository {
         Ok(sqlx::query_as::<_, CachedRepoMap>(
             "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
              FROM repo_map_cache
-             WHERE project_id = ?1
-               AND project_path = ?2
-               AND ((worktree_path IS NULL AND ?3 IS NULL) OR worktree_path = ?3)
-               AND commit_sha = ?4",
+             WHERE project_id = ?
+               AND project_path = ?
+               AND ((worktree_path IS NULL AND ? IS NULL) OR worktree_path = ?)
+               AND commit_sha = ?",
         )
         .bind(key.project_id)
         .bind(key.project_path)
+        .bind(key.worktree_path)
         .bind(key.worktree_path)
         .bind(key.commit_sha)
         .fetch_optional(self.db.pool())
@@ -68,9 +69,9 @@ impl RepoMapCacheRepository {
         Ok(sqlx::query_as::<_, CachedRepoMap>(
             "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
              FROM repo_map_cache
-             WHERE project_id = ?1
-               AND project_path = ?2
-               AND commit_sha = ?3
+             WHERE project_id = ?
+               AND project_path = ?
+               AND commit_sha = ?
              ORDER BY CASE WHEN worktree_path IS NULL THEN 0 ELSE 1 END, created_at DESC
              LIMIT 1",
         )
@@ -84,7 +85,7 @@ impl RepoMapCacheRepository {
     pub async fn insert(&self, entry: RepoMapCacheInsert<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "INSERT OR REPLACE INTO repo_map_cache (
+            "INSERT INTO repo_map_cache (
                 project_id,
                 project_path,
                 worktree_path,
@@ -93,7 +94,12 @@ impl RepoMapCacheRepository {
                 token_estimate,
                 included_entries,
                 graph_artifact
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                rendered_map=VALUES(rendered_map),
+                token_estimate=VALUES(token_estimate),
+                included_entries=VALUES(included_entries),
+                graph_artifact=VALUES(graph_artifact)",
         )
         .bind(entry.key.project_id)
         .bind(entry.key.project_path)

@@ -1,0 +1,35 @@
+# Heavy build artefacts — never send to the Docker daemon.
+target/
+**/target/
+server/target/
+desktop/dist/
+desktop/node_modules/
+website/node_modules/
+website/.next/
+node_modules/
+**/node_modules/
+
+# VCS and local state.
+.git/
+.gitignore
+.github/
+.djinn/
+tmp/
+**/tmp/
+worktrees/
+server/worktrees/
+
+# Editor / OS cruft.
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Don't copy any host-side docker metadata into the image.
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Keep .sqlx — required for offline compilation.
+!server/.sqlx/
+!server/.sqlx/**
