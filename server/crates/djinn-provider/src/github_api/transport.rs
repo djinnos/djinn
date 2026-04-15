@@ -1,8 +1,7 @@
 use anyhow::{Result, anyhow};
 use reqwest::{Response, StatusCode};
 
-use crate::github_api::GitHubApiClient;
-use crate::oauth::github_app::GitHubAppTokens;
+use crate::github_api::{AuthMode, GitHubApiClient};
 
 /// Maximum number of token-refresh retries on 401 responses.
 const MAX_REFRESH_RETRIES: u32 = 1;
@@ -14,30 +13,62 @@ const BACKOFF_INITIAL_SECS: u64 = 1;
 const BACKOFF_MAX_SECS: u64 = 60;
 
 impl GitHubApiClient {
-    /// Load the cached GitHub OAuth App user access token.
-    pub(super) async fn load_user_token(&self) -> Result<GitHubAppTokens> {
-        GitHubAppTokens::load_from_db(&self.cred_repo)
-            .await
-            .ok_or_else(|| anyhow!("No GitHub App tokens found — please authenticate first"))
+    /// Resolve a bearer token for the next outbound request based on the
+    /// configured [`AuthMode`].
+    pub(super) async fn bearer_token(&self) -> Result<String> {
+        match &self.auth {
+            AuthMode::SessionUser => djinn_core::auth_context::current_user_token()
+                .ok_or_else(|| anyhow!("sign in with GitHub required")),
+            AuthMode::Installation { installation_id } => {
+                let tok = crate::github_app::get_installation_token(*installation_id)
+                    .await
+                    .map_err(|e| {
+                        anyhow!("failed to mint installation token for {installation_id}: {e}")
+                    })?;
+                Ok(tok.token)
+            }
+        }
     }
 
-    /// Execute a request using the user OAuth token directly (per ADR-039).
-    /// Returns an authentication error on 401.
+    /// Invalidate any cached bearer token. For installation-scoped clients
+    /// this drops the cached installation token; for user-token clients
+    /// there is nothing to invalidate (the row is reloaded on the next
+    /// call).
+    fn invalidate_cached_token(&self) {
+        if let AuthMode::Installation { installation_id } = &self.auth {
+            crate::github_app::installations::invalidate_cache(*installation_id);
+        }
+    }
+
+    /// Execute a request using the configured auth mode. Retries once with
+    /// a refreshed token on 401 for installation-scoped clients; for user
+    /// tokens a 401 surfaces a re-auth error immediately.
     pub(super) async fn send_with_retry<F, Fut>(&self, build_request: F) -> Result<Response>
     where
         F: Fn(String) -> Fut,
         Fut: std::future::Future<Output = Result<Response>>,
     {
-        let user_tokens = self.load_user_token().await?;
-        let resp = build_request(user_tokens.access_token.clone()).await?;
+        let token = self.bearer_token().await?;
+        let resp = build_request(token).await?;
 
-        if resp.status() == StatusCode::UNAUTHORIZED {
-            return Err(anyhow!(
-                "GitHub API returned 401 — token may have been revoked, please re-authenticate"
-            ));
+        if resp.status() != StatusCode::UNAUTHORIZED {
+            return Ok(resp);
         }
 
-        Ok(resp)
+        match &self.auth {
+            AuthMode::SessionUser => Err(anyhow!(
+                "GitHub API returned 401 — token may have been revoked, please re-authenticate"
+            )),
+            AuthMode::Installation { installation_id } => {
+                tracing::warn!(
+                    installation_id = *installation_id,
+                    "github-api: 401 — refreshing installation token and retrying"
+                );
+                self.invalidate_cached_token();
+                let token = self.bearer_token().await?;
+                build_request(token).await
+            }
+        }
     }
 }
 

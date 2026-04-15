@@ -1,29 +1,27 @@
-use djinn_core::events::EventBus;
-use djinn_db::Database;
-use std::sync::Arc;
+//! Test helpers for the `GitHubApiClient` unit tests.
+//!
+//! Post GitHub-App migration, all client flows authenticate via installation
+//! tokens. Tests prime the installation-token cache with a synthetic value
+//! and build the client with `for_installation_with_base_url` pointed at a
+//! `wiremock` server — no DB or task-local is involved.
 
-use crate::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
-use crate::repos::CredentialRepository;
+use crate::github_app::installations::prime_cache_for_tests;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod checks;
 mod pull_requests;
 mod reviews;
 mod transport;
 
-pub fn make_repo() -> Arc<CredentialRepository> {
-    let db = Database::open_in_memory().expect("in-memory db");
-    Arc::new(CredentialRepository::new(db, EventBus::noop()))
-}
-
-pub async fn seed_tokens(repo: &CredentialRepository, access_token: &str) {
-    let json = serde_json::json!({
-        "access_token": access_token,
-        "user_login": "djinn-test",
-    })
-    .to_string();
-    repo.set("github_app", GITHUB_APP_OAUTH_DB_KEY, &json)
-        .await
-        .unwrap();
+/// Allocate a fresh installation id for each test and seed the in-memory
+/// installation-token cache with a predictable bearer value. Using distinct
+/// ids avoids cross-talk between tests that run in parallel (notably the
+/// 401 transport test, which invalidates its id on retry).
+pub fn seed_installation_token() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    prime_cache_for_tests(id, "ghs_test_install");
+    id
 }
 
 fn now_secs() -> i64 {

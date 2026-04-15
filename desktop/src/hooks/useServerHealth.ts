@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { getServerStatus, retryServerConnection } from "@/electron/commands";
-import { listen } from "@/electron/shims/event";
+import { getServerBaseUrl } from "@/api/serverUrl";
 
 export type ConnectionStatus = "loading" | "connected" | "error";
 
@@ -15,35 +14,40 @@ export interface ServerHealthState {
 }
 
 const POLL_INTERVAL_MS = 2000;
+const REQUEST_TIMEOUT_MS = 3000;
+
+async function pingServer(): Promise<{ version: string | null }> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${getServerBaseUrl()}/health`, { signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`Health check failed: ${res.status}`);
+    }
+    const json = (await res.json().catch(() => ({}))) as { version?: string };
+    return { version: json?.version ?? null };
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 
 export function useServerHealth(): ServerHealthState {
   const [status, setStatus] = useState<ConnectionStatus>("loading");
-  const [port, setPort] = useState<number | null>(null);
+  const [port] = useState<number | null>(() => {
+    const url = new URL(getServerBaseUrl());
+    return Number(url.port) || null;
+  });
   const [error, setError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
-  const [updateAvailable, setUpdateAvailable] = useState(false);
 
   const checkStatus = useCallback(async () => {
     try {
-      const serverStatus = await getServerStatus();
-
-      if (serverStatus.is_healthy && serverStatus.port) {
-        setPort(serverStatus.port);
-        setStatus("connected");
-        setError(null);
-        setServerVersion(serverStatus.server_version);
-        setUpdateAvailable(serverStatus.update_available);
-        return true;
-      }
-
-      if (serverStatus.has_error) {
-        setStatus("error");
-        setError(serverStatus.error_message || "Failed to connect to server");
-        return false;
-      }
-
-      return false;
+      const result = await pingServer();
+      setStatus("connected");
+      setError(null);
+      setServerVersion(result.version);
+      return true;
     } catch (err) {
       setStatus("error");
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -56,47 +60,30 @@ export function useServerHealth(): ServerHealthState {
     try {
       setStatus("loading");
       setError(null);
-      await retryServerConnection();
-      // Wait a moment then check status
-      await new Promise(resolve => setTimeout(resolve, 1000));
       await checkStatus();
-    } catch (err) {
-      setStatus("error");
-      setError(err instanceof Error ? err.message : "Failed to retry connection");
     } finally {
       setIsRetrying(false);
     }
   }, [checkStatus]);
 
   useEffect(() => {
-    // Initial check
-    checkStatus();
-
-    // Poll while not connected
-    const intervalId = setInterval(() => {
+    void checkStatus();
+    const intervalId = window.setInterval(() => {
       if (status !== "connected") {
-        checkStatus();
+        void checkStatus();
       }
     }, POLL_INTERVAL_MS);
-
-    // Listen for backend health monitor events
-    const unlistenReconnected = listen<number>("server:reconnected", (event) => {
-      setPort(event.payload);
-      setStatus("connected");
-      setError(null);
-    });
-
-    const unlistenDisconnected = listen("server:disconnected", () => {
-      setStatus("error");
-      setError("Server connection lost. Attempting to reconnect...");
-    });
-
-    return () => {
-      clearInterval(intervalId);
-      unlistenReconnected.then((fn) => fn());
-      unlistenDisconnected.then((fn) => fn());
-    };
+    return () => window.clearInterval(intervalId);
   }, [checkStatus, status]);
 
-  return { status, port, error, retry, isRetrying, serverVersion, updateAvailable };
+  return {
+    status,
+    port,
+    error,
+    retry,
+    isRetrying,
+    serverVersion,
+    // Update detection required the Electron host; not applicable in the web client.
+    updateAvailable: false,
+  };
 }

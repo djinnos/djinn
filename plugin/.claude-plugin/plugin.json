@@ -9,12 +9,5 @@
   "homepage": "https://github.com/djinnos/djinn",
   "repository": "https://github.com/djinnos/djinn",
   "license": "MIT",
-  "keywords": ["project-management", "task-boards", "memory", "multi-agent", "coordination", "planning"],
-  "mcpServers": {
-    "djinn": {
-      "type": "stdio",
-      "command": "djinn-server",
-      "args": ["--mcp-connect"]
-    }
-  }
+  "keywords": ["project-management", "task-boards", "memory", "multi-agent", "coordination", "planning"]
 }

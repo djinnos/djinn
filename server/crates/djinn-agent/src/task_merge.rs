@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 
 use crate::context::AgentContext;
 use crate::knowledge_promotion::{
@@ -11,8 +10,34 @@ use djinn_core::models::{SessionStatus, TransitionAction};
 use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 use djinn_git::GitError;
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
-use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
-use djinn_provider::repos::CredentialRepository;
+use djinn_provider::github_app::{
+    app_id as github_app_id, get_installation_token, installations::invalidate_cache,
+};
+
+/// Build the HTTPS push URL for a GitHub repo authenticated by a GitHub App
+/// **installation** access token.
+///
+/// The resulting URL uses the `x-access-token` basic-auth username that
+/// GitHub documents for installation tokens, and encodes `owner`/`repo`
+/// unchanged (we assume callers have already normalised them). Commits
+/// pushed through this URL are attributed to the App's bot identity
+/// (`djinn-bot[bot]`).
+pub(crate) fn build_app_push_url(owner: &str, repo: &str, installation_token: &str) -> String {
+    let repo = repo.trim_end_matches(".git");
+    format!("https://x-access-token:{installation_token}@github.com/{owner}/{repo}.git")
+}
+
+/// Bot identity used when committing/pushing through the GitHub App. The
+/// canonical no-reply email form is `<app-id>+djinn-bot[bot]@users.noreply.github.com`.
+fn bot_identity() -> (String, String) {
+    let app_id = djinn_provider::github_app::app_id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    (
+        "djinn-bot[bot]".to_string(),
+        format!("{app_id}+djinn-bot[bot]@users.noreply.github.com"),
+    )
+}
 
 const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
 const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
@@ -76,34 +101,59 @@ async fn try_create_github_pr(
     base_branch: &str,
     merge_target: &str,
     project_dir: &Path,
+    project_id: &str,
     app_state: &AgentContext,
 ) -> Result<Option<String>, String> {
-    let cred_repo = Arc::new(CredentialRepository::new(
-        app_state.db.clone(),
-        app_state.event_bus.clone(),
-    ));
-
-    // Check whether the GitHub App credential exists.
-    let has_app = cred_repo
-        .get_decrypted(GITHUB_APP_OAUTH_DB_KEY)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    if !has_app {
+    // The GitHub App must be configured for any PR-creation path to work.
+    // Fall back to direct-push if the server is running without an App
+    // (e.g. local dev): callers treat `Ok(None)` as "no App available".
+    if github_app_id().is_err() {
         return Ok(None);
     }
 
-    // Resolve owner/repo from `git remote get-url origin`.
-    let remote_output = djinn_git::run_git_command(
-        project_dir.to_path_buf(),
-        vec!["remote".into(), "get-url".into(), "origin".into()],
-    )
-    .await
-    .map_err(|e| format!("failed to get git remote URL: {e}"))?;
-    let remote_url = remote_output.stdout.trim().to_string();
-    let (owner, repo_name) = parse_github_owner_repo(&remote_url)
-        .ok_or_else(|| format!("could not parse GitHub owner/repo from remote: {remote_url}"))?;
+    // Resolve owner/repo + installation id from the persisted project row
+    // (set at `project_add_from_github` time, Migrations 2 + 4). Legacy
+    // rows without either column are not pushable through the App; fail
+    // cleanly rather than falling back to a user-token push.
+    let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let (owner, repo_name) = match project_repo.get_github_coords(project_id).await {
+        Ok(Some(coords)) => coords,
+        Ok(None) => {
+            return Err(format!(
+                "project {project_id} has no github_owner/github_repo persisted — \
+                 re-add this project via `project_add_from_github` so the Djinn \
+                 GitHub App can push on its behalf"
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to read github coords for project {project_id}: {e}"
+            ));
+        }
+    };
+
+    let installation_id = match project_repo.get_installation_id(project_id).await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return Err(format!(
+                "project {project_id} ({owner}/{repo_name}) has no cached installation_id — \
+                 re-add this project via `project_add_from_github` so the Djinn GitHub \
+                 App installation is persisted on the row"
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to read installation_id for project {project_id}: {e}"
+            ));
+        }
+    };
+
+    // Mint a 1-hour installation access token for the push URL (cached in
+    // process — see `github_app::installations`).
+    let install_token = get_installation_token(installation_id)
+        .await
+        .map_err(|e| format!("could not mint installation token: {e}"))?;
+    let push_url = build_app_push_url(&owner, &repo_name, &install_token.token);
 
     // Prune stale remote-tracking refs so --force-with-lease doesn't
     // reject pushes to branch names that were deleted after a prior merge.
@@ -134,18 +184,48 @@ async fn try_create_github_pr(
         ));
     }
 
-    // Push the branch to origin before opening the PR.
-    djinn_git::run_git_command(
-        project_dir.to_path_buf(),
+    // Push the branch through the App-authenticated URL. Commits authored
+    // by the agents inherit the repo's `user.name`/`user.email` (set to
+    // `djinn-bot[bot]` at clone time), but we also inject them here via
+    // `-c` flags so a worktree created before that config landed still
+    // pushes under the bot identity.
+    let (bot_name, bot_email) = bot_identity();
+    let push_args = |url: &str| -> Vec<String> {
         vec![
+            "-c".into(),
+            format!("user.name={bot_name}"),
+            "-c".into(),
+            format!("user.email={bot_email}"),
             "push".into(),
             "--force-with-lease".into(),
-            "origin".into(),
+            url.to_string(),
             format!("{base_branch}:{base_branch}"),
-        ],
-    )
-    .await
-    .map_err(|e| format!("failed to push branch {base_branch} to origin: {e}"))?;
+        ]
+    };
+
+    let first_attempt =
+        djinn_git::run_git_command(project_dir.to_path_buf(), push_args(&push_url)).await;
+    if let Err(first_err) = first_attempt {
+        // Installation tokens are 1h TTL with a 5-min refresh margin, but a
+        // push that straddles the cache-expiry boundary can still land on a
+        // revoked token. Invalidate the cache, refetch, and retry once.
+        tracing::warn!(
+            task_id = %task_id,
+            owner = %owner,
+            repo = %repo_name,
+            installation_id,
+            error = %first_err,
+            "github-app push failed — refreshing installation token and retrying once"
+        );
+        invalidate_cache(installation_id);
+        let refreshed = get_installation_token(installation_id).await.map_err(|e| {
+            format!("failed to refresh installation token after push error: {e}")
+        })?;
+        let retry_url = build_app_push_url(&owner, &repo_name, &refreshed.token);
+        djinn_git::run_git_command(project_dir.to_path_buf(), push_args(&retry_url))
+            .await
+            .map_err(|e| format!("failed to push branch {base_branch} to origin: {e}"))?;
+    }
 
     // Load the task for PR body construction.
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -219,7 +299,10 @@ async fn try_create_github_pr(
     };
     let pr_title = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
-    let github_client = GitHubApiClient::new(cred_repo);
+    // PR creation goes through the same installation token used for the
+    // push, so the PR and its commits are attributed to the App bot instead
+    // of an authenticated user.
+    let github_client = GitHubApiClient::for_installation(installation_id);
     let head_ref = format!("{owner}:{base_branch}");
 
     // Before creating a new PR, check if one already exists (open or closed)
@@ -330,6 +413,10 @@ async fn try_create_github_pr(
 ///
 /// Supports both HTTPS (`https://github.com/owner/repo.git`) and SSH
 /// (`git@github.com:owner/repo.git`) formats.
+///
+/// Kept for tests and potential future use; the production push path now
+/// reads coordinates from the `projects` DB row instead.
+#[allow(dead_code)]
 fn parse_github_owner_repo(remote_url: &str) -> Option<(String, String)> {
     // Normalize: strip user@ from HTTPS URLs (e.g. https://user@github.com/...)
     let url = if let Some(rest) = remote_url.strip_prefix("https://") {
@@ -449,6 +536,7 @@ pub(crate) async fn merge_and_transition(
         &base_branch,
         &merge_target,
         &project_dir,
+        &task.project_id,
         app_state,
     )
     .await
@@ -800,6 +888,33 @@ async fn project_path_for_id(project_id: &str, app_state: &AgentContext) -> Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_app_push_url_shape() {
+        let url = build_app_push_url("acme", "widgets", "ghs_FAKETOKEN123");
+        assert_eq!(
+            url,
+            "https://x-access-token:ghs_FAKETOKEN123@github.com/acme/widgets.git"
+        );
+    }
+
+    #[test]
+    fn build_app_push_url_strips_trailing_dot_git() {
+        let url = build_app_push_url("acme", "widgets.git", "ghs_tok");
+        assert_eq!(
+            url,
+            "https://x-access-token:ghs_tok@github.com/acme/widgets.git"
+        );
+    }
+
+    #[test]
+    fn build_app_push_url_uses_x_access_token_user() {
+        let url = build_app_push_url("octo", "hello-world", "ghs_abc");
+        assert!(url.starts_with("https://x-access-token:"));
+        assert!(url.contains("@github.com/octo/hello-world.git"));
+        // Must never fall back to `x-oauth-basic` (the legacy PAT form).
+        assert!(!url.contains("x-oauth-basic"));
+    }
 
     #[test]
     fn parse_ssh_remote() {

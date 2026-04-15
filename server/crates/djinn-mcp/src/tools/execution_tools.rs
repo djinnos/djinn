@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use crate::server::DjinnMcpServer;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
-use djinn_provider::oauth::github_app::GITHUB_APP_OAUTH_DB_KEY;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ExecutionStartParams {
@@ -194,32 +193,23 @@ impl DjinnMcpServer {
             });
         };
 
-        // Gate: require GitHub OAuth credentials before starting execution (ADR-039).
-        // Without a token, PR creation will fail for every completed task.
-        {
-            let cred_repo = djinn_provider::repos::CredentialRepository::new(
-                self.state.db().clone(),
-                self.state.event_bus(),
-            );
-            let github_connected = cred_repo
-                .exists(GITHUB_APP_OAUTH_DB_KEY)
-                .await
-                .unwrap_or(false);
-            if !github_connected {
-                return Json(ExecutionStartResponse {
-                    ok: false,
-                    state: None,
-                    resumed: None,
-                    scope: None,
-                    project_id,
-                    error: Some(
-                        "GitHub is not connected. Connect GitHub first via Settings > Providers \
-                         before starting execution. Without GitHub credentials, PR creation will \
-                         fail for completed tasks."
-                            .to_string(),
-                    ),
-                });
-            }
+        // Gate: require the GitHub App to be configured before starting
+        // execution (ADR-039). PR creation mints installation tokens, which
+        // requires GITHUB_APP_ID + the App's private key to be present.
+        if djinn_provider::github_app::app_id().is_err() {
+            return Json(ExecutionStartResponse {
+                ok: false,
+                state: None,
+                resumed: None,
+                scope: None,
+                project_id,
+                error: Some(
+                    "GitHub App is not configured on the server. Set GITHUB_APP_ID and \
+                     GITHUB_APP_PRIVATE_KEY(_PATH) before starting execution — without \
+                     the App, PR creation will fail for completed tasks."
+                        .to_string(),
+                ),
+            });
         }
 
         // Purge all worktrees so stale leftovers from previous runs don't

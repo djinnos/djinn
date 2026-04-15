@@ -3,17 +3,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::github_api::{CheckRunsResponse, CreatePrParams, GitHubApiClient, MergeMethod, PrState};
 
-use super::{make_repo, seed_tokens};
+use super::seed_installation_token;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_pull_request_success() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("POST"))
         .and(path("/repos/djinnos/server/pulls"))
-        .and(header("Authorization", "Bearer ghu_user"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
             "number": 42,
             "title": "feat: add feature",
@@ -28,7 +28,7 @@ async fn create_pull_request_success() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let pr = client
         .create_pull_request(
             "djinnos",
@@ -53,12 +53,12 @@ async fn create_pull_request_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enable_auto_merge_success() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(header("Authorization", "Bearer ghu_user"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": {
                 "enablePullRequestAutoMerge": {
@@ -76,7 +76,7 @@ async fn enable_auto_merge_success() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let result = client
         .enable_auto_merge(
             "djinnos",
@@ -95,12 +95,12 @@ async fn enable_auto_merge_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mark_pr_ready_for_review_uses_graphql_mutation() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(header("Authorization", "Bearer ghu_user"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": {
                 "markPullRequestReadyForReview": {
@@ -111,7 +111,7 @@ async fn mark_pr_ready_for_review_uses_graphql_mutation() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let result = client.mark_pr_ready_for_review("PR_node456").await.unwrap();
 
     assert_eq!(
@@ -123,8 +123,8 @@ async fn mark_pr_ready_for_review_uses_graphql_mutation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mark_pr_ready_for_review_propagates_graphql_error() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("POST"))
         .and(path("/graphql"))
@@ -134,7 +134,7 @@ async fn mark_pr_ready_for_review_propagates_graphql_error() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let err = client
         .mark_pr_ready_for_review("PR_node456")
         .await
@@ -146,8 +146,8 @@ async fn mark_pr_ready_for_review_propagates_graphql_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_pull_request_success() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls/42"))
@@ -182,7 +182,7 @@ async fn get_pull_request_success() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let (pr, checks): (_, CheckRunsResponse) = client
         .get_pull_request("djinnos", "server", 42)
         .await
@@ -196,8 +196,8 @@ async fn get_pull_request_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_pr_returns_error_on_422() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("POST"))
         .and(path("/repos/djinnos/server/pulls"))
@@ -208,7 +208,7 @@ async fn create_pr_returns_error_on_422() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let result = client
         .create_pull_request(
             "djinnos",
@@ -232,8 +232,8 @@ async fn create_pr_returns_error_on_422() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_pulls_by_head_returns_matching_prs() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls"))
@@ -255,7 +255,7 @@ async fn list_pulls_by_head_returns_matching_prs() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let prs = client
         .list_pulls_by_head("djinnos", "server", "djinnos:task/453b")
         .await
@@ -269,8 +269,8 @@ async fn list_pulls_by_head_returns_matching_prs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_pulls_by_head_returns_empty_when_no_match() {
     let server = MockServer::start().await;
-    let repo = make_repo();
-    seed_tokens(&repo, "ghu_user").await;
+    let install_id = seed_installation_token();
+
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls"))
@@ -278,7 +278,7 @@ async fn list_pulls_by_head_returns_empty_when_no_match() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let prs = client
         .list_pulls_by_head("djinnos", "server", "djinnos:no-such-branch")
         .await
@@ -287,17 +287,3 @@ async fn list_pulls_by_head_returns_empty_when_no_match() {
     assert!(prs.is_empty());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_creds_returns_error() {
-    let server = MockServer::start().await;
-    let repo = make_repo();
-    let client = GitHubApiClient::with_base_url(repo, server.uri());
-    let result = client.get_pull_request("djinnos", "server", 1).await;
-    assert!(result.is_err());
-    let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("No GitHub App tokens"),
-        "unexpected error: {}",
-        msg
-    );
-}

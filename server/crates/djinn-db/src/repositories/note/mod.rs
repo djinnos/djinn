@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use sqlx::Sqlite;
-
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
     BrokenLink, ExtractedNoteAuditReport, GraphEdge, GraphNode, GraphResponse, HealthReport, Note,
@@ -101,7 +99,7 @@ const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, fil
             created_at, updated_at, last_accessed,
             access_count, confidence, abstract as abstract_, overview,
             scope_paths
-     FROM notes WHERE id = ?1";
+     FROM notes WHERE id = ?";
 
 // ── Repository ────────────────────────────────────────────────────────────────
 

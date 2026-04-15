@@ -2,7 +2,6 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::Json;
@@ -33,7 +32,6 @@ use djinn_mcp::tools::task_tools::{
     update_task as shared_update_task,
 };
 use djinn_provider::github_api::GitHubApiClient;
-use djinn_provider::repos::CredentialRepository;
 
 use super::fuzzy::fuzzy_replace;
 use super::helpers::*;
@@ -214,8 +212,12 @@ where
             let root_str = root.to_string_lossy().into_owned();
             call_code_graph(state, &call.arguments, &root_str).await
         }
-        "github_search" => call_github_search(state, &call.arguments).await,
-        "github_fetch_file" => call_github_fetch_file(state, &call.arguments).await,
+        "github_search" => {
+            call_github_search(state, &call.arguments, project_id.as_deref()).await
+        }
+        "github_fetch_file" => {
+            call_github_fetch_file(state, &call.arguments, project_id.as_deref()).await
+        }
         other => {
             if let Some(registry) = mcp_registry
                 && registry.has_tool(other)
