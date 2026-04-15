@@ -261,13 +261,7 @@ export async function addProjectFromGithub(args: {
 export async function fetchProjectBranches(
   projectId: string,
 ): Promise<{ branches: string[]; current: string | null }> {
-  // Tool name not yet in the generated MCP types snapshot — regenerate with
-  // `pnpm mcp:types` once the server is running to drop this cast.
-  const response = (await callMcpTool(
-    "project_branches" as Parameters<typeof callMcpTool>[0],
-    { project_id: projectId },
-  )) as { status: string; branches?: string[]; current?: string | null };
-
+  const response = await callMcpTool("project_branches", { project_id: projectId });
   if (response.status.startsWith("error")) {
     throw new Error(response.status.replace(/^error:\s*/, ""));
   }

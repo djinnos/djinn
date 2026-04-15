@@ -2029,6 +2029,27 @@ export namespace ProjectAddFromGithubOutputSchema {
 
 }
 export type ProjectAddFromGithubOutput = ProjectAddFromGithubOutputSchema.ProjectAddFromGithubOutput;
+export namespace ProjectBranchesInputSchema {
+  export interface ProjectBranchesInput {
+  /**
+   * Project UUID to resolve the server-owned clone path for.
+   */
+  project_id: string
+  [k: string]: any
+  }
+
+}
+export type ProjectBranchesInput = ProjectBranchesInputSchema.ProjectBranchesInput;
+export namespace ProjectBranchesOutputSchema {
+  export interface ProjectBranchesOutput {
+  branches: string[]
+  current?: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ProjectBranchesOutput = ProjectBranchesOutputSchema.ProjectBranchesOutput;
 export namespace ProjectConfigGetInputSchema {
   export interface ProjectConfigGetInput {
   project: string
@@ -3785,7 +3806,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_add_from_github" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3840,6 +3861,7 @@ export interface McpToolMap {
   "model_health": { input: ModelHealthInput; output: ModelHealthOutput };
   "project_add": { input: ProjectAddInput; output: ProjectAddOutput };
   "project_add_from_github": { input: ProjectAddFromGithubInput; output: ProjectAddFromGithubOutput };
+  "project_branches": { input: ProjectBranchesInput; output: ProjectBranchesOutput };
   "project_config_get": { input: ProjectConfigGetInput; output: ProjectConfigGetOutput };
   "project_config_set": { input: ProjectConfigSetInput; output: ProjectConfigSetOutput };
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
