@@ -12,7 +12,6 @@ mod blockers;
 mod queries;
 mod reads;
 mod status;
-pub(crate) mod verification;
 mod writes;
 
 // ── Query / result types ──────────────────────────────────────────────────────

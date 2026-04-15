@@ -1,10 +1,9 @@
 //! GitHub **App** integration — installation tokens + bot identity.
 //!
-//! This module is the proper counterpart to the legacy
-//! [`crate::oauth::github_oauth_app_legacy`] (which implements the classic
-//! OAuth App device-code flow). Here we mint App-level JWTs from the App's
-//! private key, exchange them for installation access tokens, and expose a
-//! thin client that wraps those tokens for all repo operations.
+//! Mints App-level JWTs from the App's private key, exchanges them for
+//! installation access tokens, and exposes a thin client that wraps those
+//! tokens for all repo operations. Replaces the retired OAuth App
+//! device-code flow entirely.
 //!
 //! Commits made through the resulting clone URLs are attributed to the App's
 //! bot identity (`djinn-bot[bot]`).
