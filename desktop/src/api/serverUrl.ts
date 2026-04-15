@@ -11,7 +11,9 @@ function stripTrailingSlash(url: string): string {
   return url.endsWith("/") ? url.slice(0, -1) : url;
 }
 
-export function getBaseUrl(): string {
+export function getServerBaseUrl(): string {
   const envUrl = import.meta.env?.VITE_DJINN_SERVER_URL as string | undefined;
   return stripTrailingSlash(envUrl && envUrl.length > 0 ? envUrl : DEFAULT_SERVER_URL);
 }
+
+export const getBaseUrl = getServerBaseUrl;

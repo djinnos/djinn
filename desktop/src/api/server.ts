@@ -8,14 +8,6 @@ async function getBaseUrl(): Promise<string> {
   return getServerBaseUrl();
 }
 
-/**
- * No-op stub kept for AuthGate.tsx compatibility while the parallel auth
- * migration is in flight. Delete alongside the AuthGate rework.
- */
-export async function setUserIdentity(_email: string, _userId: string): Promise<void> {
-  return;
-}
-
 function providerDescription(provider: ProviderCatalogItem): string {
   const tags: string[] = [];
   if (provider.oauth_supported) tags.push("OAuth supported");
