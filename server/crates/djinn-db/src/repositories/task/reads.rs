@@ -218,10 +218,12 @@ impl TaskRepository {
         let mut tx = self.db.pool().begin().await?;
         // Verify epic exists before INSERT when task references one.
         if let Some(epic_id) = &task.epic_id {
-            let epic_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?")
-                .bind(epic_id)
-                .fetch_one(&mut *tx)
-                .await?;
+            let epic_exists = sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM epics WHERE id = ?",
+                epic_id
+            )
+            .fetch_one(&mut *tx)
+            .await?;
             if epic_exists == 0 {
                 tx.commit().await?;
                 return Ok(false);
