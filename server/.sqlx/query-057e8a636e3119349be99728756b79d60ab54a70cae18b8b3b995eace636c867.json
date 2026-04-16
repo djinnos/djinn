@@ -1,0 +1,314 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    `status` AS \"status!\", priority, owner, labels, acceptance_criteria,\n                    reopen_count, continuation_count, verification_failure_count,\n                    total_reopen_count, total_verification_failure_count,\n                    intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,\n                    agent_type,\n                    CAST(0 AS SIGNED) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE id = ? OR short_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "short_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 128
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "epic_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "description",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "design",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "issue_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "status!",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "priority",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "owner",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "labels",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "acceptance_criteria",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "reopen_count",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "continuation_count",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "verification_failure_count",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "total_reopen_count",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "total_verification_failure_count",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "intervention_count",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "last_intervention_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "created_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "updated_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "closed_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 23,
+        "name": "close_reason",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 24,
+        "name": "merge_commit_sha",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 25,
+        "name": "pr_url",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 4096
+        }
+      },
+      {
+        "ordinal": 26,
+        "name": "merge_conflict_metadata",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 27,
+        "name": "memory_refs",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 28,
+        "name": "agent_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 29,
+        "name": "unresolved_blocker_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "057e8a636e3119349be99728756b79d60ab54a70cae18b8b3b995eace636c867"
+}
