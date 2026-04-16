@@ -1,6 +1,52 @@
 # SQLx compile-time conversion status
 
-Branch: `feat/sqlx-compile-time-convert` (batch 1) + `feat/sqlx-compile-time-convert-batch2` (batch 2) + `feat/sqlx-compile-time-convert-batch3` (batch 3).
+Branch: `feat/sqlx-compile-time-convert` (batch 1) + `feat/sqlx-compile-time-convert-batch2` (batch 2) + `feat/sqlx-compile-time-convert-batch3` (batch 3) + `feat/sqlx-compile-time-convert-batch4` (batch 4).
+
+## Batch 4 summary
+
+Phase A: Established the **inline-projection pattern** for shared SELECT
+constants. `sqlx::query_as!` requires a string-literal SQL argument and
+rejects `concat!()`-built literals (verified empirically — fails with
+"expected string literal"). The `AGENT_COLUMNS`, `EPIC_COLS`, and
+`SESSION_COLS` consts that fed `format!("SELECT {COLS} FROM …")` queries are
+therefore expanded inline at every call site as raw string literals; each
+copy carries the necessary `!: bool` / `!: T` / backtick-reserved-word
+overrides for `is_default`, `auto_breakdown`, `status`, etc.
+
+Phase B (files touched):
+
+| File | Converted this batch | Annotated runtime | Notes |
+|------|---------------------:|------------------:|-------|
+| `repositories/note/graph.rs`              | 12 | 0 | Tuple `query_as` → named `query!()` rows for graph/orphan/broken-link/health helpers; SQLite-vec orphan check now uses `EXISTS … AS "exists!: i64"`. |
+| `repositories/note/tests/graph_scoring.rs`| 0  | 16 | SQLite-only fixture (`datetime('now')`, `strftime`, positional `?N`); annotated at file head. |
+| `repositories/note/consolidation.rs`      | 14 | 2  | DBNoteGroup/ConsolidationNote SELECTs use `\`abstract\` AS abstract_`; `INT` columns cast to `SIGNED` for `i64` binding; FTS dedup query gains explicit `f64` cast on MATCH() AGAINST and reorders ORDER BY by the expression. Two `format!()` IN-list helpers stay annotated. |
+| `repositories/note/search.rs`             | 5  | 8  | Static helpers (`semantic_branch_for_task`, `catalog`, `task_refs`, two test INSERTs) macro-typed; lexical-search dispatch (SQLite/MySQL) and JSON_TABLE scope-overlap stay dynamic. |
+| `repositories/note/association.rs`        | 22 | 0  | All static SELECT/INSERT/UPDATE/DELETE; `NoteAssociationEntry` CASE-WHEN columns get `!: String` overrides; tests + Project lookup use the standard `auto_merge!: bool` / `sync_enabled!: bool` overrides. |
+| `repositories/agent.rs`                   | 24 | 2  | Inlined `AGENT_COLUMNS`; aggregate metrics queries (`get_metrics`, `count_closed_tasks_since`, `get_windowed_metrics`) replace tuple destructures with named `query!()` rows + explicit `!: f64` / `!: i64` overrides. `list_for_project`'s two `format!()` queries stay annotated. |
+| `repositories/epic.rs`                    | 25 | 4  | Inlined `EPIC_COLS`; `task_counts` uses named `query!()` row + `COALESCE` so SUM(CASE WHEN …) bind without `sqlx::Row::get`; removed unused `use sqlx::Row;`. `list_filtered`/`count_grouped`/`short_id_exists` stay dynamic. |
+| `repositories/session.rs`                 | 26 | 1  | Inlined `SESSION_COLS`; `event_taxonomy`/`worktree_path` scalar lookups now flatten `Option<Option<String>>`. `count_for_tasks` IN-list stays annotated. |
+| `repositories/project.rs`                 | 24 | 0  | All UPDATE/INSERT/DELETE + `ProjectConfig` SELECT macro-typed; `list_sync_enabled` + the test `is_default` row reshape to use named `query!()` rows. |
+
+Batch-4 new compile-time-checked call sites: **~152**.
+
+**Converted total (cumulative) end of batch 4**: **~310** out of ~355 queries.
+**Annotated-as-dynamic (cumulative)**: **~93** (new annotations: dynamic IN
+lists in note/search, note/consolidation, session, plus the SQLite-only
+`graph_scoring` fixture).
+**`.sqlx/` cache**: 272 entries (from 144 at end of batch 3, +128 new).
+
+### Documented constraints
+
+- **`concat!()` does not satisfy `sqlx::query_as!` literal requirement.**
+  Confirmed in batch 4 on `agent.rs` — fails with `expected string literal`.
+  The shared-projection consts (`AGENT_COLUMNS`, `EPIC_COLS`, `SESSION_COLS`)
+  were therefore inlined at every call site rather than wrapped in a
+  `macro_rules!`. The `note_select_where_id!` and `task_select_where_id!`
+  macros (batch 3) still work because they expand into the **complete**
+  `query_as!(…, "literal", $id)` invocation in a single pass, with the SQL
+  itself appearing as a single literal token inside the macro body.
+
+
 
 ## Batch 3 summary
 
@@ -91,27 +137,16 @@ macro refactor touching **~40** additional call sites.
 
 ## Remaining (runtime-typed, NOT yet converted)
 
-Ordered by query count, smallest first (recommended traversal order):
+All files below are either fully converted or annotated as dynamic. The
+~45 annotated-runtime sites are either:
+- `format!()`-built SQL with variable WHERE/IN/ORDER clauses, or
+- SQLite-only test fixtures using `datetime('now')`, `strftime`, positional `?N`.
 
-| File | Queries (approx) | Status |
-|------|------------------|--------|
-| `repositories/note/crud.rs` | 18 | untouched (all use shared `NOTE_SELECT_WHERE_ID` const → need to move that to a macro first, see “Known blocker” below) |
-| `repositories/note/search.rs` | 17 (2 must stay runtime — dynamic IN) | untouched |
-| `repositories/note/graph.rs` | 16 | untouched |
-| `repositories/note/tests/graph_scoring.rs` | 16 | untouched (test) |
-| `repositories/task/reads.rs` | 14 (2 converted) | partial — remaining queries return `Task` (has `#[sqlx(default)]` fields) or build dynamic WHERE clauses |
-| `repositories/task/status.rs` | 14 | untouched — same `Task` default-field issue, plus `TASK_SELECT_WHERE_ID` const |
-| `repositories/note/consolidation.rs` | 17 | untouched — uses `NOTE_SELECT_WHERE_ID` |
-| `repositories/note/embeddings.rs` | 2-3 SQLite-vec only | annotated; rest converted |
-| `repositories/task/queries.rs` | 17 | untouched |
-| `repositories/task/writes.rs` | 19 | untouched |
-| `repositories/note/association.rs` | 23 | untouched |
-| `repositories/agent.rs` | 25 | untouched |
-| `repositories/session.rs` | 27 | untouched |
-| `repositories/project.rs` | 24 | partial (4 converted on main earlier) |
-| `repositories/epic.rs` | 29 | untouched |
+No further mechanical conversion is possible without either introducing
+runtime-dispatched SQL or splitting the annotated dynamic queries into
+fixed variants.
 
-Grand total remaining: ~**220–230 runtime-typed query call-sites**.
+Grand total remaining runtime-typed call-sites: **~45** (all annotated).
 
 ## Known blocker: shared `SELECT` constants vs. `query_as!`
 
