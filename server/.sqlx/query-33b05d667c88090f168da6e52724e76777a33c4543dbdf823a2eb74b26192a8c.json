@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE activity_log SET archived = 1 WHERE task_id = ? AND archived = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "33b05d667c88090f168da6e52724e76777a33c4543dbdf823a2eb74b26192a8c"
+}

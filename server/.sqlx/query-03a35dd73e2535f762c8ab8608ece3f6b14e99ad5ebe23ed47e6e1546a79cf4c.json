@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO repo_map_cache (\n                project_id,\n                project_path,\n                worktree_path,\n                commit_sha,\n                rendered_map,\n                token_estimate,\n                included_entries,\n                graph_artifact\n            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n             ON DUPLICATE KEY UPDATE\n                rendered_map=VALUES(rendered_map),\n                token_estimate=VALUES(token_estimate),\n                included_entries=VALUES(included_entries),\n                graph_artifact=VALUES(graph_artifact)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "03a35dd73e2535f762c8ab8608ece3f6b14e99ad5ebe23ed47e6e1546a79cf4c"
+}

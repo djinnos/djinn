@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM verification_results WHERE created_at < DATE_SUB(NOW(3), INTERVAL ? DAY)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ac3c041ad3b454918b353073a62ec47ceb6b50d252b954c5bf933c47f44714b0"
+}

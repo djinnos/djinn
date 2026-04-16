@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO activity_log\n                (id, task_id, actor_id, actor_role, event_type, payload)\n             VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "dec188fcc012e3dc063e53d4d38b573d0593e346da1b5b5e05aa1c2f69f479ed"
+}
