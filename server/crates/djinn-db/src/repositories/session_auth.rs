@@ -10,9 +10,6 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::database::Database;
 
-const COLS: &str = "token, user_id, github_login, github_name, github_avatar_url, \
-                    github_access_token, created_at, expires_at";
-
 /// Row materialised from `user_auth_sessions` plus the GitHub access token.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct UserAuthSessionRecord {
@@ -51,26 +48,29 @@ impl SessionAuthRepository {
     pub async fn create(&self, params: CreateUserAuthSession<'_>) -> Result<UserAuthSessionRecord> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO user_auth_sessions
                 (token, user_id, github_login, github_name, github_avatar_url,
                  github_access_token, expires_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params.token,
+            params.user_id,
+            params.github_login,
+            params.github_name,
+            params.github_avatar_url,
+            params.github_access_token,
+            params.expires_at,
         )
-        .bind(params.token)
-        .bind(params.user_id)
-        .bind(params.github_login)
-        .bind(params.github_name)
-        .bind(params.github_avatar_url)
-        .bind(params.github_access_token)
-        .bind(params.expires_at)
         .execute(self.db.pool())
         .await?;
 
-        let row = sqlx::query_as::<_, UserAuthSessionRecord>(&format!(
-            "SELECT {COLS} FROM user_auth_sessions WHERE token = ?"
-        ))
-        .bind(params.token)
+        let row = sqlx::query_as!(
+            UserAuthSessionRecord,
+            "SELECT token, user_id, github_login, github_name, github_avatar_url, \
+                    github_access_token, created_at, expires_at \
+             FROM user_auth_sessions WHERE token = ?",
+            params.token,
+        )
         .fetch_one(self.db.pool())
         .await?;
 
@@ -79,18 +79,20 @@ impl SessionAuthRepository {
 
     pub async fn get_by_token(&self, token: &str) -> Result<Option<UserAuthSessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, UserAuthSessionRecord>(&format!(
-            "SELECT {COLS} FROM user_auth_sessions WHERE token = ?"
-        ))
-        .bind(token)
+        Ok(sqlx::query_as!(
+            UserAuthSessionRecord,
+            "SELECT token, user_id, github_login, github_name, github_avatar_url, \
+                    github_access_token, created_at, expires_at \
+             FROM user_auth_sessions WHERE token = ?",
+            token,
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
 
     pub async fn delete_by_token(&self, token: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let res = sqlx::query("DELETE FROM user_auth_sessions WHERE token = ?")
-            .bind(token)
+        let res = sqlx::query!("DELETE FROM user_auth_sessions WHERE token = ?", token)
             .execute(self.db.pool())
             .await?;
         Ok(res.rows_affected())
@@ -99,10 +101,12 @@ impl SessionAuthRepository {
     /// Delete any session rows whose `expires_at` is <= `now` (RFC3339).
     pub async fn delete_expired(&self, now_rfc3339: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let res = sqlx::query("DELETE FROM user_auth_sessions WHERE expires_at <= ?")
-            .bind(now_rfc3339)
-            .execute(self.db.pool())
-            .await?;
+        let res = sqlx::query!(
+            "DELETE FROM user_auth_sessions WHERE expires_at <= ?",
+            now_rfc3339,
+        )
+        .execute(self.db.pool())
+        .await?;
         Ok(res.rows_affected())
     }
 }
