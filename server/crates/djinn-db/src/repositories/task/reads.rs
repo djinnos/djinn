@@ -7,34 +7,40 @@ impl TaskRepository {
     /// List all tasks in a project (for peer reconciliation - SYNC-14).
     pub async fn list_by_project(&self, project_id: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+        Ok(sqlx::query_as!(
+            Task,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-             FROM tasks WHERE project_id = ? ORDER BY priority, created_at",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    agent_type,
+                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE project_id = ? ORDER BY priority, created_at"#,
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?)
     }
 
     pub async fn list_by_epic(&self, epic_id: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+        Ok(sqlx::query_as!(
+            Task,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-             FROM tasks WHERE epic_id = ? ORDER BY priority, created_at",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    agent_type,
+                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE epic_id = ? ORDER BY priority, created_at"#,
+            epic_id
         )
-        .bind(epic_id)
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -56,6 +62,7 @@ impl TaskRepository {
         } else {
             ""
         };
+        // NOTE: dynamic SQL (optional blocker_filter fragment) — compile-time check not possible
         let sql = format!(
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     `status`, priority, owner, labels, acceptance_criteria,
@@ -81,17 +88,20 @@ impl TaskRepository {
 
     pub async fn get_by_short_id(&self, short_id: &str) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+        Ok(sqlx::query_as!(
+            Task,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-             FROM tasks WHERE short_id = ?",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    agent_type,
+                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE short_id = ?"#,
+            short_id
         )
-        .bind(short_id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -99,18 +109,21 @@ impl TaskRepository {
     /// Resolve a task by UUID or short_id.
     pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+        Ok(sqlx::query_as!(
+            Task,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-             FROM tasks WHERE id = ? OR short_id = ?",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    agent_type,
+                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE id = ? OR short_id = ?"#,
+            id_or_short,
+            id_or_short
         )
-        .bind(id_or_short)
-        .bind(id_or_short)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -121,19 +134,22 @@ impl TaskRepository {
         id_or_short: &str,
     ) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+        Ok(sqlx::query_as!(
+            Task,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-             FROM tasks WHERE project_id = ? AND (id = ? OR short_id = ?)",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    agent_type,
+                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE project_id = ? AND (id = ? OR short_id = ?)"#,
+            project_id,
+            id_or_short,
+            id_or_short
         )
-        .bind(project_id)
-        .bind(id_or_short)
-        .bind(id_or_short)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -145,18 +161,21 @@ impl TaskRepository {
     pub async fn list_by_memory_ref(&self, permalink: &str) -> Result<Vec<Task>> {
         let pattern = format!("%\"{permalink}\"%");
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Task>(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+        Ok(sqlx::query_as!(
+            Task,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    agent_type,
+                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
              FROM tasks WHERE memory_refs LIKE ?
-             ORDER BY priority, created_at",
+             ORDER BY priority, created_at"#,
+            pattern
         )
-        .bind(&pattern)
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -168,6 +187,7 @@ impl TaskRepository {
     /// JSONL files small.
     pub async fn list_for_export(&self, project_id: Option<&str>) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
+        // NOTE: dynamic SQL (SELECT variant depends on project filter) — compile-time check not possible
         let sql = if project_id.is_some() {
             "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
                     `status`, priority, owner, labels, acceptance_criteria,
@@ -385,10 +405,12 @@ impl TaskRepository {
     ) -> Result<bool> {
         // Verify epic exists before INSERT when task references one.
         if let Some(epic_id) = &task.epic_id {
-            let epic_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM epics WHERE id = ?")
-                .bind(epic_id)
-                .fetch_one(&mut **tx)
-                .await?;
+            let epic_exists: i64 = sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM epics WHERE id = ?",
+                epic_id
+            )
+            .fetch_one(&mut **tx)
+            .await?;
             if epic_exists == 0 {
                 return Ok(false);
             }
