@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "e865b9e7a64a00a3b1ef776f04bda62ef00c7de9a3dd8b3db99ec4e8fd38aca3"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM note_embedding_meta WHERE note_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "51a6d8113f2a7efa62366ed010f4b128b3e125af031e5f246cacf0f65a2ca8fc"
+}

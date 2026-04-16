@@ -480,13 +480,11 @@ async fn search_rrf_prefers_higher_access_count_for_equivalent_matches() {
         .await
         .unwrap();
 
-    sqlx::query("UPDATE notes SET access_count = 10 WHERE id = ?1")
-        .bind(&high.id)
+    sqlx::query!("UPDATE notes SET access_count = 10 WHERE id = ?", high.id)
         .execute(db.pool())
         .await
         .unwrap();
-    sqlx::query("UPDATE notes SET access_count = 0 WHERE id = ?1")
-        .bind(&low.id)
+    sqlx::query!("UPDATE notes SET access_count = 0 WHERE id = ?", low.id)
         .execute(db.pool())
         .await
         .unwrap();
@@ -528,8 +526,7 @@ async fn update_confidence_reads_updates_and_persists() {
         .await
         .unwrap();
 
-    sqlx::query("UPDATE notes SET confidence = 0.5 WHERE id = ?1")
-        .bind(&note.id)
+    sqlx::query!("UPDATE notes SET confidence = 0.5 WHERE id = ?", note.id)
         .execute(db.pool())
         .await
         .unwrap();
@@ -540,8 +537,7 @@ async fn update_confidence_reads_updates_and_persists() {
         .unwrap();
     assert!(updated > 0.5);
 
-    let stored: f64 = sqlx::query_scalar("SELECT confidence FROM notes WHERE id = ?1")
-        .bind(&note.id)
+    let stored = sqlx::query_scalar!("SELECT confidence FROM notes WHERE id = ?", note.id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -579,16 +575,20 @@ async fn search_rrf_confidence_lowers_equivalent_match_ranking() {
         .await
         .unwrap();
 
-    sqlx::query("UPDATE notes SET access_count = 0, confidence = 1.0 WHERE id = ?1")
-        .bind(&high.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-    sqlx::query("UPDATE notes SET access_count = 0, confidence = 0.5 WHERE id = ?1")
-        .bind(&low.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    sqlx::query!(
+        "UPDATE notes SET access_count = 0, confidence = 1.0 WHERE id = ?",
+        high.id
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query!(
+        "UPDATE notes SET access_count = 0, confidence = 0.5 WHERE id = ?",
+        low.id
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
 
     let results = repo
         .search(NoteSearchParams {

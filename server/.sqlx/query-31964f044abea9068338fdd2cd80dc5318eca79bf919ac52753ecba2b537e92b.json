@@ -1,0 +1,34 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, content FROM notes WHERE project_id = ? AND content_hash IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "content",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "31964f044abea9068338fdd2cd80dc5318eca79bf919ac52753ecba2b537e92b"
+}

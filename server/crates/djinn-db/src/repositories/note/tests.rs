@@ -30,6 +30,7 @@ fn sqlite_vec_test_lock() -> &'static Mutex<()> {
 async fn make_epic(db: &Database, project_id: &str) -> String {
     let epic_id = uuid::Uuid::now_v7().to_string();
     let short_id = format!("ep-{}", epic_id);
+    // NOTE: SQLite-only test helper (positional ?N); compile-time check would validate against MySQL pool
     sqlx::query(
         "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -79,6 +80,7 @@ async fn make_session(
             )
         }
     };
+    // NOTE: SQLite-only pragma_table_info — compile-time check not possible against MySQL
     let has_branch: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'branch'",
     )
@@ -87,6 +89,7 @@ async fn make_session(
     .unwrap();
 
     if has_branch > 0 {
+        // NOTE: SQLite-only helper (strftime, positional ?N) — compile-time check not possible
         sqlx::query(
             "INSERT INTO sessions (id, project_id, task_id, branch, status, started_at)
              VALUES (?1, ?2, ?3, ?4, 'completed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
@@ -99,6 +102,7 @@ async fn make_session(
         .await
         .unwrap();
     } else {
+        // NOTE: SQLite-only helper (strftime, positional ?N) — compile-time check not possible
         sqlx::query(
             "INSERT INTO sessions (
                 id,

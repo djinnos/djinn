@@ -1,8 +1,10 @@
 # SQLx compile-time conversion status
 
-Branch: `feat/sqlx-compile-time-convert`
+Branch: `feat/sqlx-compile-time-convert` (batch 1) + `feat/sqlx-compile-time-convert-batch2` (batch 2).
 
 ## Done (fully or partially converted to macros)
+
+### Batch 1
 
 | File | Converted | Deferred | Notes |
 |------|-----------|----------|-------|
@@ -18,9 +20,29 @@ Branch: `feat/sqlx-compile-time-convert`
 | `repositories/dolt_branch.rs` | 0 | 2 | All queries hit Dolt-only `dolt_branches` / SQL param — annotated. |
 | `repositories/dolt_history_maintenance.rs` | 0 | 4 | All against `dolt_log` / `information_schema` / runtime table names — annotated. |
 
-**Converted total**: **45** `query!` / `query_as!` / `query_scalar!` calls (9 of them inside `#[cfg(test)]`).
-**Annotated-as-dynamic total**: **8** (dolt-only or runtime-built SQL).
-**`.sqlx/` cache entries committed**: **44**.
+### Batch 2
+
+| File | Converted | Deferred | Notes |
+|------|-----------|----------|-------|
+| `repositories/note/housekeeping.rs` | 5 | 0 | `abstract` needs backticks (`` `abstract` AS abstract_ ``). Dropped unused selects from `BrokenLinkCandidateRow`. |
+| `repositories/note/context.rs` | 3 | 3 | `fts_candidates` dispatches across pool kinds; `fetch_l0/l1_notes` build runtime IN-lists — annotated. |
+| `repositories/note/tests/session_scoped_consolidation.rs` | 1 | 0 | Test-only; converted positional `?1..?3` → `?` placeholders. |
+| `repositories/note/tests/wikilink_graph.rs` | 2 | 0 | Same positional → `?` rewrite. |
+| `repositories/note/tests.rs` | 0 | 4 | Helpers use SQLite-only `pragma_table_info` and `strftime` — annotated. |
+| `repositories/note/tests/crud_storage.rs` | 2 | 2 | `query_as::<_, Note>(NOTE_SELECT_WHERE_ID)` can't go through `query_as!` (const is not a literal). Annotated. |
+| `repositories/note/tests/search_ranking.rs` | 6 | 0 | All simple scalar + update. |
+| `repositories/test_support.rs` | 6 | 0 | `Project.auto_merge/sync_enabled` needed `AS "…!: bool"` nullability/type override. |
+| `repositories/note/indexing.rs` | 6 | 2 | Two `query_as::<_, Note>(super::NOTE_SELECT_WHERE_ID)` callers kept runtime — same `const`-literal issue. |
+| `repositories/note/scoring.rs` | 6 | 2 | `note_confidence_map`, `temporal_scores` stay dynamic (IN list) — annotated. |
+| `repositories/task/blockers.rs` | 7 | 1 | `emit_unblocked_tasks` selects into `Task` which has `#[sqlx(default)]` fields → kept runtime. Cycle-detect uses `SELECT EXISTS(...) AS "exists!: i64"` override. `BlockerRef` macro-typed cleanly. |
+| `repositories/note/tests/consolidation_housekeeping.rs` | 9 | 1 | Positional `?N` → `?`. `abstract` backticked. One helper still uses SQLite `datetime('now','-31 days')` — annotated. |
+| `repositories/task/mod.rs` | 5 | 0 | Test fixtures + `maybe_reopen_epic`. `Epic.auto_breakdown` needs `AS "…!: bool"` override. |
+| `repositories/note/embeddings.rs` | 12 | 3 | LEFT JOIN nullability overrides (`AS "…: Option<String>"`) needed for `EmbeddingRepairRow`. SQLite-vec helpers (`note_embeddings_vec`) annotated. |
+| `repositories/task/reads.rs` | 2 | 24 | Only the scalar `COUNT(*) FROM epics` helpers converted; the large `Task`-returning queries and dynamic WHERE clauses stay runtime. |
+
+**Converted total (cumulative)**: **~117** `query!` / `query_as!` / `query_scalar!` calls.
+**Annotated-as-dynamic total (cumulative)**: **~50** (dolt-only, SQLite-only, runtime-built SQL, or shared-const SELECT).
+**`.sqlx/` cache**: regenerated three times during batch 2; all new entries committed.
 
 ## Remaining (runtime-typed, NOT yet converted)
 
@@ -28,36 +50,54 @@ Ordered by query count, smallest first (recommended traversal order):
 
 | File | Queries (approx) | Status |
 |------|------------------|--------|
-| `repositories/note/housekeeping.rs` | 5 | untouched |
-| `repositories/note/context.rs` | 6 | untouched |
-| `repositories/note/tests/session_scoped_consolidation.rs` | 1 | untouched (test) |
-| `repositories/note/tests/wikilink_graph.rs` | 2 | untouched (test) |
-| `repositories/note/tests.rs` | 4 | untouched (test) |
-| `repositories/note/tests/crud_storage.rs` | 4 | untouched (test) |
-| `repositories/note/search.rs` | 17 (2 remain runtime — dynamic IN) | untouched |
-| `repositories/note/tests/search_ranking.rs` | 6 | untouched (test) |
-| `repositories/test_support.rs` | 6 | untouched (test infra) |
-| `repositories/note/indexing.rs` | 8 | untouched |
-| `repositories/note/scoring.rs` | 8 | untouched |
-| `repositories/task/blockers.rs` | 9 | untouched |
-| `repositories/note/tests/consolidation_housekeeping.rs` | 10 | untouched (test) |
-| `repositories/task/mod.rs` | 10 | untouched |
-| `repositories/note/crud.rs` | 24 (6 converted, 18 remain) | partial — was touched on main infra prep, still has runtime queries |
-| `repositories/task/status.rs` | 14 | untouched |
+| `repositories/note/crud.rs` | 18 | untouched (all use shared `NOTE_SELECT_WHERE_ID` const → need to move that to a macro first, see “Known blocker” below) |
+| `repositories/note/search.rs` | 17 (2 must stay runtime — dynamic IN) | untouched |
 | `repositories/note/graph.rs` | 16 | untouched |
 | `repositories/note/tests/graph_scoring.rs` | 16 | untouched (test) |
-| `repositories/task/reads.rs` | 16 | untouched |
-| `repositories/note/consolidation.rs` | 17 | untouched |
-| `repositories/note/embeddings.rs` | 17 | untouched |
+| `repositories/task/reads.rs` | 14 (2 converted) | partial — remaining queries return `Task` (has `#[sqlx(default)]` fields) or build dynamic WHERE clauses |
+| `repositories/task/status.rs` | 14 | untouched — same `Task` default-field issue, plus `TASK_SELECT_WHERE_ID` const |
+| `repositories/note/consolidation.rs` | 17 | untouched — uses `NOTE_SELECT_WHERE_ID` |
+| `repositories/note/embeddings.rs` | 2-3 SQLite-vec only | annotated; rest converted |
 | `repositories/task/queries.rs` | 17 | untouched |
 | `repositories/task/writes.rs` | 19 | untouched |
 | `repositories/note/association.rs` | 23 | untouched |
 | `repositories/agent.rs` | 25 | untouched |
 | `repositories/session.rs` | 27 | untouched |
-| `repositories/project.rs` | 28 (4 converted, 24 remain) | partial — project.rs was touched on main earlier, still has runtime queries |
+| `repositories/project.rs` | 24 | partial (4 converted on main earlier) |
 | `repositories/epic.rs` | 29 | untouched |
 
-Grand total remaining: ~**310 runtime-typed query call-sites** (many are multi-line; the spec figure of 259 refers to *logical* queries, not `sqlx::query*` text matches).
+Grand total remaining: ~**220–230 runtime-typed query call-sites**.
+
+## Known blocker: shared `SELECT` constants vs. `query_as!`
+
+`sqlx::query_as!` requires a **string literal** for its SQL argument. The
+repo uses two shared `const &str` projections, `NOTE_SELECT_WHERE_ID` and
+`TASK_SELECT_WHERE_ID`, that are referenced from a dozen call sites each
+(`note/crud.rs`, `note/indexing.rs`, `note/consolidation.rs`,
+`note/tests/crud_storage.rs`, `task/reads.rs`, `task/status.rs`,
+`task/writes.rs`, `task/queries.rs`). Converting them to the macro form
+requires either:
+
+1. Replacing the const with a `macro_rules! note_select_where_id { () => { "…" } }`
+   and updating every call site to use `sqlx::query_as!(Note, note_select_where_id!(), id)` —
+   note that `query_as!` **does** accept nested macro expansions (verified during
+   batch 2; an earlier attempt failed and was reverted, but the failure was actually
+   a type-annotation edge case that can be fixed by binding the result to a
+   `let` with an explicit `Vec<Note>`/`Note` type, or calling the macro with
+   `concat!("…")`).  A follow-up sub-batch should make that mechanical change.
+2. Inlining the SELECT text into each call site (simpler, but 10+ copies of a
+   long multi-line string).
+
+Until one of those is done, the remaining `NOTE_SELECT_WHERE_ID` /
+`TASK_SELECT_WHERE_ID` call sites must stay runtime-typed and carry the
+`// NOTE: …` annotation.
+
+Second blocker: `Task` and some other structs use `#[cfg_attr(feature = "sqlx",
+sqlx(default))]` on newer columns (`pr_url`, `agent_type`,
+`unresolved_blocker_count`). `query_as!` does not honour `#[sqlx(default)]`,
+so every SELECT that doesn't list those columns explicitly fails to
+compile as a macro. Options: add those columns to every SELECT (verbose),
+or switch to `query!` + manual struct construction.
 
 ## Method for the next agent
 

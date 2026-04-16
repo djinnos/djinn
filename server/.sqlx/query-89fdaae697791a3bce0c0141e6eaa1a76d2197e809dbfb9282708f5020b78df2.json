@@ -1,0 +1,64 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT src.id AS source_id, src.title AS source_title,\n                    src.tags AS source_tags, src.content AS source_content,\n                    l.target_raw AS target_raw\n             FROM note_links l\n             JOIN notes src ON src.id = l.source_id\n             WHERE src.project_id = ?\n               AND l.target_id IS NULL\n             ORDER BY src.id, l.target_raw",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "source_title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "source_tags",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "source_content",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "target_raw",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "89fdaae697791a3bce0c0141e6eaa1a76d2197e809dbfb9282708f5020b78df2"
+}

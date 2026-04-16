@@ -51,11 +51,13 @@ impl NoteRepository {
 
         let clamped = value.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEILING);
 
-        sqlx::query("UPDATE notes SET confidence = ? WHERE id = ?")
-            .bind(clamped)
-            .bind(note_id)
-            .execute(self.db.pool())
-            .await?;
+        sqlx::query!(
+            "UPDATE notes SET confidence = ? WHERE id = ?",
+            clamped,
+            note_id
+        )
+        .execute(self.db.pool())
+        .await?;
 
         Ok(())
     }
@@ -63,18 +65,19 @@ impl NoteRepository {
     pub async fn update_confidence(&self, note_id: &str, signal: f64) -> Result<f64> {
         self.db.ensure_initialized().await?;
 
-        let prior = sqlx::query_scalar::<_, f64>("SELECT confidence FROM notes WHERE id = ?")
-            .bind(note_id)
+        let prior = sqlx::query_scalar!("SELECT confidence FROM notes WHERE id = ?", note_id)
             .fetch_one(self.db.pool())
             .await?;
 
         let posterior = bayesian_update(prior, signal);
 
-        sqlx::query("UPDATE notes SET confidence = ? WHERE id = ?")
-            .bind(posterior)
-            .bind(note_id)
-            .execute(self.db.pool())
-            .await?;
+        sqlx::query!(
+            "UPDATE notes SET confidence = ? WHERE id = ?",
+            posterior,
+            note_id
+        )
+        .execute(self.db.pool())
+        .await?;
 
         Ok(posterior)
     }
@@ -92,6 +95,7 @@ impl NoteRepository {
             placeholders
         );
 
+        // NOTE: dynamic SQL — compile-time check not possible (runtime IN list)
         let mut query = sqlx::query_as::<_, (String, f64)>(&sql);
         for id in note_ids {
             query = query.bind(id);
@@ -119,6 +123,7 @@ impl NoteRepository {
             placeholders
         );
 
+        // NOTE: dynamic SQL — compile-time check not possible (runtime IN list)
         let mut q = sqlx::query_as::<_, (String, i64, String, String)>(&query).bind(project_id);
         for id in candidate_ids {
             q = q.bind(id);
@@ -158,38 +163,46 @@ impl NoteRepository {
             return Ok(Vec::new());
         }
 
-        let project_id =
-            sqlx::query_scalar::<_, String>("SELECT project_id FROM notes WHERE id = ? LIMIT 1")
-                .bind(&seed_ids[0])
-                .fetch_optional(self.db.pool())
-                .await?
-                .unwrap_or_default();
+        let seed0 = &seed_ids[0];
+        let project_id = sqlx::query_scalar!(
+            "SELECT project_id FROM notes WHERE id = ? LIMIT 1",
+            seed0
+        )
+        .fetch_optional(self.db.pool())
+        .await?
+        .unwrap_or_default();
 
         if project_id.is_empty() {
             return Ok(Vec::new());
         }
 
-        let link_edges: Vec<(String, String)> = sqlx::query_as(
-            "SELECT source_id, target_id FROM note_links WHERE target_id IS NOT NULL AND source_id IN (
+        let link_edges: Vec<(String, String)> = sqlx::query!(
+            r#"SELECT source_id, target_id AS "target_id!: String" FROM note_links WHERE target_id IS NOT NULL AND source_id IN (
                 SELECT id FROM notes WHERE project_id = ?
-            )",
+            )"#,
+            project_id
         )
-        .bind(&project_id)
         .fetch_all(self.db.pool())
-        .await?;
+        .await?
+        .into_iter()
+        .map(|r| (r.source_id, r.target_id))
+        .collect();
 
-        let association_edges: Vec<(String, String, f64)> = sqlx::query_as(
+        let association_edges: Vec<(String, String, f64)> = sqlx::query!(
             "SELECT note_a_id, note_b_id, weight
              FROM note_associations
              WHERE weight >= ?
                AND note_a_id IN (SELECT id FROM notes WHERE project_id = ?)
                AND note_b_id IN (SELECT id FROM notes WHERE project_id = ?)",
+            MIN_ASSOCIATION_WEIGHT,
+            project_id,
+            project_id
         )
-        .bind(MIN_ASSOCIATION_WEIGHT)
-        .bind(&project_id)
-        .bind(&project_id)
         .fetch_all(self.db.pool())
-        .await?;
+        .await?
+        .into_iter()
+        .map(|r| (r.note_a_id, r.note_b_id, r.weight))
+        .collect();
 
         let mut adjacency: HashMap<String, Vec<ProximityEdge>> = HashMap::new();
         for (source, target) in link_edges {
