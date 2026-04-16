@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO tasks\n                (id, project_id, short_id, epic_id, title, description, design,\n                 issue_type, priority, owner, `status`, acceptance_criteria,\n                 created_by_user_id)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 13
+    },
+    "nullable": []
+  },
+  "hash": "31011911139753a5ae14e9c268b87a993080b06cd34ff06770e6b47023618719"
+}

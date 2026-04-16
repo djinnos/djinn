@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO repo_graph_cache\n             (project_id, commit_sha, graph_blob, built_at)\n             VALUES (?, ?, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))\n             ON DUPLICATE KEY UPDATE\n                graph_blob=VALUES(graph_blob),\n                built_at=VALUES(built_at)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "88320e26bcbf1e4358ba1a5b733f2450aebd6996013b9b4dfd8a537d7a2ee6da"
+}

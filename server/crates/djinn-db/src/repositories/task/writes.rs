@@ -80,11 +80,17 @@ impl TaskRepository {
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
         let ac = acceptance_criteria.unwrap_or("[]");
+        // Phase 3B: stamp `created_by_user_id` from the task-local set at
+        // the MCP dispatch root (`SESSION_USER_ID`). `None` for
+        // agent/background callers with no user context — schema allows
+        // NULL and Phase 4 will tighten where appropriate.
+        let created_by_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, `status`, acceptance_criteria)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?)",
+                 issue_type, priority, owner, `status`, acceptance_criteria,
+                 created_by_user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?)",
             id,
             project_id,
             short_id,
@@ -96,7 +102,8 @@ impl TaskRepository {
             priority,
             owner,
             status,
-            ac
+            ac,
+            created_by_user_id
         )
         .execute(self.db.pool())
         .await?;
@@ -345,5 +352,132 @@ impl TaskRepository {
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
+    }
+}
+
+#[cfg(test)]
+mod created_by_tests {
+    //! Phase 3B — verify that task inserts stamp `created_by_user_id` from the
+    //! `SESSION_USER_ID` task-local and default to NULL when no user context
+    //! is in scope.
+
+    use super::TaskRepository;
+    use crate::database::Database;
+    use crate::repositories::user::UserRepository;
+    use djinn_core::auth_context::SESSION_USER_ID;
+    use djinn_core::events::EventBus;
+
+    async fn seed_project_and_epic(db: &Database) -> (String, String) {
+        db.ensure_initialized().await.unwrap();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+            project_id,
+            "p",
+            "/tmp/p",
+            "[]"
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            epic_id,
+            project_id,
+            "ep01",
+            "Epic",
+            "",
+            "",
+            "",
+            "",
+            "[]"
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        (project_id, epic_id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_in_project_stamps_created_by_user_id_from_task_local() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, epic_id) = seed_project_and_epic(&db).await;
+
+        // Seed a real user row — the FK on tasks.created_by_user_id requires
+        // the referenced users.id to exist.
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(424242, "phase3b-tester", Some("Tester"), None)
+            .await
+            .unwrap();
+        let user_id = user.id.clone();
+
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        // With SESSION_USER_ID set, the insert must stamp the column.
+        let created_id = SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                let task = repo
+                    .create_in_project(
+                        &project_id,
+                        Some(&epic_id),
+                        "Attributed",
+                        "",
+                        "",
+                        "task",
+                        0,
+                        "",
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                task.id
+            })
+            .await;
+
+        let stamped: Option<String> = sqlx::query_scalar!(
+            "SELECT created_by_user_id FROM tasks WHERE id = ?",
+            created_id
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            stamped.as_deref(),
+            Some(user_id.as_str()),
+            "created_by_user_id must match the SESSION_USER_ID task-local"
+        );
+
+        // Without SESSION_USER_ID in scope, created_by_user_id stays NULL —
+        // agent/background insert semantics.
+        let unattributed = repo
+            .create_in_project(
+                &project_id,
+                Some(&epic_id),
+                "Unattributed",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let stamped: Option<String> = sqlx::query_scalar!(
+            "SELECT created_by_user_id FROM tasks WHERE id = ?",
+            unattributed.id
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert!(
+            stamped.is_none(),
+            "task created outside SESSION_USER_ID scope must leave created_by_user_id NULL"
+        );
     }
 }

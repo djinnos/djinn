@@ -183,6 +183,31 @@ export function useEventSource(projectId?: string | null) {
           "lifecycle_step",
         ] as const;
 
+        // OAuth flows (Codex, Copilot) ask the desktop to open the
+        // authorization URL in the user's default browser. The server runs in
+        // Docker and can't xdg-open anything itself. The envelope shape is
+        // { entity_type, action, payload: { provider, url } } — hence the
+        // nested `.payload.url` access.
+        es.addEventListener("oauth.open_browser", (event) => {
+          if (!isActive) return;
+          try {
+            const envelope = JSON.parse(event.data);
+            const url = envelope?.payload?.url;
+            if (typeof url !== "string" || !url) return;
+            const win = window.open(url, "_blank", "noopener,noreferrer");
+            if (!win) {
+              sseStore.getState().setError(
+                new Error(
+                  "Browser blocked the OAuth popup. Open this URL manually: " + url,
+                ),
+              );
+              console.warn("oauth.open_browser: popup blocked; url:", url);
+            }
+          } catch (err) {
+            console.error("Failed to handle oauth.open_browser:", err);
+          }
+        });
+
         eventTypes.forEach((eventType) => {
           es.addEventListener(eventType, (event) => {
             if (!isActive) return;

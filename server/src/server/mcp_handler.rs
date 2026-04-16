@@ -1,7 +1,7 @@
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use djinn_core::auth_context::SESSION_USER_TOKEN;
+use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
 use serde_json::Value;
 
 use super::AppState;
@@ -16,18 +16,23 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
         .map(std::path::PathBuf::from)
         .filter(|path| path.join(".git").exists());
 
-    // Resolve the authenticated user's GitHub access token (if any) and
-    // thread it through MCP dispatch via a tokio task-local. Tools that
-    // need to call user-scoped GitHub endpoints read this via
-    // `djinn_core::auth_context::current_user_token()`.
-    let user_token: Option<String> = match authenticate(&state, &headers).await {
-        Ok(Some(user)) => Some(user.github_access_token),
-        Ok(None) => None,
-        Err(err) => {
-            tracing::warn!(error = %err, "mcp_handler: authenticate failed; proceeding unauth");
-            None
-        }
-    };
+    // Resolve the authenticated user's GitHub access token *and* stable
+    // `users.id` (if any), and thread both through MCP dispatch via tokio
+    // task-locals:
+    //   - `SESSION_USER_TOKEN` — read by tools that call user-scoped
+    //     GitHub endpoints via `current_user_token()`.
+    //   - `SESSION_USER_ID`    — read by repository inserts so new rows
+    //     on `tasks`, `epics`, and `sessions` carry `created_by_user_id`
+    //     attribution via `current_user_id()`.
+    let (user_token, user_id): (Option<String>, Option<String>) =
+        match authenticate(&state, &headers).await {
+            Ok(Some(user)) => (Some(user.github_access_token), Some(user.id)),
+            Ok(None) => (None, None),
+            Err(err) => {
+                tracing::warn!(error = %err, "mcp_handler: authenticate failed; proceeding unauth");
+                (None, None)
+            }
+        };
 
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Ok(body) => body,
@@ -57,7 +62,10 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
     }
 
     let response = SESSION_USER_TOKEN
-        .scope(user_token, dispatch(state.clone(), worktree_root, payload.clone()))
+        .scope(
+            user_token,
+            SESSION_USER_ID.scope(user_id, dispatch(state.clone(), worktree_root, payload.clone())),
+        )
         .await;
 
     let mut resp = axum::Json(response).into_response();

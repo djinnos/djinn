@@ -199,6 +199,7 @@ async fn fts5_search_folder_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "MySQL FULLTEXT applies equal weight across indexed columns; title-vs-content ranking was SQLite FTS5-specific (bm25 weights). See replacement_notes on MysqlFulltext plans."]
 async fn fts5_search_prefers_title_over_content() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
@@ -245,6 +246,7 @@ async fn fts5_search_prefers_title_over_content() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "MySQL FULLTEXT applies equal weight across indexed columns; tags-vs-content ranking was SQLite FTS5-specific (bm25 weights). See replacement_notes on MysqlFulltext plans."]
 async fn fts5_search_prefers_tags_over_content() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();

@@ -6,7 +6,7 @@ INSTALL_PATH := $(INSTALL_DIR)/$(BINARY)
 DESKTOP_DIR := $(CURDIR)/../desktop
 DAEMON_FILE := $(HOME)/.djinn/daemon.json
 
-.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt langfuse-up langfuse-down verify help
+.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt langfuse-up langfuse-down verify test-db-clean help
 
 build: ## Build debug binary
 	cargo build
@@ -102,6 +102,18 @@ reset: ## Kill everything and restart fresh
 
 verify: ## Run CI-equivalent checks locally (fmt, check, clippy, hakari, test)
 	./scripts/verify
+
+test-db-clean: ## Drop all ephemeral `djinn_test_*` databases from Dolt
+	@docker compose exec -T dolt dolt sql -q "\
+		SELECT CONCAT('DROP DATABASE \`', SCHEMA_NAME, '\`;') FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE 'djinn_test_%';\
+	" --result-format=csv 2>/dev/null \
+		| tail -n +2 \
+		| while read stmt; do \
+			if [ -n "$$stmt" ]; then \
+				docker compose exec -T dolt dolt sql -q "$$stmt" 2>/dev/null || true; \
+			fi; \
+		done
+	@echo "Ephemeral djinn_test_* databases dropped."
 
 langfuse-up: ## Start Langfuse stack (dashboard at http://localhost:3000)
 	docker compose -f docker/docker-compose.langfuse.yml up -d

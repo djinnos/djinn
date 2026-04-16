@@ -47,28 +47,31 @@ impl NoteRepository {
         // NOTE: dynamic SQL (backend-specific FTS query built from a runtime plan and dispatched across SQLite/MySQL pools) — compile-time check not possible
         let sql = executable_lexical_search_sql(&plan);
 
-        let rows = match self.db.pool_kind() {
-            crate::database::DatabasePool::Sqlite(pool) => {
-                sqlx::query_as::<_, (String, f64)>(&sql)
-                    .bind(&plan.query)
-                    .bind(project_id)
-                    .bind(folder)
-                    .bind(note_type)
-                    .bind(limit)
-                    .fetch_all(pool)
-                    .await?
-            }
-            crate::database::DatabasePool::Mysql(pool) => {
-                sqlx::query_as::<sqlx::MySql, (String, f64)>(&sql)
-                    .bind(&plan.query)
-                    .bind(project_id)
-                    .bind(folder)
-                    .bind(note_type)
-                    .bind(limit)
-                    .fetch_all(pool)
-                    .await?
-            }
-        };
+        let mut q = sqlx::query_as::<sqlx::MySql, (String, f64)>(&sql);
+        if plan.needs_query_bind() {
+            q = q.bind(&plan.query);
+        }
+        // The Ranked MySQL plan uses `?3` for folder and `?4` for note_type
+        // twice each (once for the `?='' OR ...` guard, once for the equality
+        // check). MySQL positional binding expands each occurrence into its own
+        // placeholder, so we must bind folder/note_type twice on that backend.
+        // SQLite FTS5 reuses numbered placeholders natively, so bind once there.
+        let repeat_filter_binds = matches!(
+            plan.backend,
+            crate::repositories::note::LexicalSearchBackend::MysqlFulltext
+        );
+        q = q.bind(project_id).bind(folder);
+        if repeat_filter_binds {
+            q = q.bind(folder);
+        }
+        q = q.bind(note_type);
+        if repeat_filter_binds {
+            q = q.bind(note_type);
+        }
+        let rows = q
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -92,54 +95,30 @@ impl NoteRepository {
         // NOTE: dynamic SQL (backend-specific FTS dedup query built from a runtime plan) — compile-time check not possible
         let sql = executable_lexical_search_sql(&plan);
 
-        let rows = match self.db.pool_kind() {
-            crate::database::DatabasePool::Sqlite(pool) => {
-                sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        String,
-                        String,
-                        String,
-                        String,
-                        Option<String>,
-                        Option<String>,
-                        f64,
-                    ),
-                >(&sql)
-                .bind(&plan.query)
-                .bind(project_id)
-                .bind(folder)
-                .bind(note_type)
-                .bind(threshold)
-                .bind(limit)
-                .fetch_all(pool)
-                .await?
-            }
-            crate::database::DatabasePool::Mysql(pool) => {
-                sqlx::query_as::<
-                    sqlx::MySql,
-                    (
-                        String,
-                        String,
-                        String,
-                        String,
-                        String,
-                        Option<String>,
-                        Option<String>,
-                        f64,
-                    ),
-                >(&sql)
-                .bind(&plan.query)
-                .bind(project_id)
-                .bind(folder)
-                .bind(note_type)
-                .bind(threshold)
-                .bind(limit)
-                .fetch_all(pool)
-                .await?
-            }
-        };
+        let mut q = sqlx::query_as::<
+            sqlx::MySql,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                f64,
+            ),
+        >(&sql);
+        if plan.needs_query_bind() {
+            q = q.bind(&plan.query);
+        }
+        let rows = q
+            .bind(project_id)
+            .bind(folder)
+            .bind(note_type)
+            .bind(threshold)
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -175,24 +154,16 @@ impl NoteRepository {
         // NOTE: dynamic SQL (backend-specific FTS contradiction query built from a runtime plan) — compile-time check not possible
         let sql = executable_lexical_search_sql(&plan);
 
-        let rows = match self.db.pool_kind() {
-            crate::database::DatabasePool::Sqlite(pool) => {
-                sqlx::query_as::<_, (String, String, String, String, String, f64)>(&sql)
-                    .bind(&plan.query)
-                    .bind(note_id)
-                    .bind(threshold)
-                    .fetch_all(pool)
-                    .await?
-            }
-            crate::database::DatabasePool::Mysql(pool) => {
-                sqlx::query_as::<sqlx::MySql, (String, String, String, String, String, f64)>(&sql)
-                    .bind(&plan.query)
-                    .bind(note_id)
-                    .bind(threshold)
-                    .fetch_all(pool)
-                    .await?
-            }
-        };
+        let mut q =
+            sqlx::query_as::<sqlx::MySql, (String, String, String, String, String, f64)>(&sql);
+        if plan.needs_query_bind() {
+            q = q.bind(&plan.query);
+        }
+        let rows = q
+            .bind(note_id)
+            .bind(threshold)
+            .fetch_all(self.db.pool())
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -650,7 +621,7 @@ impl NoteRepository {
             bind_values.push(changed_path.clone());
             bind_values.push(changed_path.clone());
             overlap_parts.push(
-                "EXISTS (SELECT 1 FROM JSON_TABLE(n.scope_paths, '$[*]' COLUMNS (value VARCHAR(1024) PATH '$')) AS sp \
+                "EXISTS (SELECT 1 FROM JSON_TABLE(CAST(n.scope_paths AS JSON), '$[*]' COLUMNS (value VARCHAR(1024) PATH '$')) AS sp \
                  WHERE ? LIKE CONCAT(sp.value, '/%') \
                     OR sp.value LIKE CONCAT(?, '/%') \
                     OR sp.value = ?)".to_string()
@@ -667,7 +638,7 @@ impl NoteRepository {
                     n.scope_paths
              FROM notes n
              WHERE n.project_id = ?
-               AND JSON_LENGTH(n.scope_paths) > 0
+               AND JSON_LENGTH(CAST(n.scope_paths AS JSON)) > 0
                AND ({overlap_clause})
              ORDER BY n.updated_at DESC
              LIMIT {limit}"
@@ -725,10 +696,11 @@ mod contradiction_tests {
         let id = uuid::Uuid::now_v7().to_string();
         let path_str = tmp.path().to_str().unwrap();
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
             id,
             "test",
-            path_str
+            path_str,
+            "[]"
         )
         .execute(db.pool())
         .await
@@ -901,10 +873,11 @@ mod scope_overlap_decay_tests {
         let id = uuid::Uuid::now_v7().to_string();
         let path_str = tmp.path().to_str().unwrap();
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
             id,
             "test",
-            path_str
+            path_str,
+            "[]"
         )
         .execute(db.pool())
         .await

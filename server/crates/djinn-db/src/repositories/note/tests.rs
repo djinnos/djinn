@@ -22,6 +22,11 @@ mod search_ranking;
 mod session_scoped_consolidation;
 mod wikilink_graph;
 
+/// Mutex kept around so embedding tests can serialize against the
+/// shared sqlite-vec extension state. With the MySQL migration the
+/// extension is gone but the embedding tests still acquire the lock
+/// (harmless) so we keep the helper as a no-op pending their own
+/// rewrite to target Qdrant.
 fn sqlite_vec_test_lock() -> &'static Mutex<()> {
     static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -29,21 +34,23 @@ fn sqlite_vec_test_lock() -> &'static Mutex<()> {
 
 async fn make_epic(db: &Database, project_id: &str) -> String {
     let epic_id = uuid::Uuid::now_v7().to_string();
-    let short_id = format!("ep-{}", epic_id);
-    // NOTE: SQLite-only test helper (positional ?N); compile-time check would validate against MySQL pool
-    sqlx::query(
+    // `epics.short_id` is VARCHAR(32); a full UUID + "ep-" prefix overflows.
+    // Use the last 12 hex digits of the UUID (time_hi + node) — unique enough
+    // per test run and always fits.
+    let short_id = format!("ep-{}", &epic_id[epic_id.len() - 12..]);
+    sqlx::query!(
         "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        epic_id,
+        project_id,
+        short_id,
+        "Epic",
+        "",
+        "",
+        "",
+        "",
+        "[]",
     )
-    .bind(&epic_id)
-    .bind(project_id)
-    .bind(short_id)
-    .bind("Epic")
-    .bind("")
-    .bind("")
-    .bind("")
-    .bind("")
-    .bind("[]")
     .execute(db.pool())
     .await
     .unwrap();
@@ -54,7 +61,7 @@ async fn make_session(
     db: &Database,
     project_id: &str,
     task_id: Option<&str>,
-    branch: &str,
+    _branch: &str,
 ) -> String {
     let id = uuid::Uuid::now_v7().to_string();
     let task_id = match task_id {
@@ -80,62 +87,40 @@ async fn make_session(
             )
         }
     };
-    // NOTE: SQLite-only pragma_table_info — compile-time check not possible against MySQL
-    let has_branch: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'branch'",
+    // The MySQL `sessions` table no longer carries a `branch` column — the
+    // caller-supplied `_branch` is accepted for legacy signature
+    // compatibility but ignored here.
+    sqlx::query!(
+        "INSERT INTO sessions (
+            id,
+            project_id,
+            task_id,
+            model_id,
+            agent_type,
+            started_at,
+            status,
+            tokens_in,
+            tokens_out,
+            worktree_path
+        )
+        VALUES (
+            ?,
+            ?,
+            ?,
+            'test-model',
+            'worker',
+            DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
+            'completed',
+            0,
+            0,
+            NULL
+        )",
+        id,
+        project_id,
+        task_id,
     )
-    .fetch_one(db.pool())
+    .execute(db.pool())
     .await
     .unwrap();
-
-    if has_branch > 0 {
-        // NOTE: SQLite-only helper (strftime, positional ?N) — compile-time check not possible
-        sqlx::query(
-            "INSERT INTO sessions (id, project_id, task_id, branch, status, started_at)
-             VALUES (?1, ?2, ?3, ?4, 'completed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-        )
-        .bind(&id)
-        .bind(project_id)
-        .bind(task_id.as_deref())
-        .bind(branch)
-        .execute(db.pool())
-        .await
-        .unwrap();
-    } else {
-        // NOTE: SQLite-only helper (strftime, positional ?N) — compile-time check not possible
-        sqlx::query(
-            "INSERT INTO sessions (
-                id,
-                project_id,
-                task_id,
-                model_id,
-                agent_type,
-                started_at,
-                status,
-                tokens_in,
-                tokens_out,
-                worktree_path
-            )
-            VALUES (
-                ?1,
-                ?2,
-                ?3,
-                'test-model',
-                ?4,
-                strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                'completed',
-                0,
-                0,
-                NULL
-            )",
-        )
-        .bind(&id)
-        .bind(project_id)
-        .bind(task_id.as_deref())
-        .bind(branch)
-        .execute(db.pool())
-        .await
-        .unwrap();
-    }
     id
 }

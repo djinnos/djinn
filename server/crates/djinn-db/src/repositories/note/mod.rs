@@ -39,8 +39,8 @@ pub use djinn_core::models::{
 pub use embeddings::{
     EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
     NoteEmbeddingProvider, NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore,
-    QdrantNoteVectorStore, SqliteVecNoteVectorStore, UpsertNoteEmbedding,
-    infer_embedding_branch_from_worktree, task_branch_name,
+    QdrantNoteVectorStore, UpsertNoteEmbedding, infer_embedding_branch_from_worktree,
+    task_branch_name,
 };
 pub use lexical_search::{
     LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
@@ -137,7 +137,7 @@ impl NoteRepository {
             worktree_root: None,
             embedding_provider: None,
             embedding_branch: "main".to_string(),
-            vector_store: Arc::new(SqliteVecNoteVectorStore) as Arc<dyn NoteVectorStore>,
+            vector_store: Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
         }
     }
 

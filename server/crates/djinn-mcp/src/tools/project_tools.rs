@@ -7,7 +7,7 @@ use tokio::fs;
 
 use crate::server::DjinnMcpServer;
 use djinn_core::auth_context::current_user_token;
-use djinn_db::{ProjectRepository, VerificationRule};
+use djinn_db::{OrgConfigRepository, ProjectRepository, VerificationRule};
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
@@ -547,75 +547,91 @@ impl DjinnMcpServer {
         }
     }
 
-    /// List GitHub repositories the authenticated user can access through
-    /// the Djinn GitHub **App**'s installations. Iterates each installation
-    /// surfaced by `GET /user/installations`, calls
-    /// `GET /installation/repositories` with that installation's token, and
-    /// merges + dedupes the results.
+    /// List GitHub repositories visible to the deployment's bound
+    /// installation (recorded in `org_config`).
+    ///
+    /// Calls `GET /installation/repositories` with an installation access
+    /// token minted from the App JWT + the pinned `installation_id`. No
+    /// iteration over App-wide installations — the one-org-per-deployment
+    /// invariant means there is exactly one installation to list from.
     #[tool(
-        description = "List GitHub repositories accessible via the Djinn App's installations. Each entry includes an installation_id and account_login; pass these to project_add_from_github to clone. Populate an Add-Project picker from this tool."
+        description = "List GitHub repositories accessible via the Djinn App installation bound to this deployment (from org_config). Each entry includes an installation_id and account_login; pass these to project_add_from_github to clone. Populate an Add-Project picker from this tool."
     )]
     pub async fn github_list_repos(
         &self,
         Parameters(input): Parameters<GithubListReposParams>,
     ) -> Json<GithubListReposResponse> {
-        use djinn_provider::github_app::{
-            GitHubAppClient, list_installations_for_user,
-        };
+        use djinn_provider::github_app::{GitHubAppClient, get_installation_by_id};
 
-        let Some(user_access_token) = current_user_token() else {
+        if std::env::var("GITHUB_APP_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
             return Json(GithubListReposResponse {
-                status: "error: sign in with GitHub required".into(),
+                status: "error: GitHub App not configured".into(),
                 repos: vec![],
             });
-        };
+        }
 
-        let installations = match list_installations_for_user(&user_access_token).await {
-            Ok(list) => list,
+        // Source of truth: the singleton `org_config` row. If unset, we
+        // refuse to list — the deployment has not been bound to a GitHub
+        // org yet.
+        let org_repo = OrgConfigRepository::new(self.state.db().clone());
+        let cfg = match org_repo.get().await {
+            Ok(Some(cfg)) => cfg,
+            Ok(None) => {
+                return Json(GithubListReposResponse {
+                    status: "error: deployment not bound to an organization".into(),
+                    repos: vec![],
+                });
+            }
             Err(e) => {
                 return Json(GithubListReposResponse {
-                    status: format!("error: list installations failed: {e}"),
+                    status: format!("error: read org_config: {e}"),
                     repos: vec![],
                 });
             }
         };
-        if installations.is_empty() {
-            return Json(GithubListReposResponse {
-                status: "error: no GitHub App installations — install the Djinn App first".into(),
-                repos: vec![],
-            });
-        }
 
-        let mut seen = std::collections::HashSet::<String>::new();
-        let mut out: Vec<GithubRepoEntry> = Vec::new();
-        for install in installations {
-            let client = GitHubAppClient::new(install.id);
-            let repos = match client.list_repositories(input.per_page).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        installation_id = install.id,
-                        error = %e,
-                        "github_list_repos: installation listing failed; skipping"
-                    );
-                    continue;
-                }
-            };
-            for r in repos {
-                if !seen.insert(r.full_name.clone()) {
-                    continue;
-                }
-                out.push(GithubRepoEntry {
-                    owner: r.owner,
-                    repo: r.repo,
-                    default_branch: r.default_branch,
-                    private: r.private,
-                    description: r.description,
-                    installation_id: install.id,
-                    account_login: install.account_login.clone(),
+        let installation_id = cfg.installation_id as u64;
+
+        // Pull the installation's account_login for the response payload.
+        // This hits `GET /app/installations/{id}` (App JWT), which is cheap
+        // relative to the repo listing call that follows.
+        let account_login = match get_installation_by_id(installation_id).await {
+            Ok(install) => install.account_login,
+            Err(e) => {
+                return Json(GithubListReposResponse {
+                    status: format!("error: fetch installation {installation_id}: {e}"),
+                    repos: vec![],
                 });
             }
-        }
+        };
+
+        let client = GitHubAppClient::new(installation_id);
+        let repos = match client.list_repositories(input.per_page).await {
+            Ok(r) => r,
+            Err(e) => {
+                return Json(GithubListReposResponse {
+                    status: format!("error: list repositories for installation {installation_id}: {e}"),
+                    repos: vec![],
+                });
+            }
+        };
+
+        let out: Vec<GithubRepoEntry> = repos
+            .into_iter()
+            .map(|r| GithubRepoEntry {
+                owner: r.owner,
+                repo: r.repo,
+                default_branch: r.default_branch,
+                private: r.private,
+                description: r.description,
+                installation_id,
+                account_login: account_login.clone(),
+            })
+            .collect();
 
         Json(GithubListReposResponse {
             status: "ok".into(),

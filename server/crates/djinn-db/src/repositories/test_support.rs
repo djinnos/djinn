@@ -24,11 +24,16 @@ pub async fn make_project(db: &Database, path: &Path) -> Project {
         .unwrap_or("root");
     let project_name = format!("test-project-{path_slug}-{id}");
     let path_str = path.to_str().unwrap();
+    // MySQL/Dolt declares `verification_rules` NOT NULL without a default
+    // (unlike the retired SQLite schema, which filled `[]`); pass it
+    // explicitly here so tests using this fixture don't choke on the
+    // strict-insert check.
     sqlx::query!(
-        "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+        "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
         id,
         project_name,
-        path_str
+        path_str,
+        "[]",
     )
     .execute(db.pool())
     .await

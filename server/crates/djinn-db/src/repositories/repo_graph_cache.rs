@@ -50,11 +50,15 @@ impl RepoGraphCacheRepository {
 
     pub async fn upsert(&self, entry: RepoGraphCacheInsert<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
+        // `built_at` defaults to "" in the schema; stamp it explicitly so the
+        // row carries a usable ISO-8601 timestamp on first insert.
         sqlx::query!(
             "INSERT INTO repo_graph_cache
-             (project_id, commit_sha, graph_blob)
-             VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE graph_blob=VALUES(graph_blob)",
+             (project_id, commit_sha, graph_blob, built_at)
+             VALUES (?, ?, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
+             ON DUPLICATE KEY UPDATE
+                graph_blob=VALUES(graph_blob),
+                built_at=VALUES(built_at)",
             entry.project_id,
             entry.commit_sha,
             entry.graph_blob,

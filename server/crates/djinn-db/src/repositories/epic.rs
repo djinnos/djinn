@@ -170,9 +170,12 @@ impl EpicRepository {
         let status = input.status.unwrap_or("drafting");
         let auto_breakdown = i64::from(input.auto_breakdown.unwrap_or(true));
         let memory_refs = input.memory_refs.unwrap_or("[]");
+        // Phase 3B: stamp `created_by_user_id` from the task-local set at
+        // the MCP dispatch root. `None` when no user context is in scope.
+        let created_by_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
-            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, `status`, owner, memory_refs, auto_breakdown, originating_adr_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, `status`, owner, memory_refs, auto_breakdown, originating_adr_id, created_by_user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             id,
             project_id,
             short_id,
@@ -184,7 +187,8 @@ impl EpicRepository {
             input.owner,
             memory_refs,
             auto_breakdown,
-            input.originating_adr_id
+            input.originating_adr_id,
+            created_by_user_id
         )
         .execute(self.db.pool())
         .await?;
@@ -389,12 +393,15 @@ impl EpicRepository {
     /// Aggregate child-task counts for an epic.
     pub async fn task_counts(&self, epic_id: &str) -> Result<EpicTaskCounts> {
         self.db.ensure_initialized().await?;
+        // MySQL/Dolt returns SUM(...) as DECIMAL; casting to SIGNED keeps the
+        // value decodeable as i64 via sqlx (otherwise large DECIMAL round-trip
+        // blows up to sign-extended 2^62 on Dolt).
         let row = sqlx::query!(
             r#"SELECT
                 COUNT(*) AS "task_count!: i64",
-                COALESCE(SUM(CASE WHEN `status` = 'open' THEN 1 ELSE 0 END), 0) AS "open_count!: i64",
-                COALESCE(SUM(CASE WHEN `status` = 'in_progress' THEN 1 ELSE 0 END), 0) AS "in_progress_count!: i64",
-                COALESCE(SUM(CASE WHEN `status` = 'closed' THEN 1 ELSE 0 END), 0) AS "closed_count!: i64"
+                CAST(COALESCE(SUM(CASE WHEN `status` = 'open' THEN 1 ELSE 0 END), 0) AS SIGNED) AS "open_count!: i64",
+                CAST(COALESCE(SUM(CASE WHEN `status` = 'in_progress' THEN 1 ELSE 0 END), 0) AS SIGNED) AS "in_progress_count!: i64",
+                CAST(COALESCE(SUM(CASE WHEN `status` = 'closed' THEN 1 ELSE 0 END), 0) AS SIGNED) AS "closed_count!: i64"
              FROM tasks WHERE epic_id = ?"#,
             epic_id
         )
@@ -531,10 +538,11 @@ impl EpicRepository {
 
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
             id,
             "default",
-            "."
+            ".",
+            "[]"
         )
         .execute(self.db.pool())
         .await?;
@@ -831,8 +839,8 @@ mod tests {
             let id = uuid::Uuid::now_v7().to_string();
             sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                    issue_type, priority, owner, `status`, continuation_count, memory_refs)
-                 VALUES (?, ?, ?, ?, 'T', '', '', 'task', 0, '', 'open', 0, '[]')",
+                                    issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
+                 VALUES (?, ?, ?, ?, 'T', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
                 id,
                 epic.project_id,
                 short,
@@ -845,8 +853,8 @@ mod tests {
         let t3_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, memory_refs)
-             VALUES (?, ?, 't003', ?, 'T3', '', '', 'task', 0, '', 'open', 0, '[]')",
+                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES (?, ?, 't003', ?, 'T3', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
             t3_id,
             epic.project_id,
             epic.id
@@ -877,8 +885,8 @@ mod tests {
             let id = uuid::Uuid::now_v7().to_string();
             sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                    issue_type, priority, owner, `status`, continuation_count, memory_refs)
-                 VALUES (?, ?, ?, ?, 'T', '', '', 'task', 0, '', 'open', 0, '[]')",
+                                    issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
+                 VALUES (?, ?, ?, ?, 'T', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
                 id,
                 epic.project_id,
                 short,

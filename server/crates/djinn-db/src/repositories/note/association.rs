@@ -686,10 +686,11 @@ mod tests {
             let id = uuid::Uuid::now_v7().to_string();
             let project2_path_str = project2_path.to_str().unwrap();
             sqlx::query!(
-                "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+                "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
                 id,
                 "test-project-2",
-                project2_path_str
+                project2_path_str,
+                "[]"
             )
             .execute(db.pool())
             .await

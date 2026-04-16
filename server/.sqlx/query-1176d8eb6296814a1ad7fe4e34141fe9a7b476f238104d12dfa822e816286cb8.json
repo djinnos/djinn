@@ -1,0 +1,54 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT\n                COUNT(*) AS \"task_count!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN `status` = 'open' THEN 1 ELSE 0 END), 0) AS SIGNED) AS \"open_count!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN `status` = 'in_progress' THEN 1 ELSE 0 END), 0) AS SIGNED) AS \"in_progress_count!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN `status` = 'closed' THEN 1 ELSE 0 END), 0) AS SIGNED) AS \"closed_count!: i64\"\n             FROM tasks WHERE epic_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "task_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "open_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "in_progress_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "closed_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1176d8eb6296814a1ad7fe4e34141fe9a7b476f238104d12dfa822e816286cb8"
+}

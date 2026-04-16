@@ -14,8 +14,8 @@ pub mod test_support {
 
 pub use database::{
     Database, DatabaseBackendCapabilities, DatabaseBackendKind, DatabaseBootstrapInfo,
-    DatabaseConnectConfig, DatabasePool, MysqlBackendFlavor, MysqlDatabaseConfig,
-    NoteSearchBackend, NoteVectorBackend, SqliteDatabaseConfig, SqliteVecStatus, default_db_path,
+    DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig, NoteSearchBackend,
+    NoteVectorBackend, SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
@@ -49,7 +49,7 @@ pub use repositories::{
         LexicalSearchMode, LexicalSearchPlan, NoopNoteVectorStore, NoteAssociationEntry,
         NoteConsolidationRepository, NoteDedupCandidate, NoteEmbeddingMatch, NoteEmbeddingProvider,
         NoteEmbeddingRecord, NoteRepository, NoteSearchParams, NoteVectorStore,
-        QdrantNoteVectorStore, STALE_CITATION, SqliteVecNoteVectorStore, UpdateNoteIndexParams,
+        QdrantNoteVectorStore, STALE_CITATION, UpdateNoteIndexParams,
         UpsertNoteEmbedding, build_lexical_search_plan, executable_lexical_search_sql,
         file_path_for, file_path_for_with_status, folder_for_type, folder_for_type_with_status,
         infer_embedding_branch_from_worktree, infer_note_type, is_singleton,
@@ -59,6 +59,7 @@ pub use repositories::{
         task_branch_name, title_from_permalink, validate_mysql_fulltext_threshold,
         virtual_note_path_for_permalink,
     },
+    org_config::{NewOrgConfig, OrgConfig, OrgConfigRepository},
     project::{ProjectConfig, ProjectRepository, VerificationRule, validate_verification_rules},
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_map_cache::{CachedRepoMap, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository},
@@ -67,6 +68,7 @@ pub use repositories::{
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
     task::TaskRepository,
+    user::{User, UserRepository},
     task::{
         ActivityQuery, BlockerRef, CountQuery, CreateTaskInProjectParams, CreateTaskParams,
         ListQuery, ListResult, ReadyQuery, UpdateTaskParams,

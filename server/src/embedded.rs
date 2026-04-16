@@ -6,14 +6,18 @@
 /// (up to 5 seconds of connection draining).
 use std::path::PathBuf;
 
-use djinn_db::{Database, default_db_path};
+use djinn_db::{
+    Database, DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Configuration for the embedded server.
 pub struct Config {
     /// Port to listen on. Use `0` to let the OS pick a free port.
     pub port: u16,
-    /// Database path. Defaults to `~/.djinn/djinn.db` when `None`.
+    /// Legacy database path (retained for call-site compatibility). The
+    /// embedded server now always targets the compose-managed Dolt backend;
+    /// this field is ignored.
     pub db_path: Option<PathBuf>,
 }
 
@@ -25,9 +29,15 @@ pub struct Config {
 ///
 /// The server stops when `cancel` is cancelled.
 pub async fn start(config: Config, cancel: CancellationToken) -> Result<u16, String> {
-    let db_path = config.db_path.unwrap_or_else(default_db_path);
-    tracing::info!(path = %db_path.display(), "embedded: opening database");
-    let db = Database::open(&db_path).map_err(|e| format!("open database: {e}"))?;
+    let _ = config.db_path; // kept for API stability; Dolt URL is environment-driven
+    let url = std::env::var("DJINN_MYSQL_URL")
+        .unwrap_or_else(|_| "mysql://root@127.0.0.1:3306/djinn".to_owned());
+    tracing::info!(url = %url, "embedded: opening database");
+    let db = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
+        url,
+        flavor: MysqlBackendFlavor::Dolt,
+    }))
+    .map_err(|e| format!("open database: {e}"))?;
 
     let state = crate::server::AppState::new(db, cancel.clone());
     state.initialize().await;

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO sessions\n                (id, project_id, task_id, model_id, agent_type, `status`, worktree_path,\n                 created_by_user_id)\n             VALUES (?, ?, ?, ?, ?, 'running', ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "e2afc8d40d12e74909c00f0394eba236a03b5bfe9798b92071b082d3fbdfee13"
+}

@@ -223,24 +223,15 @@ impl NoteRepository {
 
         let sql = executable_lexical_search_sql(&plan);
         // NOTE: dynamic SQL — compile-time check not possible
-        let rows: Vec<(String, f64)> = match self.db.pool_kind() {
-            crate::database::DatabasePool::Sqlite(pool) => {
-                sqlx::query_as(&sql)
-                    .bind(&plan.query)
-                    .bind(project_id)
-                    .bind(limit as i64)
-                    .fetch_all(pool)
-                    .await?
-            }
-            crate::database::DatabasePool::Mysql(pool) => {
-                sqlx::query_as::<sqlx::MySql, _>(&sql)
-                    .bind(&plan.query)
-                    .bind(project_id)
-                    .bind(limit as i64)
-                    .fetch_all(pool)
-                    .await?
-            }
-        };
+        let mut q = sqlx::query_as::<sqlx::MySql, (String, f64)>(&sql);
+        if plan.needs_query_bind() {
+            q = q.bind(&plan.query);
+        }
+        let rows: Vec<(String, f64)> = q
+            .bind(project_id)
+            .bind(limit as i64)
+            .fetch_all(self.db.pool())
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -474,8 +465,11 @@ fn age_days(timestamp: &str, now: std::time::SystemTime) -> f64 {
     };
     let now_unix = duration.as_secs_f64();
 
-    let timestamp = timestamp.trim();
-    let Some((date_part, time_part)) = timestamp.split_once(' ') else {
+    let timestamp = timestamp.trim().trim_end_matches('Z');
+    let Some((date_part, time_part)) = timestamp
+        .split_once(' ')
+        .or_else(|| timestamp.split_once('T'))
+    else {
         return f64::EPSILON;
     };
     let Some((y, m, d)) = parse_ymd(date_part) else {

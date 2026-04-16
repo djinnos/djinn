@@ -102,9 +102,6 @@ pub trait NoteVectorStore: Send + Sync {
 }
 
 #[derive(Debug, Default)]
-pub struct SqliteVecNoteVectorStore;
-
-#[derive(Debug, Default)]
 pub struct NoopNoteVectorStore;
 
 #[derive(Clone, Debug)]
@@ -364,106 +361,6 @@ async fn delete_embedding_metadata(repo: &NoteRepository, note_id: &str) -> Resu
     .await?;
     tx.commit().await?;
     Ok(())
-}
-
-#[async_trait::async_trait]
-impl NoteVectorStore for SqliteVecNoteVectorStore {
-    fn backend(&self) -> NoteVectorBackend {
-        NoteVectorBackend::SqliteVec
-    }
-
-    async fn can_index(&self, repo: &NoteRepository) -> Result<bool> {
-        Ok(repo.db.sqlite_vec_status().await?.available)
-    }
-
-    async fn upsert_embedding(
-        &self,
-        repo: &NoteRepository,
-        input: UpsertNoteEmbedding<'_>,
-    ) -> Result<NoteEmbeddingRecord> {
-        let status = repo.db.sqlite_vec_status().await?;
-        let record = upsert_embedding_metadata(
-            repo,
-            UpsertNoteEmbedding {
-                note_id: input.note_id,
-                content_hash: input.content_hash,
-                model_version: input.model_version,
-                embedding: input.embedding,
-                branch: input.branch,
-            },
-            if status.available { "ready" } else { "pending" },
-        )
-        .await?;
-
-        if status.available {
-            let mut tx = repo.db.pool().begin().await?;
-            // NOTE: SQLite-only vss table (note_embeddings_vec) — compile-time check not possible against MySQL
-            sqlx::query("DELETE FROM note_embeddings_vec WHERE note_id = ?1")
-                .bind(input.note_id)
-                .execute(&mut *tx)
-                .await?;
-            // NOTE: SQLite-only vss table (note_embeddings_vec) — compile-time check not possible against MySQL
-            sqlx::query("INSERT INTO note_embeddings_vec (note_id, embedding) VALUES (?1, ?2)")
-                .bind(input.note_id)
-                .bind(embedding_to_blob(input.embedding))
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-        }
-
-        Ok(record)
-    }
-
-    async fn delete_embedding(&self, repo: &NoteRepository, note_id: &str) -> Result<()> {
-        let status = repo.db.sqlite_vec_status().await?;
-        if status.available {
-            // NOTE: SQLite-only vss table (note_embeddings_vec) — compile-time check not possible against MySQL
-            sqlx::query("DELETE FROM note_embeddings_vec WHERE note_id = ?1")
-                .bind(note_id)
-                .execute(repo.db.pool())
-                .await?;
-        }
-        delete_embedding_metadata(repo, note_id).await
-    }
-
-    async fn query_similar_embeddings(
-        &self,
-        repo: &NoteRepository,
-        query_embedding: &[f32],
-        query: EmbeddingQueryContext<'_>,
-        limit: usize,
-    ) -> Result<Vec<NoteEmbeddingMatch>> {
-        let status = repo.db.sqlite_vec_status().await?;
-        if !status.available {
-            return Ok(vec![]);
-        }
-
-        let limit = i64::try_from(limit)
-            .map_err(|_| Error::InvalidData("embedding query limit exceeds i64".to_owned()))?;
-        let branches = embedding_query_branches(query.branch);
-        let placeholders = std::iter::repeat_n("?", branches.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT v.note_id, v.distance
-             FROM note_embeddings_vec v
-             JOIN note_embedding_meta m ON m.note_id = v.note_id
-             WHERE v.embedding MATCH ?1 AND v.k = ?2
-               AND m.branch IN ({placeholders})",
-        );
-        let mut rows_query = sqlx::query_as::<_, (String, f64)>(&sql)
-            .bind(embedding_to_blob(query_embedding))
-            .bind(limit);
-        for branch in &branches {
-            rows_query = rows_query.bind(branch);
-        }
-        let rows = rows_query.fetch_all(repo.db.pool()).await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|(note_id, distance)| NoteEmbeddingMatch { note_id, distance })
-            .collect())
-    }
 }
 
 #[async_trait::async_trait]

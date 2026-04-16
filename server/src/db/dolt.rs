@@ -101,9 +101,7 @@ fn parse_port(value: &str) -> Result<u16, DoltRuntimeError> {
 pub fn ensure_dolt_runtime_for_connect_config(
     connect: &DatabaseConnectConfig,
 ) -> Result<Option<DoltSqlServerAvailability>, DoltRuntimeError> {
-    let DatabaseConnectConfig::Mysql(mysql) = connect else {
-        return Ok(None);
-    };
+    let DatabaseConnectConfig::Mysql(mysql) = connect;
     if mysql.flavor != MysqlBackendFlavor::Dolt {
         return Ok(None);
     }

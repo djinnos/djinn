@@ -14,6 +14,40 @@ pub struct CachedRepoMap {
     pub created_at: String,
 }
 
+/// Internal row shape that mirrors the MySQL/Dolt schema (non-null worktree_path).
+#[derive(Debug, sqlx::FromRow)]
+struct CachedRepoMapRow {
+    project_id: String,
+    project_path: String,
+    worktree_path: String,
+    commit_sha: String,
+    rendered_map: String,
+    token_estimate: i64,
+    included_entries: i64,
+    graph_artifact: Option<String>,
+    created_at: String,
+}
+
+impl From<CachedRepoMapRow> for CachedRepoMap {
+    fn from(row: CachedRepoMapRow) -> Self {
+        CachedRepoMap {
+            project_id: row.project_id,
+            project_path: row.project_path,
+            worktree_path: if row.worktree_path.is_empty() {
+                None
+            } else {
+                Some(row.worktree_path)
+            },
+            commit_sha: row.commit_sha,
+            rendered_map: row.rendered_map,
+            token_estimate: row.token_estimate,
+            included_entries: row.included_entries,
+            graph_artifact: row.graph_artifact,
+            created_at: row.created_at,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoMapCacheKey<'a> {
     pub project_id: &'a str,
@@ -42,22 +76,28 @@ impl RepoMapCacheRepository {
 
     pub async fn get(&self, key: RepoMapCacheKey<'_>) -> Result<Option<CachedRepoMap>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            CachedRepoMap,
-            r#"SELECT project_id, project_path, worktree_path AS "worktree_path: Option<String>", commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
+        // `worktree_path` is stored as a non-null VARCHAR on MySQL/Dolt where
+        // the empty string `""` encodes "no worktree" (NULL would break the
+        // PK on (project_id, project_path, worktree_path, commit_sha)). The
+        // Rust API keeps `Option<String>` for ergonomics so we normalize on
+        // the way in and on the way out.
+        let worktree_param = key.worktree_path.unwrap_or("");
+        let row = sqlx::query_as!(
+            CachedRepoMapRow,
+            r#"SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
              FROM repo_map_cache
              WHERE project_id = ?
                AND project_path = ?
-               AND ((worktree_path IS NULL AND ? IS NULL) OR worktree_path = ?)
+               AND worktree_path = ?
                AND commit_sha = ?"#,
             key.project_id,
             key.project_path,
-            key.worktree_path,
-            key.worktree_path,
+            worktree_param,
             key.commit_sha,
         )
         .fetch_optional(self.db.pool())
-        .await?)
+        .await?;
+        Ok(row.map(CachedRepoMap::from))
     }
 
     pub async fn get_by_commit_prefer_canonical(
@@ -67,25 +107,31 @@ impl RepoMapCacheRepository {
         commit_sha: &str,
     ) -> Result<Option<CachedRepoMap>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            CachedRepoMap,
-            r#"SELECT project_id, project_path, worktree_path AS "worktree_path: Option<String>", commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
+        let row = sqlx::query_as!(
+            CachedRepoMapRow,
+            // Canonical entries use `worktree_path = ''`; worktree-scoped
+            // entries use a non-empty path. Prefer canonical first.
+            r#"SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
              FROM repo_map_cache
              WHERE project_id = ?
                AND project_path = ?
                AND commit_sha = ?
-             ORDER BY CASE WHEN worktree_path IS NULL THEN 0 ELSE 1 END, created_at DESC
+             ORDER BY CASE WHEN worktree_path = '' THEN 0 ELSE 1 END, created_at DESC
              LIMIT 1"#,
             project_id,
             project_path,
             commit_sha,
         )
         .fetch_optional(self.db.pool())
-        .await?)
+        .await?;
+        Ok(row.map(CachedRepoMap::from))
     }
 
     pub async fn insert(&self, entry: RepoMapCacheInsert<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
+        // `worktree_path` is part of the PK and NOT NULL on MySQL/Dolt; we
+        // use the empty string as the canonical-entry sentinel.
+        let worktree_param = entry.key.worktree_path.unwrap_or("");
         sqlx::query!(
             "INSERT INTO repo_map_cache (
                 project_id,
@@ -104,7 +150,7 @@ impl RepoMapCacheRepository {
                 graph_artifact=VALUES(graph_artifact)",
             entry.key.project_id,
             entry.key.project_path,
-            entry.key.worktree_path,
+            worktree_param,
             entry.key.commit_sha,
             entry.rendered_map,
             entry.token_estimate,

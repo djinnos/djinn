@@ -277,8 +277,11 @@ fn age_days_from_timestamp(value: &str, now: SystemTime) -> f64 {
     };
     let now_unix = duration.as_secs_f64();
 
-    let value = value.trim();
-    let Some((date_part, time_part)) = value.split_once(' ') else {
+    let value = value.trim().trim_end_matches('Z');
+    let Some((date_part, time_part)) = value
+        .split_once(' ')
+        .or_else(|| value.split_once('T'))
+    else {
         return f64::EPSILON;
     };
     let Some((y, m, d)) = parse_ymd(date_part) else {

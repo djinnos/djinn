@@ -56,9 +56,13 @@ export interface AgentModelEntry {
 function ModelPicker({
   availableModels,
   onSelect,
+  variant,
+  label = "Add Model",
 }: {
   availableModels: ProviderModel[];
   onSelect: (model: ProviderModel) => void;
+  variant?: "default" | "outline" | "ghost" | "secondary";
+  label?: string;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -80,9 +84,9 @@ function ModelPicker({
   return (
     <ModelSelector open={open} onOpenChange={setOpen}>
       <ModelSelectorTrigger
-        render={<Button />}
+        render={<Button variant={variant} size="sm" />}
       >
-        Add Model
+        {label}
       </ModelSelectorTrigger>
 
       <ModelSelectorContent title="Add a model">
@@ -294,11 +298,13 @@ export function AgentConfig({
         <div className="py-8 text-center text-sm text-muted-foreground">Loading...</div>
       ) : (
         <>
-          {hideHeader && (
-            <ModelPicker
-              availableModels={availableModels}
-              onSelect={(m) => onAddModel({ model: stripProviderPrefix(m.id), provider: m.provider_id ?? m.provider ?? "unknown" })}
-            />
+          {hideHeader && models.length === 0 && (
+            <div className="flex justify-center">
+              <ModelPicker
+                availableModels={availableModels}
+                onSelect={(m) => onAddModel({ model: stripProviderPrefix(m.id), provider: m.provider_id ?? m.provider ?? "unknown" })}
+              />
+            </div>
           )}
 
           {models.length === 0 ? (
@@ -326,6 +332,17 @@ export function AgentConfig({
                 />
               ))}
             </Reorder.Group>
+          )}
+
+          {hideHeader && models.length > 0 && (
+            <div className="flex justify-center pt-1">
+              <ModelPicker
+                availableModels={availableModels}
+                onSelect={(m) => onAddModel({ model: stripProviderPrefix(m.id), provider: m.provider_id ?? m.provider ?? "unknown" })}
+                variant="ghost"
+                label="+ Add another"
+              />
+            </div>
           )}
         </>
       )}

@@ -84,9 +84,31 @@ mod tests {
         VerificationCacheRepository::new(db)
     }
 
+    /// Create the project rows referenced by `verification_cache.project_id`.
+    /// The cache table carries a FK to `projects` on MySQL/Dolt, so inserting
+    /// a cache row for "p1"/"p2" without the parent row is a constraint
+    /// violation (SQLite quietly allowed it in the previous backend).
+    async fn seed_projects(db: &Database, ids: &[&str]) {
+        db.ensure_initialized().await.unwrap();
+        for id in ids {
+            let path = format!("/tmp/verif-cache-{id}");
+            sqlx::query!(
+                "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+                id,
+                id,
+                path,
+                "[]",
+            )
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn insert_and_get_round_trip() {
         let repo = test_repo().await;
+        seed_projects(&repo.db, &["p1"]).await;
         repo.insert("p1", "abc123", "[{\"ok\":true}]", 42)
             .await
             .expect("insert");
@@ -107,6 +129,7 @@ mod tests {
     #[tokio::test]
     async fn invalidate_project_deletes_only_project_rows() {
         let repo = test_repo().await;
+        seed_projects(&repo.db, &["p1", "p2"]).await;
         repo.insert("p1", "a1", "[]", 10).await.expect("insert p1");
         repo.insert("p1", "a2", "[]", 20).await.expect("insert p1");
         repo.insert("p2", "b1", "[]", 30).await.expect("insert p2");
@@ -121,6 +144,7 @@ mod tests {
     #[tokio::test]
     async fn prune_older_than_deletes_old_rows() {
         let repo = test_repo().await;
+        seed_projects(&repo.db, &["p1"]).await;
 
         repo.insert("p1", "old", "[]", 1).await.expect("insert old");
         sqlx::query!(

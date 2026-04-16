@@ -72,7 +72,14 @@ async function connectClient(forceReconnect = false): Promise<Client> {
     }
 
     const client = new Client({ name: "djinn-desktop", version: "0.1.0" });
-    const transport = new StreamableHTTPClientTransport(new URL(url));
+    const transport = new StreamableHTTPClientTransport(new URL(url), {
+      // Required so the browser attaches the `djinn_session` cookie on
+      // cross-origin POSTs (browser on :1420, server on :8372). Without
+      // this, tools that need the user's GitHub OAuth token — like
+      // github_app_installations — see no session and return
+      // "sign in required".
+      requestInit: { credentials: "include" },
+    });
     await client.connect(transport);
 
     activeClient = client;

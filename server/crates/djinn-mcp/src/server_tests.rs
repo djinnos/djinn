@@ -479,4 +479,71 @@ mod tests {
                 .exists()
         );
     }
+
+    /// Parity check between the two MCP dispatch paths (see
+    /// `dispatch.rs` vs the `#[tool_router]`-generated router).
+    ///
+    /// rmcp 0.16's `ToolRouter::call` needs a `Peer<RoleServer>` whose
+    /// constructor is `pub(crate)`, so we can't invoke the router directly
+    /// from our HTTP handler. Instead, we keep a hand-written match in
+    /// `dispatch_tool` — which historically drifts out of sync every time
+    /// someone adds a `#[tool]` and forgets the arm (users then see
+    /// runtime "unknown MCP tool" errors).
+    ///
+    /// This test fails CI the moment a tool is added to the router but
+    /// not to `dispatch_tool`. It doesn't care whether the tool actually
+    /// executes — an arg-decode failure or a real runtime error means
+    /// the match found the arm, which is all we need to prove parity.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_registered_tool_has_a_dispatch_arm() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db);
+        let server = DjinnMcpServer::new(state);
+
+        let tool_names: Vec<String> = server
+            .all_tool_schemas()
+            .into_iter()
+            .filter_map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        assert!(
+            !tool_names.is_empty(),
+            "tool_router returned zero tools — check rmcp wiring"
+        );
+
+        let mut missing: Vec<String> = Vec::new();
+        for name in &tool_names {
+            // Empty args — we only care whether the dispatcher's match
+            // recognizes the name, not whether the tool actually runs.
+            // Run in a spawned task so a tool panicking on unrelated state
+            // (e.g. "mysql pool requested from sqlite runtime") is caught
+            // as a JoinError rather than failing the whole test. Any
+            // panic means the arm exists; we only fail on the specific
+            // "unknown MCP tool" error.
+            let server = server.clone();
+            let name_clone = name.clone();
+            let handle = tokio::spawn(async move {
+                server.dispatch_tool(&name_clone, json!({})).await
+            });
+            match handle.await {
+                Ok(Ok(_)) => {}           // arm exists, tool ran
+                Ok(Err(msg)) if msg.starts_with(&format!("unknown MCP tool: '{name}'")) => {
+                    missing.push(name.clone());
+                }
+                Ok(Err(_)) => {}          // arm exists, tool failed for other reasons
+                Err(e) if e.is_panic() => {} // arm exists, tool panicked (unrelated state)
+                Err(e) => panic!("spawned task failed for {name}: {e}"),
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "tools registered via #[tool] but missing from dispatch_tool match in dispatch.rs: {missing:#?}\n\
+             Add a match arm for each in server/crates/djinn-mcp/src/dispatch.rs"
+        );
+    }
 }

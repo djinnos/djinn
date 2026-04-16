@@ -25,27 +25,72 @@ pub struct LexicalSearchPlan {
     pub replacement_notes: Vec<&'static str>,
 }
 
+impl LexicalSearchPlan {
+    /// Whether the caller must bind `query` as the first positional parameter
+    /// when executing the SQL returned by [`executable_lexical_search_sql`].
+    ///
+    /// For `MysqlFulltext` the query is inlined as a SQL literal (see the
+    /// Dolt workaround comment in `executable_lexical_search_sql`), so callers
+    /// must skip the first bind.
+    pub fn needs_query_bind(&self) -> bool {
+        matches!(self.backend, LexicalSearchBackend::SqliteFts5)
+    }
+}
+
 pub fn executable_lexical_search_sql(plan: &LexicalSearchPlan) -> String {
     match plan.backend {
         LexicalSearchBackend::SqliteFts5 => plan.sql.clone(),
         LexicalSearchBackend::MysqlFulltext => {
-            let mut normalized = String::with_capacity(plan.sql.len());
+            // Dolt's MySQL wire protocol currently fails to bind a prepared
+            // parameter inside MATCH(...) AGAINST (?), returning
+            // "MySQLToType failed: unsupported type" for the column metadata.
+            // As a workaround we inline the (already sanitized) query string
+            // as a SQL literal at the `?1` positions, and emit `?` for all
+            // other positional placeholders (`?2`, `?3`, ...). Callers bind
+            // the remaining parameters in order but skip the query literal.
+            //
+            // Safety: `plan.query` is produced by `sanitize_mysql_boolean_query`,
+            // which only emits characters from the set [A-Za-z0-9_ +*] — none
+            // of which require SQL-level escaping inside a double-quoted
+            // string literal. We still escape `"` and `\` defensively.
+            let literal = mysql_string_literal(&plan.query);
+
+            let mut out = String::with_capacity(plan.sql.len());
             let mut chars = plan.sql.chars().peekable();
 
             while let Some(ch) = chars.next() {
                 if ch == '?' {
-                    normalized.push('?');
+                    let mut digits = String::new();
                     while matches!(chars.peek(), Some(next) if next.is_ascii_digit()) {
-                        chars.next();
+                        digits.push(chars.next().unwrap());
+                    }
+                    if digits == "1" {
+                        out.push_str(&literal);
+                    } else {
+                        out.push('?');
                     }
                 } else {
-                    normalized.push(ch);
+                    out.push(ch);
                 }
             }
 
-            normalized
+            out
         }
     }
+}
+
+fn mysql_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub fn normalize_lexical_score(plan: &LexicalSearchPlan, raw_score: f64) -> f64 {
@@ -193,49 +238,53 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Ranked) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE) AS fulltext_score\nFROM notes n\nWHERE n.project_id = ?2\n  AND (?3 = '' OR n.folder = ?3)\n  AND (?4 = '' OR n.note_type = ?4)\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT ?5".to_owned(),
+            sql: "SELECT n.id, CAST(MATCH(n.title, n.content, n.tags) AGAINST (?1) AS DOUBLE) AS fulltext_score\nFROM notes n\nWHERE n.project_id = ?2\n  AND (?3 = '' OR n.folder = ?3)\n  AND (?4 = '' OR n.note_type = ?4)\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT ?5".to_owned(),
             query,
             score_alias: "fulltext_score",
             score_descending: true,
             replacement_notes: vec![
                 "Runs directly against notes instead of a shadow notes_fts table.",
                 "Assumes FULLTEXT INDEX notes_ft (title, content, tags) exists.",
+                "Uses natural language mode (Dolt does not yet support IN BOOLEAN MODE).",
             ],
         },
         (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Dedup) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE) AS score\nFROM notes n\nWHERE n.project_id = ?2\n  AND n.folder = ?3\n  AND n.note_type = ?4\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE) > ?5\nORDER BY score DESC, n.id ASC\nLIMIT ?6".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       CAST(MATCH(n.title, n.content, n.tags) AGAINST (?1) AS DOUBLE) AS score\nFROM notes n\nWHERE n.project_id = ?2\n  AND n.folder = ?3\n  AND n.note_type = ?4\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1) > ?5\nORDER BY score DESC, n.id ASC\nLIMIT ?6".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
             replacement_notes: vec![
                 "Dedup no longer depends on bm25 sign inversion.",
                 "Threshold placeholder remains required but must be recalibrated for MATCH() scores.",
+                "Uses natural language mode (Dolt does not yet support IN BOOLEAN MODE).",
             ],
         },
         (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Contradiction) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE) AS score\nFROM notes n\nWHERE n.id != ?2\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE) > ?3\nORDER BY score DESC, n.id ASC\nLIMIT 3".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       CAST(MATCH(n.title, n.content, n.tags) AGAINST (?1) AS DOUBLE) AS score\nFROM notes n\nWHERE n.id != ?2\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1) > ?3\nORDER BY score DESC, n.id ASC\nLIMIT 3".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
             replacement_notes: vec![
                 "Contradiction search retains the same top-3 contract for downstream TypeRisk filtering.",
                 "Threshold must be retuned because MATCH() score distributions differ from FTS5.",
+                "Uses natural language mode (Dolt does not yet support IN BOOLEAN MODE).",
             ],
         },
         (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Discovery) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE) AS fulltext_score\nFROM notes n\nWHERE n.project_id = ?2\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT ?3".to_owned(),
+            sql: "SELECT n.id, CAST(MATCH(n.title, n.content, n.tags) AGAINST (?1) AS DOUBLE) AS fulltext_score\nFROM notes n\nWHERE n.project_id = ?2\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT ?3".to_owned(),
             query,
             score_alias: "fulltext_score",
             score_descending: true,
             replacement_notes: vec![
                 "Discovery remains lexical candidate generation for the RRF pipeline.",
                 "No shadow table or trigger maintenance is required on MySQL/Dolt.",
+                "Uses natural language mode (Dolt does not yet support IN BOOLEAN MODE).",
             ],
         },
     }))
@@ -282,8 +331,10 @@ mod tests {
 
         assert!(
             plan.sql
-                .contains("MATCH(n.title, n.content, n.tags) AGAINST (?1 IN BOOLEAN MODE)")
+                .contains("MATCH(n.title, n.content, n.tags) AGAINST (?1)")
         );
+        assert!(plan.sql.contains("CAST("));
+        assert!(!plan.sql.contains("IN BOOLEAN MODE"));
         assert!(!plan.sql.contains("notes_fts"));
         assert_eq!(plan.query, "+rust* +sqlite*");
         assert!(plan.score_descending);
@@ -324,9 +375,13 @@ mod tests {
         .unwrap();
 
         let sql = executable_lexical_search_sql(&plan);
-        assert!(sql.contains("AGAINST (? IN BOOLEAN MODE)"));
+        // `?1` positions are replaced with the sanitized query literal
+        // (Dolt workaround: prepared MATCH AGAINST bindings are unsupported).
+        assert!(sql.contains("AGAINST (\"+rust* +sqlite*\")"));
+        assert!(!sql.contains("IN BOOLEAN MODE"));
         assert!(!sql.contains("?1"));
         assert!(!sql.contains("?2"));
+        assert!(!plan.needs_query_bind());
     }
 
     #[test]

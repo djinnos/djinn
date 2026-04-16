@@ -1,0 +1,184 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT\n                 s.token               AS s_token,\n                 s.user_id             AS s_user_id,\n                 s.github_login        AS s_github_login,\n                 s.github_name         AS s_github_name,\n                 s.github_avatar_url   AS s_github_avatar_url,\n                 s.github_access_token AS s_github_access_token,\n                 s.created_at          AS s_created_at,\n                 s.expires_at          AS s_expires_at,\n                 s.user_fk             AS s_user_fk,\n                 u.id                  AS u_id,\n                 u.github_id           AS u_github_id,\n                 u.github_login        AS u_github_login,\n                 u.github_name         AS u_github_name,\n                 u.github_avatar_url   AS u_github_avatar_url,\n                 u.is_member_of_org    AS `u_is_member_of_org!: bool`,\n                 u.last_seen_at        AS u_last_seen_at,\n                 u.created_at          AS u_created_at\n               FROM user_auth_sessions s\n               INNER JOIN users u ON u.id = s.user_fk\n               WHERE s.token = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s_token",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "s_user_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "s_github_login",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "s_github_name",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "s_github_avatar_url",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "s_github_access_token",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "s_created_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "s_expires_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "s_user_fk",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "u_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "u_github_id",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "u_github_login",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "u_github_name",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "u_github_avatar_url",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "u_is_member_of_org!: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "u_last_seen_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "u_created_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "5ba9b955653bc3b49c8c202b318e1a93f48c711d79e3d7ac4fbf6a252e4e1ddc"
+}

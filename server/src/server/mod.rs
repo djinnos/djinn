@@ -12,9 +12,11 @@ mod agents;
 mod auth;
 mod chat;
 mod mcp_handler;
+mod org_sync;
 mod project_tools;
 mod state;
 pub use auth::{AuthenticatedUser, authenticate};
+pub use org_sync::{start_org_member_sync, sync_once, SyncReport};
 pub use state::AppState;
 
 /// Build the application router.
@@ -27,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
         .merge(auth::router())
+        .merge(org_sync::router())
         .merge(project_tools::router())
         .layer(cors_layer())
         .with_state(state)

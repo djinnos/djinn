@@ -33,7 +33,8 @@ pub use config::{
     ENV_WEBHOOK_SECRET,
 };
 pub use installations::{
-    Installation, InstallationToken, get_installation_token, list_installations_for_user,
+    Installation, InstallationToken, get_installation_by_id, get_installation_token,
+    list_installations_for_app, list_installations_for_user,
 };
 pub use jwt::{AppJwtError, app_id, mint_app_jwt, private_key_pem};
 

@@ -186,6 +186,132 @@ pub async fn list_installations_for_user(user_token: &str) -> Result<Vec<Install
         .collect())
 }
 
+/// List all installations of this App, globally (as the App itself).
+///
+/// `GET /app/installations` — authenticated with a short-lived App JWT,
+/// no user session required. Returns every account/org that has installed
+/// this App. Appropriate for single-operator self-hosted Djinn, where the
+/// App is the source of truth for reachable targets.
+pub async fn list_installations_for_app() -> Result<Vec<Installation>> {
+    #[derive(Deserialize)]
+    struct RawInstallation {
+        id: u64,
+        account: Option<RawAccount>,
+        #[serde(default)]
+        target_type: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct RawAccount {
+        login: Option<String>,
+        #[serde(rename = "type", default)]
+        account_type: Option<String>,
+    }
+
+    let jwt = mint_app_jwt_anyhow()?;
+    let client = Client::new();
+    let resp = client
+        .get(format!("{GITHUB_API}/app/installations"))
+        .bearer_auth(jwt)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await
+        .map_err(|e| anyhow!("list app installations request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("/app/installations failed ({status}): {body}"));
+    }
+
+    let parsed: Vec<RawInstallation> = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("failed to decode /app/installations: {e}"))?;
+
+    Ok(parsed
+        .into_iter()
+        .map(|raw| {
+            let (login, acct_type) = match raw.account {
+                Some(a) => (
+                    a.login.unwrap_or_default(),
+                    a.account_type.unwrap_or_else(|| "User".into()),
+                ),
+                None => (String::new(), "User".into()),
+            };
+            let target_type = raw.target_type.clone().unwrap_or_else(|| acct_type.clone());
+            Installation {
+                id: raw.id,
+                account_login: login,
+                account_type: acct_type,
+                target_type,
+            }
+        })
+        .collect())
+}
+
+/// Fetch a single installation by numeric id, authenticated as the App.
+///
+/// `GET /app/installations/{installation_id}` — used when the deployment is
+/// bound to exactly one installation (via `org_config`) and we want to
+/// return just that installation's metadata instead of listing all of them.
+pub async fn get_installation_by_id(installation_id: u64) -> Result<Installation> {
+    #[derive(Deserialize)]
+    struct RawInstallation {
+        id: u64,
+        account: Option<RawAccount>,
+        #[serde(default)]
+        target_type: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct RawAccount {
+        login: Option<String>,
+        #[serde(rename = "type", default)]
+        account_type: Option<String>,
+    }
+
+    let jwt = mint_app_jwt_anyhow()?;
+    let client = Client::new();
+    let resp = client
+        .get(format!("{GITHUB_API}/app/installations/{installation_id}"))
+        .bearer_auth(jwt)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await
+        .map_err(|e| anyhow!("get installation request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "/app/installations/{installation_id} failed ({status}): {body}"
+        ));
+    }
+
+    let raw: RawInstallation = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("failed to decode /app/installations/{installation_id}: {e}"))?;
+
+    let (login, acct_type) = match raw.account {
+        Some(a) => (
+            a.login.unwrap_or_default(),
+            a.account_type.unwrap_or_else(|| "User".into()),
+        ),
+        None => (String::new(), "User".into()),
+    };
+    let target_type = raw.target_type.clone().unwrap_or_else(|| acct_type.clone());
+    Ok(Installation {
+        id: raw.id,
+        account_login: login,
+        account_type: acct_type,
+        target_type,
+    })
+}
+
 /// Exchange an App JWT for an installation access token.
 ///
 /// `POST /app/installations/{installation_id}/access_tokens`.

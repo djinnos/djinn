@@ -1071,11 +1071,9 @@ dependencies = [
  "libc",
  "qdrant-client",
  "ring",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
- "sqlite-vec",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -1201,13 +1199,11 @@ dependencies = [
  "petgraph",
  "proptest",
  "protobuf",
- "refinery",
  "regex",
  "reqwest 0.13.2",
  "ring",
  "rmcp",
  "rstest",
- "rusqlite",
  "schemars",
  "scip",
  "serde",
@@ -3754,16 +3750,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "refinery"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52c427f2572afe5c6cbfa2b1bf40071c89bf1a8539e958ea582842f6f38dcfae"
-dependencies = [
- "refinery-core",
- "refinery-macros",
-]
-
-[[package]]
 name = "refinery-core"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3781,19 +3767,6 @@ dependencies = [
  "toml",
  "url",
  "walkdir",
-]
-
-[[package]]
-name = "refinery-macros"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5145756cdf293b5089dc6b4f103f1a1229cc55d67082c866f8c8289531c4b983"
-dependencies = [
- "proc-macro2",
- "quote",
- "refinery-core",
- "regex",
- "syn",
 ]
 
 [[package]]
@@ -4544,15 +4517,6 @@ dependencies = [
  "nom",
  "serde",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "sqlite-vec"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0ba424237a9a5db2f6071f193319e2b6a32f7f3961debb2fbbfe67067abce3f"
-dependencies = [
- "cc",
 ]
 
 [[package]]

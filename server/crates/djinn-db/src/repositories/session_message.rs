@@ -221,8 +221,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, memory_refs)
-             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
             task_id,
             epic.project_id,
             short_id,

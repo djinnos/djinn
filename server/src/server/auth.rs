@@ -47,8 +47,12 @@ use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
-use djinn_db::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord};
+use djinn_db::{
+    CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository,
+    UserAuthSessionRecord, UserRepository,
+};
 use djinn_provider::github_app::AppConfig as GhAppConfig;
+use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
 use djinn_provider::repos::credential::CredentialRepository;
 use std::sync::Arc;
 
@@ -80,6 +84,7 @@ pub(super) fn router() -> Router<AppState> {
             get(app_manifest_callback),
         )
         .route("/auth/logout", post(logout))
+        .route("/setup/status", get(setup_status))
 }
 
 #[derive(Serialize)]
@@ -194,21 +199,80 @@ struct MeResponse {
     login: String,
     name: Option<String>,
     avatar_url: Option<String>,
+    /// GitHub org this deployment is locked to. Surfaced so the web client can
+    /// show "signed in as <login> on <org>" without a second round-trip.
+    /// `None` when the deployment hasn't finished the manifest flow yet.
+    org_login: Option<String>,
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    // Phase 2: prefer the session→users join so we surface the stable
+    // `users.id` surrogate and pick up any renamed login/avatar from GitHub
+    // the next time `upsert_from_github` ran.
+    let Some(token) = extract_cookie(&headers, SESSION_COOKIE) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let sessions = SessionAuthRepository::new(state.db().clone());
+
+    // Try the join path first. If the row has no `user_fk` (legacy Phase 1
+    // session), fall back to the flat fetch so we don't break already-signed-in
+    // browsers during the rollout.
+    match sessions.get_by_token_with_user(&token).await {
+        Ok(Some((session, user))) => {
+            if session_expired(&session.expires_at) {
+                let _ = sessions.delete_by_token(&token).await;
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            let org_login = org_login_for_response(&state).await;
+            return Json(MeResponse {
+                id: user.id,
+                login: user.github_login,
+                name: user.github_name,
+                avatar_url: user.github_avatar_url,
+                org_login,
+            })
+            .into_response();
+        }
+        Ok(None) => {
+            // Either unknown token or legacy (user_fk IS NULL). Fall through.
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "auth /me: db error on joined fetch");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
     match authenticate(&state, &headers).await {
-        Ok(Some(user)) => Json(MeResponse {
-            id: user.id,
-            login: user.login,
-            name: user.name,
-            avatar_url: user.avatar_url,
-        })
-        .into_response(),
+        Ok(Some(user)) => {
+            let org_login = org_login_for_response(&state).await;
+            Json(MeResponse {
+                id: user.id,
+                login: user.login,
+                name: user.name,
+                avatar_url: user.avatar_url,
+                org_login,
+            })
+            .into_response()
+        }
         Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
         Err(e) => {
             tracing::error!(error = %e, "auth /me: db error");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Best-effort read of `org_config.github_org_login`. Errors are logged and
+/// swallowed — we'd rather surface the user identity with `org_login: null`
+/// than 500 the `/auth/me` endpoint over a transient DB blip.
+async fn org_login_for_response(state: &AppState) -> Option<String> {
+    let repo = OrgConfigRepository::new(state.db().clone());
+    match repo.get().await {
+        Ok(Some(cfg)) => Some(cfg.github_org_login),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "auth /me: org_config lookup failed");
+            None
         }
     }
 }
@@ -281,6 +345,11 @@ async fn github_start(State(state): State<AppState>, Query(q): Query<StartQuery>
 struct CallbackQuery {
     code: Option<String>,
     state: Option<String>,
+    /// Present when GitHub redirects here after an App *install* (because
+    /// the App has no explicit `setup_url`). We recognise it and bounce
+    /// the user to the web app — no OAuth exchange, no session creation.
+    installation_id: Option<String>,
+    setup_action: Option<String>,
 }
 
 async fn github_callback(
@@ -288,6 +357,20 @@ async fn github_callback(
     Query(q): Query<CallbackQuery>,
     headers: HeaderMap,
 ) -> Response {
+    // Install-completion redirect (no OAuth state, just ?installation_id=X&setup_action=install).
+    // Happens when the manifest doesn't set setup_url and GitHub falls back
+    // to the callback URL. Harmless — already authenticated earlier in the
+    // flow, so just send the user home.
+    if q.installation_id.is_some() && q.setup_action.as_deref() == Some("install") {
+        let mut resp_headers = HeaderMap::new();
+        let target = format!("{}/", web_url().trim_end_matches('/'));
+        resp_headers.insert(
+            header::LOCATION,
+            HeaderValue::from_str(&target).unwrap_or_else(|_| HeaderValue::from_static("/")),
+        );
+        return (StatusCode::FOUND, resp_headers).into_response();
+    }
+
     let (code, state_param) = match (q.code, q.state) {
         (Some(c), Some(s)) if !c.is_empty() && !s.is_empty() => (c, s),
         _ => return (StatusCode::BAD_REQUEST, "missing code or state").into_response(),
@@ -350,20 +433,98 @@ async fn github_callback(
         }
     };
 
-    // 3. Persist a new session row.
+    // 3. Phase 2: enforce "one deployment = one GitHub org". Look up the
+    //    deployment's locked org; if absent the deployment isn't set up.
+    let org_repo = OrgConfigRepository::new(state.db().clone());
+    let org_cfg = match org_repo.get().await {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => {
+            tracing::warn!(
+                "auth callback: rejecting login — deployment has no org_config yet"
+            );
+            return (
+                StatusCode::PRECONDITION_FAILED,
+                "Djinn is not configured yet. The deployment owner must complete \
+                 the GitHub App manifest flow before anyone can sign in.",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "auth callback: org_config read failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    // 4. Verify the signed-in user is an active member of the locked org.
+    //    GitHub's `/user/memberships/orgs/{org}` is authenticated with the
+    //    *user* token we just got; it returns `state: "active"|"pending"` on
+    //    2xx and 404 for non-members. We treat only `state == "active"` as
+    //    a pass; pending invites still count as "not a member".
+    match check_org_membership(&access_token, &org_cfg.github_org_login).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(
+                user = %user.login,
+                org = %org_cfg.github_org_login,
+                "auth callback: rejecting non-member",
+            );
+            let body = format!(
+                "Access denied. This deployment is locked to the GitHub org '{org}', \
+                 and the GitHub account '{login}' is not an active member.",
+                org = org_cfg.github_org_login,
+                login = user.login,
+            );
+            return (StatusCode::FORBIDDEN, body).into_response();
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                org = %org_cfg.github_org_login,
+                "auth callback: membership check failed",
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                "failed to verify GitHub org membership",
+            )
+                .into_response();
+        }
+    }
+
+    // 5. Upsert the persistent `users` row → stable surrogate `users.id`.
+    let users_repo = UserRepository::new(state.db().clone());
+    let user_row = match users_repo
+        .upsert_from_github(
+            user.id as i64,
+            &user.login,
+            user.name.as_deref(),
+            user.avatar_url.as_deref(),
+        )
+        .await
+    {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!(error = %e, "auth callback: users upsert failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    // 6. Persist a new session row, linked to the users table via `user_fk`.
     let token = random_token_b64();
     let expires_at = rfc3339_in(SESSION_TTL_SECS);
     let repo = SessionAuthRepository::new(state.db().clone());
     if let Err(e) = repo
-        .create(CreateUserAuthSession {
-            token: &token,
-            user_id: &user.id.to_string(),
-            github_login: &user.login,
-            github_name: user.name.as_deref(),
-            github_avatar_url: user.avatar_url.as_deref(),
-            github_access_token: &access_token,
-            expires_at: &expires_at,
-        })
+        .create_with_user_fk(
+            CreateUserAuthSession {
+                token: &token,
+                user_id: &user.id.to_string(),
+                github_login: &user.login,
+                github_name: user.name.as_deref(),
+                github_avatar_url: user.avatar_url.as_deref(),
+                github_access_token: &access_token,
+                expires_at: &expires_at,
+            },
+            &user_row.id,
+        )
         .await
     {
         tracing::error!(error = %e, "auth callback: failed to persist session");
@@ -502,6 +663,56 @@ async fn fetch_github_user(access_token: &str) -> Result<GhUser, String> {
         return Err(format!("GitHub /user returned {status}: {body}"));
     }
     resp.json::<GhUser>().await.map_err(|e| e.to_string())
+}
+
+/// Verify `access_token` belongs to an **active** member of `org_login`.
+///
+/// Uses `GET /user/memberships/orgs/{org}`, the endpoint GitHub documents as
+/// the canonical "am I in this org?" probe for user-to-server tokens.
+/// Returns:
+///   * `Ok(true)`  — 200 response with `state == "active"`.
+///   * `Ok(false)` — 404 (the user can't see the org), 403 (e.g. revoked),
+///                   or 200 with `state == "pending"` (invite not yet
+///                   accepted). We intentionally treat pending invites as
+///                   non-members: the deployment policy is "active members
+///                   only". Any other non-success status is surfaced as an
+///                   error so callers can decide whether to 502.
+///   * `Err(_)`    — network or decode failure.
+async fn check_org_membership(access_token: &str, org_login: &str) -> Result<bool, String> {
+    #[derive(Deserialize)]
+    struct Membership {
+        #[serde(default)]
+        state: Option<String>,
+    }
+
+    // Percent-encode the org segment so a weird login can't escape the path.
+    let url = format!(
+        "https://api.github.com/user/memberships/orgs/{}",
+        urlencode(org_login),
+    );
+    let client = Client::new();
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "djinn-server")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status();
+    if status == StatusCode::NOT_FOUND || status == StatusCode::FORBIDDEN {
+        return Ok(false);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "GitHub /user/memberships/orgs/{org_login} returned {status}: {body}"
+        ));
+    }
+    let parsed: Membership = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(parsed.state.as_deref() == Some("active"))
 }
 
 // ─── Cookie + misc helpers ────────────────────────────────────────────────────
@@ -651,11 +862,18 @@ pub(crate) fn build_manifest_json(public_url: &str) -> serde_json::Value {
         "actions": "read",
         "checks": "read",
     });
+    let web = web_url();
+    let web = web.trim_end_matches('/');
     serde_json::json!({
         "name": format!("Djinn ({host})"),
         "url": public_url,
         "redirect_url": format!("{public_url}/auth/github/app-manifest-callback"),
         "callback_urls": [format!("{public_url}/auth/github/callback")],
+        // Where GitHub sends the user after they install the App on an
+        // account/org. Points at the web client so the user lands back in
+        // the app after install.
+        "setup_url": format!("{web}/"),
+        "setup_on_update": false,
         "request_oauth_on_install": true,
         "public": false,
         "default_permissions": permissions,
@@ -672,7 +890,20 @@ fn url_host(s: &str) -> Option<String> {
 
 /// Render an auto-submitting HTML form that POSTs our manifest JSON to
 /// `https://github.com/settings/apps/new?state=<csrf>`.
-async fn create_app_form(State(state): State<AppState>) -> Response {
+#[derive(Deserialize)]
+struct CreateAppQuery {
+    /// Optional GitHub org login. When set, the App is created under the
+    /// org (`github.com/organizations/<org>/settings/apps/new`) so it can
+    /// be installed on that org's repos. Without it, the App is created
+    /// under the signed-in GitHub user and can only be installed on that
+    /// user's personal account.
+    organization: Option<String>,
+}
+
+async fn create_app_form(
+    State(state): State<AppState>,
+    Query(q): Query<CreateAppQuery>,
+) -> Response {
     if state.app_config().await.is_some() {
         return (
             StatusCode::CONFLICT,
@@ -687,17 +918,28 @@ async fn create_app_form(State(state): State<AppState>) -> Response {
     let csrf = random_token_b64();
     let manifest_escaped = html_attr_escape(&manifest_json);
     let csrf_escaped = html_attr_escape(&csrf);
+    let action = match q.organization.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(org) => format!(
+            "https://github.com/organizations/{}/settings/apps/new?state={}",
+            urlencode(org),
+            csrf_escaped
+        ),
+        None => format!(
+            "https://github.com/settings/apps/new?state={}",
+            csrf_escaped
+        ),
+    };
 
     let html = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Create Djinn GitHub App</title></head>\
          <body><p>Redirecting to GitHub to create the Djinn App…</p>\
-         <form id=\"f\" method=\"post\" action=\"https://github.com/settings/apps/new?state={csrf}\">\
+         <form id=\"f\" method=\"post\" action=\"{action}\">\
          <input type=\"hidden\" name=\"manifest\" value=\"{manifest}\" />\
          <noscript><button type=\"submit\">Continue to GitHub</button></noscript>\
          </form>\
          <script>document.getElementById('f').submit();</script>\
          </body></html>",
-        csrf = csrf_escaped,
+        action = action,
         manifest = manifest_escaped,
     );
 
@@ -727,6 +969,23 @@ struct ManifestConversion {
     #[serde(default)]
     webhook_secret: Option<String>,
     pem: String,
+    /// The GitHub account (user or org) under which the App was created. This
+    /// is the account that visited `/settings/apps/new` (for a personal App)
+    /// or `/organizations/<org>/settings/apps/new` (for an org App). Phase 2
+    /// requires `owner.type == "Organization"`.
+    #[serde(default)]
+    owner: Option<ManifestOwner>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct ManifestOwner {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    login: String,
+    /// Either `"User"` or `"Organization"`.
+    #[serde(rename = "type", default)]
+    account_type: String,
 }
 
 async fn app_manifest_callback(
@@ -762,6 +1021,44 @@ async fn app_manifest_callback(
         }
     };
 
+    // Phase 2 invariant: this deployment is pinned to exactly one GitHub
+    // *org*. Reject personal-account installs early — otherwise we'd write
+    // an `org_config` row pointing at a user account and later OAuth logins
+    // would fail the `GET /user/memberships/orgs/<login>` check (that
+    // endpoint only accepts org logins).
+    let owner = match conversion.owner.as_ref() {
+        Some(o) if !o.login.is_empty() => o.clone(),
+        _ => {
+            tracing::error!(
+                "manifest callback: conversion response missing owner; cannot bind deployment"
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                "manifest conversion response did not include owner information",
+            )
+                .into_response();
+        }
+    };
+    if !owner.account_type.eq_ignore_ascii_case("Organization") {
+        tracing::warn!(
+            owner_login = %owner.login,
+            owner_type = %owner.account_type,
+            "manifest callback: rejecting non-org owner",
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "This deployment requires the GitHub App to be owned by an \
+                 organization, but the submitted manifest was created under \
+                 the personal account '{}' (type={}). Re-run the manifest \
+                 flow from the target org's 'Developer settings → GitHub Apps' \
+                 page.",
+                owner.login, owner.account_type,
+            ),
+        )
+            .into_response();
+    }
+
     let cfg = GhAppConfig {
         app_id: conversion.id,
         slug: conversion.slug,
@@ -772,13 +1069,68 @@ async fn app_manifest_callback(
         public_url: public_url(),
     };
 
-    let repo = CredentialRepository::new(state.db().clone(), state.event_bus());
-    if let Err(e) = repo.set_github_app_config(&cfg).await {
+    let cred_repo = CredentialRepository::new(state.db().clone(), state.event_bus());
+    if let Err(e) = cred_repo.set_github_app_config(&cfg).await {
         tracing::error!(error = %e, "manifest callback: failed to persist App config");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    // Mirror creds into env + hot-swap so the JWT minter sees them for the
+    // installation lookup immediately below. This also publishes the creds
+    // to the rest of the process.
     cfg.export_to_env();
-    state.set_app_config(Some(Arc::new(cfg))).await;
+    state.set_app_config(Some(Arc::new(cfg.clone()))).await;
+
+    // Fetch the installation id for this org. At manifest-conversion time,
+    // GitHub has just installed the App on the owning org (via the manifest
+    // install-step dance), so this endpoint is expected to 200. If it 404s
+    // the operator can install and retry, but the deployment is still
+    // half-configured — so we bail loudly instead of writing a sentinel.
+    let installation_id = match fetch_org_installation_id(&owner.login).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(
+                org = %owner.login,
+                error = %e,
+                "manifest callback: failed to fetch org installation id",
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "App credentials were saved, but fetching the installation \
+                     id for org '{}' failed: {}. Install the App on the org \
+                     and retry the manifest flow.",
+                    owner.login, e,
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    // Bind the deployment to this org. `set_once` loudly fails a second call.
+    let org_repo = OrgConfigRepository::new(state.db().clone());
+    if let Err(e) = org_repo
+        .set_once(NewOrgConfig {
+            github_org_id: owner.id,
+            github_org_login: &owner.login,
+            app_id: cfg.app_id as i64,
+            installation_id: installation_id as i64,
+        })
+        .await
+    {
+        // InvalidTransition = already bound to a (possibly different) org.
+        tracing::error!(
+            error = %e,
+            owner = %owner.login,
+            "manifest callback: org_config already set; refusing to rebind",
+        );
+        return (
+            StatusCode::CONFLICT,
+            "This deployment is already bound to a GitHub org. To rebind, \
+             redeploy with a fresh database or remove the row from the \
+             `org_config` table manually and retry.",
+        )
+            .into_response();
+    }
 
     let mut resp_headers = HeaderMap::new();
     clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
@@ -788,6 +1140,42 @@ async fn app_manifest_callback(
         HeaderValue::from_static(location),
     );
     (StatusCode::FOUND, resp_headers).into_response()
+}
+
+/// Look up `GET /orgs/{org}/installation` with a fresh App JWT to discover
+/// this deployment's installation id. Called right after the manifest
+/// conversion so the just-created App's credentials are already in env.
+async fn fetch_org_installation_id(org_login: &str) -> Result<u64, String> {
+    #[derive(Deserialize)]
+    struct InstallationResp {
+        id: u64,
+    }
+
+    let jwt = mint_app_jwt_anyhow().map_err(|e| e.to_string())?;
+    let url = format!(
+        "https://api.github.com/orgs/{}/installation",
+        urlencode(org_login),
+    );
+    let client = Client::new();
+    let resp = client
+        .get(&url)
+        .bearer_auth(&jwt)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "djinn-server")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("{status}: {body}"));
+    }
+    let parsed: InstallationResp = resp
+        .json()
+        .await
+        .map_err(|e| format!("decode /orgs/{org_login}/installation: {e}"))?;
+    Ok(parsed.id)
 }
 
 async fn exchange_manifest_code(code: &str) -> Result<ManifestConversion, String> {
@@ -808,6 +1196,48 @@ async fn exchange_manifest_code(code: &str) -> Result<ManifestConversion, String
     resp.json::<ManifestConversion>()
         .await
         .map_err(|e| format!("manifest conversion decode: {e}"))
+}
+
+// ─── Setup-status endpoint (Phase 2) ──────────────────────────────────────────
+//
+// Public, no-auth endpoint so the web client can gate itself before even
+// prompting the user to sign in. Returns enough information for the UI to
+// decide between "show the big 'Create the GitHub App' button" and "show
+// the usual sign-in flow".
+
+#[derive(Serialize)]
+struct SetupStatusResponse {
+    /// True when either the GitHub App credentials are missing OR the
+    /// singleton `org_config` row hasn't been written. The client treats
+    /// these identically: the operator needs to complete (or re-complete)
+    /// the manifest flow.
+    needs_app_install: bool,
+    /// The org this deployment is locked to, once known. `None` until the
+    /// manifest callback writes `org_config`.
+    org_login: Option<String>,
+}
+
+async fn setup_status(State(state): State<AppState>) -> Json<SetupStatusResponse> {
+    // Read both independently so a DB blip on one doesn't mask the other.
+    let app_cfg = state.app_config().await;
+
+    let org_cfg = {
+        let repo = OrgConfigRepository::new(state.db().clone());
+        match repo.get().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "setup/status: org_config lookup failed");
+                None
+            }
+        }
+    };
+
+    let needs_app_install = app_cfg.is_none() || org_cfg.is_none();
+    let org_login = org_cfg.map(|c| c.github_org_login);
+    Json(SetupStatusResponse {
+        needs_app_install,
+        org_login,
+    })
 }
 
 fn html_attr_escape(s: &str) -> String {
@@ -939,7 +1369,11 @@ mod tests {
         };
         state.set_app_config(Some(Arc::new(cfg))).await;
 
-        let resp = create_app_form(State(state.clone())).await;
+        let resp = create_app_form(
+            State(state.clone()),
+            Query(CreateAppQuery { organization: None }),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
@@ -978,5 +1412,114 @@ mod tests {
         let mut tampered = token.clone().into_bytes();
         tampered[0] ^= 1;
         assert!(!constant_time_eq(token.as_bytes(), &tampered));
+    }
+
+    /// `/setup/status` must be reachable without a session and must report
+    /// `needs_app_install=true` on a fresh deployment.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_status_reports_unconfigured_on_fresh_state() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        let resp = setup_status(State(state)).await;
+        let body = resp.0;
+        assert!(body.needs_app_install);
+        assert!(body.org_login.is_none());
+    }
+
+    /// `/setup/status` flips to `needs_app_install=false` only when BOTH the
+    /// App config and the org_config row are present.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_status_reports_configured_when_both_present() {
+        use crate::test_helpers;
+        use djinn_db::{NewOrgConfig, OrgConfigRepository};
+        let state = test_helpers::test_app_state_in_memory().await;
+
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        OrgConfigRepository::new(state.db().clone())
+            .set_once(NewOrgConfig {
+                github_org_id: 777,
+                github_org_login: "acme",
+                app_id: 1,
+                installation_id: 42,
+            })
+            .await
+            .unwrap();
+
+        let resp = setup_status(State(state)).await;
+        assert!(!resp.0.needs_app_install);
+        assert_eq!(resp.0.org_login.as_deref(), Some("acme"));
+    }
+
+    /// Only one of the two present → still "needs install". Guards against a
+    /// half-written deployment being treated as ready.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_status_half_configured_still_needs_install() {
+        use crate::test_helpers;
+        let state = test_helpers::test_app_state_in_memory().await;
+        // Only app_config; no org_config row.
+        let cfg = djinn_provider::github_app::AppConfig {
+            app_id: 1,
+            slug: "djinn".into(),
+            client_id: "Iv1.x".into(),
+            client_secret: "y".into(),
+            pem: "PEM".into(),
+            webhook_secret: "w".into(),
+            public_url: "http://127.0.0.1:8372".into(),
+        };
+        state.set_app_config(Some(Arc::new(cfg))).await;
+
+        let resp = setup_status(State(state)).await;
+        assert!(resp.0.needs_app_install);
+        assert!(resp.0.org_login.is_none());
+    }
+
+    /// Manifest-conversion payload with `owner.type == "User"` must be
+    /// rejected. We short-circuit the HTTP call out to GitHub by testing the
+    /// decision directly on the parsed struct — the handler shape makes a
+    /// full integration test impractical without a mock server.
+    #[test]
+    fn manifest_conversion_rejects_user_owner() {
+        let raw = r#"{
+            "id": 1,
+            "slug": "djinn",
+            "client_id": "Iv1.x",
+            "client_secret": "y",
+            "pem": "PEM",
+            "owner": { "id": 99, "login": "alice", "type": "User" }
+        }"#;
+        let parsed: ManifestConversion = serde_json::from_str(raw).unwrap();
+        let owner = parsed.owner.expect("owner present");
+        assert_eq!(owner.account_type, "User");
+        assert!(
+            !owner.account_type.eq_ignore_ascii_case("Organization"),
+            "User owner must be rejected — see Phase 2 invariant"
+        );
+    }
+
+    #[test]
+    fn manifest_conversion_accepts_org_owner() {
+        let raw = r#"{
+            "id": 1,
+            "slug": "djinn",
+            "client_id": "Iv1.x",
+            "client_secret": "y",
+            "pem": "PEM",
+            "owner": { "id": 7, "login": "acme-corp", "type": "Organization" }
+        }"#;
+        let parsed: ManifestConversion = serde_json::from_str(raw).unwrap();
+        let owner = parsed.owner.expect("owner present");
+        assert_eq!(owner.login, "acme-corp");
+        assert_eq!(owner.id, 7);
+        assert!(owner.account_type.eq_ignore_ascii_case("Organization"));
     }
 }

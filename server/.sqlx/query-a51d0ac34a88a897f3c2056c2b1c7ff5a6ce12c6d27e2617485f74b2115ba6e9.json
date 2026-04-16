@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO org_config\n                (id, github_org_id, github_org_login, app_id, installation_id)\n             VALUES (1, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a51d0ac34a88a897f3c2056c2b1c7ff5a6ce12c6d27e2617485f74b2115ba6e9"
+}

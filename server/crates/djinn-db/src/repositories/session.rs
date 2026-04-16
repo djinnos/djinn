@@ -33,16 +33,24 @@ impl SessionRepository {
         let id = uuid::Uuid::now_v7().to_string();
         let _ = params.metadata_json;
 
+        // Phase 3B: stamp `created_by_user_id` from the task-local set at
+        // the MCP dispatch root. Sessions spawned from the agent
+        // coordinator's internal loops have no user context and stay
+        // NULL; sessions created in response to a user MCP call (e.g.
+        // `session_start` via chat) inherit the calling user's id.
+        let created_by_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO sessions
-                (id, project_id, task_id, model_id, agent_type, `status`, worktree_path)
-             VALUES (?, ?, ?, ?, ?, 'running', ?)",
+                (id, project_id, task_id, model_id, agent_type, `status`, worktree_path,
+                 created_by_user_id)
+             VALUES (?, ?, ?, ?, ?, 'running', ?, ?)",
             id,
             params.project_id,
             params.task_id,
             params.model,
             params.agent_type,
-            params.worktree_path
+            params.worktree_path,
+            created_by_user_id
         )
         .execute(self.db.pool())
         .await?;
@@ -515,8 +523,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, memory_refs)
-             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
             task_id,
             epic.project_id,
             short_id,
@@ -733,8 +741,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, memory_refs)
-             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
             task_id,
             project_id,
             short_id,

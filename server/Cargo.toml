@@ -42,15 +42,13 @@ bytes = "1"
 git2 = "0.20"
 dirs = "6"
 protobuf = "3"
-refinery = { version = "0.9", features = ["int8-versions", "rusqlite"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
 rmcp = { version = "0.16", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 libc = "0.2"
 ring = "0.17"
 base64 = "0.22"
 sha2 = "0.10"
 serde_urlencoded = "0.7"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+sqlx = { version = "0.8", features = ["mysql", "runtime-tokio-rustls", "macros"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

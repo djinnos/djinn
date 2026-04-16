@@ -820,10 +820,11 @@ mod tests {
         let id = uuid::Uuid::now_v7().to_string();
         let path = format!("/tmp/test-{id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
             id,
             "test",
-            path
+            path,
+            "[]"
         )
         .execute(db.pool())
         .await
@@ -1097,8 +1098,18 @@ mod tests {
             .await;
 
         let error = result.expect_err("second default should violate unique partial index");
-        let message = error.to_string();
-        assert!(message.contains("UNIQUE constraint failed: agents.project_id, agents.base_role"));
+        let message = error.to_string().to_lowercase();
+        // Accept either the legacy SQLite message or the MySQL/Dolt duplicate-key
+        // message. Dolt phrases it as "duplicate unique key given"; vanilla
+        // MySQL says "duplicate entry". Both flows still point at the partial
+        // unique index `uq_agents_project_default_base`.
+        assert!(
+            message.contains("unique constraint failed: agents.project_id, agents.base_role")
+                || message.contains("duplicate entry")
+                || message.contains("duplicate unique key")
+                || message.contains("uq_agents_project_default_base"),
+            "unexpected error: {message}"
+        );
 
         let defaults_rows = sqlx::query!(
             r#"SELECT `name`, is_default AS "is_default!: i64" FROM agents WHERE project_id = ? AND base_role = 'worker' ORDER BY `name`"#,

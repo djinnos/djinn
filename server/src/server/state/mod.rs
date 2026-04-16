@@ -16,7 +16,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_db::{
     Database, NoopNoteVectorStore, NoteRepository, NoteVectorStore, ProjectRepository,
-    QdrantNoteVectorStore, SettingsRepository, SqliteVecNoteVectorStore,
+    QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -135,10 +135,9 @@ struct Inner {
 
 impl AppState {
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
-        let runtime =
-            DatabaseRuntimeManager::new(crate::db::runtime::DatabaseRuntimeConfig::sqlite(
-                db.bootstrap_info().target.clone().into(),
-            ));
+        let runtime = DatabaseRuntimeManager::new(
+            crate::db::runtime::DatabaseRuntimeConfig::dolt(db.bootstrap_info().target.clone()),
+        );
         Self::new_with_runtime(db, runtime, cancel)
     }
 
@@ -550,7 +549,10 @@ impl AppState {
             Ok(value) if value.eq_ignore_ascii_case("noop") => {
                 Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>
             }
-            _ => Arc::new(SqliteVecNoteVectorStore) as Arc<dyn NoteVectorStore>,
+            // With sqlite-vec retired, the default falls back to a
+            // no-op vector store. Production deployments set
+            // DJINN_VECTOR_BACKEND=qdrant.
+            _ => Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
         }
     }
 
@@ -772,6 +774,12 @@ impl AppState {
         // use.  Per-worktree skeleton refresh is no longer required.
 
         crate::task_confidence::spawn_task_outcome_listener(self.clone());
+
+        // Phase 3C: periodic GitHub-org-membership reconciliation.
+        // Flips `users.is_member_of_org` and revokes sessions when someone
+        // leaves the locked org so their existing `djinn_session` cookie
+        // stops working on the next request.
+        crate::server::start_org_member_sync(self.clone());
     }
 
     async fn interrupt_stale_sessions_on_startup(&self) {

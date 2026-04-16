@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO users\n                (id, github_id, github_login, github_name, github_avatar_url,\n                 is_member_of_org, last_seen_at)\n             VALUES (?, ?, ?, ?, ?, TRUE,\n                     DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))\n             ON DUPLICATE KEY UPDATE\n                 github_login      = VALUES(github_login),\n                 github_name       = VALUES(github_name),\n                 github_avatar_url = VALUES(github_avatar_url),\n                 last_seen_at      = VALUES(last_seen_at)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "7f8ea1d691e3f4f253178c10af656d36a893fb78482616da6b769bd48ab97b8c"
+}

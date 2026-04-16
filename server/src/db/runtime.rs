@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use djinn_db::{
     Database, DatabaseBackendKind, DatabaseBootstrapInfo, DatabaseConnectConfig,
-    MysqlBackendFlavor, MysqlDatabaseConfig, SqliteDatabaseConfig,
+    MysqlBackendFlavor, MysqlDatabaseConfig,
 };
 
 use crate::db::dolt::{DoltRuntimeError, ensure_dolt_runtime_for_connect_config};
@@ -16,18 +16,8 @@ pub struct DatabaseRuntimeConfig {
 }
 
 impl DatabaseRuntimeConfig {
-    pub fn sqlite(path: PathBuf) -> Self {
-        Self {
-            connect: DatabaseConnectConfig::Sqlite(SqliteDatabaseConfig {
-                path,
-                readonly: false,
-                create_if_missing: true,
-            }),
-        }
-    }
-
     pub fn from_cli_and_env(
-        db_path: Option<PathBuf>,
+        _db_path: Option<PathBuf>,
         backend: Option<String>,
         mysql_url: Option<String>,
         mysql_flavor: Option<String>,
@@ -40,9 +30,6 @@ impl DatabaseRuntimeConfig {
             .to_ascii_lowercase();
 
         match backend.as_str() {
-            "sqlite" => Ok(Self::sqlite(
-                db_path.unwrap_or_else(djinn_db::default_db_path),
-            )),
             "mysql" | "dolt" => {
                 let flavor = match mysql_flavor
                     .as_deref()
@@ -83,6 +70,17 @@ impl DatabaseRuntimeConfig {
     pub fn backend_kind(&self) -> DatabaseBackendKind {
         self.connect.backend_kind()
     }
+
+    /// Build a `DatabaseRuntimeConfig` targeting the Dolt service at the
+    /// given URL. Used by tests and CLI fallback paths.
+    pub fn dolt(url: String) -> Self {
+        Self {
+            connect: DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
+                url,
+                flavor: MysqlBackendFlavor::Dolt,
+            }),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -115,12 +113,6 @@ impl DatabaseRuntimeManager {
 
     pub fn startup_mode(&self) -> DatabaseRuntimeMode {
         match &self.config.connect {
-            DatabaseConnectConfig::Sqlite(config) => DatabaseRuntimeMode {
-                backend_kind: DatabaseBackendKind::Sqlite,
-                backend_label: "sqlite".to_owned(),
-                target: config.path.display().to_string(),
-                managed_process: false,
-            },
             DatabaseConnectConfig::Mysql(config) => DatabaseRuntimeMode {
                 backend_kind: DatabaseBackendKind::Mysql,
                 backend_label: config.display_backend().to_owned(),
@@ -151,9 +143,6 @@ impl DatabaseRuntimeManager {
     pub fn planned_health_snapshot(&self) -> DatabaseRuntimeHealth {
         let mode = self.startup_mode();
         let detail = match mode.backend_kind {
-            DatabaseBackendKind::Sqlite => {
-                "sqlite backend selected; no external SQL server process required".to_owned()
-            }
             DatabaseBackendKind::Mysql => {
                 if mode.managed_process {
                     "dolt backend selected; runtime will connect to the compose-managed dolt service over TCP"
@@ -223,14 +212,6 @@ fn redact_mysql_target(url: &str) -> String {
 
 fn runtime_detail_for_bootstrap(bootstrap: &DatabaseBootstrapInfo) -> String {
     match bootstrap.backend_kind {
-        DatabaseBackendKind::Sqlite => {
-            if bootstrap.readonly {
-                "sqlite backend ready in read-only mode".to_owned()
-            } else {
-                "sqlite backend ready; SQLite-specific pragmas and migrations applied locally"
-                    .to_owned()
-            }
-        }
         DatabaseBackendKind::Mysql => {
             if bootstrap.backend_label == "dolt" {
                 return "dolt backend ready via mysql-compatible sqlx pool against compose-managed dolt service".to_owned();
@@ -251,13 +232,9 @@ mod tests {
     fn dolt_is_default_backend_selection() {
         let config = DatabaseRuntimeConfig::from_cli_and_env(None, None, None, None).unwrap();
         assert_eq!(config.backend_kind(), DatabaseBackendKind::Mysql);
-        match &config.connect {
-            DatabaseConnectConfig::Mysql(cfg) => {
-                assert_eq!(cfg.flavor, MysqlBackendFlavor::Dolt);
-                assert!(cfg.url.contains("127.0.0.1:3306"));
-            }
-            other => panic!("expected mysql default, got {other:?}"),
-        }
+        let DatabaseConnectConfig::Mysql(cfg) = &config.connect;
+        assert_eq!(cfg.flavor, MysqlBackendFlavor::Dolt);
+        assert!(cfg.url.contains("127.0.0.1:3306"));
     }
 
     #[test]

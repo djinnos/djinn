@@ -21,6 +21,33 @@ services:
       - "127.0.0.1:3306:3306"
     volumes:
       - ${HOME}/.djinn/dolt:/var/lib/dolt
+    # Cap RAM so runaway query caches can't freeze the host. Dolt had
+    # been claiming ~37GB with accumulated test-DB clutter before this.
+    mem_limit: 8g
+    memswap_limit: 8g
+
+  # Isolated Dolt instance for `cargo test` and sqlx macro compilation.
+  # No host volume — state is ephemeral, scoped to container lifetime.
+  # The workspace `.cargo/config.toml` defaults DATABASE_URL here, so
+  # `cargo test` / `cargo check` use this instance automatically. The
+  # dev Dolt on :3306 is opt-in only — agents can't accidentally hit it.
+  dolt-test:
+    image: dolthub/dolt-sql-server:latest
+    container_name: djinn-dolt-test
+    restart: unless-stopped
+    environment:
+      DOLT_ROOT_PASSWORD: ""
+      DOLT_ROOT_HOST: "%"
+      DOLT_DATABASE: djinn
+    ports:
+      - "127.0.0.1:3307:3306"
+    # Generous cap — `cargo test -p djinn-db` creates ~250 ephemeral
+    # `djinn_test_*` DBs in a single run and each gets 4 migrations applied,
+    # which spikes Dolt memory. At 2g Dolt was OOM-killed mid-run and every
+    # downstream test saw "UnexpectedEof". 8g keeps the full suite stable
+    # while still bounded (the dev Dolt on :3306 uses the same cap).
+    mem_limit: 8g
+    memswap_limit: 8g
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -38,6 +65,11 @@ services:
       dockerfile: Dockerfile
     image: djinn-server:local
     container_name: djinn-server
+    # Pinned so the credential-vault AES key (derived from hostname + USER
+    # in djinn-db::crypto) stays stable across `docker compose up --build`.
+    # Without this, each rebuild gets a random Docker-assigned hostname and
+    # old encrypted credentials (GitHub App config, etc.) become undecryptable.
+    hostname: djinn-server
     restart: unless-stopped
     depends_on:
       dolt:

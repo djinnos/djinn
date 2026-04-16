@@ -15,6 +15,7 @@ use crate::tools::execution_tools::{
     ExecutionKillTaskParams, ExecutionPauseParams, ExecutionResumeParams, ExecutionStartParams,
     ExecutionStatusParams, SessionForTaskParams,
 };
+use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
 use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
 use crate::tools::graph_tools::CodeGraphParams;
 use crate::tools::memory_tools::{
@@ -24,6 +25,7 @@ use crate::tools::memory_tools::{
     ReindexParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::project_tools::{
+    GithubListReposParams, ProjectAddFromGithubParams, ProjectBranchesParams,
     ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
     ProjectSettingsValidateParams,
 };
@@ -622,6 +624,41 @@ impl DjinnMcpServer {
             "github_fetch_file" => map_error_or(
                 name,
                 self.github_fetch_file(Parameters(decode_args::<GithubFetchFileParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "github_app_installations" => map_json(
+                name,
+                self.github_app_installations(Parameters(decode_args::<
+                    GithubAppInstallationsParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "github_app_install_url" => map_json(
+                name,
+                self.github_app_install_url(Parameters(decode_args::<GithubAppInstallUrlParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "github_list_repos" => map_json(
+                name,
+                self.github_list_repos(Parameters(decode_args::<GithubListReposParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "project_add_from_github" => map_json(
+                name,
+                self.project_add_from_github(Parameters(decode_args::<ProjectAddFromGithubParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "project_branches" => map_json(
+                name,
+                self.project_branches(Parameters(decode_args::<ProjectBranchesParams>(
                     name, args,
                 )?))
                 .await,

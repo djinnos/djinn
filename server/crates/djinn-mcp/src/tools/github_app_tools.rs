@@ -9,8 +9,8 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use djinn_core::auth_context::current_user_token;
-use djinn_provider::github_app::{Installation, install_url, list_installations_for_user};
+use djinn_db::OrgConfigRepository;
+use djinn_provider::github_app::{Installation, get_installation_by_id, install_url};
 
 use crate::server::DjinnMcpServer;
 
@@ -74,39 +74,66 @@ fn installation_to_entry(i: Installation) -> InstallationEntry {
 
 #[tool_router(router = github_app_tool_router, vis = "pub")]
 impl DjinnMcpServer {
-    /// List GitHub App installations visible to the authenticated user.
+    /// Return the single installation bound to this deployment via
+    /// `org_config`.
     ///
-    /// If the user has no installations, the response's top-level
-    /// `install_url` points at the App's installation page so the UI can
-    /// render an actionable "Install Djinn" button.
+    /// Under the "one deployment = one GitHub org" model, a deployment is
+    /// pinned to exactly one installation id at setup time. We read that
+    /// binding from `org_config` and fetch the installation metadata with
+    /// `GET /app/installations/{id}` authenticated by an App JWT. If the
+    /// deployment hasn't been bound yet, we surface an explicit error and
+    /// the install URL so the UI can route the user through the manifest
+    /// flow.
     #[tool(
-        description = "List GitHub App installations the authenticated user can access. Returns each installation's id, account, type, and a URL to manage it. If no installations are found, include `install_url` pointing at the App's installation page."
+        description = "Return the single GitHub App installation bound to this Djinn deployment (from org_config). Uses the App's private-key JWT — no user session needed. Returns a one-element list with the installation's id, account, type, and a URL to manage it. If the deployment is not yet bound to an organization, returns an empty list plus `install_url` pointing at the App's installation page."
     )]
     pub async fn github_app_installations(
         &self,
         Parameters(_): Parameters<GithubAppInstallationsParams>,
     ) -> Json<GithubAppInstallationsResponse> {
-        // We need a user token to call GET /user/installations. The token
-        // is threaded in via the `SESSION_USER_TOKEN` task-local, set by
-        // the HTTP MCP handler after resolving the `djinn_session` cookie.
-        let Some(access_token) = current_user_token() else {
+        // If the App itself isn't provisioned yet (no GITHUB_APP_ID), say so
+        // cleanly instead of bubbling a cryptic JWT-mint error. The UI can
+        // route the user to the manifest flow on this signal.
+        if std::env::var("GITHUB_APP_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
             return Json(GithubAppInstallationsResponse {
-                status: "error: sign in with GitHub required".into(),
+                status: "error: GitHub App not configured".into(),
                 installations: vec![],
                 install_url: install_url(),
             });
+        }
+
+        // Source of truth: the singleton `org_config` row written at deploy
+        // setup. If unset, we refuse to list — the deployment has not been
+        // bound to a GitHub org yet.
+        let org_repo = OrgConfigRepository::new(self.state.db().clone());
+        let cfg = match org_repo.get().await {
+            Ok(Some(cfg)) => cfg,
+            Ok(None) => {
+                return Json(GithubAppInstallationsResponse {
+                    status: "error: deployment not bound to an organization".into(),
+                    installations: vec![],
+                    install_url: install_url(),
+                });
+            }
+            Err(e) => {
+                return Json(GithubAppInstallationsResponse {
+                    status: format!("error: read org_config: {e}"),
+                    installations: vec![],
+                    install_url: install_url(),
+                });
+            }
         };
 
-        match list_installations_for_user(&access_token).await {
-            Ok(list) => {
-                let installations: Vec<InstallationEntry> =
-                    list.into_iter().map(installation_to_entry).collect();
-                Json(GithubAppInstallationsResponse {
-                    status: "ok".into(),
-                    installations,
-                    install_url: install_url(),
-                })
-            }
+        match get_installation_by_id(cfg.installation_id as u64).await {
+            Ok(install) => Json(GithubAppInstallationsResponse {
+                status: "ok".into(),
+                installations: vec![installation_to_entry(install)],
+                install_url: install_url(),
+            }),
             Err(e) => Json(GithubAppInstallationsResponse {
                 status: format!("error: {e}"),
                 installations: vec![],

@@ -212,14 +212,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_backend_is_rejected() {
-        let db = Database::open_in_memory().unwrap();
-        let helper = DoltBranchSqlHelper::new(&db);
-        let error = helper.create_branch("task/he6k", "main").await.unwrap_err();
-        assert!(matches!(error, DoltBranchError::UnsupportedBackend { .. }));
-    }
-
-    #[tokio::test]
     async fn mysql_dolt_capability_detected_from_backend_metadata() {
         let db = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
             url: "mysql://root@127.0.0.1:3306/djinn".to_string(),

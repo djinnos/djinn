@@ -184,6 +184,20 @@ jobs:
         working-directory: server
     env:
       RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
+    # Ephemeral Dolt for djinn-db integration tests. The workspace
+    # `.cargo/config.toml` points DATABASE_URL and DJINN_TEST_MYSQL_URL
+    # at :3307, matching the `dolt-test` service in docker-compose.yml —
+    # CI inherits those values automatically, so we just need the port
+    # forwarded here.
+    services:
+      dolt:
+        image: dolthub/dolt-sql-server:latest
+        env:
+          DOLT_ROOT_PASSWORD: ""
+          DOLT_ROOT_HOST: "%"
+          DOLT_DATABASE: djinn
+        ports:
+          - 3307:3306
     steps:
       - uses: actions/checkout@v4
 
@@ -201,6 +215,36 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: taiki-e/install-action@nextest
+
+      # Prebuilt binary — avoids a multi-minute Rust build of sqlx-cli.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - name: Wait for Dolt
+        run: |
+          # Dolt ships no health check, so poll. Check both: port open
+          # (tcp) AND query-ready (SELECT 1). The latter covers the gap
+          # between bind and accept — on cold start Dolt binds fast but
+          # takes a few seconds to serve queries.
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/3307) >/dev/null 2>&1 \
+               && mysql -h 127.0.0.1 -P 3307 -u root -e "SELECT 1" >/dev/null 2>&1; then
+              echo "Dolt is ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Dolt did not become ready within 60s"
+          docker ps -a
+          docker logs "$(docker ps -aqf 'ancestor=dolthub/dolt-sql-server:latest')" || true
+          exit 1
+
+      - name: Apply djinn-db migrations
+        working-directory: server/crates/djinn-db
+        env:
+          DATABASE_URL: mysql://root@127.0.0.1:3307/djinn
+        run: sqlx migrate run --source migrations_mysql
 
       - name: Configure git identity for tests
         run: |
