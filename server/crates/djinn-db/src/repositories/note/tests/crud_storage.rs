@@ -392,6 +392,7 @@ async fn file_backed_note_crud_persists_db_and_filesystem_state_changes() {
     assert_eq!(updated.content, "updated body");
     assert_eq!(updated.tags, r#"["updated"]"#);
 
+    // NOTE: uses shared const NOTE_SELECT_WHERE_ID; sqlx macros require a literal, keep runtime
     let persisted_updated = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
         .bind(&created.id)
         .fetch_one(db.pool())
@@ -407,8 +408,7 @@ async fn file_backed_note_crud_persists_db_and_filesystem_state_changes() {
     repo.delete(&created.id).await.unwrap();
     assert!(repo.get(&created.id).await.unwrap().is_none());
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notes WHERE id = ?1")
-            .bind(&created.id)
+        sqlx::query_scalar!("SELECT COUNT(*) FROM notes WHERE id = ?", created.id)
             .fetch_one(db.pool())
             .await
             .unwrap(),
@@ -438,6 +438,7 @@ async fn db_backed_note_crud_persists_state_without_filesystem_side_effects() {
     assert_eq!(created.storage, "db");
     assert_eq!(created.file_path, "");
 
+    // NOTE: uses shared const NOTE_SELECT_WHERE_ID; sqlx macros require a literal, keep runtime
     let persisted_created = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
         .bind(&created.id)
         .fetch_one(db.pool())
@@ -468,8 +469,7 @@ async fn db_backed_note_crud_persists_state_without_filesystem_side_effects() {
     repo.delete(&created.id).await.unwrap();
     assert!(repo.get(&created.id).await.unwrap().is_none());
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notes WHERE id = ?1")
-            .bind(&created.id)
+        sqlx::query_scalar!("SELECT COUNT(*) FROM notes WHERE id = ?", created.id)
             .fetch_one(db.pool())
             .await
             .unwrap(),
