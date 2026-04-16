@@ -158,6 +158,8 @@ impl<'a> DoltHistoryMaintenanceService<'a> {
             });
         };
 
+        // NOTE: dynamic SQL — Dolt system tables/information_schema not in application
+        // schema, so compile-time checks cannot validate these queries.
         let commit_row = sqlx::query("SELECT COUNT(*) AS count FROM dolt_log")
             .fetch_one(pool)
             .await
