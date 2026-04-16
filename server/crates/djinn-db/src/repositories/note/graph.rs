@@ -13,50 +13,48 @@ impl NoteRepository {
     pub async fn graph(&self, project_id: &str) -> Result<GraphResponse> {
         self.db.ensure_initialized().await?;
 
-        let node_rows = sqlx::query_as::<_, (String, String, String, String, String, i64)>(
-            "SELECT n.id, n.permalink, n.title, n.note_type, n.folder,
+        let node_rows = sqlx::query!(
+            r#"SELECT n.id, n.permalink, n.title, n.note_type, n.folder,
                     (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
                        AND target_id IS NOT NULL)
                     + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
-                      AS connection_count
+                      AS "connection_count!: i64"
              FROM notes n
              WHERE n.project_id = ?
-             ORDER BY n.folder, n.title",
+             ORDER BY n.folder, n.title"#,
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
-        let edge_rows = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT l.source_id, l.target_id, l.target_raw
+        let edge_rows = sqlx::query!(
+            r#"SELECT l.source_id, l.target_id AS "target_id!", l.target_raw
              FROM note_links l
              JOIN notes src ON src.id = l.source_id AND src.project_id = ?
-             WHERE l.target_id IS NOT NULL",
+             WHERE l.target_id IS NOT NULL"#,
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
         let nodes = node_rows
             .into_iter()
-            .map(
-                |(id, permalink, title, note_type, folder, connection_count)| GraphNode {
-                    id,
-                    permalink,
-                    title,
-                    note_type,
-                    folder,
-                    connection_count,
-                },
-            )
+            .map(|row| GraphNode {
+                id: row.id,
+                permalink: row.permalink,
+                title: row.title,
+                note_type: row.note_type,
+                folder: row.folder,
+                connection_count: row.connection_count,
+            })
             .collect();
 
         let edges = edge_rows
             .into_iter()
-            .map(|(source_id, target_id, raw_text)| GraphEdge {
-                source_id,
-                target_id,
-                raw_text,
+            .map(|row| GraphEdge {
+                source_id: row.source_id,
+                target_id: row.target_id,
+                raw_text: row.target_raw,
             })
             .collect();
 
@@ -72,30 +70,28 @@ impl NoteRepository {
     ) -> Result<Vec<BrokenLink>> {
         self.db.ensure_initialized().await?;
 
-        let rows = sqlx::query_as::<_, (String, String, String, String)>(
-            "SELECT src.id, src.permalink, src.title, l.target_raw
+        let rows = sqlx::query!(
+            r#"SELECT src.id, src.permalink, src.title, l.target_raw
              FROM note_links l
              JOIN notes src ON src.id = l.source_id AND src.project_id = ?
              WHERE l.target_id IS NULL
                AND (? IS NULL OR src.folder = ?)
-             ORDER BY src.permalink, l.target_raw",
+             ORDER BY src.permalink, l.target_raw"#,
+            project_id,
+            folder,
+            folder
         )
-        .bind(project_id)
-        .bind(folder)
-        .bind(folder)
         .fetch_all(self.db.pool())
         .await?;
 
         Ok(rows
             .into_iter()
-            .map(
-                |(source_id, source_permalink, source_title, raw_text)| BrokenLink {
-                    source_id,
-                    source_permalink,
-                    source_title,
-                    raw_text,
-                },
-            )
+            .map(|row| BrokenLink {
+                source_id: row.id,
+                source_permalink: row.permalink,
+                source_title: row.title,
+                raw_text: row.target_raw,
+            })
             .collect())
     }
 
@@ -105,8 +101,8 @@ impl NoteRepository {
     pub async fn orphans(&self, project_id: &str, folder: Option<&str>) -> Result<Vec<OrphanNote>> {
         self.db.ensure_initialized().await?;
 
-        let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
-            "SELECT n.id, n.permalink, n.title, n.note_type, n.folder
+        let rows = sqlx::query!(
+            r#"SELECT n.id, n.permalink, n.title, n.note_type, n.folder
              FROM notes n
              WHERE n.project_id = ?
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
@@ -114,22 +110,22 @@ impl NoteRepository {
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
                )
-             ORDER BY n.folder, n.title",
+             ORDER BY n.folder, n.title"#,
+            project_id,
+            folder,
+            folder
         )
-        .bind(project_id)
-        .bind(folder)
-        .bind(folder)
         .fetch_all(self.db.pool())
         .await?;
 
         Ok(rows
             .into_iter()
-            .map(|(id, permalink, title, note_type, folder)| OrphanNote {
-                id,
-                permalink,
-                title,
-                note_type,
-                folder,
+            .map(|row| OrphanNote {
+                id: row.id,
+                permalink: row.permalink,
+                title: row.title,
+                note_type: row.note_type,
+                folder: row.folder,
             })
             .collect())
     }
@@ -140,59 +136,63 @@ impl NoteRepository {
     pub async fn health(&self, project_id: &str) -> Result<HealthReport> {
         self.db.ensure_initialized().await?;
 
-        let total_notes: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?")
-                .bind(project_id)
-                .fetch_one(self.db.pool())
-                .await?;
-
-        let broken_link_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM note_links l
-             JOIN notes src ON src.id = l.source_id AND src.project_id = ?
-             WHERE l.target_id IS NULL",
+        let total_notes: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM notes WHERE project_id = ?",
+            project_id
         )
-        .bind(project_id)
         .fetch_one(self.db.pool())
         .await?;
 
-        let orphan_note_count: i64 = sqlx::query_scalar(
+        let broken_link_count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM note_links l
+             JOIN notes src ON src.id = l.source_id AND src.project_id = ?
+             WHERE l.target_id IS NULL",
+            project_id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+
+        let orphan_note_count: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM notes n
              WHERE n.project_id = ?
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
                )",
+            project_id
         )
-        .bind(project_id)
         .fetch_one(self.db.pool())
         .await?;
 
-        let stale_rows = sqlx::query_as::<_, (String, i64)>(
-            "SELECT folder, COUNT(*) FROM notes
+        let stale_rows = sqlx::query!(
+            r#"SELECT folder, COUNT(*) AS "count!: i64" FROM notes
              WHERE project_id = ?
                AND updated_at < DATE_SUB(NOW(3), INTERVAL 30 DAY)
-             GROUP BY folder ORDER BY folder",
+             GROUP BY folder ORDER BY folder"#,
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
         let stale_notes_by_folder = stale_rows
             .into_iter()
-            .map(|(folder, count)| StaleFolder { folder, count })
+            .map(|row| StaleFolder {
+                folder: row.folder,
+                count: row.count,
+            })
             .collect::<Vec<_>>();
         let stale_note_count = stale_notes_by_folder
             .iter()
             .map(|folder| folder.count)
             .sum();
 
-        let low_confidence_note_count: i64 = sqlx::query_scalar(
+        let low_confidence_note_count: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM notes
              WHERE project_id = ?
                AND confidence < ?",
+            project_id,
+            STALE_CITATION
         )
-        .bind(project_id)
-        .bind(STALE_CITATION)
         .fetch_one(self.db.pool())
         .await?;
 
@@ -224,18 +224,19 @@ impl NoteRepository {
     pub async fn extracted_note_audit(&self, project_id: &str) -> Result<ExtractedNoteAuditReport> {
         self.db.ensure_initialized().await?;
 
-        let notes = sqlx::query_as::<_, Note>(
-            "SELECT id, project_id, permalink, title, file_path,
+        let notes = sqlx::query_as!(
+            Note,
+            r#"SELECT id, project_id, permalink, title, file_path,
                     storage, note_type, folder, tags, content,
                     created_at, updated_at, last_accessed,
-                    access_count, confidence, abstract as abstract_, overview,
+                    access_count, confidence, `abstract` AS abstract_, overview,
                     scope_paths
              FROM notes
              WHERE project_id = ?
                AND note_type IN ('case', 'pattern', 'pitfall')
-             ORDER BY note_type, permalink",
+             ORDER BY note_type, permalink"#,
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
@@ -299,10 +300,10 @@ impl NoteRepository {
                 && paragraph_count <= 2
                 && missing_sections.len() == required_sections.len();
             let looks_task_local = looks_task_local(&note.title, &note.content);
-            let is_orphan = !sqlx::query_scalar::<_, i64>(
-                "SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = ?)",
+            let is_orphan = !sqlx::query_scalar!(
+                r#"SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = ?) AS "exists!: i64""#,
+                note.id
             )
-            .bind(&note.id)
             .fetch_one(self.db.pool())
             .await?
                 > 0;
@@ -422,11 +423,11 @@ impl NoteRepository {
         project_id: &str,
         permalink: &str,
     ) -> Result<Option<String>> {
-        Ok(sqlx::query_scalar::<_, String>(
+        Ok(sqlx::query_scalar!(
             "SELECT id FROM notes WHERE project_id = ? AND permalink = ? LIMIT 1",
+            project_id,
+            permalink
         )
-        .bind(project_id)
-        .bind(permalink)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -455,11 +456,11 @@ impl NoteRepository {
         let mut filtered = Vec::new();
 
         for (id, score) in candidate_scores {
-            let note_type = sqlx::query_scalar::<_, String>(
+            let note_type = sqlx::query_scalar!(
                 "SELECT note_type FROM notes WHERE id = ? AND project_id = ? LIMIT 1",
+                id,
+                project_id
             )
-            .bind(&id)
-            .bind(project_id)
             .fetch_optional(self.db.pool())
             .await?;
 
@@ -491,12 +492,13 @@ impl NoteRepository {
 
         let mut scores: HashMap<String, f64> = HashMap::new();
 
-        let task_refs: Option<String> =
-            sqlx::query_scalar("SELECT memory_refs FROM tasks WHERE id = ? AND project_id = ?")
-                .bind(task_id)
-                .bind(project_id)
-                .fetch_optional(self.db.pool())
-                .await?;
+        let task_refs: Option<String> = sqlx::query_scalar!(
+            "SELECT memory_refs FROM tasks WHERE id = ? AND project_id = ?",
+            task_id,
+            project_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
 
         if let Some(refs_json) = task_refs
             && let Ok(memory_refs) = serde_json::from_str::<Vec<String>>(&refs_json)
@@ -528,14 +530,14 @@ impl NoteRepository {
             }
         }
 
-        let epic_refs: Option<String> = sqlx::query_scalar(
-            "SELECT e.memory_refs
+        let epic_refs: Option<String> = sqlx::query_scalar!(
+            r#"SELECT e.memory_refs AS "memory_refs!"
              FROM tasks t
              JOIN epics e ON e.id = t.epic_id
-             WHERE t.id = ? AND t.project_id = ?",
+             WHERE t.id = ? AND t.project_id = ?"#,
+            task_id,
+            project_id
         )
-        .bind(task_id)
-        .bind(project_id)
         .fetch_optional(self.db.pool())
         .await?;
 
@@ -550,18 +552,19 @@ impl NoteRepository {
             }
         }
 
-        let blocker_refs = sqlx::query_as::<_, (String,)>(
-            "SELECT bt.memory_refs
+        let blocker_refs = sqlx::query!(
+            r#"SELECT bt.memory_refs AS "memory_refs!"
              FROM blockers b
              JOIN tasks bt ON bt.id = b.blocking_task_id
-             WHERE b.task_id = ? AND bt.project_id = ?",
+             WHERE b.task_id = ? AND bt.project_id = ?"#,
+            task_id,
+            project_id
         )
-        .bind(task_id)
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
-        for (refs_json,) in blocker_refs {
+        for row in blocker_refs {
+            let refs_json = row.memory_refs;
             if let Ok(note_ids) = serde_json::from_str::<Vec<String>>(&refs_json) {
                 for note_id in note_ids {
                     scores
