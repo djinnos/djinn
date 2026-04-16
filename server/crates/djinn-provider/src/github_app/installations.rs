@@ -319,7 +319,10 @@ pub async fn get_installation_by_id(installation_id: u64) -> Result<Installation
 /// before the reported `expires_at`.
 pub async fn get_installation_token(installation_id: u64) -> Result<InstallationToken> {
     if let Some(cached) = cache_get(installation_id) {
-        tracing::debug!(installation_id, "github_app: reusing cached installation token");
+        tracing::debug!(
+            installation_id,
+            "github_app: reusing cached installation token"
+        );
         return Ok(cached);
     }
 

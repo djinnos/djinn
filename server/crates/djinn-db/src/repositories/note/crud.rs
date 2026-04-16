@@ -477,9 +477,7 @@ impl NoteRepository {
         .execute(self.db.pool())
         .await?;
 
-        let note = note_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
@@ -502,9 +500,7 @@ impl NoteRepository {
         .execute(self.db.pool())
         .await?;
 
-        let note = note_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
@@ -557,9 +553,7 @@ impl NoteRepository {
         index_links_for_note(&mut tx, &id, &project_id, &content).await?;
         resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
 
-        let note = note_select_where_id!(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
         tx.commit().await?;
         self.sync_note_embedding(
@@ -799,9 +793,7 @@ impl NoteRepository {
             index_links_for_note(&mut tx, &id, &project_id, &content).await?;
             resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
 
-            let note = note_select_where_id!(id)
-                .fetch_one(&mut *tx)
-                .await?;
+            let note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
             tx.commit().await?;
             Ok(note)
@@ -1122,9 +1114,7 @@ impl NoteRepository {
         index_links_for_note(&mut tx, &id, &current.project_id, &content).await?;
         resolve_links_for_note(&mut tx, &id, &title, &permalink, &current.project_id).await?;
 
-        let note: Note = note_select_where_id!(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
         tx.commit().await?;
 
@@ -1163,9 +1153,7 @@ impl NoteRepository {
         .execute(&mut *tx)
         .await?;
 
-        let note: Note = note_select_where_id!(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
         tx.commit().await?;
         self.events.send(DjinnEventEnvelope::note_updated(&note));
@@ -1308,9 +1296,7 @@ impl NoteRepository {
         index_links_for_note(&mut tx, id, &current.project_id, &current.content).await?;
         resolve_links_for_note(&mut tx, id, new_title, &new_permalink, &current.project_id).await?;
 
-        let note: Note = note_select_where_id!(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
         tx.commit().await?;
 

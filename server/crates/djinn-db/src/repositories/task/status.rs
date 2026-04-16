@@ -1,5 +1,5 @@
-use super::*;
 use super::task_select_where_id;
+use super::*;
 
 impl TaskRepository {
     /// Transition a task through the state machine.
@@ -55,9 +55,7 @@ impl TaskRepository {
         let mut tx = self.db.pool().begin().await?;
 
         // Load current task.
-        let current: Task = task_select_where_id!(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let current: Task = task_select_where_id!(id).fetch_one(&mut *tx).await?;
         let from = TaskStatus::parse(&current.status)?;
 
         // Snapshot AC when reviewer starts so we can detect stale cycles later.
@@ -247,9 +245,7 @@ impl TaskRepository {
         .execute(&mut *tx)
         .await?;
 
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
 
         self.events
@@ -269,9 +265,7 @@ impl TaskRepository {
     /// Only used for tests and admin tooling. Production code should use `transition`.
     pub async fn set_status(&self, id: &str, status: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        let from_task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let from_task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
         let closed_at_sql = if status == "closed" {
             "closed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),"
         } else {
@@ -297,9 +291,7 @@ impl TaskRepository {
         .bind(id)
         .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         let status_payload = serde_json::json!({
             "from_status": from_task.status,
@@ -335,9 +327,7 @@ impl TaskRepository {
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
 
-        let from_task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let from_task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         // Only increment reopen_count on actual reopen transitions (not open->open)
         let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
@@ -372,9 +362,7 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
 
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         let status_payload = serde_json::json!({
             "from_status": from_task.status,
@@ -410,9 +398,7 @@ impl TaskRepository {
         )
         .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         if let Some(epic_id) = new_epic_id {
             maybe_reopen_epic(&self.db, &self.events, epic_id).await?;

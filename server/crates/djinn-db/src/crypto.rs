@@ -27,15 +27,15 @@ const KEY_LEN: usize = 32;
 
 /// Resolve the on-disk path for the vault key.
 fn vault_key_path() -> Result<PathBuf> {
-    if let Ok(explicit) = std::env::var("DJINN_VAULT_KEY_PATH") {
-        if !explicit.is_empty() {
-            return Ok(PathBuf::from(explicit));
-        }
+    if let Ok(explicit) = std::env::var("DJINN_VAULT_KEY_PATH")
+        && !explicit.is_empty()
+    {
+        return Ok(PathBuf::from(explicit));
     }
-    if let Ok(djinn_home) = std::env::var("DJINN_HOME") {
-        if !djinn_home.is_empty() {
-            return Ok(PathBuf::from(djinn_home).join("vault.key"));
-        }
+    if let Ok(djinn_home) = std::env::var("DJINN_HOME")
+        && !djinn_home.is_empty()
+    {
+        return Ok(PathBuf::from(djinn_home).join("vault.key"));
     }
     let home = dirs::home_dir()
         .ok_or_else(|| Error::InvalidData("cannot determine home directory".into()))?;

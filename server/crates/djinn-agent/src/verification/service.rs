@@ -111,6 +111,25 @@ mod tests {
         Database::open_in_memory().expect("in-memory db")
     }
 
+    /// Insert a `projects` row with id `project_id` so that tests can seed
+    /// `verification_cache` rows referencing it without tripping the
+    /// `fk_verification_cache_project` foreign-key constraint on Dolt/MySQL.
+    async fn seed_project(db: &Database, project_id: &str) {
+        db.ensure_initialized().await.expect("init schema");
+        let name = format!("test-project-{project_id}");
+        let path = format!("/tmp/{project_id}");
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+        )
+        .bind(project_id)
+        .bind(&name)
+        .bind(&path)
+        .bind("[]")
+        .execute(db.pool())
+        .await
+        .expect("seed project row for FK");
+    }
+
     fn write_settings(dir: &Path, setup_json: &str) {
         let djinn_dir = dir.join(".djinn");
         std::fs::create_dir_all(&djinn_dir).expect("create .djinn");
@@ -137,6 +156,7 @@ mod tests {
             ),
         );
         let state = test_db();
+        seed_project(&state, "p1").await;
         let scoped = vec!["echo ok".to_string()];
 
         let result = verify_commit("p1", "sha1", dir.path(), &state, &scoped)
@@ -168,6 +188,7 @@ mod tests {
             ),
         );
         let state = test_db();
+        seed_project(&state, "p1").await;
         let repo = VerificationCacheRepository::new(state.clone());
         let scoped = vec![format!("touch {}", verify_marker.display())];
         let cache_key = super::super::settings::verification_cache_key("sha2", &scoped);
@@ -204,6 +225,7 @@ mod tests {
             r#"[{"name":"setup","command":"echo setup","timeout_secs":10}]"#,
         );
         let state = test_db();
+        seed_project(&state, "p1").await;
         let scoped = vec!["false".to_string()];
 
         let result = verify_commit("p1", "sha3", dir.path(), &state, &scoped)
@@ -225,6 +247,7 @@ mod tests {
     async fn verify_commit_no_commands_passes_vacuously() {
         let dir = tempdir_in_tmp();
         let state = test_db();
+        seed_project(&state, "p1").await;
 
         let result = verify_commit("p1", "sha5", dir.path(), &state, &[])
             .await
@@ -240,6 +263,7 @@ mod tests {
     async fn verify_commit_different_scoped_commands_get_different_cache_keys() {
         let dir = tempdir_in_tmp();
         let state = test_db();
+        seed_project(&state, "p1").await;
 
         let full_cmds = vec!["echo full".to_string()];
         let result = verify_commit("p1", "sha6", dir.path(), &state, &full_cmds)

@@ -68,10 +68,7 @@ impl NoteRepository {
         if repeat_filter_binds {
             q = q.bind(note_type);
         }
-        let rows = q
-            .bind(limit)
-            .fetch_all(self.db.pool())
-            .await?;
+        let rows = q.bind(limit).fetch_all(self.db.pool()).await?;
 
         Ok(rows
             .into_iter()

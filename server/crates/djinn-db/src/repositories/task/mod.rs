@@ -711,11 +711,7 @@ pub(super) fn extract_constraint_name(db_err: &dyn sqlx::error::DatabaseError) -
     }
 }
 
-pub(super) async fn short_id_exists(
-    pool: &MySqlPool,
-    table: &str,
-    short_id: &str,
-) -> Result<bool> {
+pub(super) async fn short_id_exists(pool: &MySqlPool, table: &str, short_id: &str) -> Result<bool> {
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = ?)");
     Ok(sqlx::query_scalar::<_, i64>(&sql)
         .bind(short_id)

@@ -16,7 +16,7 @@ mod org_sync;
 mod project_tools;
 mod state;
 pub use auth::{AuthenticatedUser, authenticate};
-pub use org_sync::{start_org_member_sync, sync_once, SyncReport};
+pub use org_sync::{SyncReport, start_org_member_sync, sync_once};
 pub use state::AppState;
 
 /// Build the application router.

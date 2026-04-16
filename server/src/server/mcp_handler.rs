@@ -64,7 +64,10 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
     let response = SESSION_USER_TOKEN
         .scope(
             user_token,
-            SESSION_USER_ID.scope(user_id, dispatch(state.clone(), worktree_root, payload.clone())),
+            SESSION_USER_ID.scope(
+                user_id,
+                dispatch(state.clone(), worktree_root, payload.clone()),
+            ),
         )
         .await;
 

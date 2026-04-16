@@ -1,5 +1,5 @@
-use super::*;
 use super::task_select_where_id;
+use super::*;
 use crate::SessionRepository;
 use djinn_core::models::IssueType;
 
@@ -323,9 +323,7 @@ impl TaskRepository {
         .execute(&mut *tx)
         .await?;
 
-        let task = task_select_where_id!(&task.id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let task = task_select_where_id!(&task.id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         let task = Some(task);
 
@@ -668,9 +666,7 @@ impl TaskRepository {
             .execute(&mut *tx)
             .await?;
 
-            let updated: Task = task_select_where_id!(&task.id)
-                .fetch_one(&mut *tx)
-                .await?;
+            let updated: Task = task_select_where_id!(&task.id).fetch_one(&mut *tx).await?;
             healed.push(updated);
         }
         tx.commit().await?;

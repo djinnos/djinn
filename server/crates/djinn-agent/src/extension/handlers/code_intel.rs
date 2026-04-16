@@ -354,8 +354,7 @@ async fn resolve_installation_id(
     let project_id = project_id.ok_or(
         "github_* tools require an active project context; dispatcher could not resolve project_id",
     )?;
-    let project_repo =
-        djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+    let project_repo = djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
     match project_repo.get_installation_id(project_id).await {
         Ok(Some(id)) => Ok(id),
         Ok(None) => Err(format!(

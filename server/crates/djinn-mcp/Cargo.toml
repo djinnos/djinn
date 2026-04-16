@@ -28,5 +28,5 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+sqlx = { version = "0.8", features = ["mysql", "runtime-tokio-rustls", "macros"] }
 anyhow = "1"

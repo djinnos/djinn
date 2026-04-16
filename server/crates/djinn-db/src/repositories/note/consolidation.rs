@@ -656,7 +656,9 @@ fn canonical_pair(left: &str, right: &str) -> (String, String) {
 }
 
 fn sql_placeholders(count: usize, _start_index: usize) -> String {
-    std::iter::repeat_n("?", count).collect::<Vec<_>>().join(", ")
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn sanitize_fts5_query(query: &str) -> Option<String> {

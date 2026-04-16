@@ -220,12 +220,9 @@ impl SessionAuthRepository {
     /// sessions).
     pub async fn delete_by_user_fk(&self, user_fk: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let res = sqlx::query!(
-            "DELETE FROM user_auth_sessions WHERE user_fk = ?",
-            user_fk,
-        )
-        .execute(self.db.pool())
-        .await?;
+        let res = sqlx::query!("DELETE FROM user_auth_sessions WHERE user_fk = ?", user_fk,)
+            .execute(self.db.pool())
+            .await?;
         Ok(res.rows_affected())
     }
 }
@@ -296,7 +293,10 @@ mod tests {
         .await
         .unwrap();
 
-        let swept = repo.delete_expired("2025-01-01T00:00:00.000Z").await.unwrap();
+        let swept = repo
+            .delete_expired("2025-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
         assert_eq!(swept, 1);
         assert!(repo.get_by_token("past").await.unwrap().is_none());
         assert!(repo.get_by_token("future").await.unwrap().is_some());
@@ -325,7 +325,11 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            sessions.get_by_token_with_user("legacy").await.unwrap().is_none(),
+            sessions
+                .get_by_token_with_user("legacy")
+                .await
+                .unwrap()
+                .is_none(),
             "sessions with NULL user_fk must not resolve via the join"
         );
 

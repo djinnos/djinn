@@ -10,7 +10,6 @@ async fn create_pull_request_success() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("POST"))
         .and(path("/repos/djinnos/server/pulls"))
         .and(header("Authorization", "Bearer ghs_test_install"))
@@ -55,7 +54,6 @@ async fn enable_auto_merge_success() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .and(header("Authorization", "Bearer ghs_test_install"))
@@ -97,7 +95,6 @@ async fn mark_pr_ready_for_review_uses_graphql_mutation() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .and(header("Authorization", "Bearer ghs_test_install"))
@@ -125,7 +122,6 @@ async fn mark_pr_ready_for_review_propagates_graphql_error() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -147,7 +143,6 @@ async fn mark_pr_ready_for_review_propagates_graphql_error() {
 async fn get_pull_request_success() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
-
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls/42"))
@@ -198,7 +193,6 @@ async fn create_pr_returns_error_on_422() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("POST"))
         .and(path("/repos/djinnos/server/pulls"))
         .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
@@ -233,7 +227,6 @@ async fn create_pr_returns_error_on_422() {
 async fn list_pulls_by_head_returns_matching_prs() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
-
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls"))
@@ -271,7 +264,6 @@ async fn list_pulls_by_head_returns_empty_when_no_match() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
@@ -286,4 +278,3 @@ async fn list_pulls_by_head_returns_empty_when_no_match() {
 
     assert!(prs.is_empty());
 }
-

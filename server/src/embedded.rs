@@ -6,9 +6,7 @@
 /// (up to 5 seconds of connection draining).
 use std::path::PathBuf;
 
-use djinn_db::{
-    Database, DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig,
-};
+use djinn_db::{Database, DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig};
 use tokio_util::sync::CancellationToken;
 
 /// Configuration for the embedded server.

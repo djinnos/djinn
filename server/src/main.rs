@@ -52,11 +52,11 @@ struct Cli {
     #[arg(long, env = "DJINN_DB_PATH")]
     db_path: Option<PathBuf>,
 
-    /// Database backend selection seam for staged SQLite -> Dolt/MySQL migration.
+    /// Database backend selector: `mysql` or `dolt` (default: `dolt`).
     #[arg(long, env = "DJINN_DB_BACKEND")]
     db_backend: Option<String>,
 
-    /// MySQL-compatible DSN for future Dolt/MySQL runtime bootstrap.
+    /// MySQL-compatible DSN for the Dolt/MySQL runtime.
     #[arg(long, env = "DJINN_MYSQL_URL")]
     mysql_url: Option<String>,
 

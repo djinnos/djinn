@@ -146,10 +146,7 @@ impl Database {
     pub fn open_in_memory() -> DbResult<Self> {
         let base_url = std::env::var("DJINN_TEST_MYSQL_URL")
             .unwrap_or_else(|_| "mysql://root@127.0.0.1:3307".to_owned());
-        let db_name = format!(
-            "djinn_test_{}",
-            uuid::Uuid::now_v7().simple()
-        );
+        let db_name = format!("djinn_test_{}", uuid::Uuid::now_v7().simple());
         // Strip any trailing database path from the base URL before appending
         // the fresh test DB name.
         let trimmed = base_url.trim_end_matches('/');

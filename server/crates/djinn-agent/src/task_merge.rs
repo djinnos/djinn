@@ -218,9 +218,9 @@ async fn try_create_github_pr(
             "github-app push failed — refreshing installation token and retrying once"
         );
         invalidate_cache(installation_id);
-        let refreshed = get_installation_token(installation_id).await.map_err(|e| {
-            format!("failed to refresh installation token after push error: {e}")
-        })?;
+        let refreshed = get_installation_token(installation_id)
+            .await
+            .map_err(|e| format!("failed to refresh installation token after push error: {e}"))?;
         let retry_url = build_app_push_url(&owner, &repo_name, &refreshed.token);
         djinn_git::run_git_command(project_dir.to_path_buf(), push_args(&retry_url))
             .await

@@ -3,8 +3,8 @@
 ## Database
 
 Runtime: **Dolt** (MySQL wire protocol), managed by `docker compose`.
-Schema: `server/crates/djinn-db/migrations_mysql/*.sql` (and a mirror under
-`migrations_sqlite/`), applied by `sqlx::migrate!()` on server boot.
+Schema: `server/crates/djinn-db/migrations_mysql/*.sql`, applied by
+`sqlx::migrate!()` on server boot.
 History lives in `_sqlx_migrations`; checksums are enforced — mutating
 an applied migration makes the server refuse to start.
 
@@ -70,3 +70,12 @@ git commit -m "feat(db): add my_column to foo"
 
 CI runs `make sqlx-check` against a booted Dolt. Any drift between the
 `.sqlx/` cache and the current queries fails the job.
+
+## Running tests
+
+Single crate: `cargo test -p <crate>` (or `make test` for just djinn-db).
+**Do not run `cargo test --workspace`** — each crate spins up 100–250 fresh
+`djinn_test_*` databases and Dolt caches them all, saturating the 8 GiB
+test-Dolt and cascading into `UnexpectedEof` failures. Run the full suite
+with `make test-all`, which runs each crate sequentially with a
+`test-db-reset` between them to drain the cache.

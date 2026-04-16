@@ -111,7 +111,10 @@ impl GitHubAppClient {
     /// `GET /installation/repositories` (paginated). For the typical UI
     /// picker use case we fetch up to `per_page` (max 100) items from the
     /// first page.
-    pub async fn list_repositories(&self, per_page: Option<usize>) -> Result<Vec<InstallationRepo>> {
+    pub async fn list_repositories(
+        &self,
+        per_page: Option<usize>,
+    ) -> Result<Vec<InstallationRepo>> {
         let per_page = per_page.unwrap_or(100).clamp(1, 100);
         let resp = self
             .get(&format!("/installation/repositories?per_page={per_page}"))
@@ -179,11 +182,7 @@ pub struct InstallationRepo {
 /// Given a user token, find an installation that contains `owner/repo`,
 /// returning its id. Queries `/installation/repositories` for each
 /// installation until a match is found.
-pub async fn find_installation_for_repo(
-    user_token: &str,
-    owner: &str,
-    repo: &str,
-) -> Result<u64> {
+pub async fn find_installation_for_repo(user_token: &str, owner: &str, repo: &str) -> Result<u64> {
     // App config must be present to mint the per-installation tokens.
     let _ = app_id().map_err(|e| anyhow!("GitHub App not configured: {e}"))?;
 
@@ -202,10 +201,7 @@ pub async fn find_installation_for_repo(
                 continue;
             }
         };
-        if repos
-            .iter()
-            .any(|r| r.full_name.to_lowercase() == target)
-        {
+        if repos.iter().any(|r| r.full_name.to_lowercase() == target) {
             return Ok(install.id);
         }
     }
@@ -234,4 +230,3 @@ mod tests {
         assert_eq!(install_url(), None);
     }
 }
-

@@ -50,14 +50,16 @@ impl DatabaseRuntimeConfig {
                 // at `dolt:3306`; for `cargo run` against a host-exposed
                 // compose stack the loopback default works too. External
                 // mysql deployments must still supply their own URL.
-                let url = mysql_url.or_else(|| match flavor {
-                    MysqlBackendFlavor::Dolt => {
-                        Some("mysql://root@127.0.0.1:3306/djinn".to_owned())
-                    }
-                    MysqlBackendFlavor::Mysql => None,
-                }).ok_or_else(|| DatabaseRuntimeError::MissingMysqlUrl {
-                    backend: backend.clone(),
-                })?;
+                let url = mysql_url
+                    .or_else(|| match flavor {
+                        MysqlBackendFlavor::Dolt => {
+                            Some("mysql://root@127.0.0.1:3306/djinn".to_owned())
+                        }
+                        MysqlBackendFlavor::Mysql => None,
+                    })
+                    .ok_or_else(|| DatabaseRuntimeError::MissingMysqlUrl {
+                        backend: backend.clone(),
+                    })?;
 
                 Ok(Self {
                     connect: DatabaseConnectConfig::Mysql(MysqlDatabaseConfig { url, flavor }),
@@ -162,7 +164,6 @@ impl DatabaseRuntimeManager {
             detail,
         }
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -191,7 +192,7 @@ pub struct DatabaseRuntimeMode {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseRuntimeError {
-    #[error("unknown database backend `{0}`; expected sqlite, mysql, or dolt")]
+    #[error("unknown database backend `{0}`; expected mysql or dolt")]
     UnknownBackend(String),
     #[error("database backend `{backend}` requires DJINN_MYSQL_URL to be set")]
     MissingMysqlUrl { backend: String },
@@ -239,25 +240,17 @@ mod tests {
 
     #[test]
     fn dolt_auto_defaults_mysql_url_to_managed_container() {
-        let config = DatabaseRuntimeConfig::from_cli_and_env(
-            None,
-            Some("dolt".to_owned()),
-            None,
-            None,
-        )
-        .unwrap();
+        let config =
+            DatabaseRuntimeConfig::from_cli_and_env(None, Some("dolt".to_owned()), None, None)
+                .unwrap();
         assert_eq!(config.backend_kind(), DatabaseBackendKind::Mysql);
     }
 
     #[test]
     fn mysql_flavor_requires_explicit_url() {
-        let error = DatabaseRuntimeConfig::from_cli_and_env(
-            None,
-            Some("mysql".to_owned()),
-            None,
-            None,
-        )
-        .expect_err("external mysql without url should fail");
+        let error =
+            DatabaseRuntimeConfig::from_cli_and_env(None, Some("mysql".to_owned()), None, None)
+                .expect_err("external mysql without url should fail");
         assert!(error.to_string().contains("DJINN_MYSQL_URL"));
     }
 
@@ -266,5 +259,4 @@ mod tests {
         let target = redact_mysql_target("mysql://user:secret@127.0.0.1:3306/djinn");
         assert_eq!(target, "mysql://<redacted>@127.0.0.1:3306/djinn");
     }
-
 }

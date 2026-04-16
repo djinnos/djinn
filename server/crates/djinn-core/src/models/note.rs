@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A knowledge base note persisted in the SQLite index, optionally backed by a
+/// A knowledge base note persisted in the MySQL/Dolt index, optionally backed by a
 /// markdown file on disk.
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

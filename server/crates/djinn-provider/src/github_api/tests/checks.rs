@@ -10,7 +10,6 @@ async fn list_run_jobs_success() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/actions/runs/123/jobs"))
         .and(header("Authorization", "Bearer ghs_test_install"))
@@ -49,7 +48,6 @@ async fn get_check_run_annotations_success() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/check-runs/555/annotations"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
@@ -79,7 +77,6 @@ async fn get_check_run_annotations_success() {
 async fn get_job_logs_success() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
-
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/actions/jobs/77/logs"))

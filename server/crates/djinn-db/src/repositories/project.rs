@@ -227,10 +227,7 @@ impl ProjectRepository {
     /// NULL) or if the project id is unknown. Callers use the presence of
     /// these coordinates to decide whether GitHub-App-authenticated pushes
     /// are possible at all for this project.
-    pub async fn get_github_coords(
-        &self,
-        project_id: &str,
-    ) -> Result<Option<(String, String)>> {
+    pub async fn get_github_coords(&self, project_id: &str) -> Result<Option<(String, String)>> {
         self.db.ensure_initialized().await?;
         let row = sqlx::query!(
             "SELECT github_owner, github_repo FROM projects WHERE id = ?",
@@ -268,11 +265,7 @@ impl ProjectRepository {
     ///
     /// Returns `Ok(None)` if no project row has both columns set to the
     /// provided values (e.g. legacy host-path projects).
-    pub async fn get_by_github(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Option<Project>> {
+    pub async fn get_by_github(&self, owner: &str, repo: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Project,
@@ -467,13 +460,9 @@ impl ProjectRepository {
             }
             "sync_remote" => {
                 let val = if value.is_empty() { None } else { Some(value) };
-                sqlx::query!(
-                    "UPDATE projects SET sync_remote = ? WHERE id = ?",
-                    val,
-                    id
-                )
-                .execute(self.db.pool())
-                .await?;
+                sqlx::query!("UPDATE projects SET sync_remote = ? WHERE id = ?", val, id)
+                    .execute(self.db.pool())
+                    .await?;
             }
             "verification_rules" => {
                 // Parse the incoming JSON and validate each rule before persisting.

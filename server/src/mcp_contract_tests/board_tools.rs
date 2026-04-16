@@ -10,7 +10,7 @@ async fn board_health_with_no_pool_returns_response_shape() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
     sqlx::query(
-        "INSERT INTO notes (id, project_id, permalink, title, file_path, note_type, folder, tags, content, created_at, updated_at, last_accessed, content_hash, confidence, storage)\n         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?10, ?11, 'db')",
+        "INSERT INTO notes (id, project_id, permalink, title, file_path, note_type, folder, tags, content, created_at, updated_at, last_accessed, content_hash, confidence, storage)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'), DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'), DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'), ?, ?, 'db')",
     )
     .bind(uuid::Uuid::now_v7().to_string())
     .bind(&project.id)
@@ -64,12 +64,12 @@ async fn board_reconcile_releases_stuck_in_progress_without_active_session() {
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = ?1")
+    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = ?")
         .bind(&task.id)
         .execute(db.pool())
         .await
         .expect("set task in_progress");
-    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
+    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?")
         .bind(&task.id)
         .execute(db.pool())
         .await
@@ -91,7 +91,7 @@ async fn board_reconcile_releases_stuck_in_progress_without_active_session() {
 
     assert!(response.get("healed_tasks").is_some());
 
-    let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?1")
+    let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
         .bind(&task.id)
         .fetch_one(db.pool())
         .await

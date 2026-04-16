@@ -56,9 +56,12 @@ impl VerificationCacheRepository {
 
     pub async fn invalidate_project(&self, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!("DELETE FROM verification_cache WHERE project_id = ?", project_id)
-            .execute(self.db.pool())
-            .await?;
+        sqlx::query!(
+            "DELETE FROM verification_cache WHERE project_id = ?",
+            project_id
+        )
+        .execute(self.db.pool())
+        .await?;
         Ok(())
     }
 

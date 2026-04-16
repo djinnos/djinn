@@ -526,15 +526,14 @@ mod tests {
             // "unknown MCP tool" error.
             let server = server.clone();
             let name_clone = name.clone();
-            let handle = tokio::spawn(async move {
-                server.dispatch_tool(&name_clone, json!({})).await
-            });
+            let handle =
+                tokio::spawn(async move { server.dispatch_tool(&name_clone, json!({})).await });
             match handle.await {
-                Ok(Ok(_)) => {}           // arm exists, tool ran
+                Ok(Ok(_)) => {} // arm exists, tool ran
                 Ok(Err(msg)) if msg.starts_with(&format!("unknown MCP tool: '{name}'")) => {
                     missing.push(name.clone());
                 }
-                Ok(Err(_)) => {}          // arm exists, tool failed for other reasons
+                Ok(Err(_)) => {} // arm exists, tool failed for other reasons
                 Err(e) if e.is_panic() => {} // arm exists, tool panicked (unrelated state)
                 Err(e) => panic!("spawned task failed for {name}: {e}"),
             }

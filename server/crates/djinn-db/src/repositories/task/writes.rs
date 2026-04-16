@@ -1,5 +1,5 @@
-use super::*;
 use super::task_select_where_id;
+use super::*;
 
 impl TaskRepository {
     #[allow(clippy::too_many_arguments)]
@@ -42,11 +42,10 @@ impl TaskRepository {
         acceptance_criteria: Option<&str>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        let project_id =
-            sqlx::query_scalar!("SELECT project_id FROM epics WHERE id = ?", epic_id)
-                .fetch_optional(self.db.pool())
-                .await?
-                .ok_or_else(|| Error::Internal(format!("epic not found: {epic_id}")))?;
+        let project_id = sqlx::query_scalar!("SELECT project_id FROM epics WHERE id = ?", epic_id)
+            .fetch_optional(self.db.pool())
+            .await?
+            .ok_or_else(|| Error::Internal(format!("epic not found: {epic_id}")))?;
         self.create_in_project(
             &project_id,
             Some(epic_id),
@@ -107,9 +106,7 @@ impl TaskRepository {
         )
         .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(&id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(&id).fetch_one(self.db.pool()).await?;
 
         if let Some(epic_id) = epic_id {
             maybe_reopen_epic(&self.db, &self.events, epic_id).await?;
@@ -155,9 +152,7 @@ impl TaskRepository {
         )
         .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_created(&task, false));
@@ -195,9 +190,7 @@ impl TaskRepository {
         )
         .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -227,9 +220,7 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
 
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -252,9 +243,7 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
 
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -281,9 +270,7 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
 
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -324,9 +311,7 @@ impl TaskRepository {
         )
         .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -345,9 +330,7 @@ impl TaskRepository {
         )
         .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));

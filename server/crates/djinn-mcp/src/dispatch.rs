@@ -651,9 +651,9 @@ impl DjinnMcpServer {
             ),
             "project_add_from_github" => map_json(
                 name,
-                self.project_add_from_github(Parameters(decode_args::<ProjectAddFromGithubParams>(
-                    name, args,
-                )?))
+                self.project_add_from_github(Parameters(
+                    decode_args::<ProjectAddFromGithubParams>(name, args)?,
+                ))
                 .await,
             ),
             "project_branches" => map_json(

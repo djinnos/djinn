@@ -23,7 +23,10 @@ use djinn_db::Database;
 
 use crate::repos::credential::CredentialRepository;
 
-use super::{ENV_APP_ID, ENV_APP_SLUG, ENV_CLIENT_ID, ENV_CLIENT_SECRET, ENV_PRIVATE_KEY, ENV_PRIVATE_KEY_PATH};
+use super::{
+    ENV_APP_ID, ENV_APP_SLUG, ENV_CLIENT_ID, ENV_CLIENT_SECRET, ENV_PRIVATE_KEY,
+    ENV_PRIVATE_KEY_PATH,
+};
 
 /// Credential `key_name` used for the JSON blob storing the full App config.
 pub const APP_CONFIG_KEY: &str = "__GITHUB_APP_CONFIG";

@@ -20,8 +20,7 @@ async fn send_with_retry_refreshes_installation_token_on_401() {
         .mount(&server)
         .await;
 
-    let client =
-        GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
     let result = client.get_pull_request("djinnos", "server", 1).await;
 
     assert!(result.is_err());

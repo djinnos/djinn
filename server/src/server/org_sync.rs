@@ -337,10 +337,8 @@ async fn fetch_org_members(
             .and_then(|h| h.to_str().ok())
             .map(str::to_string);
 
-        let page: Vec<GithubOrgMember> = resp
-            .json()
-            .await
-            .map_err(|e| format!("decode page: {e}"))?;
+        let page: Vec<GithubOrgMember> =
+            resp.json().await.map_err(|e| format!("decode page: {e}"))?;
         out.extend(page);
 
         next = link_header.as_deref().and_then(parse_next_link);
@@ -484,10 +482,7 @@ mod tests {
         let diff = diff_membership(&local, &gh);
         assert_eq!(diff.to_activate, vec!["u-carol".to_string()]);
         assert_eq!(diff.to_deactivate, vec!["u-bob".to_string()]);
-        assert_eq!(
-            diff.present_members_to_touch,
-            vec!["u-alice".to_string()]
-        );
+        assert_eq!(diff.present_members_to_touch, vec!["u-alice".to_string()]);
     }
 
     /// Empty roster response revokes every currently-active user. Guards
@@ -564,9 +559,7 @@ mod tests {
     /// diff itself is already unit-tested above.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn apply_diff_against_real_db_revokes_sessions() {
-        use djinn_db::{
-            CreateUserAuthSession, Database, SessionAuthRepository, UserRepository,
-        };
+        use djinn_db::{CreateUserAuthSession, Database, SessionAuthRepository, UserRepository};
 
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();

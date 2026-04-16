@@ -135,9 +135,9 @@ struct Inner {
 
 impl AppState {
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
-        let runtime = DatabaseRuntimeManager::new(
-            crate::db::runtime::DatabaseRuntimeConfig::dolt(db.bootstrap_info().target.clone()),
-        );
+        let runtime = DatabaseRuntimeManager::new(crate::db::runtime::DatabaseRuntimeConfig::dolt(
+            db.bootstrap_info().target.clone(),
+        ));
         Self::new_with_runtime(db, runtime, cancel)
     }
 
@@ -204,9 +204,7 @@ impl AppState {
         if cfg.is_some() {
             tracing::info!("github_app: loaded persisted/env App configuration");
         } else {
-            tracing::debug!(
-                "github_app: no persisted or env App configuration on startup"
-            );
+            tracing::debug!("github_app: no persisted or env App configuration on startup");
         }
         // Mirror to env so consumers that still read env vars (the JWT
         // minter, the GitHubAppClient install URL helper, etc.) see the

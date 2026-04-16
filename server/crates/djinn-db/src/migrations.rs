@@ -1,11 +1,10 @@
 //! Schema migrations for djinn-db.
 //!
 //! The project uses [`sqlx::migrate!`] as the single source of truth for
-//! both SQLite and MySQL/Dolt backends. Migrations live under
-//! `migrations_sqlite/` and `migrations_mysql/` at the crate root and are
-//! embedded into the binary at compile time.
+//! the MySQL/Dolt backend. Migrations live under `migrations_mysql/` at
+//! the crate root and are embedded into the binary at compile time.
 //!
-//! Adding a migration: create the next `V{N}__{slug}.sql` under the correct
+//! Adding a migration: create the next `{N}_{slug}.sql` under that
 //! directory. NEVER edit an applied migration — sqlx stores a checksum in
 //! `_sqlx_migrations` and will refuse to start if the on-disk content
 //! diverges. Tests enforce this (`tests/migrations_immutable.rs`).
@@ -45,16 +44,15 @@ fn extract_mysql_database_name(db_url: &str) -> Option<String> {
     let trimmed = db_url.trim();
     let without_scheme = trimmed.strip_prefix("mysql://")?;
     let after_host = without_scheme.rsplit('@').next().unwrap_or(without_scheme);
-    let mut parts = after_host.splitn(2, '/');
-    let _host = parts.next()?;
-    let path = parts.next()?;
+    let (_host, path) = after_host.split_once('/')?;
     let name = path.split('?').next()?.trim();
-    if name.is_empty() { None } else { Some(name.to_owned()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_owned())
+    }
 }
 
 fn is_safe_database_identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

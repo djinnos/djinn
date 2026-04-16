@@ -69,11 +69,10 @@ impl CoordinatorActor {
     /// Poll tasks in `pr_draft` status: wait for CI to pass, then undraft the PR.
     async fn poll_pr_draft_tasks(&mut self) {
         let task_repo = self.task_repo();
-        let project_repo =
-            djinn_db::ProjectRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            );
+        let project_repo = djinn_db::ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
         let pr_draft_tasks = match task_repo.list_by_status("pr_draft").await {
             Ok(tasks) => tasks,
             Err(e) => {
@@ -291,11 +290,10 @@ impl CoordinatorActor {
     /// Poll tasks in `pr_review` status: wait for reviewer approval or changes, then merge.
     async fn poll_pr_review_tasks(&mut self) {
         let task_repo = self.task_repo();
-        let project_repo =
-            djinn_db::ProjectRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            );
+        let project_repo = djinn_db::ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
         let pr_review_tasks = match task_repo.list_by_status("pr_review").await {
             Ok(tasks) => tasks,
             Err(e) => {

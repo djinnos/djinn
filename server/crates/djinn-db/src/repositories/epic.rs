@@ -4,10 +4,10 @@ use djinn_core::models::Epic;
 use crate::database::Database;
 use crate::{Error, Result};
 
-/// Inlined EPIC_COLS projection for each `query_as!(Epic, ...)` call site.
-/// `query_as!` requires a string-literal SQL argument; concat!()-produced
-/// literals don't satisfy it (verified during batch 4 on agent.rs).  Each
-/// caller therefore passes the full SELECT body as a raw string literal.
+// Inlined EPIC_COLS projection for each `query_as!(Epic, ...)` call site.
+// `query_as!` requires a string-literal SQL argument; concat!()-produced
+// literals don't satisfy it (verified during batch 4 on agent.rs).  Each
+// caller therefore passes the full SELECT body as a raw string literal.
 
 // ── Query / result types ─────────────────────────────────────────────────────
 
@@ -418,12 +418,9 @@ impl EpicRepository {
     /// Count child tasks then CASCADE-delete the epic. Returns the child task count.
     pub async fn delete_with_count(&self, id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
-        let count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM tasks WHERE epic_id = ?",
-            id
-        )
-        .fetch_one(self.db.pool())
-        .await?;
+        let count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM tasks WHERE epic_id = ?", id)
+            .fetch_one(self.db.pool())
+            .await?;
         self.delete(id).await?;
         Ok(count)
     }
@@ -528,10 +525,9 @@ impl EpicRepository {
 
     async fn ensure_default_project_id(&self) -> Result<String> {
         self.db.ensure_initialized().await?;
-        if let Some(id) =
-            sqlx::query_scalar!("SELECT id FROM projects ORDER BY created_at LIMIT 1")
-                .fetch_optional(self.db.pool())
-                .await?
+        if let Some(id) = sqlx::query_scalar!("SELECT id FROM projects ORDER BY created_at LIMIT 1")
+            .fetch_optional(self.db.pool())
+            .await?
         {
             return Ok(id);
         }

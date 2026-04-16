@@ -116,4 +116,3 @@ impl GitHubApiClient {
         Ok(resp.text().await?)
     }
 }
-

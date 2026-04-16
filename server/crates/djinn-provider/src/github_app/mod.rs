@@ -50,4 +50,3 @@ pub const ENV_PRIVATE_KEY_PATH: &str = "GITHUB_APP_PRIVATE_KEY_PATH";
 pub const ENV_CLIENT_ID: &str = "GITHUB_APP_CLIENT_ID";
 /// Env var: user-to-server OAuth client secret for the GitHub App.
 pub const ENV_CLIENT_SECRET: &str = "GITHUB_APP_CLIENT_SECRET";
-

@@ -10,7 +10,6 @@ async fn list_pull_request_reviews_success() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
 
-
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls/42/comments"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
@@ -44,7 +43,6 @@ async fn list_pull_request_reviews_success() {
 async fn fetch_pr_review_feedback_aggregates_change_requests_and_comments() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();
-
 
     Mock::given(method("GET"))
         .and(path("/repos/djinnos/server/pulls/42/reviews"))

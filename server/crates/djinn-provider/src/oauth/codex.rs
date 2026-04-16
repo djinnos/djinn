@@ -426,7 +426,13 @@ async fn spawn_callback_server(app: axum::Router) -> Result<(tokio::task::JoinHa
                 }
             }
         }
-        Err(e) => return Err(anyhow!("Failed to bind OAuth callback port {}: {}", OAUTH_PORT, e)),
+        Err(e) => {
+            return Err(anyhow!(
+                "Failed to bind OAuth callback port {}: {}",
+                OAUTH_PORT,
+                e
+            ));
+        }
     };
     let port = listener.local_addr()?.port();
     let handle = tokio::spawn(async move {
@@ -474,10 +480,7 @@ fn html_error(error: &str) -> String {
 /// Tokens are persisted to the encrypted credential DB on success. On refresh
 /// failure the existing tokens are **not** cleared — the refresh token is
 /// preserved so a future attempt can retry.
-pub async fn run_codex_flow(
-    repo: &CredentialRepository,
-    events: &EventBus,
-) -> Result<CodexTokens> {
+pub async fn run_codex_flow(repo: &CredentialRepository, events: &EventBus) -> Result<CodexTokens> {
     // 1. Check cache
     if let Some(cached) = CodexTokens::load_from_db(repo).await {
         if !cached.is_expired() {
@@ -515,7 +518,10 @@ pub async fn run_codex_flow(
     // The desktop (Electron) is responsible for opening the browser via
     // shell.openExternal. The server — which may be running in a container —
     // never shells out to xdg-open/open.
-    events.send(DjinnEventEnvelope::oauth_open_browser("chatgpt_codex", &auth_url));
+    events.send(DjinnEventEnvelope::oauth_open_browser(
+        "chatgpt_codex",
+        &auth_url,
+    ));
 
     // 3. Wait for callback (5-minute timeout)
     let code =

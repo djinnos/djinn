@@ -289,10 +289,7 @@ impl GitHubApiClient {
     /// recently-worked-in repos bubble to the top — useful for a UI picker.
     ///
     /// Each entry is `(owner, repo, default_branch, private, description)`.
-    pub async fn list_user_repos(
-        &self,
-        per_page: Option<usize>,
-    ) -> Result<Vec<UserRepoEntry>> {
+    pub async fn list_user_repos(&self, per_page: Option<usize>) -> Result<Vec<UserRepoEntry>> {
         let per_page = per_page.unwrap_or(30).clamp(1, 100);
         let url = format!(
             "{}/user/repos?per_page={}&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member",
@@ -341,7 +338,10 @@ impl GitHubApiClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("main")
                     .to_string(),
-                private: item.get("private").and_then(|v| v.as_bool()).unwrap_or(false),
+                private: item
+                    .get("private")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 description: item
                     .get("description")
                     .and_then(|v| v.as_str())

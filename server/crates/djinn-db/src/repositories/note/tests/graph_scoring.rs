@@ -583,11 +583,13 @@ async fn temporal_scores_recent_update_wins_same_access_count() {
         .await
         .unwrap();
 
-    sqlx::query("UPDATE notes SET updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?")
-        .bind(&recent.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE notes SET updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?",
+    )
+    .bind(&recent.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
 
     sqlx::query("UPDATE notes SET updated_at = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 30 DAY), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?")
         .bind(&stale.id)

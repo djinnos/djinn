@@ -353,12 +353,9 @@ async fn delete_embedding_metadata(repo: &NoteRepository, note_id: &str) -> Resu
     sqlx::query!("DELETE FROM note_embeddings WHERE note_id = ?", note_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query!(
-        "DELETE FROM note_embedding_meta WHERE note_id = ?",
-        note_id
-    )
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query!("DELETE FROM note_embedding_meta WHERE note_id = ?", note_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }

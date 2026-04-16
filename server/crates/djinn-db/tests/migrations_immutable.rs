@@ -36,7 +36,10 @@ fn canonical_entries(dir: &Path) -> Vec<(u64, String)> {
 #[test]
 fn mysql_migration_names_are_canonical_and_increasing() {
     let entries = canonical_entries(&migrations_dir("migrations_mysql"));
-    assert!(!entries.is_empty(), "must have at least one mysql migration");
+    assert!(
+        !entries.is_empty(),
+        "must have at least one mysql migration"
+    );
     let mut last = 0_u64;
     for (v, _) in &entries {
         assert!(

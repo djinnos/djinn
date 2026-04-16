@@ -3,69 +3,43 @@ use crate::test_helpers::{
 };
 use serde_json::json;
 
-/// Initialise a temp directory as a git repo with a GitHub origin remote.
-fn init_git_with_github_remote(dir: &std::path::Path) {
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir)
-        .output()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:test-owner/test-repo.git",
-        ])
-        .current_dir(dir)
-        .output()
-        .expect("git remote add");
-    // Create an initial commit so HEAD is valid.
-    std::process::Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(dir)
-        .output()
-        .expect("git commit");
-}
-
 #[tokio::test]
-async fn project_add_rejects_dir_without_github_remote() {
+async fn project_add_rejects_empty_owner_or_repo() {
+    // `project_add_from_github` (formerly `project_add`) validates that owner
+    // and repo are non-empty before anything else — exercising that fast-path
+    // doesn't require a GitHub session token.
     let app = create_test_app();
     let session_id = initialize_mcp_session(&app).await;
-    let dir = workspace_tempdir("project-tools-");
-    let path = dir.path().to_string_lossy().to_string();
 
     let added = mcp_call_tool(
         &app,
         &session_id,
-        "project_add",
-        json!({"name": "proj-no-remote", "path": path.clone()}),
+        "project_add_from_github",
+        json!({"owner": "", "repo": ""}),
     )
     .await;
     let status = added["status"].as_str().unwrap_or_default();
     assert!(
         status.starts_with("error:"),
-        "expected error for missing remote, got: {status}"
+        "expected error for empty owner/repo, got: {status}"
     );
     assert!(
-        status.contains("GitHub remote"),
-        "expected GitHub remote error message, got: {status}"
+        status.contains("owner and repo must be non-empty"),
+        "expected empty-owner/repo error message, got: {status}"
     );
 }
 
 #[tokio::test]
 async fn project_add_rejects_when_github_not_connected() {
+    // Without a GitHub-authenticated session the server must refuse to clone.
     let app = create_test_app();
     let session_id = initialize_mcp_session(&app).await;
-    let dir = workspace_tempdir("project-tools-");
-    init_git_with_github_remote(dir.path());
-    let path = dir.path().to_string_lossy().to_string();
 
     let added = mcp_call_tool(
         &app,
         &session_id,
-        "project_add",
-        json!({"name": "proj-no-token", "path": path.clone()}),
+        "project_add_from_github",
+        json!({"owner": "test-owner", "repo": "test-repo"}),
     )
     .await;
     let status = added["status"].as_str().unwrap_or_default();
@@ -74,8 +48,8 @@ async fn project_add_rejects_when_github_not_connected() {
         "expected error for missing GitHub token, got: {status}"
     );
     assert!(
-        status.contains("Connect GitHub first"),
-        "expected 'Connect GitHub first' error, got: {status}"
+        status.contains("sign in with GitHub required"),
+        "expected 'sign in with GitHub required' error, got: {status}"
     );
 }
 
@@ -104,19 +78,20 @@ async fn project_add_and_list_success_shape() {
 
 #[tokio::test]
 async fn project_add_duplicate_path_errors() {
-    // Both calls will hit the GitHub validation error, which is itself
-    // an error status — the test still verifies that the second call
-    // returns an error (just a different one than before).
+    // Under `project_add_from_github` the clone path is derived from
+    // `{owner}/{repo}`, so "duplicate path" manifests as two calls for the
+    // same repo.  Without a GitHub-authenticated session both calls short
+    // circuit on token validation — the test still verifies that both
+    // return an error status (rather than a success shape) for the same
+    // inputs.
     let app = create_test_app();
     let session_id = initialize_mcp_session(&app).await;
-    let dir = workspace_tempdir("project-tools-");
-    let path = dir.path().to_string_lossy().to_string();
 
     let first = mcp_call_tool(
         &app,
         &session_id,
-        "project_add",
-        json!({"name": "proj-a", "path": path.clone()}),
+        "project_add_from_github",
+        json!({"owner": "test-owner", "repo": "test-repo"}),
     )
     .await;
     assert!(
@@ -128,8 +103,8 @@ async fn project_add_duplicate_path_errors() {
     let dup = mcp_call_tool(
         &app,
         &session_id,
-        "project_add",
-        json!({"name": "proj-b", "path": path}),
+        "project_add_from_github",
+        json!({"owner": "test-owner", "repo": "test-repo"}),
     )
     .await;
     assert!(

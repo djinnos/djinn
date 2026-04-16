@@ -152,10 +152,7 @@ impl CredentialRepository {
     /// Persist the GitHub App configuration JSON blob produced by the
     /// manifest auto-provision flow. The JSON is encrypted at rest like any
     /// other credential.
-    pub async fn set_github_app_config(
-        &self,
-        config: &crate::github_app::AppConfig,
-    ) -> Result<()> {
+    pub async fn set_github_app_config(&self, config: &crate::github_app::AppConfig) -> Result<()> {
         let json = serde_json::to_string(config).map_err(|e| {
             djinn_db::Error::Internal(format!("failed to serialise GitHub App config: {e}"))
         })?;
@@ -169,10 +166,10 @@ impl CredentialRepository {
     }
 
     /// Load and decrypt the persisted GitHub App configuration, if any.
-    pub async fn get_github_app_config(
-        &self,
-    ) -> Result<Option<crate::github_app::AppConfig>> {
-        let Some(raw) = self.get_decrypted(crate::github_app::APP_CONFIG_KEY).await?
+    pub async fn get_github_app_config(&self) -> Result<Option<crate::github_app::AppConfig>> {
+        let Some(raw) = self
+            .get_decrypted(crate::github_app::APP_CONFIG_KEY)
+            .await?
         else {
             return Ok(None);
         };

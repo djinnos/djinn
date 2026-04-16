@@ -11,16 +11,14 @@
 //!     `djinn_provider::github_app`).
 //!
 //! Environment variables:
-//!   * `GITHUB_APP_CLIENT_ID`       — GitHub App client id (required).
-//!   * `GITHUB_APP_CLIENT_SECRET`   — GitHub App client secret (required).
-//!   * `GITHUB_APP_SLUG`            — App slug, used when `?install=1` is
-//!                                    passed to redirect to the install
-//!                                    page post-auth.
-//!   * `DJINN_PUBLIC_URL`           — Public base URL used to build the
-//!                                    OAuth callback (defaults to
-//!                                    `http://127.0.0.1:8372`).
-//!   * `DJINN_COOKIE_SECURE`        — `true` to force `Secure` on the
-//!                                    session cookie.
+//!   * `GITHUB_APP_CLIENT_ID` — GitHub App client id (required).
+//!   * `GITHUB_APP_CLIENT_SECRET` — GitHub App client secret (required).
+//!   * `GITHUB_APP_SLUG` — App slug, used when `?install=1` is passed to
+//!     redirect to the install page post-auth.
+//!   * `DJINN_PUBLIC_URL` — Public base URL used to build the OAuth
+//!     callback (defaults to `http://127.0.0.1:8372`).
+//!   * `DJINN_COOKIE_SECURE` — `true` to force `Secure` on the session
+//!     cookie.
 //!
 //! The flow:
 //!   1. `GET /auth/github/start?redirect=<path>` — mint a random `state` value,
@@ -335,8 +333,7 @@ async fn github_start(State(state): State<AppState>, Query(q): Query<StartQuery>
     );
     headers.insert(
         header::LOCATION,
-        HeaderValue::from_str(&auth_url)
-            .unwrap_or_else(|_| HeaderValue::from_static("/")),
+        HeaderValue::from_str(&auth_url).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
     (StatusCode::FOUND, headers).into_response()
 }
@@ -439,9 +436,7 @@ async fn github_callback(
     let org_cfg = match org_repo.get().await {
         Ok(Some(cfg)) => cfg,
         Ok(None) => {
-            tracing::warn!(
-                "auth callback: rejecting login — deployment has no org_config yet"
-            );
+            tracing::warn!("auth callback: rejecting login — deployment has no org_config yet");
             return (
                 StatusCode::PRECONDITION_FAILED,
                 "Djinn is not configured yet. The deployment owner must complete \
@@ -552,14 +547,9 @@ async fn github_callback(
                     .filter(|s| !s.trim().is_empty())
             });
         match slug {
-            Some(s) => format!(
-                "https://github.com/apps/{}/installations/new",
-                s.trim()
-            ),
+            Some(s) => format!("https://github.com/apps/{}/installations/new", s.trim()),
             None => {
-                tracing::warn!(
-                    "auth callback: install=1 requested but GITHUB_APP_SLUG is unset"
-                );
+                tracing::warn!("auth callback: install=1 requested but GITHUB_APP_SLUG is unset");
                 local_fallback
             }
         }
@@ -670,14 +660,13 @@ async fn fetch_github_user(access_token: &str) -> Result<GhUser, String> {
 /// Uses `GET /user/memberships/orgs/{org}`, the endpoint GitHub documents as
 /// the canonical "am I in this org?" probe for user-to-server tokens.
 /// Returns:
-///   * `Ok(true)`  — 200 response with `state == "active"`.
+///   * `Ok(true)` — 200 response with `state == "active"`.
 ///   * `Ok(false)` — 404 (the user can't see the org), 403 (e.g. revoked),
-///                   or 200 with `state == "pending"` (invite not yet
-///                   accepted). We intentionally treat pending invites as
-///                   non-members: the deployment policy is "active members
-///                   only". Any other non-success status is surfaced as an
-///                   error so callers can decide whether to 502.
-///   * `Err(_)`    — network or decode failure.
+///     or 200 with `state == "pending"` (invite not yet accepted). We
+///     intentionally treat pending invites as non-members: the deployment
+///     policy is "active members only". Any other non-success status is
+///     surfaced as an error so callers can decide whether to 502.
+///   * `Err(_)` — network or decode failure.
 async fn check_org_membership(access_token: &str, org_login: &str) -> Result<bool, String> {
     #[derive(Deserialize)]
     struct Membership {
@@ -743,9 +732,8 @@ fn cookie_secure() -> bool {
 
 fn set_cookie(headers: &mut HeaderMap, name: &str, value: &str, max_age: i64) {
     let secure = if cookie_secure() { "; Secure" } else { "" };
-    let cookie = format!(
-        "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
-    );
+    let cookie =
+        format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}");
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
         headers.append(header::SET_COOKIE, hv);
     }
@@ -753,8 +741,7 @@ fn set_cookie(headers: &mut HeaderMap, name: &str, value: &str, max_age: i64) {
 
 fn clear_cookie(headers: &mut HeaderMap, name: &str) {
     let secure = if cookie_secure() { "; Secure" } else { "" };
-    let cookie =
-        format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}");
+    let cookie = format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}");
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
         headers.append(header::SET_COOKIE, hv);
     }
@@ -885,7 +872,11 @@ fn url_host(s: &str) -> Option<String> {
     let after_scheme = s.split("://").nth(1).unwrap_or(s);
     let host_with_port = after_scheme.split('/').next().unwrap_or(after_scheme);
     let host = host_with_port.split(':').next().unwrap_or(host_with_port);
-    if host.is_empty() { None } else { Some(host.to_string()) }
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 
 /// Render an auto-submitting HTML form that POSTs our manifest JSON to
@@ -918,7 +909,12 @@ async fn create_app_form(
     let csrf = random_token_b64();
     let manifest_escaped = html_attr_escape(&manifest_json);
     let csrf_escaped = html_attr_escape(&csrf);
-    let action = match q.organization.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let action = match q
+        .organization
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(org) => format!(
             "https://github.com/organizations/{}/settings/apps/new?state={}",
             urlencode(org),
@@ -948,7 +944,12 @@ async fn create_app_form(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
-    set_cookie(&mut headers, MANIFEST_STATE_COOKIE, &csrf, STATE_COOKIE_TTL_SECS);
+    set_cookie(
+        &mut headers,
+        MANIFEST_STATE_COOKIE,
+        &csrf,
+        STATE_COOKIE_TTL_SECS,
+    );
     (StatusCode::OK, headers, html).into_response()
 }
 
@@ -994,11 +995,7 @@ async fn app_manifest_callback(
     headers: HeaderMap,
 ) -> Response {
     if state.app_config().await.is_some() {
-        return (
-            StatusCode::CONFLICT,
-            "GitHub App is already configured",
-        )
-            .into_response();
+        return (StatusCode::CONFLICT, "GitHub App is already configured").into_response();
     }
 
     let (code, state_param) = match (q.code, q.state) {
@@ -1135,10 +1132,7 @@ async fn app_manifest_callback(
     let mut resp_headers = HeaderMap::new();
     clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
     let location = "/auth/github/start?install=1";
-    resp_headers.insert(
-        header::LOCATION,
-        HeaderValue::from_static(location),
-    );
+    resp_headers.insert(header::LOCATION, HeaderValue::from_static(location));
     (StatusCode::FOUND, resp_headers).into_response()
 }
 
@@ -1284,8 +1278,10 @@ mod tests {
     #[test]
     fn urlencode_escapes_reserved_chars() {
         assert_eq!(urlencode("a b&c"), "a%20b%26c");
-        assert_eq!(urlencode("read:user user:email repo"),
-            "read%3Auser%20user%3Aemail%20repo");
+        assert_eq!(
+            urlencode("read:user user:email repo"),
+            "read%3Auser%20user%3Aemail%20repo"
+        );
     }
 
     #[test]
@@ -1339,7 +1335,10 @@ mod tests {
 
     #[test]
     fn manifest_url_host_handles_localhost_fallback() {
-        assert_eq!(url_host("http://127.0.0.1:8372").as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            url_host("http://127.0.0.1:8372").as_deref(),
+            Some("127.0.0.1")
+        );
         assert_eq!(
             url_host("https://djinn.example.com/path").as_deref(),
             Some("djinn.example.com")
@@ -1396,12 +1395,7 @@ mod tests {
             code: Some("xyz".into()),
             state: Some("abc".into()),
         };
-        let resp = app_manifest_callback(
-            State(state.clone()),
-            Query(q),
-            HeaderMap::new(),
-        )
-        .await;
+        let resp = app_manifest_callback(State(state.clone()), Query(q), HeaderMap::new()).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 

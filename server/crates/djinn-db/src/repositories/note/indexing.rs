@@ -163,9 +163,7 @@ impl NoteRepository {
         )
         .await?;
 
-        let note = super::note_select_where_id!(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let note = super::note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
         tx.commit().await?;
         self.sync_note_embedding(
@@ -220,9 +218,7 @@ impl NoteRepository {
         index_links_for_note(&mut tx, id, project_id, content).await?;
         resolve_links_for_note(&mut tx, id, title, permalink, project_id).await?;
 
-        let note = super::note_select_where_id!(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let note = super::note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
         tx.commit().await?;
         self.sync_note_embedding(

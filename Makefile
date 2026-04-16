@@ -1,7 +1,7 @@
 DESKTOP_DIR := $(CURDIR)/desktop
 SERVER_DIR := $(CURDIR)/server
 
-.PHONY: help up up-no-build down logs dev watch
+.PHONY: help up up-no-build down logs dev watch test test-all
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -51,3 +51,22 @@ test-db-reset: ## Wipe and restart the test Dolt — cleans out djinn_test_* DBs
 test: ## Run djinn-db tests (env routes to :3307 via .cargo/config.toml)
 	@$(MAKE) --no-print-directory test-db-migrate
 	cd $(SERVER_DIR) && cargo test -p djinn-db
+
+# Each crate's test suite spins up 100–250 fresh djinn_test_* databases and
+# Dolt caches them all, so running the workspace concurrently saturates the
+# 8 GiB test-Dolt and cascades into `UnexpectedEof` failures. This target
+# runs each crate sequentially with a `test-db-reset` between them so the
+# cache is drained before the next crate starts.
+test-all: ## Run every workspace crate's tests sequentially (avoids test-Dolt OOM)
+	@$(MAKE) --no-print-directory test-db-reset
+	cd $(SERVER_DIR) && cargo test -p djinn-db
+	@$(MAKE) --no-print-directory test-db-reset
+	cd $(SERVER_DIR) && cargo test -p djinn-core
+	@$(MAKE) --no-print-directory test-db-reset
+	cd $(SERVER_DIR) && cargo test -p djinn-provider
+	@$(MAKE) --no-print-directory test-db-reset
+	cd $(SERVER_DIR) && cargo test -p djinn-mcp
+	@$(MAKE) --no-print-directory test-db-reset
+	cd $(SERVER_DIR) && cargo test -p djinn-agent
+	@$(MAKE) --no-print-directory test-db-reset
+	cd $(SERVER_DIR) && cargo test -p djinn-server

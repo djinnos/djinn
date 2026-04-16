@@ -52,9 +52,12 @@ impl VerificationResultRepository {
         let pool = self.db.pool();
 
         // Delete previous results for this task.
-        sqlx::query!("DELETE FROM verification_results WHERE task_id = ?", task_id)
-            .execute(pool)
-            .await?;
+        sqlx::query!(
+            "DELETE FROM verification_results WHERE task_id = ?",
+            task_id
+        )
+        .execute(pool)
+        .await?;
 
         for step in steps {
             sqlx::query!(
@@ -97,9 +100,12 @@ impl VerificationResultRepository {
     /// Delete all results for a task.
     pub async fn delete_for_task(&self, task_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!("DELETE FROM verification_results WHERE task_id = ?", task_id)
-            .execute(self.db.pool())
-            .await?;
+        sqlx::query!(
+            "DELETE FROM verification_results WHERE task_id = ?",
+            task_id
+        )
+        .execute(self.db.pool())
+        .await?;
         Ok(())
     }
 

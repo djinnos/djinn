@@ -5,9 +5,9 @@ use serde_json::Value;
 use crate::Result;
 use crate::database::Database;
 
-/// Inlined SESSION_COLS projection for each `query_as!(SessionRecord, ...)`
-/// call site.  `query_as!` requires a string-literal SQL argument; concat!()
-/// doesn't satisfy it (verified on agent.rs in batch 4).
+// Inlined SESSION_COLS projection for each `query_as!(SessionRecord, ...)`
+// call site.  `query_as!` requires a string-literal SQL argument; concat!()
+// doesn't satisfy it (verified on agent.rs in batch 4).
 
 pub struct SessionRepository {
     db: Database,

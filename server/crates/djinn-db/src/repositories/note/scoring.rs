@@ -164,13 +164,11 @@ impl NoteRepository {
         }
 
         let seed0 = &seed_ids[0];
-        let project_id = sqlx::query_scalar!(
-            "SELECT project_id FROM notes WHERE id = ? LIMIT 1",
-            seed0
-        )
-        .fetch_optional(self.db.pool())
-        .await?
-        .unwrap_or_default();
+        let project_id =
+            sqlx::query_scalar!("SELECT project_id FROM notes WHERE id = ? LIMIT 1", seed0)
+                .fetch_optional(self.db.pool())
+                .await?
+                .unwrap_or_default();
 
         if project_id.is_empty() {
             return Ok(Vec::new());
@@ -278,9 +276,7 @@ fn age_days_from_timestamp(value: &str, now: SystemTime) -> f64 {
     let now_unix = duration.as_secs_f64();
 
     let value = value.trim().trim_end_matches('Z');
-    let Some((date_part, time_part)) = value
-        .split_once(' ')
-        .or_else(|| value.split_once('T'))
+    let Some((date_part, time_part)) = value.split_once(' ').or_else(|| value.split_once('T'))
     else {
         return f64::EPSILON;
     };

@@ -28,7 +28,6 @@ async fn git_fetch_in(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-
 // ── Param structs ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -198,11 +197,11 @@ struct StrictDjinnSettings {
 fn order_branches(mut branches: Vec<String>, current: Option<&str>) -> Vec<String> {
     branches.sort();
     branches.dedup();
-    if let Some(cur) = current {
-        if let Some(pos) = branches.iter().position(|b| b == cur) {
-            let c = branches.remove(pos);
-            branches.insert(0, c);
-        }
+    if let Some(cur) = current
+        && let Some(pos) = branches.iter().position(|b| b == cur)
+    {
+        let c = branches.remove(pos);
+        branches.insert(0, c);
     }
     branches
 }
@@ -341,9 +340,7 @@ impl DjinnMcpServer {
                 },
             });
         }
-        let display_name = input
-            .name
-            .unwrap_or_else(|| format!("{owner}/{repo}"));
+        let display_name = input.name.unwrap_or_else(|| format!("{owner}/{repo}"));
 
         // 1. Must have a session user token from the task-local (set by the
         //    HTTP MCP handler after resolving the `djinn_session` cookie).
@@ -360,9 +357,7 @@ impl DjinnMcpServer {
 
         // 2. Resolve the installation id — either trust the caller's input
         //    or scan installations to find one that has the repo.
-        use djinn_provider::github_app::{
-            find_installation_for_repo, get_installation_token,
-        };
+        use djinn_provider::github_app::{find_installation_for_repo, get_installation_token};
         let installation_id = if let Some(id) = input.installation_id {
             id
         } else {
@@ -381,10 +376,7 @@ impl DjinnMcpServer {
             }
         };
 
-        let default_branch = input
-            .git_ref
-            .clone()
-            .unwrap_or_else(|| "main".to_string());
+        let default_branch = input.git_ref.clone().unwrap_or_else(|| "main".to_string());
 
         // 3. Choose clone_path under the server-managed projects root.
         let clone_path = format!("/root/.djinn/projects/{owner}/{repo}");
@@ -441,12 +433,7 @@ impl DjinnMcpServer {
 
         if !std::path::Path::new(&clone_path).join(".git").exists() {
             let mut cmd = std::process::Command::new("git");
-            cmd.args([
-                "clone",
-                "--filter=blob:none",
-                &remote_url,
-                &clone_path,
-            ]);
+            cmd.args(["clone", "--filter=blob:none", &remote_url, &clone_path]);
             let output = match crate::process::output(cmd).await {
                 Ok(o) => o,
                 Err(e) => {
@@ -614,7 +601,9 @@ impl DjinnMcpServer {
             Ok(r) => r,
             Err(e) => {
                 return Json(GithubListReposResponse {
-                    status: format!("error: list repositories for installation {installation_id}: {e}"),
+                    status: format!(
+                        "error: list repositories for installation {installation_id}: {e}"
+                    ),
                     repos: vec![],
                 });
             }
@@ -807,26 +796,26 @@ impl DjinnMcpServer {
 
         // 1. Current branch via `git rev-parse --abbrev-ref HEAD`.
         let mut head_cmd = std::process::Command::new("git");
-        head_cmd
-            .args(["-C", &path, "rev-parse", "--abbrev-ref", "HEAD"]);
+        head_cmd.args(["-C", &path, "rev-parse", "--abbrev-ref", "HEAD"]);
         let head_fut = crate::process::output(head_cmd);
-        let head_out = match tokio::time::timeout(std::time::Duration::from_secs(30), head_fut).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                return Json(ProjectBranchesResponse {
-                    status: format!("error: git rev-parse failed: {e}"),
-                    branches: vec![],
-                    current: None,
-                });
-            }
-            Err(_) => {
-                return Json(ProjectBranchesResponse {
-                    status: "error: git rev-parse timed out after 30s".into(),
-                    branches: vec![],
-                    current: None,
-                });
-            }
-        };
+        let head_out =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), head_fut).await {
+                Ok(Ok(o)) => o,
+                Ok(Err(e)) => {
+                    return Json(ProjectBranchesResponse {
+                        status: format!("error: git rev-parse failed: {e}"),
+                        branches: vec![],
+                        current: None,
+                    });
+                }
+                Err(_) => {
+                    return Json(ProjectBranchesResponse {
+                        status: "error: git rev-parse timed out after 30s".into(),
+                        branches: vec![],
+                        current: None,
+                    });
+                }
+            };
         let current = if head_out.status.success() {
             let raw = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
             // Detached HEAD surfaces as "HEAD" — treat as no current branch.
@@ -841,31 +830,26 @@ impl DjinnMcpServer {
 
         // 2. Local branch list.
         let mut list_cmd = std::process::Command::new("git");
-        list_cmd.args([
-            "-C",
-            &path,
-            "branch",
-            "--list",
-            "--format=%(refname:short)",
-        ]);
+        list_cmd.args(["-C", &path, "branch", "--list", "--format=%(refname:short)"]);
         let list_fut = crate::process::output(list_cmd);
-        let list_out = match tokio::time::timeout(std::time::Duration::from_secs(30), list_fut).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                return Json(ProjectBranchesResponse {
-                    status: format!("error: git branch failed: {e}"),
-                    branches: vec![],
-                    current,
-                });
-            }
-            Err(_) => {
-                return Json(ProjectBranchesResponse {
-                    status: "error: git branch timed out after 30s".into(),
-                    branches: vec![],
-                    current,
-                });
-            }
-        };
+        let list_out =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), list_fut).await {
+                Ok(Ok(o)) => o,
+                Ok(Err(e)) => {
+                    return Json(ProjectBranchesResponse {
+                        status: format!("error: git branch failed: {e}"),
+                        branches: vec![],
+                        current,
+                    });
+                }
+                Err(_) => {
+                    return Json(ProjectBranchesResponse {
+                        status: "error: git branch timed out after 30s".into(),
+                        branches: vec![],
+                        current,
+                    });
+                }
+            };
         if !list_out.status.success() {
             return Json(ProjectBranchesResponse {
                 status: format!(

@@ -113,17 +113,13 @@ pub struct LearnedPromptHistoryEntry {
     pub created_at: String,
 }
 
-/// Standard SELECT projection for Agent queries.  `learned_prompt` is derived
-/// from active `learned_prompt_history` rows rather than the stale text column.
-///
-/// Implemented as a `macro_rules!` that expands into a full
-/// `sqlx::query_as!(Agent, "...", $($bind),*)` call so callers get
-/// compile-time SQL checking.  `query_as!` requires a string-literal SQL
-/// argument, which a `const &str` does not satisfy.
-/// Inline AGENT_COLUMNS projection for each `query_as!(Agent, ...)` call site.
-/// `query_as!` requires a string-literal SQL argument; `concat!()` doesn't
-/// satisfy it (verified during batch 4).  Each caller therefore passes the
-/// full SELECT body as a single raw string literal.
+// Standard SELECT projection for Agent queries.  `learned_prompt` is derived
+// from active `learned_prompt_history` rows rather than the stale text column.
+//
+// Inline AGENT_COLUMNS projection for each `query_as!(Agent, ...)` call site.
+// `query_as!` requires a string-literal SQL argument; `concat!()` doesn't
+// satisfy it (verified during batch 4).  Each caller therefore passes the
+// full SELECT body as a single raw string literal.
 
 pub struct AgentRepository {
     db: Database,
@@ -537,13 +533,19 @@ impl AgentRepository {
         .ok();
 
         Ok(AgentMetrics {
-            success_rate: task_row.as_ref().and_then(|r| r.success_rate).unwrap_or(0.0),
+            success_rate: task_row
+                .as_ref()
+                .and_then(|r| r.success_rate)
+                .unwrap_or(0.0),
             avg_reopens: task_row.as_ref().map(|r| r.avg_reopens).unwrap_or(0.0),
             verification_pass_rate: task_row
                 .as_ref()
                 .and_then(|r| r.verification_pass_rate)
                 .unwrap_or(0.0),
-            completed_task_count: task_row.as_ref().map(|r| r.completed_task_count).unwrap_or(0),
+            completed_task_count: task_row
+                .as_ref()
+                .map(|r| r.completed_task_count)
+                .unwrap_or(0),
             avg_tokens: session_row.as_ref().map(|r| r.avg_tokens).unwrap_or(0.0),
             avg_tokens_in: session_row.as_ref().map(|r| r.avg_tokens_in).unwrap_or(0.0),
             avg_tokens_out: session_row
