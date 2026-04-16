@@ -1,3 +1,7 @@
+// NOTE: SQLite-only test fixture — uses `datetime('now')`, `strftime(...)`, and
+// positional `?N` placeholders that don't compile against the MySQL schema used
+// by `sqlx::query!`. All raw `sqlx::query` calls in this file are intentionally
+// runtime-typed; compile-time check not possible.
 use super::*;
 use crate::repositories::note::NoteSearchParams;
 
