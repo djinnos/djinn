@@ -194,8 +194,7 @@ mod tests {
             .unwrap();
         assert_eq!(approved.status, TaskStatus::Approved.as_str());
 
-        let persisted = sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
-            .bind(&task.id)
+        let persisted = task_select_where_id!(&task.id)
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -261,8 +260,7 @@ mod tests {
         let epic_id = make_epic(&db, &project.id).await;
         let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
 
-        let original = sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
-            .bind(&task.id)
+        let original = task_select_where_id!(&task.id)
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -281,8 +279,7 @@ mod tests {
 
         assert!(matches!(err, Error::InvalidTransition(_)));
 
-        let persisted = sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
-            .bind(&task.id)
+        let persisted = task_select_where_id!(&task.id)
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -647,15 +644,35 @@ impl TaskRepository {
     }
 }
 
-pub(super) const TASK_SELECT_WHERE_ID: &str =
-    "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-            status, priority, owner, labels, acceptance_criteria,
-            reopen_count, continuation_count, verification_failure_count,
-            total_reopen_count, total_verification_failure_count,
-            intervention_count, last_intervention_at,
-            created_at, updated_at, closed_at,
-            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-     FROM tasks WHERE id = ?";
+/// Expands to a `sqlx::query_as!(Task, "...", $id)` call with the full
+/// SELECT projection for a `Task` row keyed by id.
+///
+/// Defined as a `macro_rules!` (rather than `const &str`) because
+/// `sqlx::query_as!` requires a string-literal SQL argument at the token
+/// level and will not accept `concat!`/macro expansions that resolve to
+/// a literal. The macro must also project every field of `Task` including
+/// `pr_url`, `agent_type` (both real columns) and a zero-valued
+/// `unresolved_blocker_count` (computed elsewhere via subquery) because
+/// `query_as!` does not honor `#[sqlx(default)]`.
+macro_rules! task_select_where_id {
+    ($id:expr) => {
+        ::sqlx::query_as!(
+            ::djinn_core::models::Task,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                `status` AS "status!", priority, owner, labels, acceptance_criteria,
+                reopen_count, continuation_count, verification_failure_count,
+                total_reopen_count, total_verification_failure_count,
+                intervention_count, last_intervention_at,
+                created_at, updated_at, closed_at,
+                close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                agent_type,
+                CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE id = ?"#,
+            $id
+        )
+    };
+}
+pub(super) use task_select_where_id;
 
 pub(super) fn short_id_from_uuid(id: &uuid::Uuid) -> String {
     let bytes = id.as_bytes();

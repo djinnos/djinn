@@ -1,4 +1,5 @@
 use super::*;
+use super::task_select_where_id;
 
 use tracing::warn;
 
@@ -73,8 +74,7 @@ impl TaskRepository {
 
     pub async fn get(&self, id: &str) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Task>(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        Ok(task_select_where_id!(id)
             .fetch_optional(self.db.pool())
             .await?)
     }

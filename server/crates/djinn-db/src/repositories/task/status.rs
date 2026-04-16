@@ -1,4 +1,5 @@
 use super::*;
+use super::task_select_where_id;
 
 impl TaskRepository {
     /// Transition a task through the state machine.
@@ -54,8 +55,7 @@ impl TaskRepository {
         let mut tx = self.db.pool().begin().await?;
 
         // Load current task.
-        let current: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let current: Task = task_select_where_id!(id)
             .fetch_one(&mut *tx)
             .await?;
         let from = TaskStatus::parse(&current.status)?;
@@ -246,8 +246,7 @@ impl TaskRepository {
         .execute(&mut *tx)
         .await?;
 
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -269,8 +268,7 @@ impl TaskRepository {
     /// Only used for tests and admin tooling. Production code should use `transition`.
     pub async fn set_status(&self, id: &str, status: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        let from_task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let from_task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
         let closed_at_sql = if status == "closed" {
@@ -297,8 +295,7 @@ impl TaskRepository {
         .bind(id)
         .execute(self.db.pool())
         .await?;
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -336,8 +333,7 @@ impl TaskRepository {
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
 
-        let from_task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let from_task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -374,8 +370,7 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
 
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -413,8 +408,7 @@ impl TaskRepository {
         .bind(id)
         .execute(self.db.pool())
         .await?;
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 

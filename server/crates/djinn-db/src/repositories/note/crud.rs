@@ -477,8 +477,7 @@ impl NoteRepository {
         .execute(self.db.pool())
         .await?;
 
-        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-            .bind(&id)
+        let note = note_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -503,8 +502,7 @@ impl NoteRepository {
         .execute(self.db.pool())
         .await?;
 
-        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-            .bind(&id)
+        let note = note_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -558,8 +556,7 @@ impl NoteRepository {
         index_links_for_note(&mut tx, &id, &project_id, &content).await?;
         resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
 
-        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-            .bind(&id)
+        let note = note_select_where_id!(id)
             .fetch_one(&mut *tx)
             .await?;
 
@@ -801,8 +798,7 @@ impl NoteRepository {
             index_links_for_note(&mut tx, &id, &project_id, &content).await?;
             resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
 
-            let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-                .bind(&id)
+            let note = note_select_where_id!(id)
                 .fetch_one(&mut *tx)
                 .await?;
 
@@ -1125,8 +1121,7 @@ impl NoteRepository {
         index_links_for_note(&mut tx, &id, &current.project_id, &content).await?;
         resolve_links_for_note(&mut tx, &id, &title, &permalink, &current.project_id).await?;
 
-        let note: Note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-            .bind(&id)
+        let note: Note = note_select_where_id!(id)
             .fetch_one(&mut *tx)
             .await?;
 
@@ -1167,8 +1162,7 @@ impl NoteRepository {
         .execute(&mut *tx)
         .await?;
 
-        let note: Note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-            .bind(&id)
+        let note: Note = note_select_where_id!(id)
             .fetch_one(&mut *tx)
             .await?;
 
@@ -1314,8 +1308,7 @@ impl NoteRepository {
         index_links_for_note(&mut tx, id, &current.project_id, &current.content).await?;
         resolve_links_for_note(&mut tx, id, new_title, &new_permalink, &current.project_id).await?;
 
-        let note: Note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-            .bind(id)
+        let note: Note = note_select_where_id!(id)
             .fetch_one(&mut *tx)
             .await?;
 

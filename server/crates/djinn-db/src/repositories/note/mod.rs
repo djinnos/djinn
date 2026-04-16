@@ -94,12 +94,28 @@ pub struct NoteSearchParams<'a> {
 
 // ── SQL constant ─────────────────────────────────────────────────────────────
 
-const NOTE_SELECT_WHERE_ID: &str = "SELECT id, project_id, permalink, title, file_path,
-            storage, note_type, folder, tags, content,
-            created_at, updated_at, last_accessed,
-            access_count, confidence, abstract as abstract_, overview,
-            scope_paths
-     FROM notes WHERE id = ?";
+/// Expands to a `sqlx::query_as!(Note, "...", $id)` call with the full
+/// SELECT projection for a `Note` row keyed by id.
+///
+/// Defined as a `macro_rules!` rather than a `const &str` because
+/// `sqlx::query_as!` requires its SQL to be a string-literal token;
+/// it does not accept a macro expansion (not even through `concat!`).
+/// Call sites use `note_select_where_id!($id)` (takes the id expr).
+macro_rules! note_select_where_id {
+    ($id:expr) => {
+        ::sqlx::query_as!(
+            ::djinn_core::models::Note,
+            r#"SELECT id, project_id, permalink, title, file_path,
+                storage, note_type, folder, tags, content,
+                created_at, updated_at, last_accessed,
+                access_count, confidence, `abstract` as abstract_, overview,
+                scope_paths
+             FROM notes WHERE id = ?"#,
+            $id
+        )
+    };
+}
+pub(super) use note_select_where_id;
 
 // ── Repository ────────────────────────────────────────────────────────────────
 

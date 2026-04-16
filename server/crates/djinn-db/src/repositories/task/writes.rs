@@ -1,4 +1,5 @@
 use super::*;
+use super::task_select_where_id;
 
 impl TaskRepository {
     #[allow(clippy::too_many_arguments)]
@@ -100,8 +101,7 @@ impl TaskRepository {
         .bind(ac)
         .execute(self.db.pool())
         .await?;
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(&id)
+        let task: Task = task_select_where_id!(&id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -145,8 +145,7 @@ impl TaskRepository {
         .bind(status)
         .execute(self.db.pool())
         .await?;
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -186,8 +185,7 @@ impl TaskRepository {
         .bind(id)
         .execute(self.db.pool())
         .await?;
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -220,8 +218,7 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
 
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -246,8 +243,7 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
 
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -276,8 +272,7 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
 
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -320,8 +315,7 @@ impl TaskRepository {
         .bind(id)
         .execute(self.db.pool())
         .await?;
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -342,8 +336,7 @@ impl TaskRepository {
         .bind(id)
         .execute(self.db.pool())
         .await?;
-        let task: Task = sqlx::query_as(TASK_SELECT_WHERE_ID)
-            .bind(id)
+        let task: Task = task_select_where_id!(id)
             .fetch_one(self.db.pool())
             .await?;
 
