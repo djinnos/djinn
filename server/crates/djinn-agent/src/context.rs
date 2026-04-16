@@ -213,8 +213,12 @@ impl bridge::SyncOps for AgentSyncOps {
         vec![]
     }
 
-    async fn import_all(&self) -> Vec<bridge::SyncResult> {
+    async fn import_all(&self, _: bool) -> Vec<bridge::SyncResult> {
         vec![]
+    }
+
+    async fn import_project(&self, _: &str, _: bool) -> Result<bridge::SyncResult, String> {
+        Err("sync not available in djinn-agent task-mutation bridge".into())
     }
 
     async fn status(&self) -> Vec<bridge::ChannelStatus> {

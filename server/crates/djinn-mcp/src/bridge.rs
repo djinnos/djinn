@@ -127,7 +127,8 @@ pub trait SyncOps: Send + Sync {
     async fn disable_project(&self, project_id: &str) -> Result<(), String>;
     async fn delete_remote_branch(&self, channel: &str, project_path: &Path) -> Result<(), String>;
     async fn export_all(&self, user_id: Option<&str>) -> Vec<SyncResult>;
-    async fn import_all(&self) -> Vec<SyncResult>;
+    async fn import_all(&self, force: bool) -> Vec<SyncResult>;
+    async fn import_project(&self, project_id: &str, force: bool) -> Result<SyncResult, String>;
     async fn status(&self) -> Vec<ChannelStatus>;
 }
 

@@ -243,8 +243,11 @@ pub(crate) mod stubs {
         async fn export_all(&self, _: Option<&str>) -> Vec<SyncResult> {
             vec![]
         }
-        async fn import_all(&self) -> Vec<SyncResult> {
+        async fn import_all(&self, _: bool) -> Vec<SyncResult> {
             vec![]
+        }
+        async fn import_project(&self, _: &str, _: bool) -> Result<SyncResult, String> {
+            Err("sync not enabled".into())
         }
         async fn status(&self) -> Vec<ChannelStatus> {
             vec![ChannelStatus {

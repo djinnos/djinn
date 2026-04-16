@@ -106,7 +106,7 @@ impl SyncManager {
                         // Auto-import using two-phase pull (SYNC-09).
                         // Two-phase pull (SYNC-08) makes idle cycles ~50ms.
                         // Events emitted with from_sync=true won't trigger re-export (SYNC-06).
-                        mgr.import_all().await;
+                        mgr.import_all(false).await;
                     }
                     _ = cancel.cancelled() => break,
                 }
@@ -298,7 +298,7 @@ impl SyncManager {
     ///
     /// Each channel is independent — a failure in one doesn't stop others (SYNC-05).
     /// Within a channel, each project is imported independently.
-    pub async fn import_all(&self) -> Vec<SyncResult> {
+    pub async fn import_all(&self, force: bool) -> Vec<SyncResult> {
         let mut results = Vec::new();
 
         let sync_projects = self.list_sync_enabled_projects().await;
@@ -317,6 +317,7 @@ impl SyncManager {
                             &project.id,
                             &self.inner.db,
                             &self.inner.events_tx,
+                            force,
                         )
                         .await
                     }
@@ -382,6 +383,97 @@ impl SyncManager {
         }
 
         results
+    }
+
+    pub async fn import_project(&self, project_id: &str, force: bool) -> SyncResult {
+        let project_repo = project_repo(&self.inner);
+
+        let project = match project_repo.get(project_id).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return SyncResult {
+                    channel: "tasks".to_string(),
+                    ok: false,
+                    count: None,
+                    error: Some(format!("project not found: {project_id}")),
+                };
+            }
+            Err(e) => {
+                return SyncResult {
+                    channel: "tasks".to_string(),
+                    ok: false,
+                    count: None,
+                    error: Some(e.to_string()),
+                };
+            }
+        };
+
+        let project_path = PathBuf::from(&project.path);
+
+        match tasks_channel::import(
+            &project_path,
+            &project.id,
+            &self.inner.db,
+            &self.inner.events_tx,
+            force,
+        )
+        .await
+        {
+            Ok(count) => {
+                {
+                    let mut states = self.inner.states.lock().await;
+                    if let Some(st) = states.get_mut("tasks") {
+                        st.backoff.record_success();
+                        st.last_synced_at = Some(now_utc());
+                        st.last_error = None;
+                    }
+                }
+                let _ = self
+                    .inner
+                    .events_tx
+                    .send(DjinnEventEnvelope::sync_completed(
+                        "tasks", "import", count, None,
+                    ));
+                SyncResult {
+                    channel: "tasks".to_string(),
+                    ok: true,
+                    count: Some(count),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                let err = e.to_string();
+
+                let delay = {
+                    let mut states = self.inner.states.lock().await;
+                    states
+                        .get_mut("tasks")
+                        .map(|s| {
+                            s.backoff.record_failure();
+                            s.last_error = Some(err.clone());
+                            s.backoff.delay_secs()
+                        })
+                        .unwrap_or(0)
+                };
+
+                let _ = self
+                    .inner
+                    .events_tx
+                    .send(DjinnEventEnvelope::sync_completed(
+                        "tasks",
+                        "import",
+                        0,
+                        Some(&err),
+                    ));
+
+                SyncResult {
+                    channel: "tasks".to_string(),
+                    ok: false,
+                    count: None,
+                    error: Some(format!("{} (retry in {}s)", err, delay)),
+                }
+            }
+        }
     }
 
     /// Query sync-enabled projects from the DB (SYNC-07).
