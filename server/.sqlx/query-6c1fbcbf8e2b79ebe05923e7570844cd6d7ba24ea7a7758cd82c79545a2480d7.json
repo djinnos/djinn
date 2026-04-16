@@ -1,0 +1,134 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, project_id, note_type, `status` AS \"status!\",\n                    CAST(scanned_note_count AS SIGNED) AS \"scanned_note_count!: i64\",\n                    CAST(candidate_cluster_count AS SIGNED) AS \"candidate_cluster_count!: i64\",\n                    CAST(consolidated_cluster_count AS SIGNED) AS \"consolidated_cluster_count!: i64\",\n                    CAST(consolidated_note_count AS SIGNED) AS \"consolidated_note_count!: i64\",\n                    CAST(source_note_count AS SIGNED) AS \"source_note_count!: i64\",\n                    started_at, completed_at, error_message\n             FROM consolidation_run_metrics\n             WHERE project_id = ?\n               AND (? = '' OR note_type = ?)\n             ORDER BY started_at DESC, id DESC\n             LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "note_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status!",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "scanned_note_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "candidate_cluster_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "consolidated_cluster_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "consolidated_note_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "source_note_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "started_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "completed_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "error_message",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "6c1fbcbf8e2b79ebe05923e7570844cd6d7ba24ea7a7758cd82c79545a2480d7"
+}

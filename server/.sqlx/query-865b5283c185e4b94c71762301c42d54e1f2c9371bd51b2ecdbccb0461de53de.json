@@ -1,0 +1,34 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT folder, COUNT(*) AS \"count!: i64\" FROM notes\n             WHERE project_id = ?\n               AND updated_at < DATE_SUB(NOW(3), INTERVAL 30 DAY)\n             GROUP BY folder ORDER BY folder",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "folder",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "865b5283c185e4b94c71762301c42d54e1f2c9371bd51b2ecdbccb0461de53de"
+}

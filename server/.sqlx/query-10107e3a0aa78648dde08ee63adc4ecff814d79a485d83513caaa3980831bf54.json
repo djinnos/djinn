@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT DISTINCT session_id\n             FROM consolidated_note_provenance\n             ORDER BY session_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "session_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "10107e3a0aa78648dde08ee63adc4ecff814d79a485d83513caaa3980831bf54"
+}

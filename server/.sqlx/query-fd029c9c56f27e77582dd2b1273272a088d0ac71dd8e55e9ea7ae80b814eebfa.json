@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT note_type FROM notes WHERE id = ? AND project_id = ? LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fd029c9c56f27e77582dd2b1273272a088d0ac71dd8e55e9ea7ae80b814eebfa"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO consolidated_note_provenance (note_id, session_id)\n             VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2d38bf26987de5b400f50c9be7c3e3959b8e264b9d1a37f107e51fb1f43deedc"
+}

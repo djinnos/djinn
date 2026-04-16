@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT COUNT(*) FROM notes n\n             WHERE n.project_id = ?\n               AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')\n               AND NOT EXISTS (\n                   SELECT 1 FROM note_links l WHERE l.target_id = n.id\n               )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "COUNT(*)",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fc9f58cfefd010d5c79b2dba4541b1c2c46c21c796d2996de992a3656887e0b4"
+}

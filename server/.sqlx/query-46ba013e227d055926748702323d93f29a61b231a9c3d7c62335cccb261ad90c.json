@@ -1,0 +1,54 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT folder, title, permalink, updated_at\n             FROM notes WHERE project_id = ?\n             ORDER BY folder, title",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "folder",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "permalink",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "updated_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "46ba013e227d055926748702323d93f29a61b231a9c3d7c62335cccb261ad90c"
+}
