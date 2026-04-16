@@ -305,14 +305,12 @@ pub(crate) async fn call_code_graph(
 pub(crate) async fn call_github_search(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    let cred_repo = Arc::new(CredentialRepository::new(
-        state.db.clone(),
-        state.event_bus.clone(),
-    ));
     let params: GithubSearchParams = parse_args(arguments)?;
+    let installation_id = resolve_installation_id(state, project_id).await?;
     github_search::search(
-        cred_repo,
+        installation_id,
         &params.query,
         params.language.as_deref(),
         params.repo.as_deref(),
@@ -328,14 +326,12 @@ pub(crate) async fn call_github_search(
 pub(crate) async fn call_github_fetch_file(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    let cred_repo = Arc::new(CredentialRepository::new(
-        state.db.clone(),
-        state.event_bus.clone(),
-    ));
     let params: GithubFetchFileParams = parse_args(arguments)?;
+    let installation_id = resolve_installation_id(state, project_id).await?;
     github_search::fetch_file(
-        cred_repo,
+        installation_id,
         &params.repo,
         &params.path,
         params.git_ref.as_deref(),
@@ -343,4 +339,31 @@ pub(crate) async fn call_github_fetch_file(
         params.end_line,
     )
     .await
+}
+
+/// Resolve a GitHub App installation id for an agent-dispatched GitHub tool.
+///
+/// Worker sessions run outside the MCP request scope, so we cannot read the
+/// session-user token-local. The project-scoped installation is the only
+/// credential available; fail closed with an actionable error when the
+/// project lacks one.
+async fn resolve_installation_id(
+    state: &AgentContext,
+    project_id: Option<&str>,
+) -> Result<u64, String> {
+    let project_id = project_id.ok_or(
+        "github_* tools require an active project context; dispatcher could not resolve project_id",
+    )?;
+    let project_repo =
+        djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+    match project_repo.get_installation_id(project_id).await {
+        Ok(Some(id)) => Ok(id),
+        Ok(None) => Err(format!(
+            "project {project_id} has no GitHub App installation; \
+             re-register the project via the GitHub App flow to enable background GitHub tools"
+        )),
+        Err(e) => Err(format!(
+            "failed to read installation_id for project {project_id}: {e}"
+        )),
+    }
 }

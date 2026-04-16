@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO note_embeddings (note_id, embedding, embedding_dim, updated_at)\n         VALUES (?, ?, ?, NOW(3))\n         ON DUPLICATE KEY UPDATE\n             embedding = VALUES(embedding),\n             embedding_dim = VALUES(embedding_dim),\n             updated_at = NOW(3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "bd9b26fb21c2a55ec0f39a5536cfb8941cf4ba47637af4a5f45fc58efb0740f2"
+}

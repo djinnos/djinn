@@ -1,0 +1,34 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, content_hash FROM notes WHERE id IN (?, ?) ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "content_hash",
+        "type_info": {
+          "type": "String",
+          "flags": "",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "05afcbc35d437565908f60dacd826db8bbb036e36313c2153c5ca25aafd645a6"
+}

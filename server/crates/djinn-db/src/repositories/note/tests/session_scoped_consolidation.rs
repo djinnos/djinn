@@ -226,13 +226,15 @@ async fn session_scoped_clusters_do_not_include_cross_session_notes() {
             "{} prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
             note.title
         );
-        sqlx::query("UPDATE notes SET abstract = ?2, overview = ?3 WHERE id = ?1")
-            .bind(&note.id)
-            .bind(&abstract_text)
-            .bind(&abstract_text)
-            .execute(db.pool())
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE notes SET `abstract` = ?, overview = ? WHERE id = ?",
+            abstract_text,
+            abstract_text,
+            note.id
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
     }
 
     let session_1 = make_session(&db, &project.id, None, "worker/s1").await;

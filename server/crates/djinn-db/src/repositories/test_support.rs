@@ -23,18 +23,25 @@ pub async fn make_project(db: &Database, path: &Path) -> Project {
         .filter(|name| !name.is_empty())
         .unwrap_or("root");
     let project_name = format!("test-project-{path_slug}-{id}");
-    sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
-        .bind(&id)
-        .bind(&project_name)
-        .bind(path.to_str().unwrap())
-        .execute(db.pool())
-        .await
-        .unwrap();
-    sqlx::query_as::<_, Project>(
-        "SELECT id, name, path, created_at, target_branch, auto_merge, sync_enabled, sync_remote \
-         FROM projects WHERE id = ?1",
+    let path_str = path.to_str().unwrap();
+    sqlx::query!(
+        "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+        id,
+        project_name,
+        path_str
     )
-    .bind(&id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query_as!(
+        Project,
+        r#"SELECT id, name, path, created_at, target_branch,
+                  auto_merge AS "auto_merge!: bool",
+                  sync_enabled AS "sync_enabled!: bool",
+                  sync_remote
+           FROM projects WHERE id = ?"#,
+        id
+    )
     .fetch_one(db.pool())
     .await
     .unwrap()
@@ -331,55 +338,57 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
         .await
         .unwrap();
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE note_associations
-         SET last_co_access = datetime('now', '-100 days')
-         WHERE (note_a_id = ?1 AND note_b_id = ?2)
-            OR (note_a_id = ?3 AND note_b_id = ?4)",
+         SET last_co_access = DATE_SUB(NOW(3), INTERVAL 100 DAY)
+         WHERE (note_a_id = ? AND note_b_id = ?)
+            OR (note_a_id = ? AND note_b_id = ?)",
+        project_one_stale_a.id,
+        project_one_stale_b.id,
+        project_two_stale_a.id,
+        project_two_stale_b.id
     )
-    .bind(&project_one_stale_a.id)
-    .bind(&project_one_stale_b.id)
-    .bind(&project_two_stale_a.id)
-    .bind(&project_two_stale_b.id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE note_associations
-         SET last_co_access = datetime('now', '-1 day')
-         WHERE (note_a_id = ?1 AND note_b_id = ?2)
-            OR (note_a_id = ?3 AND note_b_id = ?4)",
+         SET last_co_access = DATE_SUB(NOW(3), INTERVAL 1 DAY)
+         WHERE (note_a_id = ? AND note_b_id = ?)
+            OR (note_a_id = ? AND note_b_id = ?)",
+        project_one_recent_a.id,
+        project_one_recent_b.id,
+        project_two_recent_a.id,
+        project_two_recent_b.id
     )
-    .bind(&project_one_recent_a.id)
-    .bind(&project_one_recent_b.id)
-    .bind(&project_two_recent_a.id)
-    .bind(&project_two_recent_b.id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE notes
-         SET last_accessed = datetime('now', '-31 days'), access_count = 0
-         WHERE id IN (?1, ?2, ?3, ?4)",
+         SET last_accessed = DATE_SUB(NOW(3), INTERVAL 31 DAY), access_count = 0
+         WHERE id IN (?, ?, ?, ?)",
+        project_one_orphan.id,
+        project_one_linked_target.id,
+        project_two_orphan.id,
+        project_two_linked_target.id
     )
-    .bind(&project_one_orphan.id)
-    .bind(&project_one_linked_target.id)
-    .bind(&project_two_orphan.id)
-    .bind(&project_two_linked_target.id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    sqlx::query("UPDATE notes SET content_hash = NULL WHERE id IN (?1, ?2, ?3, ?4)")
-        .bind(&project_one_canonical_hash.id)
-        .bind(&project_one_legacy_hash.id)
-        .bind(&project_two_canonical_hash.id)
-        .bind(&project_two_legacy_hash.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    sqlx::query!(
+        "UPDATE notes SET content_hash = NULL WHERE id IN (?, ?, ?, ?)",
+        project_one_canonical_hash.id,
+        project_one_legacy_hash.id,
+        project_two_canonical_hash.id,
+        project_two_legacy_hash.id
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
 
     HousekeepingFixture {
         projects: vec![

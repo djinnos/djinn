@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use serde::Serialize;
 
@@ -9,9 +8,7 @@ use djinn_db::{
     MysqlBackendFlavor, MysqlDatabaseConfig, SqliteDatabaseConfig,
 };
 
-use crate::db::dolt::{
-    DoltRuntimeError, DoltSqlServerAvailability, ensure_dolt_runtime_for_connect_config,
-};
+use crate::db::dolt::{DoltRuntimeError, ensure_dolt_runtime_for_connect_config};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatabaseRuntimeConfig {
@@ -39,7 +36,7 @@ impl DatabaseRuntimeConfig {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("sqlite")
+            .unwrap_or("dolt")
             .to_ascii_lowercase();
 
         match backend.as_str() {
@@ -47,9 +44,6 @@ impl DatabaseRuntimeConfig {
                 db_path.unwrap_or_else(djinn_db::default_db_path),
             )),
             "mysql" | "dolt" => {
-                let url = mysql_url.ok_or_else(|| DatabaseRuntimeError::MissingMysqlUrl {
-                    backend: backend.clone(),
-                })?;
                 let flavor = match mysql_flavor
                     .as_deref()
                     .map(str::trim)
@@ -64,6 +58,19 @@ impl DatabaseRuntimeConfig {
                         return Err(DatabaseRuntimeError::InvalidMysqlFlavor(other.to_owned()));
                     }
                 };
+
+                // Under docker compose dolt is a sibling service reachable
+                // at `dolt:3306`; for `cargo run` against a host-exposed
+                // compose stack the loopback default works too. External
+                // mysql deployments must still supply their own URL.
+                let url = mysql_url.or_else(|| match flavor {
+                    MysqlBackendFlavor::Dolt => {
+                        Some("mysql://root@127.0.0.1:3306/djinn".to_owned())
+                    }
+                    MysqlBackendFlavor::Mysql => None,
+                }).ok_or_else(|| DatabaseRuntimeError::MissingMysqlUrl {
+                    backend: backend.clone(),
+                })?;
 
                 Ok(Self {
                     connect: DatabaseConnectConfig::Mysql(MysqlDatabaseConfig { url, flavor }),
@@ -81,14 +88,12 @@ impl DatabaseRuntimeConfig {
 #[derive(Clone)]
 pub struct DatabaseRuntimeManager {
     config: Arc<DatabaseRuntimeConfig>,
-    dolt_runtime: Arc<Mutex<Option<DoltSqlServerAvailability>>>,
 }
 
 impl DatabaseRuntimeManager {
     pub fn new(config: DatabaseRuntimeConfig) -> Self {
         Self {
             config: Arc::new(config),
-            dolt_runtime: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -100,15 +105,12 @@ impl DatabaseRuntimeManager {
         Database::open_with_config(self.config.connect.clone()).map_err(DatabaseRuntimeError::Open)
     }
 
-    pub fn ensure_runtime_available(
-        &self,
-    ) -> Result<Option<DoltSqlServerAvailability>, DatabaseRuntimeError> {
-        let availability = ensure_dolt_runtime_for_connect_config(&self.config.connect)?;
-        *self
-            .dolt_runtime
-            .lock()
-            .expect("poisoned dolt runtime state") = availability.clone();
-        Ok(availability)
+    /// Probe the dolt service over TCP. Under compose-managed deploy the
+    /// dolt container is a sibling service; if it isn't reachable we surface
+    /// an actionable error.
+    pub fn ensure_runtime_available(&self) -> Result<(), DatabaseRuntimeError> {
+        ensure_dolt_runtime_for_connect_config(&self.config.connect)?;
+        Ok(())
     }
 
     pub fn startup_mode(&self) -> DatabaseRuntimeMode {
@@ -130,13 +132,7 @@ impl DatabaseRuntimeManager {
 
     pub fn health_snapshot(&self, db: &Database) -> DatabaseRuntimeHealth {
         let bootstrap = db.bootstrap_info().clone();
-        let detail = runtime_detail_for_bootstrap(
-            &bootstrap,
-            self.dolt_runtime
-                .lock()
-                .expect("poisoned dolt runtime state")
-                .as_ref(),
-        );
+        let detail = runtime_detail_for_bootstrap(&bootstrap);
         let DatabaseBootstrapInfo {
             backend_kind,
             backend_label,
@@ -160,7 +156,7 @@ impl DatabaseRuntimeManager {
             }
             DatabaseBackendKind::Mysql => {
                 if mode.managed_process {
-                    "dolt sql-server backend selected; runtime will use the mysql-compatible connection seam"
+                    "dolt backend selected; runtime will connect to the compose-managed dolt service over TCP"
                         .to_owned()
                 } else {
                     "mysql backend selected; runtime will use the mysql-compatible connection seam"
@@ -178,9 +174,6 @@ impl DatabaseRuntimeManager {
         }
     }
 
-    pub fn should_spawn_sqlite_checkpoint(&self) -> bool {
-        matches!(self.config.backend_kind(), DatabaseBackendKind::Sqlite)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -228,10 +221,7 @@ fn redact_mysql_target(url: &str) -> String {
     }
 }
 
-fn runtime_detail_for_bootstrap(
-    bootstrap: &DatabaseBootstrapInfo,
-    dolt_runtime: Option<&DoltSqlServerAvailability>,
-) -> String {
+fn runtime_detail_for_bootstrap(bootstrap: &DatabaseBootstrapInfo) -> String {
     match bootstrap.backend_kind {
         DatabaseBackendKind::Sqlite => {
             if bootstrap.readonly {
@@ -242,20 +232,8 @@ fn runtime_detail_for_bootstrap(
             }
         }
         DatabaseBackendKind::Mysql => {
-            if bootstrap.backend_label == "dolt"
-                && let Some(availability) = dolt_runtime
-            {
-                let runtime_detail = match availability {
-                    DoltSqlServerAvailability::AlreadyHealthy { endpoint } => {
-                        format!("dolt sql-server already healthy at {endpoint}")
-                    }
-                    DoltSqlServerAvailability::Spawned { endpoint } => {
-                        format!("dolt sql-server started and became healthy at {endpoint}")
-                    }
-                };
-                return format!(
-                    "dolt backend ready via mysql-compatible sqlx pool; {runtime_detail}"
-                );
+            if bootstrap.backend_label == "dolt" {
+                return "dolt backend ready via mysql-compatible sqlx pool against compose-managed dolt service".to_owned();
             }
             format!(
                 "{} backend ready via mysql-compatible sqlx pool",
@@ -270,16 +248,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sqlite_is_default_backend_selection() {
+    fn dolt_is_default_backend_selection() {
         let config = DatabaseRuntimeConfig::from_cli_and_env(None, None, None, None).unwrap();
-        assert_eq!(config.backend_kind(), DatabaseBackendKind::Sqlite);
+        assert_eq!(config.backend_kind(), DatabaseBackendKind::Mysql);
+        match &config.connect {
+            DatabaseConnectConfig::Mysql(cfg) => {
+                assert_eq!(cfg.flavor, MysqlBackendFlavor::Dolt);
+                assert!(cfg.url.contains("127.0.0.1:3306"));
+            }
+            other => panic!("expected mysql default, got {other:?}"),
+        }
     }
 
     #[test]
-    fn dolt_requires_mysql_url() {
-        let error =
-            DatabaseRuntimeConfig::from_cli_and_env(None, Some("dolt".to_owned()), None, None)
-                .expect_err("dolt selection without url should fail");
+    fn dolt_auto_defaults_mysql_url_to_managed_container() {
+        let config = DatabaseRuntimeConfig::from_cli_and_env(
+            None,
+            Some("dolt".to_owned()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.backend_kind(), DatabaseBackendKind::Mysql);
+    }
+
+    #[test]
+    fn mysql_flavor_requires_explicit_url() {
+        let error = DatabaseRuntimeConfig::from_cli_and_env(
+            None,
+            Some("mysql".to_owned()),
+            None,
+            None,
+        )
+        .expect_err("external mysql without url should fail");
         assert!(error.to_string().contains("DJINN_MYSQL_URL"));
     }
 
@@ -289,19 +290,4 @@ mod tests {
         assert_eq!(target, "mysql://<redacted>@127.0.0.1:3306/djinn");
     }
 
-    #[test]
-    fn sqlite_checkpoint_loop_only_runs_for_sqlite() {
-        let sqlite = DatabaseRuntimeManager::new(DatabaseRuntimeConfig::sqlite(
-            std::path::Path::new("/tmp/test.db").to_path_buf(),
-        ));
-        assert!(sqlite.should_spawn_sqlite_checkpoint());
-
-        let mysql = DatabaseRuntimeManager::new(DatabaseRuntimeConfig {
-            connect: DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
-                url: "mysql://root@127.0.0.1:3306/djinn".to_owned(),
-                flavor: MysqlBackendFlavor::Dolt,
-            }),
-        });
-        assert!(!mysql.should_spawn_sqlite_checkpoint());
-    }
 }

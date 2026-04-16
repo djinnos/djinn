@@ -68,15 +68,15 @@ async fn consolidation_lists_db_note_groups_and_clusters_deterministically() {
             "{} prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
             note.title
         );
-        sqlx::query(
+        sqlx::query!(
             "UPDATE notes
-             SET abstract = ?2,
-                 overview = ?3
-             WHERE id = ?1",
+             SET `abstract` = ?,
+                 overview = ?
+             WHERE id = ?",
+            abstract_text,
+            abstract_text,
+            note.id
         )
-        .bind(&note.id)
-        .bind(&abstract_text)
-        .bind(&abstract_text)
         .execute(db.pool())
         .await
         .unwrap();
@@ -511,19 +511,22 @@ async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_
         .await
         .unwrap();
 
-    sqlx::query("UPDATE notes SET content_hash = NULL WHERE id IN (?1, ?2)")
-        .bind(&canonical.id)
-        .bind(&legacy_duplicate.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    sqlx::query!(
+        "UPDATE notes SET content_hash = NULL WHERE id IN (?, ?)",
+        canonical.id,
+        legacy_duplicate.id
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
 
-    let note_count_before: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
-            .bind(&project.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+    let note_count_before = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM notes WHERE project_id = ?",
+        project.id
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
 
     let rebuilt = repo
         .rebuild_missing_content_hashes(&project.id)
@@ -531,30 +534,34 @@ async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_
         .unwrap();
     assert_eq!(rebuilt, 2);
 
-    let note_count_after: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
-            .bind(&project.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+    let note_count_after = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM notes WHERE project_id = ?",
+        project.id
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
     assert_eq!(note_count_after, note_count_before);
 
-    let rebuilt_hashes: Vec<(String, Option<String>)> =
-        sqlx::query_as("SELECT id, content_hash FROM notes WHERE id IN (?1, ?2) ORDER BY id")
-            .bind(&canonical.id)
-            .bind(&legacy_duplicate.id)
-            .fetch_all(db.pool())
-            .await
-            .unwrap();
+    let rebuilt_hashes: Vec<(String, Option<String>)> = sqlx::query!(
+        "SELECT id, content_hash FROM notes WHERE id IN (?, ?) ORDER BY id",
+        canonical.id,
+        legacy_duplicate.id
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.id, r.content_hash))
+    .collect();
     let expected_hash = crate::note_hash::note_content_hash("Alpha\r\nBeta\n");
     assert_eq!(rebuilt_hashes.len(), 2);
     for (_id, content_hash) in rebuilt_hashes {
         assert_eq!(content_hash.as_deref(), Some(expected_hash.as_str()));
     }
 
-    let unaffected_hash: Option<String> =
-        sqlx::query_scalar("SELECT content_hash FROM notes WHERE id = ?1")
-            .bind(&unaffected.id)
+    let unaffected_hash =
+        sqlx::query_scalar!("SELECT content_hash FROM notes WHERE id = ?", unaffected.id)
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -623,6 +630,7 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
         .unwrap();
     let _ = source;
 
+    // NOTE: SQLite-only datetime() function — compile-time check not possible against MySQL
     sqlx::query(
         "UPDATE notes
          SET last_accessed = datetime('now', '-31 days'), access_count = 0
@@ -640,13 +648,11 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
         .unwrap();
     assert_eq!(flagged, 1);
 
-    let orphan_tags: String = sqlx::query_scalar("SELECT tags FROM notes WHERE id = ?1")
-        .bind(&orphan.id)
+    let orphan_tags = sqlx::query_scalar!("SELECT tags FROM notes WHERE id = ?", orphan.id)
         .fetch_one(db.pool())
         .await
         .unwrap();
-    let linked_tags: String = sqlx::query_scalar("SELECT tags FROM notes WHERE id = ?1")
-        .bind(&linked.id)
+    let linked_tags = sqlx::query_scalar!("SELECT tags FROM notes WHERE id = ?", linked.id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -696,11 +702,12 @@ async fn housekeeping_repair_broken_wikilinks_does_not_force_low_confidence_matc
     assert!(updated.content.contains("[[Rust Ownership Guide]]"));
     assert!(!updated.content.contains("[[Rust Ownership]]"));
 
-    let resolved_target: Option<String> = sqlx::query_scalar(
-        "SELECT target_id FROM note_links WHERE source_id = ?1 AND target_raw = ?2",
+    let target_raw = "Rust Ownership Guide";
+    let resolved_target = sqlx::query_scalar!(
+        "SELECT target_id FROM note_links WHERE source_id = ? AND target_raw = ?",
+        source.id,
+        target_raw
     )
-    .bind(&source.id)
-    .bind("Rust Ownership Guide")
     .fetch_optional(db.pool())
     .await
     .unwrap();

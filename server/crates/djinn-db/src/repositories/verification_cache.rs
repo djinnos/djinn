@@ -23,11 +23,12 @@ impl VerificationCacheRepository {
         commit_sha: &str,
     ) -> Result<Option<CachedVerification>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, CachedVerification>(
-            "SELECT output, duration_ms, created_at FROM verification_cache WHERE project_id = ?1 AND commit_sha = ?2",
+        Ok(sqlx::query_as!(
+            CachedVerification,
+            r#"SELECT output, duration_ms AS "duration_ms!: i64", created_at FROM verification_cache WHERE project_id = ? AND commit_sha = ?"#,
+            project_id,
+            commit_sha,
         )
-        .bind(project_id)
-        .bind(commit_sha)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -40,13 +41,14 @@ impl VerificationCacheRepository {
         duration_ms: i64,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query(
-            "INSERT OR REPLACE INTO verification_cache (project_id, commit_sha, output, duration_ms) VALUES (?1, ?2, ?3, ?4)",
+        sqlx::query!(
+            "INSERT INTO verification_cache (project_id, commit_sha, output, duration_ms) VALUES (?, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE output=VALUES(output), duration_ms=VALUES(duration_ms)",
+            project_id,
+            commit_sha,
+            output_json,
+            duration_ms,
         )
-        .bind(project_id)
-        .bind(commit_sha)
-        .bind(output_json)
-        .bind(duration_ms)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -54,8 +56,7 @@ impl VerificationCacheRepository {
 
     pub async fn invalidate_project(&self, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query("DELETE FROM verification_cache WHERE project_id = ?1")
-            .bind(project_id)
+        sqlx::query!("DELETE FROM verification_cache WHERE project_id = ?", project_id)
             .execute(self.db.pool())
             .await?;
         Ok(())
@@ -63,10 +64,10 @@ impl VerificationCacheRepository {
 
     pub async fn prune_older_than(&self, days: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query(
-            "DELETE FROM verification_cache WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ?1 || ' days')",
+        sqlx::query!(
+            "DELETE FROM verification_cache WHERE created_at < DATE_SUB(NOW(3), INTERVAL ? DAY)",
+            days,
         )
-        .bind(days)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -122,11 +123,11 @@ mod tests {
         let repo = test_repo().await;
 
         repo.insert("p1", "old", "[]", 1).await.expect("insert old");
-        sqlx::query(
-            "UPDATE verification_cache SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 days') WHERE project_id = ?1 AND commit_sha = ?2",
+        sqlx::query!(
+            "UPDATE verification_cache SET created_at = DATE_SUB(NOW(3), INTERVAL 10 DAY) WHERE project_id = ? AND commit_sha = ?",
+            "p1",
+            "old",
         )
-        .bind("p1")
-        .bind("old")
         .execute(repo.db.pool())
         .await
         .expect("age old row");

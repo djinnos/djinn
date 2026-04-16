@@ -6,7 +6,7 @@ use djinn_core::models::{
     ConsolidationNote, ConsolidationRunMetric, DbNoteGroup, Note, NoteDedupCandidate,
 };
 
-use super::{NOTE_SELECT_WHERE_ID, NoteRepository};
+use super::{NoteRepository, note_select_where_id};
 use crate::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
@@ -97,8 +97,8 @@ impl NoteConsolidationRepository {
             "SELECT id, project_id, permalink, title, note_type, folder, scope_paths, content,
                     abstract as abstract_, overview, confidence
              FROM notes
-             WHERE project_id = ?1
-               AND note_type = ?2
+             WHERE project_id = ?
+               AND note_type = ?
                AND storage = 'db'
              ORDER BY permalink ASC, id ASC",
         )
@@ -134,10 +134,10 @@ impl NoteConsolidationRepository {
                     n.abstract as abstract_, n.overview, n.confidence
              FROM notes n
              JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
-             WHERE n.project_id = ?1
-               AND n.note_type = ?2
+             WHERE n.project_id = ?
+               AND n.note_type = ?
                AND n.storage = 'db'
-               AND cnp.session_id = ?3
+               AND cnp.session_id = ?
              ORDER BY n.permalink ASC, n.id ASC",
         )
         .bind(project_id)
@@ -163,7 +163,7 @@ impl NoteConsolidationRepository {
              JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
              WHERE n.storage = 'db'
                AND n.note_type IN ('case', 'pattern', 'pitfall')
-               AND cnp.session_id = ?1
+               AND cnp.session_id = ?
              GROUP BY n.project_id, n.note_type
              HAVING COUNT(*) >= 2
              ORDER BY n.project_id ASC, n.note_type ASC",
@@ -210,7 +210,7 @@ impl NoteConsolidationRepository {
 
         for session_id in source_session_ids {
             let exists: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM sessions WHERE id = ?1 AND project_id = ?2",
+                "SELECT COUNT(*) FROM sessions WHERE id = ? AND project_id = ?",
             )
             .bind(session_id)
             .bind(project_id)
@@ -231,7 +231,7 @@ impl NoteConsolidationRepository {
 
         note_repo.set_confidence(&created.id, confidence).await?;
 
-        sqlx::query("UPDATE notes SET abstract = ?1, overview = ?2 WHERE id = ?3")
+        sqlx::query("UPDATE notes SET abstract = ?, overview = ? WHERE id = ?")
             .bind(abstract_)
             .bind(overview)
             .bind(&created.id)
@@ -243,8 +243,7 @@ impl NoteConsolidationRepository {
             provenance.push(self.add_provenance(&created.id, session_id).await?);
         }
 
-        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-            .bind(&created.id)
+        let note = note_select_where_id!(&created.id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -264,7 +263,7 @@ impl NoteConsolidationRepository {
 
         let placeholders = sql_placeholders(source_note_ids.len(), 2);
         let note_count_query =
-            format!("SELECT COUNT(*) FROM notes WHERE project_id = ?1 AND id IN ({placeholders})");
+            format!("SELECT COUNT(*) FROM notes WHERE project_id = ? AND id IN ({placeholders})");
         let mut note_count = sqlx::query_scalar::<_, i64>(&note_count_query).bind(project_id);
         for note_id in source_note_ids {
             note_count = note_count.bind(note_id);
@@ -281,7 +280,7 @@ impl NoteConsolidationRepository {
             "SELECT DISTINCT cnp.session_id
              FROM consolidated_note_provenance cnp
              JOIN notes n ON n.id = cnp.note_id
-             WHERE n.project_id = ?1
+             WHERE n.project_id = ?
                AND cnp.note_id IN ({placeholders})
              ORDER BY cnp.session_id ASC"
         );
@@ -417,25 +416,30 @@ impl NoteConsolidationRepository {
             return Ok(Vec::new());
         };
 
+        // Threshold retuned: MySQL MATCH() scores are positive; use 0.0 floor.
+        let mysql_threshold: f64 = 0.0;
+        let _ = DEDUP_SCORE_THRESHOLD;
+
         sqlx::query_as::<_, NoteDedupCandidate>(
             "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract as abstract_, n.overview,
-                    -bm25(notes_fts, 3.0, 1.0, 2.0) as score
-             FROM notes_fts
-             JOIN notes n ON notes_fts.rowid = n.rowid
-             WHERE notes_fts MATCH ?1
-               AND n.project_id = ?2
-               AND n.folder = ?3
-               AND n.note_type = ?4
+                    MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) as score
+             FROM notes n
+             WHERE MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE)
+               AND n.project_id = ?
+               AND n.folder = ?
+               AND n.note_type = ?
                AND n.storage = 'db'
-               AND -bm25(notes_fts, 3.0, 1.0, 2.0) > ?5
-             ORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)
-             LIMIT ?6",
+               AND MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) > ?
+             ORDER BY score DESC
+             LIMIT ?",
         )
+        .bind(&safe_query)
         .bind(&safe_query)
         .bind(project_id)
         .bind(folder)
         .bind(note_type)
-        .bind(DEDUP_SCORE_THRESHOLD)
+        .bind(&safe_query)
+        .bind(mysql_threshold)
         .bind(DEDUP_LIMIT)
         .fetch_all(self.db.pool())
         .await
@@ -451,7 +455,7 @@ impl NoteConsolidationRepository {
 
         sqlx::query(
             "INSERT INTO consolidated_note_provenance (note_id, session_id)
-             VALUES (?1, ?2)",
+             VALUES (?, ?)",
         )
         .bind(note_id)
         .bind(session_id)
@@ -467,7 +471,7 @@ impl NoteConsolidationRepository {
         sqlx::query_as::<_, ConsolidatedNoteProvenance>(
             "SELECT note_id, session_id, created_at
              FROM consolidated_note_provenance
-             WHERE note_id = ?1
+             WHERE note_id = ?
              ORDER BY created_at ASC, session_id ASC",
         )
         .bind(note_id)
@@ -489,7 +493,7 @@ impl NoteConsolidationRepository {
                 scanned_note_count, candidate_cluster_count,
                 consolidated_cluster_count, consolidated_note_count,
                 source_note_count, started_at, completed_at, error_message
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(params.project_id)
@@ -525,12 +529,13 @@ impl NoteConsolidationRepository {
                     consolidated_cluster_count, consolidated_note_count,
                     source_note_count, started_at, completed_at, error_message
              FROM consolidation_run_metrics
-             WHERE project_id = ?1
-               AND (?2 = '' OR note_type = ?2)
+             WHERE project_id = ?
+               AND (? = '' OR note_type = ?)
              ORDER BY started_at DESC, id DESC
-             LIMIT ?3",
+             LIMIT ?",
         )
         .bind(project_id)
+        .bind(note_type)
         .bind(note_type)
         .bind(limit)
         .fetch_all(self.db.pool())
@@ -548,7 +553,7 @@ impl NoteConsolidationRepository {
         sqlx::query_as::<_, ConsolidatedNoteProvenance>(
             "SELECT note_id, session_id, created_at
              FROM consolidated_note_provenance
-             WHERE note_id = ?1 AND session_id = ?2",
+             WHERE note_id = ? AND session_id = ?",
         )
         .bind(note_id)
         .bind(session_id)
@@ -571,7 +576,7 @@ impl NoteConsolidationRepository {
                     consolidated_cluster_count, consolidated_note_count,
                     source_note_count, started_at, completed_at, error_message
              FROM consolidation_run_metrics
-             WHERE id = ?1",
+             WHERE id = ?",
         )
         .bind(id)
         .fetch_one(self.db.pool())
@@ -625,11 +630,8 @@ fn canonical_pair(left: &str, right: &str) -> (String, String) {
     }
 }
 
-fn sql_placeholders(count: usize, start_index: usize) -> String {
-    (0..count)
-        .map(|offset| format!("?{}", start_index + offset))
-        .collect::<Vec<_>>()
-        .join(", ")
+fn sql_placeholders(count: usize, _start_index: usize) -> String {
+    std::iter::repeat_n("?", count).collect::<Vec<_>>().join(", ")
 }
 
 fn sanitize_fts5_query(query: &str) -> Option<String> {

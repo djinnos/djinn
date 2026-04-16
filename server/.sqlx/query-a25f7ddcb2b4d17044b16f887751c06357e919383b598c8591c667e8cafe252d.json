@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE note_links\n         SET target_id = ?\n         WHERE target_id IS NULL\n           AND (target_raw = ? OR target_raw = ?)\n           AND source_id IN (SELECT id FROM notes WHERE project_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a25f7ddcb2b4d17044b16f887751c06357e919383b598c8591c667e8cafe252d"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM settings WHERE `key` = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bab2c66ffc6a8370dca5af0f5cb645463838d5dd8bf55f4408d6446e1357451b"
+}

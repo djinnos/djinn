@@ -1,14 +1,11 @@
 //! MCP tools for GitHub code search and file fetching.
 
-use std::sync::Arc;
-
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use djinn_provider::github_api::GitHubApiClient;
 use djinn_provider::github_api::search::{CodeSearchHit, CodeSearchResult, FileFetchResult};
-use djinn_provider::repos::CredentialRepository;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::{ErrorOr, ErrorResponse};
@@ -180,11 +177,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(params): Parameters<GithubSearchParams>,
     ) -> Json<ErrorOr<GithubSearchResponse>> {
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.event_bus(),
-        ));
-        let client = GitHubApiClient::new(cred_repo);
+        let client = GitHubApiClient::for_session_user();
 
         let limit = match parse_optional_positive_usize(params.limit, "limit") {
             Ok(limit) => limit,
@@ -217,11 +210,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(params): Parameters<GithubFetchFileParams>,
     ) -> Json<ErrorOr<GithubFetchFileResponse>> {
-        let cred_repo = Arc::new(CredentialRepository::new(
-            self.state.db().clone(),
-            self.state.event_bus(),
-        ));
-        let client = GitHubApiClient::new(cred_repo);
+        let client = GitHubApiClient::for_session_user();
 
         let start_line = match parse_optional_positive_u32(params.start_line, "start_line") {
             Ok(start_line) => start_line,

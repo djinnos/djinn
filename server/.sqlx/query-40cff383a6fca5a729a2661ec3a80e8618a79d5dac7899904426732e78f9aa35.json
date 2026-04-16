@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT branch FROM note_embedding_meta WHERE note_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "40cff383a6fca5a729a2661ec3a80e8618a79d5dac7899904426732e78f9aa35"
+}

@@ -1,4 +1,3 @@
-pub mod checkpoint;
 pub mod dolt;
 pub mod runtime;
 

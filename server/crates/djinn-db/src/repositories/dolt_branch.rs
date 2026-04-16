@@ -95,6 +95,7 @@ impl<'a> DoltBranchSqlHelper<'a> {
                 backend: self.db.bootstrap_info().backend_label.clone(),
             });
         };
+        // NOTE: dynamic SQL — compile-time check not possible (SQL passed as runtime parameter).
         let mut query = sqlx::query(sql);
         for bind in binds {
             query = query.bind(*bind);
@@ -116,6 +117,8 @@ impl<'a> DoltBranchSqlHelper<'a> {
                 backend: self.db.bootstrap_info().backend_label.clone(),
             });
         };
+        // NOTE: dynamic SQL — `dolt_branches` is a Dolt-only system table not present
+        // in the MySQL schema used for compile-time checks; keep runtime-typed.
         let row = sqlx::query("SELECT COUNT(*) AS count FROM dolt_branches WHERE name = ?")
             .bind(branch)
             .fetch_one(pool)

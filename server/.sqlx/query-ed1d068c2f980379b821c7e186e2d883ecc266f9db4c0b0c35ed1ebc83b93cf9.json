@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE tasks SET\n                `status` = ?,\n                reopen_count = reopen_count + ?,\n                total_reopen_count = total_reopen_count + ?,\n                continuation_count = CASE WHEN ? THEN 0 WHEN ? THEN continuation_count + 1 ELSE continuation_count END,\n                verification_failure_count = CASE WHEN ? THEN 0 WHEN ? THEN verification_failure_count + 1 ELSE verification_failure_count END,\n                total_verification_failure_count = total_verification_failure_count + CASE WHEN ? THEN 1 ELSE 0 END,\n                intervention_count = CASE WHEN ? THEN intervention_count + 1 ELSE intervention_count END,\n                last_intervention_at = CASE WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') ELSE last_intervention_at END,\n                closed_at = CASE\n                    WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n                    WHEN ? THEN NULL\n                    ELSE closed_at\n                END,\n                close_reason = CASE\n                    WHEN ? IS NOT NULL THEN ?\n                    WHEN ? THEN NULL\n                    ELSE close_reason\n                END,\n                merge_conflict_metadata = CASE\n                    WHEN ? THEN NULL\n                    WHEN ? THEN ?\n                    ELSE merge_conflict_metadata\n                END,\n                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 19
+    },
+    "nullable": []
+  },
+  "hash": "ed1d068c2f980379b821c7e186e2d883ecc266f9db4c0b0c35ed1ebc83b93cf9"
+}

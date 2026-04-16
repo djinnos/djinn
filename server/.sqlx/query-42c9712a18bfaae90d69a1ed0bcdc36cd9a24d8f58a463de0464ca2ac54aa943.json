@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "42c9712a18bfaae90d69a1ed0bcdc36cd9a24d8f58a463de0464ca2ac54aa943"
+}

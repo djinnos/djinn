@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)\n             VALUES (?, ?,\n                     (SELECT id FROM notes\n                      WHERE project_id = ? AND (title = ? OR permalink = ?)\n                      LIMIT 1),\n                     ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "937b41a1fe777a3cb06de9d9ca16753e5a4c7f1fc9d676f4b9d6e1153e3e7e11"
+}

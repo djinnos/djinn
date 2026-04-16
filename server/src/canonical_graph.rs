@@ -62,40 +62,6 @@ pub(crate) fn derive_graph_caches(
     (pagerank, sccs)
 }
 
-#[allow(dead_code)]
-pub(crate) async fn status_snapshot(
-    index_tree_path: &Path,
-) -> Option<(String, time::OffsetDateTime)> {
-    let cache = GRAPH_CACHE.read().await;
-    cache.as_ref().and_then(|cached| {
-        if cached.project_path == index_tree_path {
-            Some((cached.git_head.clone(), cached.last_warm_at))
-        } else {
-            None
-        }
-    })
-}
-
-#[allow(dead_code)]
-pub(crate) async fn current_and_previous_graphs() -> (
-    Option<(crate::repo_graph::RepoDependencyGraph, String)>,
-    Option<(crate::repo_graph::RepoDependencyGraph, String)>,
-) {
-    let current = {
-        let cache = GRAPH_CACHE.read().await;
-        cache
-            .as_ref()
-            .map(|c| (c.graph.clone(), c.git_head.clone()))
-    };
-    let previous = {
-        let cache = PREVIOUS_GRAPH_CACHE.read().await;
-        cache
-            .as_ref()
-            .map(|c| (c.graph.clone(), c.git_head.clone()))
-    };
-    (current, previous)
-}
-
 pub(crate) async fn ensure_canonical_graph(
     state: &AppState,
     project_id: &str,
@@ -777,41 +743,6 @@ pub(crate) fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathB
     let project_root = requested;
     let index_tree_path = djinn_core::index_tree::index_tree_path(&project_root);
     (project_root, index_tree_path)
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) async fn install_test_graphs(
-    project_path: &Path,
-    previous: Option<crate::repo_graph::RepoDependencyGraph>,
-    current: crate::repo_graph::RepoDependencyGraph,
-) {
-    {
-        let mut prev_cache = PREVIOUS_GRAPH_CACHE.write().await;
-        *prev_cache = previous.map(|graph| {
-            let (pagerank, sccs) = derive_graph_caches(&graph);
-            CachedGraph {
-                graph,
-                project_path: project_path.to_path_buf(),
-                git_head: "previous".into(),
-                last_warm_at: time::OffsetDateTime::now_utc(),
-                pagerank,
-                sccs,
-            }
-        });
-    }
-    {
-        let (pagerank, sccs) = derive_graph_caches(&current);
-        let mut cache = GRAPH_CACHE.write().await;
-        *cache = Some(CachedGraph {
-            graph: current,
-            project_path: project_path.to_path_buf(),
-            git_head: "current".into(),
-            last_warm_at: time::OffsetDateTime::now_utc(),
-            pagerank,
-            sccs,
-        });
-    }
 }
 
 #[cfg(test)]
