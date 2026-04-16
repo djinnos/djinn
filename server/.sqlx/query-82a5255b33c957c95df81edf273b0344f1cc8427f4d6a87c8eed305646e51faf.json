@@ -1,0 +1,94 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT token, user_id, github_login, github_name, github_avatar_url, github_access_token, created_at, expires_at FROM user_auth_sessions WHERE token = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "github_login",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "github_name",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "github_avatar_url",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "github_access_token",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "expires_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "82a5255b33c957c95df81edf273b0344f1cc8427f4d6a87c8eed305646e51faf"
+}
