@@ -466,14 +466,14 @@ impl NoteRepository {
         let id = id.to_owned();
         let scope_paths = scope_paths.to_owned();
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE notes SET
                 scope_paths = ?,
                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            scope_paths,
+            id
         )
-        .bind(&scope_paths)
-        .bind(&id)
         .execute(self.db.pool())
         .await?;
 
@@ -491,14 +491,14 @@ impl NoteRepository {
         let id = id.to_owned();
         let tags = tags.to_owned();
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE notes SET
                 tags = ?,
                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            tags,
+            id
         )
-        .bind(&tags)
-        .bind(&id)
         .execute(self.db.pool())
         .await?;
 
@@ -534,22 +534,23 @@ impl NoteRepository {
 
         let content_hash = note_content_hash(&content);
 
-        sqlx::query(
+        let empty_scope = "[]";
+        sqlx::query!(
             "INSERT INTO notes
                 (id, project_id, permalink, title, file_path,
                  storage, note_type, folder, tags, content, content_hash, scope_paths)
              VALUES (?, ?, ?, ?, '', 'db', ?, ?, ?, ?, ?, ?)",
+            id,
+            project_id,
+            permalink,
+            title,
+            note_type,
+            folder,
+            tags,
+            content,
+            content_hash,
+            empty_scope
         )
-        .bind(&id)
-        .bind(&project_id)
-        .bind(&permalink)
-        .bind(&title)
-        .bind(&note_type)
-        .bind(&folder)
-        .bind(&tags)
-        .bind(&content)
-        .bind(&content_hash)
-        .bind("[]")
         .execute(&mut *tx)
         .await?;
 
@@ -774,24 +775,24 @@ impl NoteRepository {
         let note_result: Result<Note> = async {
             let mut tx = self.db.pool().begin().await?;
 
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO notes
                     (id, project_id, permalink, title, file_path,
                      storage, note_type, folder, tags, content, content_hash, scope_paths)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                id,
+                project_id,
+                permalink,
+                title,
+                file_path_str,
+                storage,
+                note_type,
+                folder,
+                tags,
+                content,
+                content_hash,
+                scope_paths
             )
-            .bind(&id)
-            .bind(&project_id)
-            .bind(&permalink)
-            .bind(&title)
-            .bind(&file_path_str)
-            .bind(&storage)
-            .bind(&note_type)
-            .bind(&folder)
-            .bind(&tags)
-            .bind(&content)
-            .bind(&content_hash)
-            .bind(&scope_paths)
             .execute(&mut *tx)
             .await?;
 
@@ -1080,7 +1081,7 @@ impl NoteRepository {
         let content_hash = note_content_hash(&content);
 
         if let Some(file_path_str) = healed_file_path_str.as_ref() {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE notes SET
                     title   = ?,
                     content = ?,
@@ -1090,17 +1091,17 @@ impl NoteRepository {
                     file_path = ?,
                     updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
                  WHERE id = ?",
+                title,
+                content,
+                tags,
+                content_hash,
+                file_path_str,
+                id
             )
-            .bind(&title)
-            .bind(&content)
-            .bind(&tags)
-            .bind(&content_hash)
-            .bind(file_path_str)
-            .bind(&id)
             .execute(&mut *tx)
             .await?;
         } else {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE notes SET
                     title   = ?,
                     content = ?,
@@ -1108,12 +1109,12 @@ impl NoteRepository {
                     content_hash = ?,
                     updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
                  WHERE id = ?",
+                title,
+                content,
+                tags,
+                content_hash,
+                id
             )
-            .bind(&title)
-            .bind(&content)
-            .bind(&tags)
-            .bind(&content_hash)
-            .bind(&id)
             .execute(&mut *tx)
             .await?;
         }
@@ -1149,16 +1150,16 @@ impl NoteRepository {
         let id = id.to_owned();
         let mut tx = self.db.pool().begin().await?;
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE notes SET
-                abstract = ?,
+                `abstract` = ?,
                 overview = ?,
                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            abstract_summary,
+            overview,
+            id
         )
-        .bind(abstract_summary)
-        .bind(overview)
-        .bind(&id)
         .execute(&mut *tx)
         .await?;
 
@@ -1182,8 +1183,7 @@ impl NoteRepository {
         let id_owned = id.to_owned();
         let id_for_event = id.to_owned();
 
-        sqlx::query("DELETE FROM notes WHERE id = ?")
-            .bind(&id_owned)
+        sqlx::query!("DELETE FROM notes WHERE id = ?", id_owned)
             .execute(self.db.pool())
             .await?;
 
@@ -1218,13 +1218,13 @@ impl NoteRepository {
             .await?
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE notes SET
                 last_accessed = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
                 access_count = access_count + 1
              WHERE id = ?",
+            id
         )
-        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -1286,7 +1286,7 @@ impl NoteRepository {
 
         let mut tx = self.db.pool().begin().await?;
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE notes SET
                 title      = ?,
                 file_path  = ?,
@@ -1295,13 +1295,13 @@ impl NoteRepository {
                 permalink  = ?,
                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            new_title,
+            new_file_path_str,
+            new_note_type,
+            new_folder,
+            new_permalink,
+            id
         )
-        .bind(new_title)
-        .bind(&new_file_path_str)
-        .bind(new_note_type)
-        .bind(&new_folder)
-        .bind(&new_permalink)
-        .bind(id)
         .execute(&mut *tx)
         .await?;
 
