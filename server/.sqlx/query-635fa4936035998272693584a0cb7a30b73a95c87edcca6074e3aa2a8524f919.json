@@ -1,0 +1,44 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT n.project_id, n.note_type, COUNT(*) AS \"note_count!: i64\"\n             FROM notes n\n             JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id\n             WHERE n.storage = 'db'\n               AND n.note_type IN ('case', 'pattern', 'pitfall')\n               AND cnp.session_id = ?\n             GROUP BY n.project_id, n.note_type\n             HAVING COUNT(*) >= 2\n             ORDER BY n.project_id ASC, n.note_type ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "note_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "note_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "635fa4936035998272693584a0cb7a30b73a95c87edcca6074e3aa2a8524f919"
+}

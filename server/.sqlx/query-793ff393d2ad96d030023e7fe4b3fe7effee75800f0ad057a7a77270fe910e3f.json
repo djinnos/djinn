@@ -1,0 +1,44 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT l.source_id, l.target_id AS \"target_id!\", l.target_raw\n             FROM note_links l\n             JOIN notes src ON src.id = l.source_id AND src.project_id = ?\n             WHERE l.target_id IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "target_id!",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "target_raw",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "793ff393d2ad96d030023e7fe4b3fe7effee75800f0ad057a7a77270fe910e3f"
+}

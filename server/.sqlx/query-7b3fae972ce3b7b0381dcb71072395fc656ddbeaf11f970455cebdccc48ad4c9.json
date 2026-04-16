@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE sessions\n             SET `status` = 'interrupted',\n                 ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n             WHERE task_id = ? AND `status` = 'running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7b3fae972ce3b7b0381dcb71072395fc656ddbeaf11f970455cebdccc48ad4c9"
+}

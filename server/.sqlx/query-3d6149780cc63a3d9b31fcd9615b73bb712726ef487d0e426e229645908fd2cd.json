@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO consolidation_run_metrics (\n                id, project_id, `status`, note_type,\n                scanned_note_count, candidate_cluster_count,\n                consolidated_cluster_count, consolidated_note_count,\n                source_note_count, started_at, completed_at, error_message\n             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "3d6149780cc63a3d9b31fcd9615b73bb712726ef487d0e426e229645908fd2cd"
+}

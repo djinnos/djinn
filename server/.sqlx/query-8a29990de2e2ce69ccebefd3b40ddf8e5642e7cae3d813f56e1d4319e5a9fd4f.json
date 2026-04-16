@@ -1,0 +1,34 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT\n                COALESCE(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END), 0) AS \"completed!: i64\",\n                COALESCE(SUM(CASE WHEN t.close_reason != 'completed' OR t.close_reason IS NULL THEN 1 ELSE 0 END), 0) AS \"failed!: i64\"\n             FROM tasks t\n             WHERE t.project_id = ?\n               AND t.`status` = 'closed'\n               AND t.closed_at > ?\n               AND EXISTS (\n                   SELECT 1 FROM sessions s\n                   WHERE s.task_id = t.id AND s.agent_type = ?\n               )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "completed!: i64",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "failed!: i64",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "8a29990de2e2ce69ccebefd3b40ddf8e5642e7cae3d813f56e1d4319e5a9fd4f"
+}

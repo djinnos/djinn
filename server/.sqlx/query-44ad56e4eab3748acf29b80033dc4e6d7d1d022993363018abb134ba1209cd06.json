@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM note_associations\n             WHERE weight < 0.05\n               AND last_co_access < DATE_SUB(NOW(3), INTERVAL 90 DAY)\n               AND note_a_id IN (SELECT id FROM notes WHERE project_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "44ad56e4eab3748acf29b80033dc4e6d7d1d022993363018abb134ba1209cd06"
+}

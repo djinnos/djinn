@@ -1,0 +1,64 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT n.id, n.permalink, n.title, n.note_type, n.folder\n             FROM notes n\n             WHERE n.project_id = ?\n               AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')\n               AND (? IS NULL OR n.folder = ?)\n               AND NOT EXISTS (\n                   SELECT 1 FROM note_links l WHERE l.target_id = n.id\n               )\n             ORDER BY n.folder, n.title",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "permalink",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "note_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "folder",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0ef65e5fe0e5973c643bd2c57e505a270e625e473c03458b6ea9315806d26b05"
+}

@@ -1,0 +1,94 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.`abstract` AS abstract_, n.overview,\n                    CAST(MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) AS DOUBLE) AS \"score!: f64\"\n             FROM notes n\n             WHERE MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE)\n               AND n.project_id = ?\n               AND n.folder = ?\n               AND n.note_type = ?\n               AND n.storage = 'db'\n               AND MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) > ?\n             ORDER BY MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) DESC\n             LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "permalink",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "folder",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "note_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "abstract_",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "overview",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "score!: f64",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "8febd17c4fd7b72a46bb702deffb5d4f7de7ccec90a6b052c41b726212bc39d9"
+}

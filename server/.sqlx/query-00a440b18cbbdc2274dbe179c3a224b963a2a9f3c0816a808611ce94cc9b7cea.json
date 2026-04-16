@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT e.memory_refs AS \"memory_refs!\"\n             FROM tasks t\n             JOIN epics e ON e.id = t.epic_id\n             WHERE t.id = ? AND t.project_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "memory_refs!",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "00a440b18cbbdc2274dbe179c3a224b963a2a9f3c0816a808611ce94cc9b7cea"
+}

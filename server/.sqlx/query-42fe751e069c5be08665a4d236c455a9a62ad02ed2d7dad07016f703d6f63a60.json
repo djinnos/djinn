@@ -1,0 +1,44 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT\n                COALESCE(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END), 0) AS \"completed!: i64\",\n                COALESCE(SUM(CASE WHEN t.close_reason != 'completed' THEN 1 ELSE 0 END), 0) AS \"failed!: i64\",\n                COALESCE(AVG(\n                    CASE WHEN t.close_reason = 'completed'\n                        THEN (\n                            SELECT COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS DOUBLE)), 0.0)\n                            FROM sessions s\n                            WHERE s.task_id = t.id AND s.agent_type = ?\n                        )\n                        ELSE NULL\n                    END\n                ), 0.0) AS \"avg_tokens!: f64\"\n             FROM tasks t\n             WHERE t.project_id = ?\n               AND t.`status` = 'closed'\n               AND t.closed_at > ?\n               AND t.closed_at <= ?\n               AND EXISTS (\n                   SELECT 1 FROM sessions s\n                   WHERE s.task_id = t.id AND s.agent_type = ?\n               )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "completed!: i64",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "failed!: i64",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "avg_tokens!: f64",
+        "type_info": {
+          "type": "Double",
+          "flags": "",
+          "max_size": 22
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "42fe751e069c5be08665a4d236c455a9a62ad02ed2d7dad07016f703d6f63a60"
+}

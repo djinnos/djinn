@@ -1,0 +1,44 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT project_id, note_type, COUNT(*) AS \"note_count!: i64\"\n             FROM notes\n             WHERE storage = 'db'\n               AND note_type IN ('case', 'pattern', 'pitfall')\n             GROUP BY project_id, note_type\n             ORDER BY project_id ASC, note_type ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "note_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "note_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "37d8e318c595127e3a5513848d1ff7fbcdaed30000c2ce06ee8d139d2ddca991"
+}

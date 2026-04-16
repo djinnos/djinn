@@ -5,9 +5,9 @@ use serde_json::Value;
 use crate::Result;
 use crate::database::Database;
 
-/// Column list shared by all session SELECT queries.
-const SESSION_COLS: &str = "id, project_id, task_id, model_id, agent_type, started_at, ended_at, \
-     `status`, tokens_in, tokens_out, worktree_path";
+/// Inlined SESSION_COLS projection for each `query_as!(SessionRecord, ...)`
+/// call site.  `query_as!` requires a string-literal SQL argument; concat!()
+/// doesn't satisfy it (verified on agent.rs in batch 4).
 
 pub struct SessionRepository {
     db: Database,
@@ -33,24 +33,27 @@ impl SessionRepository {
         let id = uuid::Uuid::now_v7().to_string();
         let _ = params.metadata_json;
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, `status`, worktree_path)
              VALUES (?, ?, ?, ?, ?, 'running', ?)",
+            id,
+            params.project_id,
+            params.task_id,
+            params.model,
+            params.agent_type,
+            params.worktree_path
         )
-        .bind(&id)
-        .bind(params.project_id)
-        .bind(params.task_id)
-        .bind(params.model)
-        .bind(params.agent_type)
-        .bind(params.worktree_path)
         .execute(self.db.pool())
         .await?;
 
-        let session = sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE id = ?"
-        ))
-        .bind(&id)
+        let session = sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions WHERE id = ?"#,
+            id
+        )
         .fetch_one(self.db.pool())
         .await?;
 
@@ -73,10 +76,13 @@ impl SessionRepository {
     /// Re-fetch a session by id and emit `SessionUpdated`.
     async fn fetch_and_emit_update(&self, id: &str) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
-        let session = sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE id = ?"
-        ))
-        .bind(id)
+        let session = sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions WHERE id = ?"#,
+            id
+        )
         .fetch_one(self.db.pool())
         .await?;
         let action = match session.status.as_str() {
@@ -106,18 +112,19 @@ impl SessionRepository {
     ) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query(
+        let status_str = status.as_str();
+        sqlx::query!(
             "UPDATE sessions
              SET `status` = ?,
                  tokens_in = ?,
                  tokens_out = ?,
                  ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            status_str,
+            tokens_in,
+            tokens_out,
+            id
         )
-        .bind(status.as_str())
-        .bind(tokens_in)
-        .bind(tokens_out)
-        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -129,9 +136,12 @@ impl SessionRepository {
     pub async fn interrupt_all_running(&self) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let running_sessions = sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE `status` = 'running'"
-        ))
+        let running_sessions = sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions WHERE `status` = 'running'"#
+        )
         .fetch_all(self.db.pool())
         .await?;
 
@@ -139,11 +149,11 @@ impl SessionRepository {
             return Ok(0);
         }
 
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE sessions
              SET `status` = 'interrupted',
                  ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE `status` = 'running'",
+             WHERE `status` = 'running'"
         )
         .execute(self.db.pool())
         .await?;
@@ -160,10 +170,13 @@ impl SessionRepository {
     pub async fn interrupt_running_for_task(&self, task_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let orphans = sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE task_id = ? AND `status` = 'running'"
-        ))
-        .bind(task_id)
+        let orphans = sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions WHERE task_id = ? AND `status` = 'running'"#,
+            task_id
+        )
         .fetch_all(self.db.pool())
         .await?;
 
@@ -171,13 +184,13 @@ impl SessionRepository {
             return Ok(0);
         }
 
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE sessions
              SET `status` = 'interrupted',
                  ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE task_id = ? AND `status` = 'running'",
+            task_id
         )
-        .bind(task_id)
         .execute(self.db.pool())
         .await?;
 
@@ -190,10 +203,13 @@ impl SessionRepository {
 
     pub async fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE id = ?"
-        ))
-        .bind(id)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions WHERE id = ?"#,
+            id
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -204,21 +220,27 @@ impl SessionRepository {
         id: &str,
     ) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE project_id = ? AND id = ?"
-        ))
-        .bind(project_id)
-        .bind(id)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions WHERE project_id = ? AND id = ?"#,
+            project_id,
+            id
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
 
     pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE task_id = ? ORDER BY started_at DESC"
-        ))
-        .bind(task_id)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions WHERE task_id = ? ORDER BY started_at DESC"#,
+            task_id
+        )
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -229,33 +251,42 @@ impl SessionRepository {
         task_id: &str,
     ) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions \
-             WHERE project_id = ? AND task_id = ? ORDER BY started_at DESC"
-        ))
-        .bind(project_id)
-        .bind(task_id)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE project_id = ? AND task_id = ? ORDER BY started_at DESC"#,
+            project_id,
+            task_id
+        )
         .fetch_all(self.db.pool())
         .await?)
     }
 
     pub async fn list_active(&self) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions \
-             WHERE `status` = 'running' ORDER BY started_at DESC"
-        ))
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE `status` = 'running' ORDER BY started_at DESC"#
+        )
         .fetch_all(self.db.pool())
         .await?)
     }
 
     pub async fn list_active_in_project(&self, project_id: &str) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions \
-             WHERE project_id = ? AND `status` = 'running' ORDER BY started_at DESC"
-        ))
-        .bind(project_id)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE project_id = ? AND `status` = 'running' ORDER BY started_at DESC"#,
+            project_id
+        )
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -266,29 +297,31 @@ impl SessionRepository {
     /// actively reshaping the epic.
     pub async fn active_planner_for_epic(&self, epic_id: &str) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        let prefixed = SESSION_COLS
-            .split(',')
-            .map(|c| format!("s.{}", c.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {prefixed} FROM sessions s \
-             INNER JOIN tasks t ON t.id = s.task_id \
-             WHERE s.`status` = 'running' AND s.agent_type = 'planner' AND t.epic_id = ? \
-             ORDER BY s.started_at DESC"
-        ))
-        .bind(epic_id)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
+                    s.started_at, s.ended_at,
+                    s.`status` AS "status!", s.tokens_in, s.tokens_out, s.worktree_path
+             FROM sessions s
+             INNER JOIN tasks t ON t.id = s.task_id
+             WHERE s.`status` = 'running' AND s.agent_type = 'planner' AND t.epic_id = ?
+             ORDER BY s.started_at DESC"#,
+            epic_id
+        )
         .fetch_all(self.db.pool())
         .await?)
     }
 
     pub async fn active_for_task(&self, task_id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions \
-             WHERE task_id = ? AND `status` = 'running' ORDER BY started_at DESC LIMIT 1"
-        ))
-        .bind(task_id)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE task_id = ? AND `status` = 'running' ORDER BY started_at DESC LIMIT 1"#,
+            task_id
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -296,8 +329,7 @@ impl SessionRepository {
     pub async fn count_for_task(&self, task_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
         Ok(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions WHERE task_id = ?")
-                .bind(task_id)
+            sqlx::query_scalar!("SELECT COUNT(*) FROM sessions WHERE task_id = ?", task_id)
                 .fetch_one(self.db.pool())
                 .await?,
         )
@@ -313,6 +345,7 @@ impl SessionRepository {
             return Ok(std::collections::HashMap::new());
         }
         let placeholders: Vec<String> = (0..task_ids.len()).map(|_| "?".to_string()).collect();
+        // NOTE: dynamic SQL (IN list built at runtime) — compile-time check not possible
         let sql = format!(
             "SELECT task_id, COUNT(*) as cnt FROM sessions WHERE task_id IN ({}) GROUP BY task_id",
             placeholders.join(", ")
@@ -330,12 +363,12 @@ impl SessionRepository {
     pub async fn pause(&self, id: &str, tokens_in: i64, tokens_out: i64) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE sessions SET `status` = 'paused', tokens_in = ?, tokens_out = ? WHERE id = ?",
+            tokens_in,
+            tokens_out,
+            id
         )
-        .bind(tokens_in)
-        .bind(tokens_out)
-        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -346,8 +379,7 @@ impl SessionRepository {
     pub async fn set_running(&self, id: &str) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query("UPDATE sessions SET `status` = 'running' WHERE id = ?")
-            .bind(id)
+        sqlx::query!("UPDATE sessions SET `status` = 'running' WHERE id = ?", id)
             .execute(self.db.pool())
             .await?;
 
@@ -357,11 +389,14 @@ impl SessionRepository {
     /// Find the most recent paused session for a task (if any).
     pub async fn paused_for_task(&self, task_id: &str) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions \
-             WHERE task_id = ? AND `status` = 'paused' ORDER BY started_at DESC LIMIT 1"
-        ))
-        .bind(task_id)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE task_id = ? AND `status` = 'paused' ORDER BY started_at DESC LIMIT 1"#,
+            task_id
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -373,11 +408,13 @@ impl SessionRepository {
     pub async fn set_event_taxonomy(&self, id: &str, taxonomy_json: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query("UPDATE sessions SET event_taxonomy = ? WHERE id = ?")
-            .bind(taxonomy_json)
-            .bind(id)
-            .execute(self.db.pool())
-            .await?;
+        sqlx::query!(
+            "UPDATE sessions SET event_taxonomy = ? WHERE id = ?",
+            taxonomy_json,
+            id
+        )
+        .execute(self.db.pool())
+        .await?;
 
         Ok(())
     }
@@ -386,16 +423,18 @@ impl SessionRepository {
     pub async fn latest_event_taxonomy_for_task(&self, task_id: &str) -> Result<Option<Value>> {
         self.db.ensure_initialized().await?;
 
-        let row: Option<String> = sqlx::query_scalar(
+        let row: Option<Option<String>> = sqlx::query_scalar!(
             "SELECT event_taxonomy FROM sessions
              WHERE task_id = ? AND event_taxonomy IS NOT NULL
              ORDER BY started_at DESC LIMIT 1",
+            task_id
         )
-        .bind(task_id)
         .fetch_optional(self.db.pool())
         .await?;
 
-        Ok(row.and_then(|json| serde_json::from_str::<Value>(&json).ok()))
+        Ok(row
+            .flatten()
+            .and_then(|json| serde_json::from_str::<Value>(&json).ok()))
     }
 
     /// Return the most recent non-null `worktree_path` recorded for any session
@@ -405,16 +444,16 @@ impl SessionRepository {
     pub async fn latest_worktree_path_for_task(&self, task_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
 
-        let row: Option<String> = sqlx::query_scalar(
+        let row: Option<Option<String>> = sqlx::query_scalar!(
             "SELECT worktree_path FROM sessions
              WHERE task_id = ? AND worktree_path IS NOT NULL
              ORDER BY started_at DESC LIMIT 1",
+            task_id
         )
-        .bind(task_id)
         .fetch_optional(self.db.pool())
         .await?;
 
-        Ok(row)
+        Ok(row.flatten())
     }
 
     /// Find the most recent paused session for a task that matches the given
@@ -426,13 +465,16 @@ impl SessionRepository {
         agent_type: &str,
     ) -> Result<Option<SessionRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, SessionRecord>(&format!(
-            "SELECT {SESSION_COLS} FROM sessions \
-             WHERE task_id = ? AND `status` = 'paused' AND agent_type = ? \
-             ORDER BY started_at DESC LIMIT 1"
-        ))
-        .bind(task_id)
-        .bind(agent_type)
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, worktree_path
+             FROM sessions
+             WHERE task_id = ? AND `status` = 'paused' AND agent_type = ?
+             ORDER BY started_at DESC LIMIT 1"#,
+            task_id,
+            agent_type
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -471,15 +513,15 @@ mod tests {
 
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                 issue_type, priority, owner, `status`, continuation_count, memory_refs)
              VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+            task_id,
+            epic.project_id,
+            short_id,
+            epic.id
         )
-        .bind(&task_id)
-        .bind(&epic.project_id)
-        .bind(&short_id)
-        .bind(&epic.id)
         .execute(db.pool())
         .await
         .unwrap();
@@ -689,15 +731,15 @@ mod tests {
     async fn create_task_under_epic(db: &Database, project_id: &str, epic_id: &str) -> String {
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                 issue_type, priority, owner, `status`, continuation_count, memory_refs)
              VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+            task_id,
+            project_id,
+            short_id,
+            epic_id
         )
-        .bind(&task_id)
-        .bind(project_id)
-        .bind(short_id)
-        .bind(epic_id)
         .execute(db.pool())
         .await
         .unwrap();

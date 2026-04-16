@@ -1,0 +1,54 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT\n                CAST(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE)\n                    / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE) AS \"success_rate: f64\",\n                COALESCE(AVG(CAST(t.total_reopen_count AS DOUBLE)), 0.0) AS \"avg_reopens!: f64\",\n                CAST(SUM(CASE WHEN t.total_verification_failure_count = 0 THEN 1 ELSE 0 END) AS DOUBLE)\n                    / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE) AS \"verification_pass_rate: f64\",\n                COUNT(DISTINCT t.id) AS \"completed_task_count!: i64\"\n             FROM tasks t\n             WHERE t.project_id = ?\n               AND t.`status` = 'closed'\n               AND EXISTS (\n                   SELECT 1 FROM sessions s\n                   WHERE s.task_id = t.id AND s.agent_type = ?\n               )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "success_rate: f64",
+        "type_info": {
+          "type": "Double",
+          "flags": "",
+          "max_size": 22
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "avg_reopens!: f64",
+        "type_info": {
+          "type": "Double",
+          "flags": "",
+          "max_size": 22
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "verification_pass_rate: f64",
+        "type_info": {
+          "type": "Double",
+          "flags": "",
+          "max_size": 22
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "completed_task_count!: i64",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "57042dc8dbabbe2e536234657e7087a7bc12626b811aeca823801b1f56ae5b86"
+}

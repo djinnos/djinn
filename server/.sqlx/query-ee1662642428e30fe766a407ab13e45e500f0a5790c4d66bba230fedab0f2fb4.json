@@ -1,0 +1,64 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT h.id, h.agent_id, h.created_at, h.proposed_text, h.metrics_before\n             FROM learned_prompt_history h\n             JOIN agents r ON r.id = h.agent_id\n             WHERE r.project_id = ?\n               AND h.action = 'keep'\n               AND h.metrics_after IS NULL\n             ORDER BY h.created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "agent_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "proposed_text",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "metrics_before",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ee1662642428e30fe766a407ab13e45e500f0a5790c4d66bba230fedab0f2fb4"
+}

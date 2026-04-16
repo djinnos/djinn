@@ -60,10 +60,10 @@ impl NoteConsolidationRepository {
     pub async fn list_sessions_with_provenance(&self) -> Result<Vec<String>> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_scalar::<_, String>(
+        sqlx::query_scalar!(
             "SELECT DISTINCT session_id
              FROM consolidated_note_provenance
-             ORDER BY session_id ASC",
+             ORDER BY session_id ASC"
         )
         .fetch_all(self.db.pool())
         .await
@@ -73,13 +73,14 @@ impl NoteConsolidationRepository {
     pub async fn list_db_note_groups(&self) -> Result<Vec<DbNoteGroup>> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_as::<_, DbNoteGroup>(
-            "SELECT project_id, note_type, COUNT(*) as note_count
+        sqlx::query_as!(
+            DbNoteGroup,
+            r#"SELECT project_id, note_type, COUNT(*) AS "note_count!: i64"
              FROM notes
              WHERE storage = 'db'
                AND note_type IN ('case', 'pattern', 'pitfall')
              GROUP BY project_id, note_type
-             ORDER BY project_id ASC, note_type ASC",
+             ORDER BY project_id ASC, note_type ASC"#
         )
         .fetch_all(self.db.pool())
         .await
@@ -93,17 +94,18 @@ impl NoteConsolidationRepository {
     ) -> Result<Vec<ConsolidationNote>> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_as::<_, ConsolidationNote>(
-            "SELECT id, project_id, permalink, title, note_type, folder, scope_paths, content,
-                    abstract as abstract_, overview, confidence
+        sqlx::query_as!(
+            ConsolidationNote,
+            r#"SELECT id, project_id, permalink, title, note_type, folder, scope_paths, content,
+                    `abstract` AS abstract_, overview, confidence
              FROM notes
              WHERE project_id = ?
                AND note_type = ?
                AND storage = 'db'
-             ORDER BY permalink ASC, id ASC",
+             ORDER BY permalink ASC, id ASC"#,
+            project_id,
+            note_type
         )
-        .bind(project_id)
-        .bind(note_type)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -129,20 +131,21 @@ impl NoteConsolidationRepository {
     ) -> Result<Vec<ConsolidationNote>> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_as::<_, ConsolidationNote>(
-            "SELECT n.id, n.project_id, n.permalink, n.title, n.note_type, n.folder, n.scope_paths, n.content,
-                    n.abstract as abstract_, n.overview, n.confidence
+        sqlx::query_as!(
+            ConsolidationNote,
+            r#"SELECT n.id, n.project_id, n.permalink, n.title, n.note_type, n.folder, n.scope_paths, n.content,
+                    n.`abstract` AS abstract_, n.overview, n.confidence
              FROM notes n
              JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
              WHERE n.project_id = ?
                AND n.note_type = ?
                AND n.storage = 'db'
                AND cnp.session_id = ?
-             ORDER BY n.permalink ASC, n.id ASC",
+             ORDER BY n.permalink ASC, n.id ASC"#,
+            project_id,
+            note_type,
+            session_id
         )
-        .bind(project_id)
-        .bind(note_type)
-        .bind(session_id)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -157,8 +160,9 @@ impl NoteConsolidationRepository {
     ) -> Result<Vec<DbNoteGroup>> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_as::<_, DbNoteGroup>(
-            "SELECT n.project_id, n.note_type, COUNT(*) as note_count
+        sqlx::query_as!(
+            DbNoteGroup,
+            r#"SELECT n.project_id, n.note_type, COUNT(*) AS "note_count!: i64"
              FROM notes n
              JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
              WHERE n.storage = 'db'
@@ -166,9 +170,9 @@ impl NoteConsolidationRepository {
                AND cnp.session_id = ?
              GROUP BY n.project_id, n.note_type
              HAVING COUNT(*) >= 2
-             ORDER BY n.project_id ASC, n.note_type ASC",
+             ORDER BY n.project_id ASC, n.note_type ASC"#,
+            session_id
         )
-        .bind(session_id)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -209,11 +213,11 @@ impl NoteConsolidationRepository {
         } = params;
 
         for session_id in source_session_ids {
-            let exists: i64 = sqlx::query_scalar(
+            let exists: i64 = sqlx::query_scalar!(
                 "SELECT COUNT(*) FROM sessions WHERE id = ? AND project_id = ?",
+                session_id,
+                project_id
             )
-            .bind(session_id)
-            .bind(project_id)
             .fetch_one(self.db.pool())
             .await?;
 
@@ -231,12 +235,14 @@ impl NoteConsolidationRepository {
 
         note_repo.set_confidence(&created.id, confidence).await?;
 
-        sqlx::query("UPDATE notes SET abstract = ?, overview = ? WHERE id = ?")
-            .bind(abstract_)
-            .bind(overview)
-            .bind(&created.id)
-            .execute(self.db.pool())
-            .await?;
+        sqlx::query!(
+            "UPDATE notes SET `abstract` = ?, overview = ? WHERE id = ?",
+            abstract_,
+            overview,
+            created.id
+        )
+        .execute(self.db.pool())
+        .await?;
 
         let mut provenance = Vec::with_capacity(source_session_ids.len());
         for session_id in source_session_ids {
@@ -262,6 +268,7 @@ impl NoteConsolidationRepository {
         }
 
         let placeholders = sql_placeholders(source_note_ids.len(), 2);
+        // NOTE: dynamic SQL (IN list built at runtime) — compile-time check not possible
         let note_count_query =
             format!("SELECT COUNT(*) FROM notes WHERE project_id = ? AND id IN ({placeholders})");
         let mut note_count = sqlx::query_scalar::<_, i64>(&note_count_query).bind(project_id);
@@ -276,6 +283,7 @@ impl NoteConsolidationRepository {
             )));
         }
 
+        // NOTE: dynamic SQL (IN list built at runtime) — compile-time check not possible
         let session_query = format!(
             "SELECT DISTINCT cnp.session_id
              FROM consolidated_note_provenance cnp
@@ -420,9 +428,10 @@ impl NoteConsolidationRepository {
         let mysql_threshold: f64 = 0.0;
         let _ = DEDUP_SCORE_THRESHOLD;
 
-        sqlx::query_as::<_, NoteDedupCandidate>(
-            "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract as abstract_, n.overview,
-                    MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) as score
+        sqlx::query_as!(
+            NoteDedupCandidate,
+            r#"SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.`abstract` AS abstract_, n.overview,
+                    CAST(MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) AS DOUBLE) AS "score!: f64"
              FROM notes n
              WHERE MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE)
                AND n.project_id = ?
@@ -430,17 +439,18 @@ impl NoteConsolidationRepository {
                AND n.note_type = ?
                AND n.storage = 'db'
                AND MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) > ?
-             ORDER BY score DESC
-             LIMIT ?",
+             ORDER BY MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) DESC
+             LIMIT ?"#,
+            safe_query,
+            safe_query,
+            project_id,
+            folder,
+            note_type,
+            safe_query,
+            mysql_threshold,
+            safe_query,
+            DEDUP_LIMIT
         )
-        .bind(&safe_query)
-        .bind(&safe_query)
-        .bind(project_id)
-        .bind(folder)
-        .bind(note_type)
-        .bind(&safe_query)
-        .bind(mysql_threshold)
-        .bind(DEDUP_LIMIT)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -453,12 +463,12 @@ impl NoteConsolidationRepository {
     ) -> Result<ConsolidatedNoteProvenance> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO consolidated_note_provenance (note_id, session_id)
              VALUES (?, ?)",
+            note_id,
+            session_id
         )
-        .bind(note_id)
-        .bind(session_id)
         .execute(self.db.pool())
         .await?;
 
@@ -468,13 +478,14 @@ impl NoteConsolidationRepository {
     pub async fn list_provenance(&self, note_id: &str) -> Result<Vec<ConsolidatedNoteProvenance>> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_as::<_, ConsolidatedNoteProvenance>(
+        sqlx::query_as!(
+            ConsolidatedNoteProvenance,
             "SELECT note_id, session_id, created_at
              FROM consolidated_note_provenance
              WHERE note_id = ?
              ORDER BY created_at ASC, session_id ASC",
+            note_id
         )
-        .bind(note_id)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -487,26 +498,31 @@ impl NoteConsolidationRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
-        sqlx::query(
+        let scanned_i32 = params.scanned_note_count as i32;
+        let candidate_i32 = params.candidate_cluster_count as i32;
+        let consolidated_cluster_i32 = params.consolidated_cluster_count as i32;
+        let consolidated_note_i32 = params.consolidated_note_count as i32;
+        let source_i32 = params.source_note_count as i32;
+        sqlx::query!(
             "INSERT INTO consolidation_run_metrics (
-                id, project_id, note_type, status,
+                id, project_id, `status`, note_type,
                 scanned_note_count, candidate_cluster_count,
                 consolidated_cluster_count, consolidated_note_count,
                 source_note_count, started_at, completed_at, error_message
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id,
+            params.project_id,
+            params.status,
+            params.note_type,
+            scanned_i32,
+            candidate_i32,
+            consolidated_cluster_i32,
+            consolidated_note_i32,
+            source_i32,
+            params.started_at,
+            params.completed_at,
+            params.error_message
         )
-        .bind(&id)
-        .bind(params.project_id)
-        .bind(params.note_type)
-        .bind(params.status)
-        .bind(params.scanned_note_count)
-        .bind(params.candidate_cluster_count)
-        .bind(params.consolidated_cluster_count)
-        .bind(params.consolidated_note_count)
-        .bind(params.source_note_count)
-        .bind(params.started_at)
-        .bind(params.completed_at)
-        .bind(params.error_message)
         .execute(self.db.pool())
         .await?;
 
@@ -523,21 +539,25 @@ impl NoteConsolidationRepository {
         let note_type = note_type.unwrap_or("");
         let limit = limit as i64;
 
-        sqlx::query_as::<_, ConsolidationRunMetric>(
-            "SELECT id, project_id, note_type, status,
-                    scanned_note_count, candidate_cluster_count,
-                    consolidated_cluster_count, consolidated_note_count,
-                    source_note_count, started_at, completed_at, error_message
+        sqlx::query_as!(
+            ConsolidationRunMetric,
+            r#"SELECT id, project_id, note_type, `status` AS "status!",
+                    CAST(scanned_note_count AS SIGNED) AS "scanned_note_count!: i64",
+                    CAST(candidate_cluster_count AS SIGNED) AS "candidate_cluster_count!: i64",
+                    CAST(consolidated_cluster_count AS SIGNED) AS "consolidated_cluster_count!: i64",
+                    CAST(consolidated_note_count AS SIGNED) AS "consolidated_note_count!: i64",
+                    CAST(source_note_count AS SIGNED) AS "source_note_count!: i64",
+                    started_at, completed_at, error_message
              FROM consolidation_run_metrics
              WHERE project_id = ?
                AND (? = '' OR note_type = ?)
              ORDER BY started_at DESC, id DESC
-             LIMIT ?",
+             LIMIT ?"#,
+            project_id,
+            note_type,
+            note_type,
+            limit
         )
-        .bind(project_id)
-        .bind(note_type)
-        .bind(note_type)
-        .bind(limit)
         .fetch_all(self.db.pool())
         .await
         .map_err(Into::into)
@@ -550,13 +570,14 @@ impl NoteConsolidationRepository {
     ) -> Result<ConsolidatedNoteProvenance> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_as::<_, ConsolidatedNoteProvenance>(
+        sqlx::query_as!(
+            ConsolidatedNoteProvenance,
             "SELECT note_id, session_id, created_at
              FROM consolidated_note_provenance
              WHERE note_id = ? AND session_id = ?",
+            note_id,
+            session_id
         )
-        .bind(note_id)
-        .bind(session_id)
         .fetch_one(self.db.pool())
         .await
         .map_err(|err| match err {
@@ -570,15 +591,19 @@ impl NoteConsolidationRepository {
     async fn get_run_metric(&self, id: &str) -> Result<ConsolidationRunMetric> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query_as::<_, ConsolidationRunMetric>(
-            "SELECT id, project_id, note_type, status,
-                    scanned_note_count, candidate_cluster_count,
-                    consolidated_cluster_count, consolidated_note_count,
-                    source_note_count, started_at, completed_at, error_message
+        sqlx::query_as!(
+            ConsolidationRunMetric,
+            r#"SELECT id, project_id, note_type, `status` AS "status!",
+                    CAST(scanned_note_count AS SIGNED) AS "scanned_note_count!: i64",
+                    CAST(candidate_cluster_count AS SIGNED) AS "candidate_cluster_count!: i64",
+                    CAST(consolidated_cluster_count AS SIGNED) AS "consolidated_cluster_count!: i64",
+                    CAST(consolidated_note_count AS SIGNED) AS "consolidated_note_count!: i64",
+                    CAST(source_note_count AS SIGNED) AS "source_note_count!: i64",
+                    started_at, completed_at, error_message
              FROM consolidation_run_metrics
-             WHERE id = ?",
+             WHERE id = ?"#,
+            id
         )
-        .bind(id)
         .fetch_one(self.db.pool())
         .await
         .map_err(|err| match err {

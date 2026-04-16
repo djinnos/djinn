@@ -1,0 +1,54 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT src.id, src.permalink, src.title, l.target_raw\n             FROM note_links l\n             JOIN notes src ON src.id = l.source_id AND src.project_id = ?\n             WHERE l.target_id IS NULL\n               AND (? IS NULL OR src.folder = ?)\n             ORDER BY src.permalink, l.target_raw",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "permalink",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "target_raw",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3bb95cea9c05e99945872d7c6bf54a8f4a9098c0b5663e9fef97b2d65a532eb0"
+}

@@ -44,6 +44,7 @@ impl NoteRepository {
         let Some(plan) = self.lexical_search_plan(LexicalSearchMode::Ranked, query)? else {
             return Ok(vec![]);
         };
+        // NOTE: dynamic SQL (backend-specific FTS query built from a runtime plan and dispatched across SQLite/MySQL pools) — compile-time check not possible
         let sql = executable_lexical_search_sql(&plan);
 
         let rows = match self.db.pool_kind() {
@@ -88,6 +89,7 @@ impl NoteRepository {
         };
         let threshold = lexical_search_threshold(plan.backend, LexicalSearchMode::Dedup)?
             .expect("dedup threshold is defined for all lexical backends");
+        // NOTE: dynamic SQL (backend-specific FTS dedup query built from a runtime plan) — compile-time check not possible
         let sql = executable_lexical_search_sql(&plan);
 
         let rows = match self.db.pool_kind() {
@@ -170,6 +172,7 @@ impl NoteRepository {
         };
         let threshold = lexical_search_threshold(plan.backend, LexicalSearchMode::Contradiction)?
             .expect("contradiction threshold is defined for all lexical backends");
+        // NOTE: dynamic SQL (backend-specific FTS contradiction query built from a runtime plan) — compile-time check not possible
         let sql = executable_lexical_search_sql(&plan);
 
         let rows = match self.db.pool_kind() {
@@ -310,6 +313,7 @@ impl NoteRepository {
         let placeholders = std::iter::repeat_n("?", ranked_ids.len())
             .collect::<Vec<_>>()
             .join(", ");
+        // NOTE: dynamic SQL (IN list built from ranked candidate ids) — compile-time check not possible
         let sql = format!(
             "SELECT id, permalink, title, folder, note_type,
                     COALESCE(abstract, substr(content, 1, 200)) as abstract_text
@@ -384,6 +388,7 @@ impl NoteRepository {
             embedding_branch_filter_sql(task_branch.as_deref());
         let folder_val = folder.unwrap_or("");
         let note_type_val = note_type.unwrap_or("");
+        // NOTE: dynamic SQL (IN list + branch filter clause built at runtime) — compile-time check not possible
         let sql = format!(
             "SELECT n.id FROM notes n
              JOIN note_embedding_meta m ON m.note_id = n.id
@@ -429,15 +434,15 @@ impl NoteRepository {
             return Ok(None);
         };
 
-        Ok(sqlx::query_scalar::<_, String>(
+        Ok(sqlx::query_scalar!(
             "SELECT short_id
                  FROM tasks
                  WHERE project_id = ? AND (id = ? OR short_id = ?)
                  LIMIT 1",
+            project_id,
+            task_id,
+            task_id
         )
-        .bind(project_id)
-        .bind(task_id)
-        .bind(task_id)
         .fetch_optional(self.db.pool())
         .await?
         .map(|short_id| task_branch_name(&short_id)))
@@ -448,14 +453,19 @@ impl NoteRepository {
     pub async fn catalog(&self, project_id: &str) -> Result<String> {
         self.db.ensure_initialized().await?;
 
-        let notes = sqlx::query_as::<_, (String, String, String, String)>(
+        let rows = sqlx::query!(
             "SELECT folder, title, permalink, updated_at
              FROM notes WHERE project_id = ?
              ORDER BY folder, title",
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
+
+        let notes: Vec<(String, String, String, String)> = rows
+            .into_iter()
+            .map(|r| (r.folder, r.title, r.permalink, r.updated_at))
+            .collect();
 
         Ok(build_catalog(&notes))
     }
@@ -471,6 +481,7 @@ impl NoteRepository {
     ) -> Result<Vec<NoteCompact>> {
         self.db.ensure_initialized().await?;
 
+        // NOTE: dynamic SQL (hours interval inlined when > 0) — compile-time check not possible
         let sql = if hours > 0 {
             format!(
                 "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
@@ -505,6 +516,7 @@ impl NoteRepository {
     ) -> Result<Vec<NoteCompact>> {
         self.db.ensure_initialized().await?;
 
+        // NOTE: dynamic SQL (folder/note_type clauses appended at runtime) — compile-time check not possible
         let mut sql = "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
              FROM notes WHERE project_id = ?"
             .to_owned();
@@ -587,6 +599,7 @@ impl NoteRepository {
             format!("(JSON_LENGTH(n.scope_paths) = 0 OR {exists_or})")
         };
 
+        // NOTE: dynamic SQL (note_type IN list and per-task-path EXISTS clauses built at runtime) — compile-time check not possible
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
                     n.storage, n.note_type, n.folder, n.tags, n.content,
@@ -645,6 +658,7 @@ impl NoteRepository {
         }
 
         let overlap_clause = overlap_parts.join(" OR ");
+        // NOTE: dynamic SQL (per-changed-path EXISTS clauses built at runtime) — compile-time check not possible
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
                     n.storage, n.note_type, n.folder, n.tags, n.content,
@@ -675,23 +689,23 @@ impl NoteRepository {
 
         let pattern = format!("%\"{permalink}\"%");
 
-        let rows = sqlx::query_as::<_, (String, String, String, String)>(
-            "SELECT id, short_id, title, status FROM tasks
+        let rows = sqlx::query!(
+            r#"SELECT id, short_id, title, `status` AS "status!" FROM tasks
              WHERE memory_refs LIKE ?
-             ORDER BY priority, created_at",
+             ORDER BY priority, created_at"#,
+            pattern
         )
-        .bind(&pattern)
         .fetch_all(self.db.pool())
         .await?;
 
         Ok(rows
             .into_iter()
-            .map(|(id, short_id, title, status)| {
+            .map(|row| {
                 serde_json::json!({
-                    "id": id,
-                    "short_id": short_id,
-                    "title": title,
-                    "status": status,
+                    "id": row.id,
+                    "short_id": row.short_id,
+                    "title": row.title,
+                    "status": row.status,
                 })
             })
             .collect())
@@ -709,13 +723,16 @@ mod contradiction_tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?, ?, ?)")
-            .bind(&id)
-            .bind("test")
-            .bind(tmp.path().to_str().unwrap())
-            .execute(db.pool())
-            .await
-            .unwrap();
+        let path_str = tmp.path().to_str().unwrap();
+        sqlx::query!(
+            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            id,
+            "test",
+            path_str
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
         (NoteRepository::new(db, EventBus::noop()), id)
     }
 
@@ -882,13 +899,16 @@ mod scope_overlap_decay_tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?, ?, ?)")
-            .bind(&id)
-            .bind("test")
-            .bind(tmp.path().to_str().unwrap())
-            .execute(db.pool())
-            .await
-            .unwrap();
+        let path_str = tmp.path().to_str().unwrap();
+        sqlx::query!(
+            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            id,
+            "test",
+            path_str
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
         (NoteRepository::new(db, EventBus::noop()), tmp, id)
     }
 

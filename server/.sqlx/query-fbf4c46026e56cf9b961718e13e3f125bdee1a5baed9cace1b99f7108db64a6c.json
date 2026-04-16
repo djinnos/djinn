@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT id, name, path,\n                      CAST(created_at AS CHAR) as \"created_at!: String\",\n                      target_branch,\n                      auto_merge as \"auto_merge: bool\",\n                      sync_enabled as \"sync_enabled: bool\",\n                      sync_remote\n               FROM projects WHERE sync_enabled = 1 ORDER BY name",
+  "query": "SELECT id, name, path, created_at, target_branch,\n                      auto_merge AS \"auto_merge!: bool\",\n                      sync_enabled AS \"sync_enabled!: bool\",\n                      sync_remote\n               FROM projects WHERE sync_enabled = 1 ORDER BY name",
   "describe": {
     "columns": [
       {
@@ -32,11 +32,11 @@
       },
       {
         "ordinal": 3,
-        "name": "created_at!: String",
+        "name": "created_at",
         "type_info": {
-          "type": "Blob",
-          "flags": "",
-          "max_size": 4294967295
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
         }
       },
       {
@@ -50,7 +50,7 @@
       },
       {
         "ordinal": 5,
-        "name": "auto_merge: bool",
+        "name": "auto_merge!: bool",
         "type_info": {
           "type": "Tiny",
           "flags": "NOT_NULL",
@@ -59,7 +59,7 @@
       },
       {
         "ordinal": 6,
-        "name": "sync_enabled: bool",
+        "name": "sync_enabled!: bool",
         "type_info": {
           "type": "Tiny",
           "flags": "NOT_NULL",
@@ -83,12 +83,12 @@
       false,
       false,
       false,
-      true,
+      false,
       false,
       false,
       false,
       true
     ]
   },
-  "hash": "673e7106688a4274328b1dcd1a2b61c14899c70110d192441e81da07c176a71b"
+  "hash": "fbf4c46026e56cf9b961718e13e3f125bdee1a5baed9cace1b99f7108db64a6c"
 }

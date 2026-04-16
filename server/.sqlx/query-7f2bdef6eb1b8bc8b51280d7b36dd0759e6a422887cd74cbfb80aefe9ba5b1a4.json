@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM epics WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7f2bdef6eb1b8bc8b51280d7b36dd0759e6a422887cd74cbfb80aefe9ba5b1a4"
+}

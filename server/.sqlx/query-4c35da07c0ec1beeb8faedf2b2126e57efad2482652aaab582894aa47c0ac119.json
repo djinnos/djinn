@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO agents (\n                id, project_id, `name`, base_role, description,\n                system_prompt_extensions, model_preference, verification_command,\n                mcp_servers, skills, is_default\n             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "4c35da07c0ec1beeb8faedf2b2126e57efad2482652aaab582894aa47c0ac119"
+}

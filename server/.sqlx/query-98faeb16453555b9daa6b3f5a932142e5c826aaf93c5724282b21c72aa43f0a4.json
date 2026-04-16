@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT event_taxonomy FROM sessions\n             WHERE task_id = ? AND event_taxonomy IS NOT NULL\n             ORDER BY started_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_taxonomy",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "98faeb16453555b9daa6b3f5a932142e5c826aaf93c5724282b21c72aa43f0a4"
+}

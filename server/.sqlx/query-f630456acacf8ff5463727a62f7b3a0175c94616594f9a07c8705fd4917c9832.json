@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT bt.memory_refs AS \"memory_refs!\"\n             FROM blockers b\n             JOIN tasks bt ON bt.id = b.blocking_task_id\n             WHERE b.task_id = ? AND bt.project_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "memory_refs!",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f630456acacf8ff5463727a62f7b3a0175c94616594f9a07c8705fd4917c9832"
+}
