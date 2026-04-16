@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE epics SET `status` = 'open',\n                    closed_at = NULL,\n                    updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "8e2e18abc5de1708b4b27afb5a0bad84a740615ebc4ed2d340782d2ea5bb728b"
+}

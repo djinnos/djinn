@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE tasks SET `status` = 'closed' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "23b09d242c2ee8d87656540038c1cb30bf5def371901bdfd2f2ac98bda0e2c0f"
+}
