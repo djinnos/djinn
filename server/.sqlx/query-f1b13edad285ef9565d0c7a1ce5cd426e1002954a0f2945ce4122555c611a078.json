@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO verification_cache (project_id, commit_sha, output, duration_ms) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE output=VALUES(output), duration_ms=VALUES(duration_ms)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f1b13edad285ef9565d0c7a1ce5cd426e1002954a0f2945ce4122555c611a078"
+}

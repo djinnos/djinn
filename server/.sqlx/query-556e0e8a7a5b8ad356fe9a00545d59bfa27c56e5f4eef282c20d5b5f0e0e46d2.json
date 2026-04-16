@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM session_messages WHERE session_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "556e0e8a7a5b8ad356fe9a00545d59bfa27c56e5f4eef282c20d5b5f0e0e46d2"
+}

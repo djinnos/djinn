@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO verification_results (project_id, task_id, run_id, phase, step_index, name, command, exit_code, stdout, stderr, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "24d1c937273bacae24f1d920613a38616384171cc83c7795e4f30d0ccdd81297"
+}

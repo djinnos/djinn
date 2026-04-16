@@ -27,23 +27,24 @@ impl SessionMessageRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO session_messages (id, session_id, role, content_json, token_count)
              VALUES (?, ?, ?, ?, ?)",
+            id,
+            session_id,
+            role,
+            content_json,
+            token_count,
         )
-        .bind(&id)
-        .bind(session_id)
-        .bind(role)
-        .bind(content_json)
-        .bind(token_count)
         .execute(self.db.pool())
         .await?;
 
-        let msg = sqlx::query_as::<_, SessionMessage>(
+        let msg = sqlx::query_as!(
+            SessionMessage,
             "SELECT id, session_id, role, content_json, token_count, created_at
              FROM session_messages WHERE id = ?",
+            id,
         )
-        .bind(&id)
         .fetch_one(self.db.pool())
         .await?;
 
@@ -82,14 +83,14 @@ impl SessionMessageRepository {
                 serde_json::to_string(&msg.content).unwrap_or_else(|_| "[]".to_string());
             let id = uuid::Uuid::now_v7().to_string();
 
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO session_messages (id, session_id, role, content_json)
                  VALUES (?, ?, ?, ?)",
+                id,
+                session_id,
+                role,
+                content_json,
             )
-            .bind(&id)
-            .bind(session_id)
-            .bind(role)
-            .bind(&content_json)
             .execute(self.db.pool())
             .await?;
 
@@ -114,13 +115,14 @@ impl SessionMessageRepository {
     pub async fn load_conversation(&self, session_id: &str) -> Result<Conversation> {
         self.db.ensure_initialized().await?;
 
-        let rows = sqlx::query_as::<_, SessionMessage>(
+        let rows = sqlx::query_as!(
+            SessionMessage,
             "SELECT id, session_id, role, content_json, token_count, created_at
              FROM session_messages
              WHERE session_id = ?
              ORDER BY created_at ASC",
+            session_id,
         )
-        .bind(session_id)
         .fetch_all(self.db.pool())
         .await?;
 
@@ -152,7 +154,8 @@ impl SessionMessageRepository {
         }
         self.db.ensure_initialized().await?;
 
-        // Build placeholders: (?1, ?2, ?3, ...)
+        // NOTE: dynamic SQL — IN-clause placeholder count is runtime-dependent;
+        // compile-time check not possible with variadic bindings.
         let placeholders: Vec<String> = (0..session_ids.len()).map(|_| "?".to_string()).collect();
         let sql = format!(
             "SELECT session_id, role, content_json, created_at \
@@ -173,10 +176,12 @@ impl SessionMessageRepository {
     /// Delete all messages for a session (used by compaction to replace with summary).
     pub async fn delete_conversation(&self, session_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let result = sqlx::query("DELETE FROM session_messages WHERE session_id = ?")
-            .bind(session_id)
-            .execute(self.db.pool())
-            .await?;
+        let result = sqlx::query!(
+            "DELETE FROM session_messages WHERE session_id = ?",
+            session_id,
+        )
+        .execute(self.db.pool())
+        .await?;
         Ok(result.rows_affected())
     }
 }
@@ -214,15 +219,15 @@ mod tests {
 
         let task_id = uuid::Uuid::now_v7().to_string();
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                 issue_type, priority, owner, `status`, continuation_count, memory_refs)
              VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]')",
+            task_id,
+            epic.project_id,
+            short_id,
+            epic.id,
         )
-        .bind(&task_id)
-        .bind(&epic.project_id)
-        .bind(&short_id)
-        .bind(&epic.id)
         .execute(db.pool())
         .await
         .unwrap();
