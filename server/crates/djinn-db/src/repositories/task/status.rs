@@ -93,14 +93,15 @@ impl TaskRepository {
             || simple_lifecycle_close
             || action == TransitionAction::ForceClose;
         if apply.set_closed_at && !work_landed {
-            let downstream = sqlx::query_as::<_, BlockerRef>(
-                "SELECT t.id AS task_id, t.short_id, t.title, t.`status`
+            let downstream = sqlx::query_as!(
+                BlockerRef,
+                r#"SELECT t.id AS task_id, t.short_id, t.title, t.`status` AS "status!"
                  FROM blockers b
                  JOIN tasks t ON t.id = b.task_id
                  WHERE b.blocking_task_id = ?
-                   AND t.`status` != 'closed'",
+                   AND t.`status` != 'closed'"#,
+                id
             )
-            .bind(id)
             .fetch_all(&mut *tx)
             .await?;
             if !downstream.is_empty() {
@@ -130,13 +131,13 @@ impl TaskRepository {
                     ));
                 }
             }
-            let count: i64 = sqlx::query_scalar(
+            let count: i64 = sqlx::query_scalar!(
                 "SELECT COUNT(*) FROM blockers b
                  JOIN tasks bt ON b.blocking_task_id = bt.id
                  WHERE b.task_id = ?
                    AND bt.`status` != 'closed'",
+                id
             )
-            .bind(id)
             .fetch_one(&mut *tx)
             .await?;
             if count > 0 {
@@ -168,7 +169,7 @@ impl TaskRepository {
 
         // Apply all side effects atomically.
         let reopen_inc_val: i64 = if apply.increment_reopen { 1 } else { 0 };
-        sqlx::query(
+        sqlx::query!(
             "UPDATE tasks SET
                 `status` = ?,
                 reopen_count = reopen_count + ?,
@@ -195,26 +196,26 @@ impl TaskRepository {
                 END,
                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            to_str,
+            reopen_inc_val,
+            reopen_inc_val,
+            apply.reset_continuation,
+            apply.increment_continuation,
+            apply.reset_verification_failure,
+            apply.increment_verification_failure,
+            apply.increment_verification_failure,
+            apply.record_intervention,
+            apply.record_intervention,
+            apply.set_closed_at,
+            apply.clear_closed_at,
+            apply.close_reason,
+            apply.close_reason,
+            apply.clear_close_reason,
+            apply.clear_merge_conflict_metadata,
+            apply.set_merge_conflict_metadata,
+            conflict_meta_ref,
+            id
         )
-        .bind(to_str)
-        .bind(reopen_inc_val)
-        .bind(reopen_inc_val)
-        .bind(apply.reset_continuation)
-        .bind(apply.increment_continuation)
-        .bind(apply.reset_verification_failure)
-        .bind(apply.increment_verification_failure)
-        .bind(apply.increment_verification_failure)
-        .bind(apply.record_intervention)
-        .bind(apply.record_intervention)
-        .bind(apply.set_closed_at)
-        .bind(apply.clear_closed_at)
-        .bind(apply.close_reason)
-        .bind(apply.close_reason)
-        .bind(apply.clear_close_reason)
-        .bind(apply.clear_merge_conflict_metadata)
-        .bind(apply.set_merge_conflict_metadata)
-        .bind(conflict_meta_ref)
-        .bind(id)
         .execute(&mut *tx)
         .await?;
 
@@ -232,17 +233,17 @@ impl TaskRepository {
         }
         let payload = payload_obj.to_string();
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO activity_log
                 (id, task_id, actor_id, actor_role, event_type, payload)
              VALUES (?, ?, ?, ?, ?, ?)",
+            activity_id,
+            id,
+            actor_id,
+            actor_role,
+            apply.activity_type,
+            payload
         )
-        .bind(&activity_id)
-        .bind(id)
-        .bind(actor_id)
-        .bind(actor_role)
-        .bind(apply.activity_type)
-        .bind(&payload)
         .execute(&mut *tx)
         .await?;
 
@@ -282,6 +283,7 @@ impl TaskRepository {
         } else {
             0
         };
+        // NOTE: dynamic SQL (closed_at fragment) — compile-time check not possible
         sqlx::query(&format!(
             "UPDATE tasks SET `status` = ?, {closed_at_sql}
                 reopen_count = reopen_count + ?,
@@ -343,7 +345,7 @@ impl TaskRepository {
         } else {
             0
         };
-        sqlx::query(
+        sqlx::query!(
             "UPDATE tasks SET
                 `status` = ?,
                 closed_at = CASE
@@ -359,14 +361,14 @@ impl TaskRepository {
                 END,
                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            status,
+            status,
+            reopen_inc,
+            reopen_inc,
+            status,
+            close_reason,
+            id
         )
-        .bind(status)
-        .bind(status)
-        .bind(reopen_inc)
-        .bind(reopen_inc)
-        .bind(status)
-        .bind(close_reason)
-        .bind(id)
         .execute(self.db.pool())
         .await?;
 
@@ -399,13 +401,13 @@ impl TaskRepository {
     /// Move a task to a different epic (or detach from epic with None).
     pub async fn move_to_epic(&self, id: &str, new_epic_id: Option<&str>) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE tasks SET epic_id = ?,
                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            new_epic_id,
+            id
         )
-        .bind(new_epic_id)
-        .bind(id)
         .execute(self.db.pool())
         .await?;
         let task: Task = task_select_where_id!(id)
