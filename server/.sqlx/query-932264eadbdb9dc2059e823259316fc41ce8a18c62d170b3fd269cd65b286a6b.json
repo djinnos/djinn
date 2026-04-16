@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM note_associations\n             WHERE last_co_access < ? AND weight <= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "932264eadbdb9dc2059e823259316fc41ce8a18c62d170b3fd269cd65b286a6b"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE learned_prompt_history\n             SET action = 'discard'\n             WHERE agent_id = ? AND action IN ('keep','confirmed')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0b1a5da1315717eca718bf1224fe523cfb44cbb065efd3ab315152aa860c01c3"
+}

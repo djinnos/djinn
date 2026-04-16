@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE agents\n             SET `name` = ?, description = ?, system_prompt_extensions = ?,\n                 model_preference = ?, verification_command = ?,\n                 mcp_servers = ?, skills = ?, learned_prompt = ?,\n                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "893b2fda9ba3951ca2e8f2f1881e2f51dd0cda21d861daeead147bf67bdc4b1f"
+}

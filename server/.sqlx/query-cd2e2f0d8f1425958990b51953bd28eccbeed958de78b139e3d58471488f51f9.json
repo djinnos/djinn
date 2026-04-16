@@ -1,0 +1,74 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, proposed_text, action AS \"action!\", metrics_before, metrics_after, created_at\n                 FROM learned_prompt_history\n                 WHERE agent_id = ?\n                 ORDER BY created_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "proposed_text",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "action!",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 128
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "metrics_before",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "metrics_after",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "cd2e2f0d8f1425958990b51953bd28eccbeed958de78b139e3d58471488f51f9"
+}

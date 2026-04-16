@@ -1,0 +1,64 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access\n             FROM note_associations\n             WHERE weight >= ?\n             ORDER BY weight DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_a_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "note_b_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "weight",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "co_access_count",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "last_co_access",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "214ca92d81d9c09ca727b1d8fcaad8f31d16f4273c2eecfedd94a58c4a8c4e97"
+}

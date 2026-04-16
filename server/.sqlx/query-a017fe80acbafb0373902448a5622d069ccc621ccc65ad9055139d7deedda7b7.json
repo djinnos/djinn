@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE agents SET is_default = 0\n             WHERE project_id = ? AND base_role = ? AND is_default = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a017fe80acbafb0373902448a5622d069ccc621ccc65ad9055139d7deedda7b7"
+}

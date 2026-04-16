@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO learned_prompt_history\n                (id, agent_id, proposed_text, action, metrics_before)\n             VALUES (?, ?, ?, 'keep', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a91f7751a7ff1c4368e27e714591e8f150a4842c54f6ac8116d514458b99cd59"
+}

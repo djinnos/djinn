@@ -1,0 +1,64 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT\n                 CASE WHEN na.note_a_id = ? THEN nb.permalink ELSE na_.permalink END AS \"note_permalink!: String\",\n                 CASE WHEN na.note_a_id = ? THEN nb.title    ELSE na_.title    END AS \"note_title!: String\",\n                 na.weight,\n                 na.co_access_count,\n                 na.last_co_access\n             FROM note_associations na\n             JOIN notes na_ ON na_.id = na.note_a_id\n             JOIN notes nb  ON nb.id  = na.note_b_id\n             WHERE (na.note_a_id = ? OR na.note_b_id = ?)\n               AND na.weight >= ?\n             ORDER BY na.weight DESC\n             LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_permalink!: String",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "note_title!: String",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "weight",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "co_access_count",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "last_co_access",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c5e98e35b6bbe18d92640f9aef304b15af1d65b984fff2353845b89851433431"
+}

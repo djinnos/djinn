@@ -1,0 +1,154 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, project_id, `name`, base_role, description,\n                system_prompt_extensions, model_preference, verification_command,\n                mcp_servers, skills,\n                is_default AS \"is_default!: bool\",\n                (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\\n\\n---\\n\\n')\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at, updated_at\n             FROM agents WHERE project_id = ? AND `name` = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "base_role",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "system_prompt_extensions",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "model_preference",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "verification_command",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "mcp_servers",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "skills",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "is_default!: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "learned_prompt",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "updated_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "821fbb0987be2c857cd7fe32a51c071660a5ebf974b6e4b26d7c9c2f0a8b737a"
+}

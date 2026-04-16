@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE learned_prompt_history\n             SET action = ?, metrics_after = ?\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6cf306fc1bc2090dd86b85955dd922d3cbf6fa9f36f8857336454b3d9849e55e"
+}

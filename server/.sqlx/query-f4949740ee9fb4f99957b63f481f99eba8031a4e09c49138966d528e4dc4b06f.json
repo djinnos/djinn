@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO note_associations\n             (note_a_id, note_b_id, weight, co_access_count, last_co_access)\n             VALUES (?, ?, 0.01, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))\n             ON DUPLICATE KEY UPDATE\n                 weight = LEAST(1.0, weight * ?),\n                 co_access_count = co_access_count + VALUES(co_access_count),\n                 last_co_access = VALUES(last_co_access)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f4949740ee9fb4f99957b63f481f99eba8031a4e09c49138966d528e4dc4b06f"
+}
