@@ -8,6 +8,7 @@
 
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -375,23 +376,66 @@ fn oauth_callback_router(
     )
 }
 
+/// Process-wide slot holding an abort handle for the currently-running OAuth
+/// callback server.
+///
+/// Only one legitimate listener on OAUTH_PORT at a time. If the user clicks
+/// "Connect" twice, the second attempt aborts the first via this slot rather
+/// than failing with `AddrInUse`.
+static ACTIVE_OAUTH_CALLBACK: tokio::sync::Mutex<Option<tokio::task::AbortHandle>> =
+    tokio::sync::Mutex::const_new(None);
+
 async fn spawn_callback_server(app: axum::Router) -> Result<(tokio::task::JoinHandle<()>, u16)> {
     use std::net::SocketAddr;
-    let addr = SocketAddr::from(([127, 0, 0, 1], OAUTH_PORT));
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            anyhow!(
-                "OAuth callback port {} is already in use. Stop the process using it and retry.",
-                OAUTH_PORT
-            )
-        } else {
-            anyhow!("Failed to bind OAuth callback port {}: {}", OAUTH_PORT, e)
+
+    // Abort any previous callback server — retry must win over stale listener.
+    if let Some(prev) = ACTIVE_OAUTH_CALLBACK.lock().await.take() {
+        prev.abort();
+        tracing::info!("aborted stale OAuth callback server before starting a new one");
+    }
+
+    // Bind on 0.0.0.0 so the listener is reachable when djinn-server runs in a
+    // container with port 1455 mapped back to the host's 127.0.0.1:1455
+    // (the browser's redirect target).
+    let addr = SocketAddr::from(([0, 0, 0, 0], OAUTH_PORT));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            // Abort happens asynchronously; the kernel can hold the socket in
+            // TIME_WAIT briefly. Retry a few times with backoff before giving up.
+            let mut last = e;
+            let mut bound = None;
+            for delay_ms in [50u64, 150, 400, 800, 1500] {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                match tokio::net::TcpListener::bind(addr).await {
+                    Ok(l) => {
+                        bound = Some(l);
+                        break;
+                    }
+                    Err(err) => last = err,
+                }
+            }
+            match bound {
+                Some(l) => l,
+                None => {
+                    return Err(anyhow!(
+                        "OAuth callback port {} is still busy after retries ({}). Kill the process using it and retry.",
+                        OAUTH_PORT,
+                        last
+                    ));
+                }
+            }
         }
-    })?;
+        Err(e) => return Err(anyhow!("Failed to bind OAuth callback port {}: {}", OAUTH_PORT, e)),
+    };
     let port = listener.local_addr()?.port();
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
+
+    // Register an abort handle so a subsequent spawn can cancel this server.
+    *ACTIVE_OAUTH_CALLBACK.lock().await = Some(handle.abort_handle());
+
     Ok((handle, port))
 }
 
@@ -419,20 +463,6 @@ fn html_error(error: &str) -> String {
     )
 }
 
-fn open_browser(url: &str) {
-    #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/c", "start", url])
-        .spawn();
-    // If we can't identify the OS, log the URL for manual opening
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    tracing::info!("Please open this URL in your browser: {}", url);
-}
-
 // ─── Full PKCE flow ──────────────────────────────────────────────────────────
 
 /// Perform the full Codex PKCE OAuth flow.
@@ -444,7 +474,10 @@ fn open_browser(url: &str) {
 /// Tokens are persisted to the encrypted credential DB on success. On refresh
 /// failure the existing tokens are **not** cleared — the refresh token is
 /// preserved so a future attempt can retry.
-pub async fn run_codex_flow(repo: &CredentialRepository) -> Result<CodexTokens> {
+pub async fn run_codex_flow(
+    repo: &CredentialRepository,
+    events: &EventBus,
+) -> Result<CodexTokens> {
     // 1. Check cache
     if let Some(cached) = CodexTokens::load_from_db(repo).await {
         if !cached.is_expired() {
@@ -478,8 +511,11 @@ pub async fn run_codex_flow(repo: &CredentialRepository) -> Result<CodexTokens> 
     let app = oauth_callback_router(csrf_state, tx);
     let (server_handle, _port) = spawn_callback_server(app).await?;
 
-    tracing::info!("Codex OAuth: opening browser for authorization");
-    open_browser(&auth_url);
+    tracing::info!("Codex OAuth: emitting open_browser event for desktop");
+    // The desktop (Electron) is responsible for opening the browser via
+    // shell.openExternal. The server — which may be running in a container —
+    // never shells out to xdg-open/open.
+    events.send(DjinnEventEnvelope::oauth_open_browser("chatgpt_codex", &auth_url));
 
     // 3. Wait for callback (5-minute timeout)
     let code =

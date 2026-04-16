@@ -382,12 +382,14 @@ impl NoteRepository {
             .join(", ");
         let (branch_filter_sql, branch_filter_values) =
             embedding_branch_filter_sql(task_branch.as_deref());
+        let folder_val = folder.unwrap_or("");
+        let note_type_val = note_type.unwrap_or("");
         let sql = format!(
             "SELECT n.id FROM notes n
              JOIN note_embedding_meta m ON m.note_id = n.id
-             WHERE n.project_id = ?1
-               AND (?2 = '' OR n.folder = ?2)
-               AND (?3 = '' OR n.note_type = ?3)
+             WHERE n.project_id = ?
+               AND (? = '' OR n.folder = ?)
+               AND (? = '' OR n.note_type = ?)
                AND {branch_filter_sql}
                AND n.id IN ({})",
             placeholders
@@ -395,8 +397,10 @@ impl NoteRepository {
 
         let mut query = sqlx::query_scalar::<_, String>(&sql)
             .bind(project_id)
-            .bind(folder.unwrap_or(""))
-            .bind(note_type.unwrap_or(""));
+            .bind(folder_val)
+            .bind(folder_val)
+            .bind(note_type_val)
+            .bind(note_type_val);
         for branch in &branch_filter_values {
             query = query.bind(branch);
         }
@@ -428,10 +432,11 @@ impl NoteRepository {
         Ok(sqlx::query_scalar::<_, String>(
             "SELECT short_id
                  FROM tasks
-                 WHERE project_id = ?1 AND (id = ?2 OR short_id = ?2)
+                 WHERE project_id = ? AND (id = ? OR short_id = ?)
                  LIMIT 1",
         )
         .bind(project_id)
+        .bind(task_id)
         .bind(task_id)
         .fetch_optional(self.db.pool())
         .await?
@@ -445,7 +450,7 @@ impl NoteRepository {
 
         let notes = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT folder, title, permalink, updated_at
-             FROM notes WHERE project_id = ?1
+             FROM notes WHERE project_id = ?
              ORDER BY folder, title",
         )
         .bind(project_id)
@@ -470,14 +475,14 @@ impl NoteRepository {
             format!(
                 "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
                  FROM notes
-                 WHERE project_id = ?1
-                   AND updated_at >= datetime('now', '-{hours} hours')
-                 ORDER BY updated_at DESC LIMIT ?2"
+                 WHERE project_id = ?
+                   AND updated_at >= DATE_SUB(NOW(3), INTERVAL {hours} HOUR)
+                 ORDER BY updated_at DESC LIMIT ?"
             )
         } else {
             "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
-             FROM notes WHERE project_id = ?1
-             ORDER BY updated_at DESC LIMIT ?2"
+             FROM notes WHERE project_id = ?
+             ORDER BY updated_at DESC LIMIT ?"
                 .to_owned()
         };
 
@@ -501,26 +506,24 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let mut sql = "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
-             FROM notes WHERE project_id = ?1"
+             FROM notes WHERE project_id = ?"
             .to_owned();
 
         let mut binds: Vec<String> = vec![project_id.to_string()];
 
         if let Some(f) = folder {
-            let idx = binds.len() + 1;
             if depth == 1 {
-                sql.push_str(&format!(" AND folder = ?{idx}"));
+                sql.push_str(" AND folder = ?");
+                binds.push(f.to_string());
             } else {
-                sql.push_str(&format!(
-                    " AND (folder = ?{idx} OR folder LIKE ?{idx} || '/%')"
-                ));
+                sql.push_str(" AND (folder = ? OR folder LIKE CONCAT(?, '/%'))");
+                binds.push(f.to_string());
+                binds.push(f.to_string());
             }
-            binds.push(f.to_string());
         }
 
         if let Some(t) = note_type {
-            let idx = binds.len() + 1;
-            sql.push_str(&format!(" AND note_type = ?{idx}"));
+            sql.push_str(" AND note_type = ?");
             binds.push(t.to_string());
         }
 
@@ -558,31 +561,30 @@ impl NoteRepository {
 
         let mut bind_values: Vec<String> = Vec::new();
 
-        // ?1 = project_id
         bind_values.push(project_id.to_string());
-        // ?2 = min_confidence
-        // (handled separately as f64)
 
         let scope_clause = if task_paths.is_empty() {
             // Only global notes
-            "json_array_length(n.scope_paths) = 0".to_string()
+            "JSON_LENGTH(n.scope_paths) = 0".to_string()
         } else {
             // Global notes OR bidirectional scope overlap:
             // - task path is under note scope (note is more general — parent match)
             // - note scope is under task path (note is more specific — child match)
             let mut exists_parts = Vec::new();
             for task_path in task_paths {
-                let idx = bind_values.len() + 2; // +2 because ?2 is min_confidence
+                // Each iteration binds the task_path 3 times for LIKE/LIKE/=
                 bind_values.push(task_path.clone());
-                exists_parts.push(format!(
-                    "EXISTS (SELECT 1 FROM json_each(n.scope_paths) AS sp \
-                     WHERE ?{idx} LIKE sp.value || '/%' \
-                        OR sp.value LIKE ?{idx} || '/%' \
-                        OR sp.value = ?{idx})"
-                ));
+                bind_values.push(task_path.clone());
+                bind_values.push(task_path.clone());
+                exists_parts.push(
+                    "EXISTS (SELECT 1 FROM JSON_TABLE(n.scope_paths, '$[*]' COLUMNS (value VARCHAR(1024) PATH '$')) AS sp \
+                     WHERE ? LIKE CONCAT(sp.value, '/%') \
+                        OR sp.value LIKE CONCAT(?, '/%') \
+                        OR sp.value = ?)".to_string()
+                );
             }
             let exists_or = exists_parts.join(" OR ");
-            format!("(json_array_length(n.scope_paths) = 0 OR {exists_or})")
+            format!("(JSON_LENGTH(n.scope_paths) = 0 OR {exists_or})")
         };
 
         let sql = format!(
@@ -592,9 +594,9 @@ impl NoteRepository {
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
                     n.scope_paths
              FROM notes n
-             WHERE n.project_id = ?1
+             WHERE n.project_id = ?
                AND n.note_type IN ({types_in})
-               AND n.confidence >= ?2
+               AND n.confidence >= ?
                AND {scope_clause}
              ORDER BY n.confidence DESC, n.updated_at DESC
              LIMIT {limit}"
@@ -602,7 +604,7 @@ impl NoteRepository {
 
         let mut query = sqlx::query_as::<_, Note>(&sql);
         query = query.bind(&bind_values[0]); // project_id
-        query = query.bind(min_confidence); // ?2
+        query = query.bind(min_confidence);
         for val in &bind_values[1..] {
             query = query.bind(val);
         }
@@ -631,14 +633,15 @@ impl NoteRepository {
         let mut overlap_parts = Vec::new();
 
         for changed_path in changed_paths {
-            let idx = bind_values.len() + 1;
             bind_values.push(changed_path.clone());
-            overlap_parts.push(format!(
-                "EXISTS (SELECT 1 FROM json_each(n.scope_paths) AS sp \
-                 WHERE ?{idx} LIKE sp.value || '/%' \
-                    OR sp.value LIKE ?{idx} || '/%' \
-                    OR sp.value = ?{idx})"
-            ));
+            bind_values.push(changed_path.clone());
+            bind_values.push(changed_path.clone());
+            overlap_parts.push(
+                "EXISTS (SELECT 1 FROM JSON_TABLE(n.scope_paths, '$[*]' COLUMNS (value VARCHAR(1024) PATH '$')) AS sp \
+                 WHERE ? LIKE CONCAT(sp.value, '/%') \
+                    OR sp.value LIKE CONCAT(?, '/%') \
+                    OR sp.value = ?)".to_string()
+            );
         }
 
         let overlap_clause = overlap_parts.join(" OR ");
@@ -649,8 +652,8 @@ impl NoteRepository {
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
                     n.scope_paths
              FROM notes n
-             WHERE n.project_id = ?1
-               AND json_array_length(n.scope_paths) > 0
+             WHERE n.project_id = ?
+               AND JSON_LENGTH(n.scope_paths) > 0
                AND ({overlap_clause})
              ORDER BY n.updated_at DESC
              LIMIT {limit}"
@@ -674,7 +677,7 @@ impl NoteRepository {
 
         let rows = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT id, short_id, title, status FROM tasks
-             WHERE memory_refs LIKE ?1
+             WHERE memory_refs LIKE ?
              ORDER BY priority, created_at",
         )
         .bind(&pattern)
@@ -706,7 +709,7 @@ mod contradiction_tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?, ?, ?)")
             .bind(&id)
             .bind("test")
             .bind(tmp.path().to_str().unwrap())
@@ -879,7 +882,7 @@ mod scope_overlap_decay_tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?1, ?2, ?3)")
+        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?, ?, ?)")
             .bind(&id)
             .bind("test")
             .bind(tmp.path().to_str().unwrap())

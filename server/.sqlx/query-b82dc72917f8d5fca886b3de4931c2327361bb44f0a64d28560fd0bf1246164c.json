@@ -1,0 +1,54 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT t.id AS task_id, t.short_id, t.title, t.`status`\n             FROM blockers b\n             JOIN tasks t ON t.id = b.task_id\n             WHERE b.blocking_task_id = ?\n             ORDER BY t.created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "task_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "short_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 128
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b82dc72917f8d5fca886b3de4931c2327361bb44f0a64d28560fd0bf1246164c"
+}

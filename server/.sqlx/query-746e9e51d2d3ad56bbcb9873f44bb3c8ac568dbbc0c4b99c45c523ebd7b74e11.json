@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT payload FROM activity_log\n             WHERE task_id = ? AND event_type = 'status_changed'\n               AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.to_status')) = 'in_task_review'\n               AND archived = 0\n             ORDER BY created_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payload",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "746e9e51d2d3ad56bbcb9873f44bb3c8ac568dbbc0c4b99c45c523ebd7b74e11"
+}

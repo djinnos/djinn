@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO note_embedding_meta (\n            note_id, content_hash, embedded_at, model_version, embedding_dim, extension_state, branch\n         ) VALUES (\n            ?, ?, NOW(3), ?, ?, ?, ?\n         )\n         ON DUPLICATE KEY UPDATE\n            content_hash = VALUES(content_hash),\n            embedded_at = NOW(3),\n            model_version = VALUES(model_version),\n            embedding_dim = VALUES(embedding_dim),\n            extension_state = VALUES(extension_state),\n            branch = VALUES(branch)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "cd226338837795f1d2e8d7f831a8481262f721265fef9f1e02c26636f0f69433"
+}

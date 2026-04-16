@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO settings (`key`, `value`, updated_at)\n             VALUES ('git:global:target_branch', ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))\n             ON DUPLICATE KEY UPDATE\n               `value` = VALUES(`value`),\n               updated_at = VALUES(updated_at)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4998c0aecfe80b97b397f3a3ad9b49101607dea96e4981eac63ab738d3242214"
+}

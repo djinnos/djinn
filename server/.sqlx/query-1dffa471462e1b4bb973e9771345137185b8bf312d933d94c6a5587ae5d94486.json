@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT m.note_id\n             FROM note_embedding_meta m\n             LEFT JOIN notes n ON n.id = m.note_id\n             WHERE n.id IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1dffa471462e1b4bb973e9771345137185b8bf312d933d94c6a5587ae5d94486"
+}

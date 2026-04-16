@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT confidence FROM notes WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "confidence",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "614e19fd7f1ee45ca5dff7cf8908220d912d59713fb22c73420bda8aa52e4e99"
+}

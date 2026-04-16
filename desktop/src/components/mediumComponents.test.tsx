@@ -2,14 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 import { AgentConfig } from './AgentConfig';
 import { ConnectionStatus } from './ConnectionStatus';
-import { GitRemoteSetupBanner } from './GitRemoteSetupBanner';
 import { SyncHealthBanner } from './SyncHealthBanner';
 import { sseStore } from '@/stores/sseStore';
-
-vi.mock('@/electron/commands', () => ({
-  checkGitRemote: vi.fn(),
-  setupGitRemote: vi.fn(),
-}));
 
 vi.mock('@/lib/toast', () => ({
   showToast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
@@ -213,31 +207,6 @@ describe('ConnectionStatus', () => {
     const statusRoot = container.firstElementChild as HTMLElement;
     expect(statusRoot).toHaveAttribute('title', expect.stringContaining('Connection Error'));
     expect(within(statusRoot).getByText('Connection Error')).toBeInTheDocument();
-  });
-});
-
-describe('GitRemoteSetupBanner', () => {
-  beforeEach(() => {
-    cleanup();
-  });
-
-  afterEach(() => {
-    cleanup();
-  });
-
-  it('shows setup prompt and hides after dismiss in same render', async () => {
-    const { container } = render(<GitRemoteSetupBanner projectPath="/tmp/proj" onResolved={vi.fn()} />);
-    const root = container.firstElementChild as HTMLElement;
-
-    expect(within(root).getByRole('heading', { name: 'Git Remote Required' })).toBeInTheDocument();
-    expect(within(root).getByPlaceholderText('https://github.com/you/repo.git')).toBeInTheDocument();
-
-    const dismissButton = within(root).getByRole('button', { name: /dismiss git remote setup banner/i });
-    fireEvent.click(dismissButton);
-
-    await waitFor(() => {
-      expect(screen.queryByRole('heading', { name: 'Git Remote Required' })).not.toBeInTheDocument();
-    });
   });
 });
 

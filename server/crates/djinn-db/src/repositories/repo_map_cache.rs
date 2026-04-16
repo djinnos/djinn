@@ -42,18 +42,20 @@ impl RepoMapCacheRepository {
 
     pub async fn get(&self, key: RepoMapCacheKey<'_>) -> Result<Option<CachedRepoMap>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, CachedRepoMap>(
-            "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
+        Ok(sqlx::query_as!(
+            CachedRepoMap,
+            r#"SELECT project_id, project_path, worktree_path AS "worktree_path: Option<String>", commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
              FROM repo_map_cache
-             WHERE project_id = ?1
-               AND project_path = ?2
-               AND ((worktree_path IS NULL AND ?3 IS NULL) OR worktree_path = ?3)
-               AND commit_sha = ?4",
+             WHERE project_id = ?
+               AND project_path = ?
+               AND ((worktree_path IS NULL AND ? IS NULL) OR worktree_path = ?)
+               AND commit_sha = ?"#,
+            key.project_id,
+            key.project_path,
+            key.worktree_path,
+            key.worktree_path,
+            key.commit_sha,
         )
-        .bind(key.project_id)
-        .bind(key.project_path)
-        .bind(key.worktree_path)
-        .bind(key.commit_sha)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -65,26 +67,27 @@ impl RepoMapCacheRepository {
         commit_sha: &str,
     ) -> Result<Option<CachedRepoMap>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, CachedRepoMap>(
-            "SELECT project_id, project_path, worktree_path, commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
+        Ok(sqlx::query_as!(
+            CachedRepoMap,
+            r#"SELECT project_id, project_path, worktree_path AS "worktree_path: Option<String>", commit_sha, rendered_map, token_estimate, included_entries, graph_artifact, created_at
              FROM repo_map_cache
-             WHERE project_id = ?1
-               AND project_path = ?2
-               AND commit_sha = ?3
+             WHERE project_id = ?
+               AND project_path = ?
+               AND commit_sha = ?
              ORDER BY CASE WHEN worktree_path IS NULL THEN 0 ELSE 1 END, created_at DESC
-             LIMIT 1",
+             LIMIT 1"#,
+            project_id,
+            project_path,
+            commit_sha,
         )
-        .bind(project_id)
-        .bind(project_path)
-        .bind(commit_sha)
         .fetch_optional(self.db.pool())
         .await?)
     }
 
     pub async fn insert(&self, entry: RepoMapCacheInsert<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query(
-            "INSERT OR REPLACE INTO repo_map_cache (
+        sqlx::query!(
+            "INSERT INTO repo_map_cache (
                 project_id,
                 project_path,
                 worktree_path,
@@ -93,16 +96,21 @@ impl RepoMapCacheRepository {
                 token_estimate,
                 included_entries,
                 graph_artifact
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                rendered_map=VALUES(rendered_map),
+                token_estimate=VALUES(token_estimate),
+                included_entries=VALUES(included_entries),
+                graph_artifact=VALUES(graph_artifact)",
+            entry.key.project_id,
+            entry.key.project_path,
+            entry.key.worktree_path,
+            entry.key.commit_sha,
+            entry.rendered_map,
+            entry.token_estimate,
+            entry.included_entries,
+            entry.graph_artifact,
         )
-        .bind(entry.key.project_id)
-        .bind(entry.key.project_path)
-        .bind(entry.key.worktree_path)
-        .bind(entry.key.commit_sha)
-        .bind(entry.rendered_map)
-        .bind(entry.token_estimate)
-        .bind(entry.included_entries)
-        .bind(entry.graph_artifact)
         .execute(self.db.pool())
         .await?;
         Ok(())

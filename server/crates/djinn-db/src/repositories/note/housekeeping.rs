@@ -29,21 +29,23 @@ impl NoteRepository {
     pub async fn rebuild_missing_content_hashes(&self, project_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT id, content FROM notes WHERE project_id = ?1 AND content_hash IS NULL",
+        let rows = sqlx::query!(
+            "SELECT id, content FROM notes WHERE project_id = ? AND content_hash IS NULL",
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
         let mut tx = self.db.pool().begin().await?;
-        for (id, content) in &rows {
-            let hash = note_content_hash(content);
-            sqlx::query("UPDATE notes SET content_hash = ?2 WHERE id = ?1")
-                .bind(id)
-                .bind(hash)
-                .execute(&mut *tx)
-                .await?;
+        for row in &rows {
+            let hash = note_content_hash(&row.content);
+            sqlx::query!(
+                "UPDATE notes SET content_hash = ? WHERE id = ?",
+                hash,
+                row.id
+            )
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(rows.len() as u64)
@@ -57,22 +59,24 @@ impl NoteRepository {
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let notes = sqlx::query_as::<_, Note>(
-            "SELECT id, project_id, permalink, title, file_path,
+        let notes = sqlx::query_as!(
+            Note,
+            r#"SELECT id, project_id, permalink, title, file_path,
                         storage, note_type, folder, tags, content,
                         created_at, updated_at, last_accessed,
-                        access_count, confidence, abstract as abstract_, overview,
+                        access_count, confidence,
+                        `abstract` AS abstract_, overview,
                         scope_paths
              FROM notes n
-             WHERE n.project_id = ?1
+             WHERE n.project_id = ?
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
-               AND n.last_accessed < datetime('now', '-30 days')
+               AND n.last_accessed < DATE_SUB(NOW(3), INTERVAL 30 DAY)
                AND n.access_count = 0
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
-               )",
+               )"#,
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
@@ -98,17 +102,18 @@ impl NoteRepository {
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
 
-        let broken = sqlx::query_as::<_, BrokenLinkCandidateRow>(
-            "SELECT src.id as source_id, src.title as source_title, src.storage as source_storage,
-                    src.note_type as source_note_type, src.tags as source_tags, src.content as source_content,
-                    l.target_raw as target_raw
+        let broken = sqlx::query_as!(
+            BrokenLinkCandidateRow,
+            r#"SELECT src.id AS source_id, src.title AS source_title,
+                    src.tags AS source_tags, src.content AS source_content,
+                    l.target_raw AS target_raw
              FROM note_links l
              JOIN notes src ON src.id = l.source_id
-             WHERE src.project_id = ?1
+             WHERE src.project_id = ?
                AND l.target_id IS NULL
-             ORDER BY src.id, l.target_raw",
+             ORDER BY src.id, l.target_raw"#,
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
@@ -146,11 +151,11 @@ impl NoteRepository {
         target_raw: &str,
         min_score: f64,
     ) -> Result<Option<String>> {
-        let exact_title = sqlx::query_scalar::<_, String>(
-            "SELECT title FROM notes WHERE project_id = ?1 AND title = ?2 LIMIT 1",
+        let exact_title = sqlx::query_scalar!(
+            "SELECT title FROM notes WHERE project_id = ? AND title = ? LIMIT 1",
+            project_id,
+            target_raw
         )
-        .bind(project_id)
-        .bind(target_raw)
         .fetch_optional(self.db.pool())
         .await?;
         if exact_title.is_some() {

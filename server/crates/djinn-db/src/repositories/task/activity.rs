@@ -12,24 +12,25 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let mut tx = self.db.pool().begin().await?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO activity_log
                 (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?, ?, ?, ?, ?, ?)",
+            id,
+            task_id,
+            actor_id,
+            actor_role,
+            event_type,
+            payload,
         )
-        .bind(&id)
-        .bind(task_id)
-        .bind(actor_id)
-        .bind(actor_role)
-        .bind(event_type)
-        .bind(payload)
         .execute(&mut *tx)
         .await?;
-        let entry = sqlx::query_as::<_, ActivityEntry>(
+        let entry = sqlx::query_as!(
+            ActivityEntry,
             "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
-             FROM activity_log WHERE id = ?1",
+             FROM activity_log WHERE id = ?",
+            id,
         )
-        .bind(&id)
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -47,11 +48,12 @@ impl TaskRepository {
 
     pub async fn list_activity(&self, task_id: &str) -> Result<Vec<ActivityEntry>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, ActivityEntry>(
+        Ok(sqlx::query_as!(
+            ActivityEntry,
             "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
-             FROM activity_log WHERE task_id = ?1 AND archived = 0 ORDER BY created_at",
+             FROM activity_log WHERE task_id = ? AND archived = 0 ORDER BY created_at",
+            task_id,
         )
-        .bind(task_id)
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -90,6 +92,7 @@ impl TaskRepository {
 
         let where_sql = clauses.join(" AND ");
 
+        // NOTE: dynamic SQL — compile-time check not possible (WHERE clauses assembled at runtime).
         let sql = format!(
             "SELECT id, task_id, actor_id, actor_role, event_type, payload, created_at
              FROM activity_log WHERE {where_sql}
@@ -112,18 +115,18 @@ impl TaskRepository {
     /// Fetch the AC snapshot from the last `task_review_start` event for a task.
     pub async fn last_review_start_ac_snapshot(&self, task_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        let row: Option<(String,)> = sqlx::query_as(
+        let row = sqlx::query_scalar!(
             "SELECT payload FROM activity_log
-             WHERE task_id = ?1 AND event_type = 'status_changed'
-               AND json_extract(payload, '$.to_status') = 'in_task_review'
+             WHERE task_id = ? AND event_type = 'status_changed'
+               AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.to_status')) = 'in_task_review'
                AND archived = 0
              ORDER BY created_at DESC LIMIT 1",
+            task_id,
         )
-        .bind(task_id)
         .fetch_optional(self.db.pool())
         .await?;
 
-        Ok(row.and_then(|(payload,)| {
+        Ok(row.and_then(|payload: String| {
             serde_json::from_str::<serde_json::Value>(&payload)
                 .ok()
                 .and_then(|v| v.get("ac_snapshot").map(|s| s.to_string()))
@@ -133,11 +136,12 @@ impl TaskRepository {
     /// Soft-delete all activity entries for a task (set archived = 1).
     pub async fn archive_activity_for_task(&self, task_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let result =
-            sqlx::query("UPDATE activity_log SET archived = 1 WHERE task_id = ?1 AND archived = 0")
-                .bind(task_id)
-                .execute(self.db.pool())
-                .await?;
+        let result = sqlx::query!(
+            "UPDATE activity_log SET archived = 1 WHERE task_id = ? AND archived = 0",
+            task_id,
+        )
+        .execute(self.db.pool())
+        .await?;
         Ok(result.rows_affected())
     }
 }

@@ -74,21 +74,22 @@ impl NoteRepository {
                     // the pre-fix MCP write path could produce: a db-only
                     // row with `file_path=""` and a slightly-different
                     // permalink coexisting with the real file on disk.
-                    if let Ok(Some((existing_id, existing_permalink))) =
-                        sqlx::query_as::<_, (String, String)>(
-                            "SELECT id, permalink FROM notes
-                             WHERE project_id = ?1
+                    if let Ok(Some(existing)) = sqlx::query!(
+                        "SELECT id, permalink FROM notes
+                             WHERE project_id = ?
                                AND storage = 'db'
-                               AND title = ?2
-                               AND note_type = ?3
+                               AND title = ?
+                               AND note_type = ?
                              LIMIT 1",
-                        )
-                        .bind(project_id)
-                        .bind(&scanned_note.title)
-                        .bind(&scanned_note.note_type)
-                        .fetch_optional(self.db.pool())
-                        .await
+                        project_id,
+                        scanned_note.title,
+                        scanned_note.note_type
+                    )
+                    .fetch_optional(self.db.pool())
+                    .await
                     {
+                        let existing_id = existing.id;
+                        let existing_permalink = existing.permalink;
                         tracing::warn!(
                             target: "djinn_db::note::reindex",
                             db_note_id = %existing_id,
@@ -133,22 +134,22 @@ impl NoteRepository {
         let id = uuid::Uuid::now_v7().to_string();
         let mut tx = self.db.pool().begin().await?;
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO notes
                 (id, project_id, permalink, title, file_path,
                  storage, note_type, folder, tags, content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id,
+            project_id,
+            scanned_note.permalink,
+            scanned_note.title,
+            scanned_note.file_path,
+            "file",
+            scanned_note.note_type,
+            scanned_note.folder,
+            scanned_note.tags,
+            scanned_note.content
         )
-        .bind(&id)
-        .bind(project_id)
-        .bind(&scanned_note.permalink)
-        .bind(&scanned_note.title)
-        .bind(&scanned_note.file_path)
-        .bind("file")
-        .bind(&scanned_note.note_type)
-        .bind(&scanned_note.folder)
-        .bind(&scanned_note.tags)
-        .bind(&scanned_note.content)
         .execute(&mut *tx)
         .await?;
 
@@ -162,6 +163,7 @@ impl NoteRepository {
         )
         .await?;
 
+        // NOTE: uses shared const NOTE_SELECT_WHERE_ID; sqlx macros require a literal, keep runtime
         let note = sqlx::query_as::<_, Note>(super::NOTE_SELECT_WHERE_ID)
             .bind(&id)
             .fetch_one(&mut *tx)
@@ -196,30 +198,31 @@ impl NoteRepository {
         } = params;
         let mut tx = self.db.pool().begin().await?;
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE notes SET
-                title = ?2,
-                file_path = ?3,
-                note_type = ?4,
-                folder = ?5,
-                tags = ?6,
-                content = ?7,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?1",
+                title = ?,
+                file_path = ?,
+                note_type = ?,
+                folder = ?,
+                tags = ?,
+                content = ?,
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
+            title,
+            file_path,
+            note_type,
+            folder,
+            tags,
+            content,
+            id
         )
-        .bind(id)
-        .bind(title)
-        .bind(file_path)
-        .bind(note_type)
-        .bind(folder)
-        .bind(tags)
-        .bind(content)
         .execute(&mut *tx)
         .await?;
 
         index_links_for_note(&mut tx, id, project_id, content).await?;
         resolve_links_for_note(&mut tx, id, title, permalink, project_id).await?;
 
+        // NOTE: uses shared const NOTE_SELECT_WHERE_ID; sqlx macros require a literal, keep runtime
         let note = sqlx::query_as::<_, Note>(super::NOTE_SELECT_WHERE_ID)
             .bind(id)
             .fetch_one(&mut *tx)
@@ -480,13 +483,12 @@ pub(super) fn extract_wikilinks(content: &str) -> Vec<(String, Option<String>)> 
 /// Deletes existing link rows for the note then re-inserts them, resolving
 /// each target by title or permalink within the same project.
 pub(super) async fn index_links_for_note(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     source_id: &str,
     project_id: &str,
     content: &str,
 ) -> Result<()> {
-    sqlx::query("DELETE FROM note_links WHERE source_id = ?1")
-        .bind(source_id)
+    sqlx::query!("DELETE FROM note_links WHERE source_id = ?", source_id)
         .execute(&mut **tx)
         .await?;
 
@@ -497,19 +499,21 @@ pub(super) async fn index_links_for_note(
 
     for (target_raw, display_text) in links {
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT OR IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)
-             VALUES (?1, ?2,
+        sqlx::query!(
+            "INSERT IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)
+             VALUES (?, ?,
                      (SELECT id FROM notes
-                      WHERE project_id = ?3 AND (title = ?4 OR permalink = ?4)
+                      WHERE project_id = ? AND (title = ? OR permalink = ?)
                       LIMIT 1),
-                     ?4, ?5)",
+                     ?, ?)",
+            id,
+            source_id,
+            project_id,
+            target_raw,
+            target_raw,
+            target_raw,
+            display_text
         )
-        .bind(&id)
-        .bind(source_id)
-        .bind(project_id)
-        .bind(&target_raw)
-        .bind(display_text.as_deref())
         .execute(&mut **tx)
         .await?;
     }
@@ -519,23 +523,23 @@ pub(super) async fn index_links_for_note(
 /// After a note is created or its title/permalink changes, resolve any
 /// previously-broken links in the project that now match this note.
 pub(super) async fn resolve_links_for_note(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     note_id: &str,
     title: &str,
     permalink: &str,
     project_id: &str,
 ) -> Result<()> {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE note_links
-         SET target_id = ?1
+         SET target_id = ?
          WHERE target_id IS NULL
-           AND (target_raw = ?2 OR target_raw = ?3)
-           AND source_id IN (SELECT id FROM notes WHERE project_id = ?4)",
+           AND (target_raw = ? OR target_raw = ?)
+           AND source_id IN (SELECT id FROM notes WHERE project_id = ?)",
+        note_id,
+        title,
+        permalink,
+        project_id
     )
-    .bind(note_id)
-    .bind(title)
-    .bind(permalink)
-    .bind(project_id)
     .execute(&mut **tx)
     .await?;
     Ok(())

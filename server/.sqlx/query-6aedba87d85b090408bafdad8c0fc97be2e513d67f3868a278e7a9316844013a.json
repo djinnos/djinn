@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT `value` FROM settings WHERE `key` = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "value",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6aedba87d85b090408bafdad8c0fc97be2e513d67f3868a278e7a9316844013a"
+}

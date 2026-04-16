@@ -253,15 +253,15 @@ async fn extracted_note_audit_groups_merge_strengthen_demote_and_archive_backlog
             "{} prerequisite seam schema seam check duplication clustering deterministic query api stable ordering repeated tokens cross note match alpha beta gamma",
             note.title
         );
-        sqlx::query(
+        sqlx::query!(
             "UPDATE notes
-             SET abstract = ?2,
-                 overview = ?3
-             WHERE id = ?1",
+             SET `abstract` = ?,
+                 overview = ?
+             WHERE id = ?",
+            abstract_text,
+            abstract_text,
+            note.id
         )
-        .bind(&note.id)
-        .bind(&abstract_text)
-        .bind(&abstract_text)
         .execute(db.pool())
         .await
         .unwrap();
@@ -504,13 +504,13 @@ async fn reindex_from_disk_backfill_can_normalize_extracted_notes_to_db_storage(
         );
     }
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE notes
          SET storage = 'db',
              file_path = ''
-         WHERE project_id = ?1 AND note_type IN ('case', 'pattern', 'pitfall')",
+         WHERE project_id = ? AND note_type IN ('case', 'pattern', 'pitfall')",
+        project.id
     )
-    .bind(&project.id)
     .execute(db.pool())
     .await
     .unwrap();

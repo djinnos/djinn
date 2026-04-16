@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM blockers WHERE task_id = ? AND blocking_task_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b8abf279f97f838a500ae035e60bc3c140967182d334f0d28c5cfda7ce165ff5"
+}

@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT project_id FROM notes WHERE id = ? LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b7e62ca25bb26b4c0c29c7c4134845cf6690b292eaa39737087869f55adf13a1"
+}

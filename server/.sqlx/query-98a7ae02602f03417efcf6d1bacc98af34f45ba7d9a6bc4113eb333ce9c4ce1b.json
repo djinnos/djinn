@@ -1,0 +1,44 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT `key` AS `key`, `value` AS `value`, updated_at FROM settings WHERE `key` = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 764
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "value",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "updated_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "98a7ae02602f03417efcf6d1bacc98af34f45ba7d9a6bc4113eb333ce9c4ce1b"
+}

@@ -52,28 +52,27 @@ impl VerificationResultRepository {
         let pool = self.db.pool();
 
         // Delete previous results for this task.
-        sqlx::query("DELETE FROM verification_results WHERE task_id = ?1")
-            .bind(task_id)
+        sqlx::query!("DELETE FROM verification_results WHERE task_id = ?", task_id)
             .execute(pool)
             .await?;
 
         for step in steps {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO verification_results \
                  (project_id, task_id, run_id, phase, step_index, name, command, exit_code, stdout, stderr, duration_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                step.project_id,
+                step.task_id,
+                step.run_id,
+                step.phase,
+                step.step_index,
+                step.name,
+                step.command,
+                step.exit_code,
+                step.stdout,
+                step.stderr,
+                step.duration_ms,
             )
-            .bind(&step.project_id)
-            .bind(&step.task_id)
-            .bind(&step.run_id)
-            .bind(&step.phase)
-            .bind(step.step_index)
-            .bind(&step.name)
-            .bind(&step.command)
-            .bind(step.exit_code)
-            .bind(&step.stdout)
-            .bind(&step.stderr)
-            .bind(step.duration_ms)
             .execute(pool)
             .await?;
         }
@@ -84,12 +83,13 @@ impl VerificationResultRepository {
     /// List the latest verification results for a task, ordered by step_index.
     pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<VerificationStepRow>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, VerificationStepRow>(
+        Ok(sqlx::query_as!(
+            VerificationStepRow,
             "SELECT id, project_id, task_id, run_id, phase, step_index, name, command, \
              exit_code, stdout, stderr, duration_ms, created_at \
-             FROM verification_results WHERE task_id = ?1 ORDER BY step_index ASC",
+             FROM verification_results WHERE task_id = ? ORDER BY step_index ASC",
+            task_id,
         )
-        .bind(task_id)
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -97,8 +97,7 @@ impl VerificationResultRepository {
     /// Delete all results for a task.
     pub async fn delete_for_task(&self, task_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query("DELETE FROM verification_results WHERE task_id = ?1")
-            .bind(task_id)
+        sqlx::query!("DELETE FROM verification_results WHERE task_id = ?", task_id)
             .execute(self.db.pool())
             .await?;
         Ok(())
@@ -107,10 +106,10 @@ impl VerificationResultRepository {
     /// Prune results older than N days.
     pub async fn prune_older_than(&self, days: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query(
-            "DELETE FROM verification_results WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ?1 || ' days')",
+        sqlx::query!(
+            "DELETE FROM verification_results WHERE created_at < DATE_SUB(NOW(3), INTERVAL ? DAY)",
+            days,
         )
-        .bind(days)
         .execute(self.db.pool())
         .await?;
         Ok(())

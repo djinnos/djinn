@@ -29,8 +29,6 @@ pub async fn start(config: Config, cancel: CancellationToken) -> Result<u16, Str
     tracing::info!(path = %db_path.display(), "embedded: opening database");
     let db = Database::open(&db_path).map_err(|e| format!("open database: {e}"))?;
 
-    crate::db::checkpoint::spawn(db.clone(), cancel.clone());
-
     let state = crate::server::AppState::new(db, cancel.clone());
     state.initialize().await;
     state.initialize_agents().await;

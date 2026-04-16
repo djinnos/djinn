@@ -18,9 +18,6 @@ pub use database::{
     NoteSearchBackend, NoteVectorBackend, SqliteDatabaseConfig, SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
-pub use migrations::{
-    mysql_notes_fulltext_prototype, mysql_schema_snapshot, sqlite_schema_snapshot,
-};
 pub use repositories::{
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
@@ -66,6 +63,7 @@ pub use repositories::{
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_map_cache::{CachedRepoMap, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository},
     session::{CreateSessionParams, SessionRepository},
+    session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_message::SessionMessageRepository,
     settings::SettingsRepository,
     task::TaskRepository,

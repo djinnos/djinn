@@ -15,7 +15,6 @@ async-trait = "0.1"
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
 dirs = "6"
 globset = "0.4"
-refinery = { version = "0.9", features = ["int8-versions", "rusqlite"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -23,7 +22,7 @@ serde_json = "1"
 sha2 = "0.10"
 qdrant-client = { version = "1", optional = true, default-features = false, features = ["reqwest"] }
 sqlite-vec = "0.1"
-sqlx = { version = "0.8", features = ["sqlite", "mysql", "runtime-tokio-rustls", "macros"] }
+sqlx = { version = "0.8", features = ["sqlite", "mysql", "runtime-tokio-rustls", "macros", "migrate"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

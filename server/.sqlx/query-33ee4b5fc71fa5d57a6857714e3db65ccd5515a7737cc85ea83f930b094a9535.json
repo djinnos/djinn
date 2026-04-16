@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT target_id AS \"target_id!: String\" FROM note_links\n             WHERE source_id = ?\n               AND target_id IS NOT NULL\n               AND target_id IN (SELECT id FROM notes WHERE project_id = ?)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "target_id!: String",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 144
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "33ee4b5fc71fa5d57a6857714e3db65ccd5515a7737cc85ea83f930b094a9535"
+}

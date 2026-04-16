@@ -23,7 +23,6 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use djinn_server::daemon;
-use djinn_server::db::checkpoint;
 use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
@@ -127,6 +126,12 @@ async fn async_main() {
         managed_process = startup_mode.managed_process,
         "opening database runtime"
     );
+
+    // Under compose, dolt resolves to a service name like `dolt:3306`. Wait
+    // for the DB port to accept connections before the pool makes its first
+    // attempt — this keeps bootstrap straightforward even when Dolt is
+    // slower to start than the server container.
+    wait_for_dolt_reachable(&startup_mode.target);
     db_runtime.ensure_runtime_available().unwrap_or_else(|e| {
         tracing::error!(error = %e, "failed to ensure database runtime availability");
         std::process::exit(1);
@@ -135,12 +140,10 @@ async fn async_main() {
         tracing::error!(error = %e, "failed to open database runtime");
         std::process::exit(1);
     });
-    if db_runtime.should_spawn_sqlite_checkpoint() {
-        checkpoint::spawn(db.clone(), cancel.clone());
-    }
 
     let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
     djinn_server::housekeeping::spawn(state.clone());
+    state.init_app_config().await;
     state.initialize().await;
     state
         .initialize_memory_mount_from_db()
@@ -274,6 +277,35 @@ async fn run_stdio_bridge(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let stdio_service = bridge.serve(stdio()).await?;
     let _ = stdio_service.waiting().await?;
     Ok(())
+}
+
+/// Parse a mysql URL of the form `mysql://<user>[:<pw>]@<host>:<port>/<db>` and
+/// block until a TCP connection to host:port succeeds (up to ~60s).
+fn wait_for_dolt_reachable(target: &str) {
+    let host_port = target
+        .strip_prefix("mysql://")
+        .and_then(|rest| rest.rsplit('@').next())
+        .and_then(|after_at| after_at.split('/').next())
+        .unwrap_or("dolt:3306");
+    let addr = host_port.to_owned();
+    tracing::info!(endpoint = %addr, "waiting for external database to accept TCP connections");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut iter) = std::net::ToSocketAddrs::to_socket_addrs(&addr)
+            && let Some(sock) = iter.next()
+            && std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_millis(500))
+                .is_ok()
+        {
+            tracing::info!(endpoint = %addr, "external database is reachable");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    tracing::warn!(
+        endpoint = %addr,
+        "external database did not accept TCP connections within 60s; continuing and letting the pool retry"
+    );
 }
 
 async fn ensure_daemon_running(port: u16, db_path: Option<&std::path::Path>) -> Result<(), String> {

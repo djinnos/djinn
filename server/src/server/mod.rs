@@ -4,15 +4,17 @@ use axum::routing::{get, post};
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use crate::sse;
 
 mod agents;
+mod auth;
 mod chat;
 mod mcp_handler;
 mod project_tools;
 mod state;
+pub use auth::{AuthenticatedUser, authenticate};
 pub use state::AppState;
 
 /// Build the application router.
@@ -24,9 +26,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/chat/completions", post(chat::completions_handler))
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
+        .merge(auth::router())
         .merge(project_tools::router())
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer())
         .with_state(state)
+}
+
+/// CORS layer that allows any origin but — crucially — **reflects** the
+/// request origin instead of returning `*`, so browsers accept responses
+/// to `credentials: 'include'` requests (session cookie auth).
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::mirror_request())
+        .allow_methods(AllowMethods::mirror_request())
+        .allow_headers(AllowHeaders::mirror_request())
+        .allow_credentials(true)
 }
 
 #[derive(Serialize)]

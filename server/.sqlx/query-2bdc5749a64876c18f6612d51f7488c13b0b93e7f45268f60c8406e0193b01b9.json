@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE note_associations\n         SET last_co_access = DATE_SUB(NOW(3), INTERVAL 100 DAY)\n         WHERE (note_a_id = ? AND note_b_id = ?)\n            OR (note_a_id = ? AND note_b_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "2bdc5749a64876c18f6612d51f7488c13b0b93e7f45268f60c8406e0193b01b9"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO session_messages (id, session_id, role, content_json)\n                 VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "1519e1b85dd721810b992137be2ac7700306e49979fa0527ffba614fea599e8a"
+}

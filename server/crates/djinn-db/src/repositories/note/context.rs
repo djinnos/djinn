@@ -144,18 +144,18 @@ impl NoteRepository {
 
     /// Get direct wikilink neighbors (one hop from seed).
     async fn get_direct_neighbors(&self, project_id: &str, seed_id: &str) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT target_id FROM note_links
-             WHERE source_id = ?1
+        let rows = sqlx::query_scalar!(
+            r#"SELECT target_id AS "target_id!: String" FROM note_links
+             WHERE source_id = ?
                AND target_id IS NOT NULL
-               AND target_id IN (SELECT id FROM notes WHERE project_id = ?2)",
+               AND target_id IN (SELECT id FROM notes WHERE project_id = ?)"#,
+            seed_id,
+            project_id
         )
-        .bind(seed_id)
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
-        Ok(rows.into_iter().map(|(id,)| id).collect())
+        Ok(rows)
     }
 
     /// Run RRF retrieval pipeline for discovered notes.
@@ -222,6 +222,7 @@ impl NoteRepository {
         };
 
         let sql = executable_lexical_search_sql(&plan);
+        // NOTE: dynamic SQL — compile-time check not possible
         let rows: Vec<(String, f64)> = match self.db.pool_kind() {
             crate::database::DatabasePool::Sqlite(pool) => {
                 sqlx::query_as(&sql)
@@ -249,14 +250,18 @@ impl NoteRepository {
 
     /// Get temporal scores for all notes in project.
     async fn temporal_scores_all(&self, project_id: &str) -> Result<Vec<(String, f64)>> {
-        let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
+        let rows = sqlx::query!(
             "SELECT id, access_count, created_at, updated_at
              FROM notes
-             WHERE project_id = ?1",
+             WHERE project_id = ?",
+            project_id
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
+        let rows: Vec<(String, i64, String, String)> = rows
+            .into_iter()
+            .map(|r| (r.id, r.access_count, r.created_at, r.updated_at))
+            .collect();
 
         use std::time::SystemTime;
 
@@ -310,6 +315,7 @@ impl NoteRepository {
             placeholders
         );
 
+        // NOTE: dynamic SQL — compile-time check not possible (runtime IN list)
         let mut query = sqlx::query_as::<_, (String, String, String, String, String)>(&sql);
         for id in &ids {
             query = query.bind(id);
@@ -363,12 +369,13 @@ impl NoteRepository {
             .join(", ");
 
         let sql = format!(
-            "SELECT id, permalink, title, note_type, COALESCE(abstract, substr(content, 1, 100)) as disclosure_text
+            "SELECT id, permalink, title, note_type, COALESCE(`abstract`, substr(content, 1, 100)) as disclosure_text
              FROM notes
              WHERE id IN ({})",
             placeholders
         );
 
+        // NOTE: dynamic SQL — compile-time check not possible (runtime IN list)
         let mut query = sqlx::query_as::<_, (String, String, String, String, String)>(&sql);
         for id in &ids {
             query = query.bind(id);

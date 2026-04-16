@@ -28,7 +28,7 @@ impl CredentialRepository {
         let encrypted = crypto::encrypt(raw_value)?;
         ensure_db!(self.db);
         let existing_id: Option<String> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;
@@ -40,13 +40,13 @@ impl CredentialRepository {
         sqlx::query(
             "INSERT INTO credentials (id, provider_id, key_name, encrypted_value,
                                       created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4,
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             ON CONFLICT(key_name) DO UPDATE SET
-                 provider_id     = excluded.provider_id,
-                 encrypted_value = excluded.encrypted_value,
-                 updated_at      = excluded.updated_at",
+             VALUES (?, ?, ?, ?,
+                     DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
+                     DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
+             ON DUPLICATE KEY UPDATE
+                 provider_id     = VALUES(provider_id),
+                 encrypted_value = VALUES(encrypted_value),
+                 updated_at      = VALUES(updated_at)",
         )
         .bind(&id)
         .bind(provider_id)
@@ -57,7 +57,7 @@ impl CredentialRepository {
 
         let cred = sqlx::query_as::<_, Credential>(
             "SELECT id, provider_id, key_name, created_at, updated_at
-             FROM credentials WHERE key_name = ?1",
+             FROM credentials WHERE key_name = ?",
         )
         .bind(key_name)
         .fetch_one(self.db.pool())
@@ -90,13 +90,13 @@ impl CredentialRepository {
     pub async fn delete(&self, key_name: &str) -> Result<bool> {
         ensure_db!(self.db);
         let deleted_id: Option<String> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;
 
         if let Some(ref id) = deleted_id {
-            sqlx::query("DELETE FROM credentials WHERE id = ?1")
+            sqlx::query("DELETE FROM credentials WHERE id = ?")
                 .bind(id)
                 .execute(self.db.pool())
                 .await?;
@@ -116,7 +116,7 @@ impl CredentialRepository {
     pub async fn delete_by_provider(&self, provider_id: &str) -> Result<u64> {
         ensure_db!(self.db);
         let ids: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE provider_id = ?1")
+            sqlx::query_scalar("SELECT id FROM credentials WHERE provider_id = ?")
                 .bind(provider_id)
                 .fetch_all(self.db.pool())
                 .await?;
@@ -125,7 +125,7 @@ impl CredentialRepository {
             return Ok(0);
         }
 
-        let result = sqlx::query("DELETE FROM credentials WHERE provider_id = ?1")
+        let result = sqlx::query("DELETE FROM credentials WHERE provider_id = ?")
             .bind(provider_id)
             .execute(self.db.pool())
             .await?;
@@ -142,11 +142,46 @@ impl CredentialRepository {
     pub async fn exists(&self, key_name: &str) -> Result<bool> {
         ensure_db!(self.db);
         let found: Option<String> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?1")
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;
         Ok(found.is_some())
+    }
+
+    /// Persist the GitHub App configuration JSON blob produced by the
+    /// manifest auto-provision flow. The JSON is encrypted at rest like any
+    /// other credential.
+    pub async fn set_github_app_config(
+        &self,
+        config: &crate::github_app::AppConfig,
+    ) -> Result<()> {
+        let json = serde_json::to_string(config).map_err(|e| {
+            djinn_db::Error::Internal(format!("failed to serialise GitHub App config: {e}"))
+        })?;
+        self.set(
+            crate::github_app::APP_CONFIG_PROVIDER,
+            crate::github_app::APP_CONFIG_KEY,
+            &json,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Load and decrypt the persisted GitHub App configuration, if any.
+    pub async fn get_github_app_config(
+        &self,
+    ) -> Result<Option<crate::github_app::AppConfig>> {
+        let Some(raw) = self.get_decrypted(crate::github_app::APP_CONFIG_KEY).await?
+        else {
+            return Ok(None);
+        };
+        match serde_json::from_str::<crate::github_app::AppConfig>(&raw) {
+            Ok(cfg) => Ok(Some(cfg)),
+            Err(e) => Err(djinn_db::Error::Internal(format!(
+                "stored GitHub App config could not be parsed: {e}"
+            ))),
+        }
     }
 
     /// Decrypt and return the raw API key for `key_name`.
@@ -156,7 +191,7 @@ impl CredentialRepository {
     pub async fn get_decrypted(&self, key_name: &str) -> Result<Option<String>> {
         ensure_db!(self.db);
         let blob: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?1")
+            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;
