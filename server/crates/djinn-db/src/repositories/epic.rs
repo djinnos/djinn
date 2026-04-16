@@ -1,13 +1,13 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Epic;
-use sqlx::Row;
 
 use crate::database::Database;
 use crate::{Error, Result};
 
-const EPIC_COLS: &str = "id, project_id, short_id, title, description, emoji, color, `status`, \
-                   owner, created_at, updated_at, closed_at, memory_refs, \
-                   auto_breakdown, originating_adr_id";
+/// Inlined EPIC_COLS projection for each `query_as!(Epic, ...)` call site.
+/// `query_as!` requires a string-literal SQL argument; concat!()-produced
+/// literals don't satisfy it (verified during batch 4 on agent.rs).  Each
+/// caller therefore passes the full SELECT body as a raw string literal.
 
 // ── Query / result types ─────────────────────────────────────────────────────
 
@@ -90,29 +90,44 @@ impl EpicRepository {
 
     pub async fn list(&self) -> Result<Vec<Epic>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Epic>(&format!(
-            "SELECT {EPIC_COLS} FROM epics ORDER BY created_at"
-        ))
+        Ok(sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics ORDER BY created_at"#
+        )
         .fetch_all(self.db.pool())
         .await?)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_as::<_, Epic>(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?"))
-                .bind(id)
-                .fetch_optional(self.db.pool())
-                .await?,
+        Ok(sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE id = ?"#,
+            id
         )
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     pub async fn get_by_short_id(&self, short_id: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Epic>(&format!(
-            "SELECT {EPIC_COLS} FROM epics WHERE short_id = ?"
-        ))
-        .bind(short_id)
+        Ok(sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE short_id = ?"#,
+            short_id
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -154,28 +169,36 @@ impl EpicRepository {
         let short_id = self.generate_short_id(&id).await?;
         let status = input.status.unwrap_or("drafting");
         let auto_breakdown = i64::from(input.auto_breakdown.unwrap_or(true));
-        sqlx::query(
+        let memory_refs = input.memory_refs.unwrap_or("[]");
+        sqlx::query!(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, `status`, owner, memory_refs, auto_breakdown, originating_adr_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id,
+            project_id,
+            short_id,
+            input.title,
+            input.description,
+            input.emoji,
+            input.color,
+            status,
+            input.owner,
+            memory_refs,
+            auto_breakdown,
+            input.originating_adr_id
         )
-        .bind(&id)
-        .bind(project_id)
-        .bind(&short_id)
-        .bind(input.title)
-        .bind(input.description)
-        .bind(input.emoji)
-        .bind(input.color)
-        .bind(status)
-        .bind(input.owner)
-        .bind(input.memory_refs.unwrap_or("[]"))
-        .bind(auto_breakdown)
-        .bind(input.originating_adr_id)
         .execute(self.db.pool())
         .await?;
-        let epic: Epic = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?"))
-            .bind(&id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let epic: Epic = sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE id = ?"#,
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
 
         self.events.send(DjinnEventEnvelope::epic_created(&epic));
         Ok(epic)
@@ -184,28 +207,36 @@ impl EpicRepository {
     pub async fn update(&self, id: &str, input: EpicUpdateInput<'_>) -> Result<Epic> {
         self.db.ensure_initialized().await?;
         let status = input.status.unwrap_or("drafting");
-        sqlx::query(
+        let memory_refs = input.memory_refs.unwrap_or("[]");
+        sqlx::query!(
             "UPDATE epics SET title = ?, description = ?, emoji = ?,
                     color = ?, `status` = ?, owner = ?, memory_refs = ?,
                     closed_at = CASE WHEN ? = 'closed' THEN COALESCE(closed_at, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')) ELSE NULL END,
                     updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            input.title,
+            input.description,
+            input.emoji,
+            input.color,
+            status,
+            input.owner,
+            memory_refs,
+            status,
+            id
         )
-        .bind(input.title)
-        .bind(input.description)
-        .bind(input.emoji)
-        .bind(input.color)
-        .bind(status)
-        .bind(input.owner)
-        .bind(input.memory_refs.unwrap_or("[]"))
-        .bind(status)
-        .bind(id)
         .execute(self.db.pool())
         .await?;
-        let epic: Epic = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?"))
-            .bind(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let epic: Epic = sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE id = ?"#,
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
 
         self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
@@ -213,19 +244,26 @@ impl EpicRepository {
 
     pub async fn close(&self, id: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE epics SET `status` = 'closed',
                     closed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
                     updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            id
         )
-        .bind(id)
         .execute(self.db.pool())
         .await?;
-        let epic: Epic = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?"))
-            .bind(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let epic: Epic = sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE id = ?"#,
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
 
         self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
@@ -233,8 +271,7 @@ impl EpicRepository {
 
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query("DELETE FROM epics WHERE id = ?")
-            .bind(id)
+        sqlx::query!("DELETE FROM epics WHERE id = ?", id)
             .execute(self.db.pool())
             .await?;
 
@@ -245,19 +282,26 @@ impl EpicRepository {
     /// Replace the `memory_refs` JSON array on an epic.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE epics SET memory_refs = ?,
                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            memory_refs_json,
+            id
         )
-        .bind(memory_refs_json)
-        .bind(id)
         .execute(self.db.pool())
         .await?;
-        let epic: Epic = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?"))
-            .bind(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let epic: Epic = sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE id = ?"#,
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
 
         self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
@@ -268,11 +312,16 @@ impl EpicRepository {
     /// Resolve an epic by UUID or short_id.
     pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Epic>(&format!(
-            "SELECT {EPIC_COLS} FROM epics WHERE id = ? OR short_id = ?"
-        ))
-        .bind(id_or_short)
-        .bind(id_or_short)
+        Ok(sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE id = ? OR short_id = ?"#,
+            id_or_short,
+            id_or_short
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -284,12 +333,17 @@ impl EpicRepository {
         id_or_short: &str,
     ) -> Result<Option<Epic>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as::<_, Epic>(&format!(
-            "SELECT {EPIC_COLS} FROM epics WHERE project_id = ? AND (id = ? OR short_id = ?)"
-        ))
-        .bind(project_id)
-        .bind(id_or_short)
-        .bind(id_or_short)
+        Ok(sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE project_id = ? AND (id = ? OR short_id = ?)"#,
+            project_id,
+            id_or_short,
+            id_or_short
+        )
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -307,19 +361,26 @@ impl EpicRepository {
                 current.status
             )));
         }
-        sqlx::query(
+        sqlx::query!(
             "UPDATE epics SET `status` = 'open',
                     closed_at = NULL,
                     updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
              WHERE id = ?",
+            id
         )
-        .bind(id)
         .execute(self.db.pool())
         .await?;
-        let epic: Epic = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?"))
-            .bind(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let epic: Epic = sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE id = ?"#,
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
 
         self.events.send(DjinnEventEnvelope::epic_updated(&epic));
         Ok(epic)
@@ -328,32 +389,34 @@ impl EpicRepository {
     /// Aggregate child-task counts for an epic.
     pub async fn task_counts(&self, epic_id: &str) -> Result<EpicTaskCounts> {
         self.db.ensure_initialized().await?;
-        let row = sqlx::query(
-            "SELECT
-                COUNT(*) AS task_count,
-                SUM(CASE WHEN `status` = 'open' THEN 1 ELSE 0 END) AS open_count,
-                SUM(CASE WHEN `status` = 'in_progress' THEN 1 ELSE 0 END) AS in_progress_count,
-                SUM(CASE WHEN `status` = 'closed' THEN 1 ELSE 0 END) AS closed_count
-             FROM tasks WHERE epic_id = ?",
+        let row = sqlx::query!(
+            r#"SELECT
+                COUNT(*) AS "task_count!: i64",
+                COALESCE(SUM(CASE WHEN `status` = 'open' THEN 1 ELSE 0 END), 0) AS "open_count!: i64",
+                COALESCE(SUM(CASE WHEN `status` = 'in_progress' THEN 1 ELSE 0 END), 0) AS "in_progress_count!: i64",
+                COALESCE(SUM(CASE WHEN `status` = 'closed' THEN 1 ELSE 0 END), 0) AS "closed_count!: i64"
+             FROM tasks WHERE epic_id = ?"#,
+            epic_id
         )
-        .bind(epic_id)
         .fetch_one(self.db.pool())
         .await?;
         Ok(EpicTaskCounts {
-            task_count: row.get::<i64, _>(0),
-            open_count: row.get::<Option<i64>, _>(1).unwrap_or(0),
-            in_progress_count: row.get::<Option<i64>, _>(2).unwrap_or(0),
-            closed_count: row.get::<Option<i64>, _>(3).unwrap_or(0),
+            task_count: row.task_count,
+            open_count: row.open_count,
+            in_progress_count: row.in_progress_count,
+            closed_count: row.closed_count,
         })
     }
 
     /// Count child tasks then CASCADE-delete the epic. Returns the child task count.
     pub async fn delete_with_count(&self, id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE epic_id = ?")
-            .bind(id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM tasks WHERE epic_id = ?",
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
         self.delete(id).await?;
         Ok(count)
     }
@@ -364,6 +427,7 @@ impl EpicRepository {
         let (where_sql, params) = epic_build_where(&query.project_id, &query.status, &query.text);
         let order_sql = epic_sort_to_sql(&query.sort);
 
+        // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
         let total_sql = format!("SELECT COUNT(*) FROM epics WHERE {where_sql}");
         let mut total_q = sqlx::query_scalar::<_, i64>(&total_sql);
         for p in &params {
@@ -372,8 +436,12 @@ impl EpicRepository {
         }
         let total = total_q.fetch_one(self.db.pool()).await?;
 
+        // NOTE: dynamic SQL (WHERE + ORDER clauses built from optional filters; uses inlined EPIC_COLS projection) — compile-time check not possible
         let sql = format!(
-            "SELECT {EPIC_COLS} FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
+            "SELECT id, project_id, short_id, title, description, emoji, color, `status`, \
+                    owner, created_at, updated_at, closed_at, memory_refs, \
+                    auto_breakdown, originating_adr_id \
+             FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
         );
         let mut epic_q = sqlx::query_as::<_, Epic>(&sql);
         for p in &params {
@@ -399,6 +467,7 @@ impl EpicRepository {
 
         match query.group_by.as_deref() {
             Some("status") => {
+                // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
                 let sql = format!(
                     "SELECT status, COUNT(*) FROM epics WHERE {where_sql}
                      GROUP BY status ORDER BY COUNT(*) DESC"
@@ -418,6 +487,7 @@ impl EpicRepository {
             }
             Some(other) => Err(Error::InvalidData(format!("unknown group_by: {other}"))),
             None => {
+                // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
                 let sql = format!("SELECT COUNT(*) FROM epics WHERE {where_sql}");
                 let mut q = sqlx::query_scalar::<_, i64>(&sql);
                 for p in &params {
@@ -452,7 +522,7 @@ impl EpicRepository {
     async fn ensure_default_project_id(&self) -> Result<String> {
         self.db.ensure_initialized().await?;
         if let Some(id) =
-            sqlx::query_scalar::<_, String>("SELECT id FROM projects ORDER BY created_at LIMIT 1")
+            sqlx::query_scalar!("SELECT id FROM projects ORDER BY created_at LIMIT 1")
                 .fetch_optional(self.db.pool())
                 .await?
         {
@@ -460,12 +530,14 @@ impl EpicRepository {
         }
 
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO projects (id, name, path) VALUES (?, ?, ?)")
-            .bind(&id)
-            .bind("default")
-            .bind(".")
-            .execute(self.db.pool())
-            .await?;
+        sqlx::query!(
+            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            id,
+            "default",
+            "."
+        )
+        .execute(self.db.pool())
+        .await?;
         Ok(id)
     }
 }
@@ -535,7 +607,7 @@ fn epic_sort_to_sql(sort: &str) -> &'static str {
 }
 
 async fn short_id_exists(pool: &sqlx::MySqlPool, table: &str, short_id: &str) -> Result<bool> {
-    // Table name is from internal code only — not user input — so this is safe.
+    // NOTE: dynamic SQL (table name interpolated; values are internal constants only) — compile-time check not possible
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = ?)");
     Ok(sqlx::query_scalar::<_, i64>(&sql)
         .bind(short_id)
@@ -757,33 +829,32 @@ mod tests {
         // Insert tasks directly via SQL.
         for short in ["t001", "t002"] {
             let id = uuid::Uuid::now_v7().to_string();
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                     issue_type, priority, owner, `status`, continuation_count, memory_refs)
                  VALUES (?, ?, ?, ?, 'T', '', '', 'task', 0, '', 'open', 0, '[]')",
+                id,
+                epic.project_id,
+                short,
+                epic.id
             )
-            .bind(&id)
-            .bind(&epic.project_id)
-            .bind(short)
-            .bind(&epic.id)
             .execute(pool)
             .await
             .unwrap();
         }
         let t3_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                 issue_type, priority, owner, `status`, continuation_count, memory_refs)
              VALUES (?, ?, 't003', ?, 'T3', '', '', 'task', 0, '', 'open', 0, '[]')",
+            t3_id,
+            epic.project_id,
+            epic.id
         )
-        .bind(&t3_id)
-        .bind(&epic.project_id)
-        .bind(&epic.id)
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query("UPDATE tasks SET `status` = 'closed' WHERE id = ?")
-            .bind(&t3_id)
+        sqlx::query!("UPDATE tasks SET `status` = 'closed' WHERE id = ?", t3_id)
             .execute(pool)
             .await
             .unwrap();
@@ -804,15 +875,15 @@ mod tests {
 
         for short in ["t001", "t002"] {
             let id = uuid::Uuid::now_v7().to_string();
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                     issue_type, priority, owner, `status`, continuation_count, memory_refs)
                  VALUES (?, ?, ?, ?, 'T', '', '', 'task', 0, '', 'open', 0, '[]')",
+                id,
+                epic.project_id,
+                short,
+                epic.id
             )
-            .bind(&id)
-            .bind(&epic.project_id)
-            .bind(short)
-            .bind(&epic.id)
             .execute(pool)
             .await
             .unwrap();
