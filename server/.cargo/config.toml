@@ -28,6 +28,12 @@ TMPDIR = "/var/tmp"
 # a stable schema), override at the command line.
 DATABASE_URL = "mysql://root@127.0.0.1:3307/djinn"
 DJINN_TEST_MYSQL_URL = "mysql://root@127.0.0.1:3307"
+# Default tests to a disk-backed vault key under /var/tmp — NOT the
+# production vault at ~/.djinn/vault.key which is owned by root (the
+# djinn-server container writes it). crypto::vault_key_path() honors
+# this env var ahead of DJINN_HOME and ~/.djinn. Override at command
+# line only when deliberately exercising the production vault.
+DJINN_VAULT_KEY_PATH = "/var/tmp/djinn-test-vault/vault.key"
 
 # Use mold for faster linking
 [target.x86_64-unknown-linux-gnu]
