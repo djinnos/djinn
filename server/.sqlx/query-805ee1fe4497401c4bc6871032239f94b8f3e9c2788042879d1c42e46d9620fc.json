@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE notes SET `abstract` = ?, overview = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "805ee1fe4497401c4bc6871032239f94b8f3e9c2788042879d1c42e46d9620fc"
+}
