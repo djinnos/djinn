@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE sessions SET event_taxonomy = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b24f9a8fe8585e8fb49f34b8cced5de44642a6cfeba17b5338c844cd52b42d0d"
+}

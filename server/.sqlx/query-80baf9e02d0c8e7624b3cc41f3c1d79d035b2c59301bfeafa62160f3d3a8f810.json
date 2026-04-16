@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE sessions SET `status` = 'paused', tokens_in = ?, tokens_out = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "80baf9e02d0c8e7624b3cc41f3c1d79d035b2c59301bfeafa62160f3d3a8f810"
+}
