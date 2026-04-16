@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT IGNORE INTO agents\n                    (id, project_id, `name`, base_role, description, is_default)\n                 VALUES (?, ?, ?, ?, ?, 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "cdb58c9a24b012ccb089dcf0f5781aafeb81bbd76e51ea5986fdebe663a782a2"
+}

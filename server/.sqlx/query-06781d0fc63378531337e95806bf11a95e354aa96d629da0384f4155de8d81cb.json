@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT installation_id FROM projects WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "installation_id",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "",
+          "max_size": 20
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "06781d0fc63378531337e95806bf11a95e354aa96d629da0384f4155de8d81cb"
+}

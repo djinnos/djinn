@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE projects SET auto_merge = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "eb180340d89587ac44a37bfc1b083c6a72702ef6664c7e4293d3154dfc41932d"
+}

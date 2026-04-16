@@ -1,0 +1,64 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT target_branch,\n                    auto_merge AS \"auto_merge!: bool\",\n                    sync_enabled AS \"sync_enabled!: bool\",\n                    sync_remote, verification_rules\n             FROM projects WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "target_branch",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "auto_merge!: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "sync_enabled!: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "sync_remote",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 2048
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "verification_rules",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "cabf4ac7bcf95a846d018a4932be6cf218cb7066cc785c5bf8e2091ca5d76da5"
+}

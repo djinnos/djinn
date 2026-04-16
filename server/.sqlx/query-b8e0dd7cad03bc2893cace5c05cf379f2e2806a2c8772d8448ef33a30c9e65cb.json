@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM projects WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b8e0dd7cad03bc2893cace5c05cf379f2e2806a2c8772d8448ef33a30c9e65cb"
+}
