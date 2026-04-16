@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE notes\n         SET last_accessed = DATE_SUB(NOW(3), INTERVAL 31 DAY), access_count = 0\n         WHERE id IN (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "33329fe3a4305259b7f3862d885409c9060836a7cbb3290895056ab0973e6abd"
+}

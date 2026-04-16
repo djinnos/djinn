@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE notes SET content_hash = NULL WHERE id IN (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "2b51d423e13fc66024e5320c3e47b59ed9c89553132ac8edbeb524ecebf82821"
+}

@@ -1,0 +1,44 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT note_a_id, note_b_id, weight\n             FROM note_associations\n             WHERE weight >= ?\n               AND note_a_id IN (SELECT id FROM notes WHERE project_id = ?)\n               AND note_b_id IN (SELECT id FROM notes WHERE project_id = ?)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_a_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "note_b_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "weight",
+        "type_info": {
+          "type": "Double",
+          "flags": "NOT_NULL",
+          "max_size": 22
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f99d12f66cb3095d18c0d6a45c9abf4ffb1a7ac7a733c4002d2445a1a53da2e8"
+}
