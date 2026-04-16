@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE note_embedding_meta\n             SET branch = ?\n             WHERE branch = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "61d4adadd1b4bdd2057ad19d2d079996c2a1206fa02b85e4b938de9f680041bc"
+}

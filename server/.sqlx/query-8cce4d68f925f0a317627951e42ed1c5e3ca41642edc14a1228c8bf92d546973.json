@@ -1,0 +1,94 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT m.note_id, m.content_hash, m.model_version, m.embedding_dim, m.embedded_at,\n                    e.updated_at, m.extension_state, m.branch\n             FROM note_embedding_meta m\n             JOIN note_embeddings e ON e.note_id = m.note_id\n             WHERE m.note_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "content_hash",
+        "type_info": {
+          "type": "String",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "model_version",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "embedding_dim",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "embedded_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "extension_state",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "branch",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8cce4d68f925f0a317627951e42ed1c5e3ca41642edc14a1228c8bf92d546973"
+}
