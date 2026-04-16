@@ -937,6 +937,7 @@ mod tests {
         let result = ensure_canonical_graph(&state, &project.id, &project_root).await;
         assert!(result.is_ok(), "expected cache-hit success, got {result:?}");
         let (_handle, returned_graph) = result.unwrap();
+        let _ = head_sha;
         assert_eq!(returned_graph.node_count(), graph.node_count());
     }
 

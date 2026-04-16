@@ -1068,55 +1068,77 @@ impl NoteRepository {
         let tags = tags.to_owned();
         let permalink = current.permalink.clone();
 
-        let mut tx = self.db.pool().begin().await?;
+        // See `move_note` for the retry rationale: Dolt surfaces 1213
+        // serialization failures when this tx races background note/link
+        // writers.
+        const MAX_TX_RETRIES: usize = 3;
+        let mut attempt: usize = 0;
+        let note: Note = loop {
+            let mut tx = self.db.pool().begin().await?;
+            let content_hash = note_content_hash(&content);
 
-        let content_hash = note_content_hash(&content);
+            let stage = async {
+                if let Some(file_path_str) = healed_file_path_str.as_ref() {
+                    sqlx::query!(
+                        "UPDATE notes SET
+                            title   = ?,
+                            content = ?,
+                            tags    = ?,
+                            content_hash = ?,
+                            storage = 'file',
+                            file_path = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        title,
+                        content,
+                        tags,
+                        content_hash,
+                        file_path_str,
+                        id
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    sqlx::query!(
+                        "UPDATE notes SET
+                            title   = ?,
+                            content = ?,
+                            tags    = ?,
+                            content_hash = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        title,
+                        content,
+                        tags,
+                        content_hash,
+                        id
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
 
-        if let Some(file_path_str) = healed_file_path_str.as_ref() {
-            sqlx::query!(
-                "UPDATE notes SET
-                    title   = ?,
-                    content = ?,
-                    tags    = ?,
-                    content_hash = ?,
-                    storage = 'file',
-                    file_path = ?,
-                    updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                 WHERE id = ?",
-                title,
-                content,
-                tags,
-                content_hash,
-                file_path_str,
-                id
-            )
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            sqlx::query!(
-                "UPDATE notes SET
-                    title   = ?,
-                    content = ?,
-                    tags    = ?,
-                    content_hash = ?,
-                    updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                 WHERE id = ?",
-                title,
-                content,
-                tags,
-                content_hash,
-                id
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
+                index_links_for_note(&mut tx, &id, &current.project_id, &content).await?;
+                resolve_links_for_note(&mut tx, &id, &title, &permalink, &current.project_id)
+                    .await?;
 
-        index_links_for_note(&mut tx, &id, &current.project_id, &content).await?;
-        resolve_links_for_note(&mut tx, &id, &title, &permalink, &current.project_id).await?;
+                let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+                tx.commit().await?;
+                Ok::<_, crate::Error>(note)
+            };
 
-        let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
-
-        tx.commit().await?;
+            match stage.await {
+                Ok(note) => break note,
+                Err(err) if attempt + 1 < MAX_TX_RETRIES && is_serialization_failure(&err) => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        10u64.saturating_mul(1u64 << attempt),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        };
 
         self.sync_note_embedding(
             &note.id,
@@ -1272,33 +1294,58 @@ impl NoteRepository {
             &current.content,
         )?;
 
-        let mut tx = self.db.pool().begin().await?;
+        // The move_note transaction touches `notes` + `note_links` which
+        // other writers (indexers, link resolvers kicked off by events) may
+        // also be modifying. On Dolt we observe occasional 1213
+        // serialization-failures (40001) when those windows overlap; retry
+        // the transaction a few times before surfacing the error.
+        const MAX_TX_RETRIES: usize = 3;
+        let mut attempt: usize = 0;
+        let note: Note = loop {
+            let mut tx = self.db.pool().begin().await?;
 
-        sqlx::query!(
-            "UPDATE notes SET
-                title      = ?,
-                file_path  = ?,
-                note_type  = ?,
-                folder     = ?,
-                permalink  = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            new_title,
-            new_file_path_str,
-            new_note_type,
-            new_folder,
-            new_permalink,
-            id
-        )
-        .execute(&mut *tx)
-        .await?;
+            let stage = async {
+                sqlx::query!(
+                    "UPDATE notes SET
+                        title      = ?,
+                        file_path  = ?,
+                        note_type  = ?,
+                        folder     = ?,
+                        permalink  = ?,
+                        updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                     WHERE id = ?",
+                    new_title,
+                    new_file_path_str,
+                    new_note_type,
+                    new_folder,
+                    new_permalink,
+                    id
+                )
+                .execute(&mut *tx)
+                .await?;
 
-        index_links_for_note(&mut tx, id, &current.project_id, &current.content).await?;
-        resolve_links_for_note(&mut tx, id, new_title, &new_permalink, &current.project_id).await?;
+                index_links_for_note(&mut tx, id, &current.project_id, &current.content).await?;
+                resolve_links_for_note(&mut tx, id, new_title, &new_permalink, &current.project_id)
+                    .await?;
 
-        let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+                let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+                tx.commit().await?;
+                Ok::<_, crate::Error>(note)
+            };
 
-        tx.commit().await?;
+            match stage.await {
+                Ok(note) => break note,
+                Err(err) if attempt + 1 < MAX_TX_RETRIES && is_serialization_failure(&err) => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        10u64.saturating_mul(1u64 << attempt),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        };
 
         self.sync_note_embedding(
             &note.id,
@@ -1310,5 +1357,18 @@ impl NoteRepository {
         .await;
         self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
+    }
+}
+
+/// Detects MySQL/Dolt error 1213 (serialization failure / deadlock).
+fn is_serialization_failure(err: &crate::Error) -> bool {
+    if let crate::Error::Sqlx(sqlx::Error::Database(db_err)) = err {
+        let msg = db_err.message();
+        db_err.code().as_deref() == Some("40001")
+            || msg.contains("1213")
+            || msg.contains("serialization failure")
+            || msg.contains("Deadlock found")
+    } else {
+        false
     }
 }

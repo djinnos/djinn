@@ -248,6 +248,32 @@ impl TaskRepository {
             }
         }
 
+        // Pre-check the existing row so we can return a meaningful
+        // `changed` flag. `ON DUPLICATE KEY UPDATE` alone isn't a reliable
+        // signal on MySQL: sqlx-mysql enables CLIENT_FOUND_ROWS, so any
+        // matched row reports rows_affected=1 even when every column is a
+        // no-op, including the LWW "this peer is older" and the terminal
+        // "local closed, peer wants to regress" paths.
+        let existing: Option<(String, String)> =
+            sqlx::query_as("SELECT updated_at, `status` FROM tasks WHERE id = ?")
+                .bind(&task.id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some((existing_updated_at, existing_status)) = existing.as_ref() {
+            if existing_updated_at.as_str() >= task.updated_at.as_str() {
+                tx.commit().await?;
+                return Ok(false);
+            }
+            // Terminal state protection: a local `closed` task cannot be
+            // regressed by a peer that tries to move it back to a non-closed
+            // status. The upsert SQL gates all status-transition columns
+            // on the same predicate, so the row is effectively unchanged.
+            if existing_status == "closed" && task.status != "closed" {
+                tx.commit().await?;
+                return Ok(false);
+            }
+        }
+
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
         let mut retry_count = 0;
@@ -408,6 +434,22 @@ impl TaskRepository {
                     .fetch_one(&mut **tx)
                     .await?;
             if epic_exists == 0 {
+                return Ok(false);
+            }
+        }
+
+        // Pre-check existing row; see `upsert_peer` for the CLIENT_FOUND_ROWS
+        // rationale and the terminal-state-protection behaviour.
+        let existing: Option<(String, String)> =
+            sqlx::query_as("SELECT updated_at, `status` FROM tasks WHERE id = ?")
+                .bind(&task.id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        if let Some((existing_updated_at, existing_status)) = existing.as_ref() {
+            if existing_updated_at.as_str() >= task.updated_at.as_str() {
+                return Ok(false);
+            }
+            if existing_status == "closed" && task.status != "closed" {
                 return Ok(false);
             }
         }

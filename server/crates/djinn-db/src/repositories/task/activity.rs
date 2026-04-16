@@ -118,7 +118,7 @@ impl TaskRepository {
         let row = sqlx::query_scalar!(
             "SELECT payload FROM activity_log
              WHERE task_id = ? AND event_type = 'status_changed'
-               AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.to_status')) = 'in_task_review'
+               AND JSON_UNQUOTE(JSON_EXTRACT(CAST(payload AS JSON), '$.to_status')) = 'in_task_review'
                AND archived = 0
              ORDER BY created_at DESC LIMIT 1",
             task_id,

@@ -257,7 +257,7 @@ mod tests {
         assert!(!created.deduplicated);
         let first_id = created.id.clone().expect("created note id");
 
-        sqlx::query("UPDATE notes SET content_hash = NULL WHERE id = ?1")
+        sqlx::query("UPDATE notes SET content_hash = NULL WHERE id = ?")
             .bind(&first_id)
             .execute(db.pool())
             .await
@@ -285,12 +285,11 @@ mod tests {
         assert!(reused.deduplicated);
         assert_eq!(reused.id.as_deref(), Some(first_id.as_str()));
 
-        let note_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?1")
-                .bind(&project.id)
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+        let note_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE project_id = ?")
+            .bind(&project.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
         assert_eq!(note_count, 1);
     }
 

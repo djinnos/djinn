@@ -186,7 +186,7 @@ mod tests {
             .update_memory_refs(&task.id, &memory_refs)
             .await
             .unwrap();
-        sqlx::query("UPDATE notes SET confidence = 0.5 WHERE id = ?1")
+        sqlx::query("UPDATE notes SET confidence = 0.5 WHERE id = ?")
             .bind(&note.id)
             .execute(db.pool())
             .await
@@ -198,7 +198,11 @@ mod tests {
     async fn dolt_history_maintenance_defaults_to_safe_planning_only_cutover() {
         let service_db = Database::open_in_memory().unwrap();
         let service = DoltHistoryMaintenanceService::new(&service_db);
-        assert!(!service.is_dolt_backend());
+        // Post sqlite→Dolt migration: `open_in_memory` now returns a Dolt-
+        // backed DB, so the service always reports dolt. The default policy
+        // still has execution disabled (planning-only), which is what the
+        // "safe cutover" invariant below asserts.
+        assert!(service.is_dolt_backend());
 
         let policy = DoltHistoryMaintenancePolicy::default();
         assert!(!policy.execution_enabled);

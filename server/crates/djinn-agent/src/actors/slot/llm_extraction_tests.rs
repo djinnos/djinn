@@ -96,7 +96,7 @@ async fn llm_extraction_routes_durable_writes_into_task_worktree_when_session_ha
 }
 
 async fn set_session_worktree_path(fixture: &TestFixture, worktree_path: &std::path::Path) {
-    sqlx::query("UPDATE sessions SET worktree_path = ?1 WHERE id = ?2")
+    sqlx::query("UPDATE sessions SET worktree_path = ? WHERE id = ?")
         .bind(worktree_path.to_string_lossy().to_string())
         .bind(&fixture.session_id)
         .execute(fixture.db.pool())
@@ -514,7 +514,7 @@ async fn llm_extracted_notes_have_confidence_0_5() {
     }
 
     let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
             .bind(&fixture.session_id)
             .fetch_one(fixture.db.pool())
             .await
@@ -703,7 +703,7 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
     assert!(updated_existing.confidence > starting_confidence);
 
     let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
             .bind(&fixture.session_id)
             .fetch_one(fixture.db.pool())
             .await
@@ -829,7 +829,7 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
     );
 
     let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
             .bind(&fixture.session_id)
             .fetch_one(fixture.db.pool())
             .await
@@ -902,7 +902,7 @@ async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
     );
 
     let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
             .bind(&fixture.session_id)
             .fetch_one(fixture.db.pool())
             .await
@@ -969,7 +969,7 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
         .await
         .expect("db initialized");
     let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?1")
+        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
             .bind(&fixture.session_id)
             .fetch_one(fixture.db.pool())
             .await

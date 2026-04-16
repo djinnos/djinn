@@ -115,7 +115,7 @@ mod tests {
         let (server, db, project_id, path) = make_server().await;
         let note = make_note(&db, &project_id, &path, "Half Confidence").await;
 
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
+        sqlx::query("UPDATE notes SET confidence = ? WHERE id = ?")
             .bind(0.5_f64)
             .bind(&note.id)
             .execute(db.pool())
@@ -142,7 +142,7 @@ mod tests {
         let (server, db, project_id, path) = make_server().await;
         let note = make_note(&db, &project_id, &path, "Low Confidence").await;
 
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
+        sqlx::query("UPDATE notes SET confidence = ? WHERE id = ?")
             .bind(note::CONFIDENCE_FLOOR)
             .bind(&note.id)
             .execute(db.pool())
@@ -175,7 +175,7 @@ mod tests {
         let (server, db, project_id, path) = make_server().await;
         let note = make_note(&db, &project_id, &path, "High Confidence").await;
 
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
+        sqlx::query("UPDATE notes SET confidence = ? WHERE id = ?")
             .bind(0.97_f64)
             .bind(&note.id)
             .execute(db.pool())
@@ -201,7 +201,7 @@ mod tests {
         let (server, db, project_id, path) = make_server().await;
         let note = make_note(&db, &project_id, &path, "Resolve By ID").await;
 
-        sqlx::query("UPDATE notes SET confidence = ?1 WHERE id = ?2")
+        sqlx::query("UPDATE notes SET confidence = ? WHERE id = ?")
             .bind(0.5_f64)
             .bind(&note.id)
             .execute(db.pool())

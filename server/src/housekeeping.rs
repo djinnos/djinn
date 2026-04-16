@@ -268,7 +268,7 @@ mod tests {
             .iter()
             .map(|fixture_project| async {
                 let count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM note_links WHERE source_id = ?1 AND target_id IS NULL",
+                    "SELECT COUNT(*) FROM note_links WHERE source_id = ? AND target_id IS NULL",
                 )
                 .bind(&fixture_project.repaired_source_note_id)
                 .fetch_one(db.pool())
@@ -312,13 +312,13 @@ mod tests {
             );
 
             let repaired_content: String =
-                sqlx::query_scalar("SELECT content FROM notes WHERE id = ?1")
+                sqlx::query_scalar("SELECT content FROM notes WHERE id = ?")
                     .bind(&fixture_project.repaired_source_note_id)
                     .fetch_one(db.pool())
                     .await
                     .unwrap();
             let repaired_target_title: String =
-                sqlx::query_scalar("SELECT title FROM notes WHERE id = ?1")
+                sqlx::query_scalar("SELECT title FROM notes WHERE id = ?")
                     .bind(&fixture_project.repaired_target_note_id)
                     .fetch_one(db.pool())
                     .await
@@ -350,7 +350,7 @@ mod tests {
             assert!(repaired_content.contains(&format!("[[{repaired_target_title}]]")));
 
             let unresolved_after: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM note_links WHERE source_id = ?1 AND target_id IS NULL",
+                "SELECT COUNT(*) FROM note_links WHERE source_id = ? AND target_id IS NULL",
             )
             .bind(&fixture_project.repaired_source_note_id)
             .fetch_one(db.pool())
@@ -358,7 +358,7 @@ mod tests {
             .unwrap();
             assert_eq!(unresolved_after, 0);
 
-            let orphan_tags: String = sqlx::query_scalar("SELECT tags FROM notes WHERE id = ?1")
+            let orphan_tags: String = sqlx::query_scalar("SELECT tags FROM notes WHERE id = ?")
                 .bind(&fixture_project.orphan_note_id)
                 .fetch_one(db.pool())
                 .await
@@ -366,7 +366,7 @@ mod tests {
             assert_eq!(orphan_tags, "[\"orphan\"]");
 
             let rebuilt_hashes: Vec<Option<String>> =
-                sqlx::query_scalar("SELECT content_hash FROM notes WHERE id IN (?1, ?2)")
+                sqlx::query_scalar("SELECT content_hash FROM notes WHERE id IN (?, ?)")
                     .bind(&fixture_project.legacy_hash_note_ids[0])
                     .bind(&fixture_project.legacy_hash_note_ids[1])
                     .fetch_all(db.pool())

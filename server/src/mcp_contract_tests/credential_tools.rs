@@ -26,7 +26,7 @@ async fn credential_set_success_shape() {
     assert!(res["id"].as_str().unwrap_or_default().len() > 8);
 
     let row: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?1")
+        sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?")
             .bind("ANTHROPIC_API_KEY")
             .fetch_optional(db.pool())
             .await

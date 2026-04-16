@@ -1173,7 +1173,7 @@ mod tests {
         assert_eq!(count1, 1);
 
         // Delete the epic to cause FK violation on next import.
-        sqlx::query("DELETE FROM epics WHERE id = ?1")
+        sqlx::query("DELETE FROM epics WHERE id = ?")
             .bind(&epic.id)
             .execute(db.pool())
             .await

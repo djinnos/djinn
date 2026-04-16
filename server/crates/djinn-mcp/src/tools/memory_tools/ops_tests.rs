@@ -266,18 +266,23 @@ mod tests {
         let setup = setup_server().await;
         let before = access_count_for(&setup.server, &setup.project, &setup.permalink).await;
 
+        // Use a string with no shared tokens with seeded content — MySQL
+        // fulltext would happily fuzzy-match a query like "missing-note"
+        // against any row containing the word "note" (unlike the SQLite
+        // FTS5 tokenizer we previously relied on).
+        let probe = "xyzzynonexistentidentifier";
         let response = ops::memory_read(
             &setup.server,
             ReadParams {
                 project: setup.project.clone(),
-                identifier: "missing-note".to_string(),
+                identifier: probe.to_string(),
             },
         )
         .await;
 
         assert_eq!(
             response.error.as_deref(),
-            Some("note not found: missing-note")
+            Some(format!("note not found: {probe}").as_str())
         );
         assert!(response.id.is_none());
 

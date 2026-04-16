@@ -511,13 +511,13 @@ impl AgentRepository {
                         THEN CAST(TIMESTAMPDIFF(MICROSECOND, s.started_at, s.ended_at) / 1000000.0 AS DOUBLE)
                         ELSE NULL END
                 ), 0.0) AS "avg_time_seconds!: f64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(s.event_taxonomy, '$.extraction_quality.extracted') AS SIGNED)), 0) AS "extracted!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(s.event_taxonomy, '$.extraction_quality.dedup_skipped') AS SIGNED)), 0) AS "dedup_skipped!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(s.event_taxonomy, '$.extraction_quality.novelty_skipped') AS SIGNED)), 0) AS "novelty_skipped!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(s.event_taxonomy, '$.extraction_quality.written') AS SIGNED)), 0) AS "written!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(s.event_taxonomy, '$.extraction_quality.merged') AS SIGNED)), 0) AS "merged!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(s.event_taxonomy, '$.extraction_quality.downgraded') AS SIGNED)), 0) AS "downgraded!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(s.event_taxonomy, '$.extraction_quality.discarded') AS SIGNED)), 0) AS "discarded!: i64"
+                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.extracted') AS SIGNED)), 0) AS "extracted!: i64",
+                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.dedup_skipped') AS SIGNED)), 0) AS "dedup_skipped!: i64",
+                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.novelty_skipped') AS SIGNED)), 0) AS "novelty_skipped!: i64",
+                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.written') AS SIGNED)), 0) AS "written!: i64",
+                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.merged') AS SIGNED)), 0) AS "merged!: i64",
+                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.downgraded') AS SIGNED)), 0) AS "downgraded!: i64",
+                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.discarded') AS SIGNED)), 0) AS "discarded!: i64"
              FROM sessions s
              JOIN tasks t ON t.id = s.task_id
              WHERE t.project_id = ?

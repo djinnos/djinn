@@ -165,7 +165,7 @@ impl TaskRepository {
             }
         }
         if let Some(lbl) = &query.label {
-            clauses.push("JSON_CONTAINS(t.labels, JSON_QUOTE(?), '$')".to_owned());
+            clauses.push("JSON_CONTAINS(CAST(t.labels AS JSON), JSON_QUOTE(?), '$')".to_owned());
             params.push(SqlParam::Text(lbl.clone()));
         }
         if let Some(owner) = &query.owner {
@@ -248,7 +248,7 @@ impl TaskRepository {
             }
         }
         if let Some(lbl) = &query.label {
-            clauses.push("JSON_CONTAINS(t.labels, JSON_QUOTE(?), '$')".to_owned());
+            clauses.push("JSON_CONTAINS(CAST(t.labels AS JSON), JSON_QUOTE(?), '$')".to_owned());
             params.push(SqlParam::Text(lbl.clone()));
         }
         if let Some(owner) = &query.owner {
@@ -419,7 +419,7 @@ impl TaskRepository {
                 let sql = format!(
                     "SELECT COALESCE(CAST({col} AS CHAR), ''), COUNT(*)
                      FROM tasks WHERE {where_sql}
-                     GROUP BY {col} ORDER BY COUNT(*) DESC"
+                     GROUP BY {col} ORDER BY COUNT(*) DESC, {col}"
                 );
                 let mut groups_q = sqlx::query_as::<_, (String, i64)>(&sql);
                 for p in &params {
@@ -460,14 +460,14 @@ impl TaskRepository {
         let epic_rows = sqlx::query(
             "SELECT e.id, e.short_id, e.title,
                     COUNT(t.id) AS total,
-                    SUM(CASE WHEN t.`status` = 'closed' THEN 1 ELSE 0 END) AS closed,
-                    SUM(CASE WHEN t.`status` IN (
+                    CAST(SUM(CASE WHEN t.`status` = 'closed' THEN 1 ELSE 0 END) AS SIGNED) AS closed,
+                    CAST(SUM(CASE WHEN t.`status` IN (
                         'needs_task_review','in_task_review','closed'
-                    ) THEN 1 ELSE 0 END) AS in_review,
+                    ) THEN 1 ELSE 0 END) AS SIGNED) AS in_review,
                     MIN(CASE WHEN t.`status` IN (
                         'needs_task_review','in_task_review','closed'
                     ) THEN t.updated_at ELSE NULL END) AS oldest_review_at,
-                    SUM(CASE WHEN t.`status` IN ('approved','pr_draft','pr_review') THEN 1 ELSE 0 END) AS pr_ready
+                    CAST(SUM(CASE WHEN t.`status` IN ('approved','pr_draft','pr_review') THEN 1 ELSE 0 END) AS SIGNED) AS pr_ready
              FROM epics e
              LEFT JOIN tasks t ON t.epic_id = e.id
              GROUP BY e.id
@@ -728,7 +728,7 @@ pub(super) fn build_where(
     }
 
     if let Some(lbl) = label {
-        clauses.push("JSON_CONTAINS(labels, JSON_QUOTE(?), '$')".to_owned());
+        clauses.push("JSON_CONTAINS(CAST(labels AS JSON), JSON_QUOTE(?), '$')".to_owned());
         params.push(SqlParam::Text(lbl.clone()));
     }
 

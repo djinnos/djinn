@@ -325,7 +325,7 @@ mod tests {
         let session_id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, started_at)
-             VALUES (?1, ?2, NULL, 'test/mock', 'planner', 'running', strftime('%s','now'))",
+             VALUES (?, ?, NULL, 'test/mock', 'planner', 'running', DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))",
         )
         .bind(&session_id)
         .bind(&project.id)
@@ -535,12 +535,12 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        sqlx::query("UPDATE epics SET status = 'open' WHERE id = ?1")
+        sqlx::query("UPDATE epics SET status = 'open' WHERE id = ?")
             .bind(&epic.id)
             .execute(db.pool())
             .await
             .unwrap();
-        let promoted: djinn_core::models::Epic = sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at, auto_breakdown, originating_adr_id FROM epics WHERE id = ?1")
+        let promoted: djinn_core::models::Epic = sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at, auto_breakdown, originating_adr_id FROM epics WHERE id = ?")
             .bind(&epic.id)
             .fetch_one(db.pool())
             .await
@@ -580,12 +580,12 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        sqlx::query("UPDATE epics SET status = 'open' WHERE id = ?1")
+        sqlx::query("UPDATE epics SET status = 'open' WHERE id = ?")
             .bind(&epic.id)
             .execute(db.pool())
             .await
             .unwrap();
-        let promoted: djinn_core::models::Epic = sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at, auto_breakdown, originating_adr_id FROM epics WHERE id = ?1")
+        let promoted: djinn_core::models::Epic = sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at, auto_breakdown, originating_adr_id FROM epics WHERE id = ?")
             .bind(&epic.id)
             .fetch_one(db.pool())
             .await

@@ -570,14 +570,12 @@ mod tests {
                         .expect("transition to verifying");
 
                     if count > 0 {
-                        sqlx::query(
-                            "UPDATE tasks SET verification_failure_count = ?1 WHERE id = ?2",
-                        )
-                        .bind(count)
-                        .bind(&task.id)
-                        .execute(db.pool())
-                        .await
-                        .expect("set verification_failure_count");
+                        sqlx::query("UPDATE tasks SET verification_failure_count = ? WHERE id = ?")
+                            .bind(count)
+                            .bind(&task.id)
+                            .execute(db.pool())
+                            .await
+                            .expect("set verification_failure_count");
                     }
 
                     (task_repo, task.id, app_state)
@@ -620,7 +618,7 @@ mod tests {
             .expect("transition to verifying");
 
         if count > 0 {
-            sqlx::query("UPDATE tasks SET verification_failure_count = ?1 WHERE id = ?2")
+            sqlx::query("UPDATE tasks SET verification_failure_count = ? WHERE id = ?")
                 .bind(count)
                 .bind(&task.id)
                 .execute(db.pool())

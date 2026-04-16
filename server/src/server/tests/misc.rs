@@ -66,7 +66,8 @@ async fn test_db_has_tables() {
     db.ensure_initialized().await.unwrap();
 
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'",
+        "SELECT COUNT(*) FROM information_schema.tables \
+         WHERE table_schema = DATABASE() AND table_name = 'settings'",
     )
     .fetch_one(db.pool())
     .await

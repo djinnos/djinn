@@ -385,7 +385,7 @@ async fn mcp_contract_board_health_detects_stale_in_progress_task() {
 
     let repo = djinn_db::TaskRepository::new(db.clone(), crate::events::EventBus::noop());
     repo.set_status(&task.id, "in_progress").await.unwrap();
-    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
+    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?")
         .bind(&task.id)
         .execute(db.pool())
         .await

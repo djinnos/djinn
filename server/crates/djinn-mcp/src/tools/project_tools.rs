@@ -55,14 +55,14 @@ pub struct ProjectAddFromGithubParams {
     /// omitted, the server scans the user's installations and picks one
     /// that contains `owner/repo`.
     #[serde(default)]
-    pub installation_id: Option<u64>,
+    pub installation_id: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct GithubListReposParams {
     /// Max number of repositories to return (1..=100). Defaults to 30.
     #[serde(default)]
-    pub per_page: Option<usize>,
+    pub per_page: Option<i64>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -76,7 +76,7 @@ pub struct GithubRepoEntry {
     /// GitHub App installation id that surfaced this repo. Pass this back
     /// to [`project_add_from_github`] to pin the clone to the same
     /// installation without re-scanning.
-    pub installation_id: u64,
+    pub installation_id: i64,
     /// Login of the account (user or org) the installation is scoped to.
     pub account_login: String,
 }
@@ -358,8 +358,8 @@ impl DjinnMcpServer {
         // 2. Resolve the installation id — either trust the caller's input
         //    or scan installations to find one that has the repo.
         use djinn_provider::github_app::{find_installation_for_repo, get_installation_token};
-        let installation_id = if let Some(id) = input.installation_id {
-            id
+        let installation_id: u64 = if let Some(id) = input.installation_id {
+            id.max(0) as u64
         } else {
             match find_installation_for_repo(&user_access_token, &owner, &repo).await {
                 Ok(id) => id,
@@ -597,7 +597,8 @@ impl DjinnMcpServer {
         };
 
         let client = GitHubAppClient::new(installation_id);
-        let repos = match client.list_repositories(input.per_page).await {
+        let per_page_usize: Option<usize> = input.per_page.map(|n| n.clamp(1, 100) as usize);
+        let repos = match client.list_repositories(per_page_usize).await {
             Ok(r) => r,
             Err(e) => {
                 return Json(GithubListReposResponse {
@@ -609,6 +610,7 @@ impl DjinnMcpServer {
             }
         };
 
+        let installation_id_i64: i64 = installation_id as i64;
         let out: Vec<GithubRepoEntry> = repos
             .into_iter()
             .map(|r| GithubRepoEntry {
@@ -617,7 +619,7 @@ impl DjinnMcpServer {
                 default_branch: r.default_branch,
                 private: r.private,
                 description: r.description,
-                installation_id,
+                installation_id: installation_id_i64,
                 account_login: account_login.clone(),
             })
             .collect();

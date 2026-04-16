@@ -27,7 +27,7 @@ pub struct GithubAppInstallUrlParams {}
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct InstallationEntry {
     /// Numeric installation ID (used for scoping API calls server-side).
-    pub id: u64,
+    pub id: i64,
     /// `login` of the account (user or org) the App is installed on.
     pub account_login: String,
     /// Either "User" or "Organization".
@@ -63,7 +63,7 @@ fn installation_to_entry(i: Installation) -> InstallationEntry {
         format!("https://github.com/settings/installations/{}", i.id)
     };
     InstallationEntry {
-        id: i.id,
+        id: i.id as i64,
         account_login: i.account_login,
         account_type: i.account_type,
         install_url,

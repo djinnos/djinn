@@ -629,7 +629,7 @@ async fn board_health_report() {
 
     // Backdate t2's updated_at to simulate staleness.
     let t2_id = t2.id.clone();
-    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
+    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?")
         .bind(&t2_id)
         .execute(db.pool())
         .await
@@ -664,7 +664,7 @@ async fn board_health_flags_repeated_reopen_role_tool_mismatch_candidates() {
         )
         .await
         .unwrap();
-    sqlx::query("UPDATE tasks SET total_reopen_count = 3 WHERE id = ?1")
+    sqlx::query("UPDATE tasks SET total_reopen_count = 3 WHERE id = ?")
         .bind(&task.id)
         .execute(db.pool())
         .await
@@ -717,7 +717,7 @@ async fn board_health_ignores_repeated_reopen_tasks_without_role_tool_mismatch()
         )
         .await
         .unwrap();
-    sqlx::query("UPDATE tasks SET total_reopen_count = 4 WHERE id = ?1")
+    sqlx::query("UPDATE tasks SET total_reopen_count = 4 WHERE id = ?")
         .bind(&task.id)
         .execute(db.pool())
         .await
@@ -745,7 +745,7 @@ async fn reconcile_heals_stale_tasks() {
 
     // Backdate updated_at so the task is considered stale (> 24h).
     let t_id = t.id.clone();
-    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1")
+    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?")
         .bind(&t_id)
         .execute(db.pool())
         .await

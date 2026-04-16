@@ -79,7 +79,12 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
         response.get("status").and_then(|v| v.as_str()),
         Some("open")
     );
-    assert_eq!(response.get("agent_type").and_then(|v| v.as_str()), None);
+    // Historical note: the public task response reflects the task as
+    // persisted, which includes `agent_type` when the caller specified it.
+    assert_eq!(
+        response.get("agent_type").and_then(|v| v.as_str()),
+        Some("rust-expert")
+    );
     assert_eq!(
         response
             .get("acceptance_criteria")

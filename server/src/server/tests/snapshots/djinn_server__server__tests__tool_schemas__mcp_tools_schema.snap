@@ -2293,6 +2293,94 @@ expression: signatures
   {
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "GithubAppInstallUrlParams",
+      "type": "object"
+    },
+    "name": "github_app_install_url",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "url": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "GithubAppInstallUrlResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "GithubAppInstallationsParams",
+      "type": "object"
+    },
+    "name": "github_app_installations",
+    "output_schema": {
+      "$defs": {
+        "InstallationEntry": {
+          "properties": {
+            "account_login": {
+              "description": "`login` of the account (user or org) the App is installed on.",
+              "type": "string"
+            },
+            "account_type": {
+              "description": "Either \"User\" or \"Organization\".",
+              "type": "string"
+            },
+            "id": {
+              "description": "Numeric installation ID (used for scoping API calls server-side).",
+              "format": "int64",
+              "type": "integer"
+            },
+            "install_url": {
+              "description": "Direct URL to review/configure this installation.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "account_login",
+            "account_type",
+            "install_url"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "install_url": {
+          "description": "URL to install the App when the user has no installations (or\nwants to add one). Always populated if `GITHUB_APP_SLUG` is set.",
+          "nullable": true,
+          "type": "string"
+        },
+        "installations": {
+          "items": {
+            "$ref": "#/$defs/InstallationEntry"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "installations"
+      ],
+      "title": "GithubAppInstallationsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "end_line": {
           "default": null,
@@ -2335,6 +2423,83 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
       "title": "ErrorOrGithubFetchFileResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "per_page": {
+          "default": null,
+          "description": "Max number of repositories to return (1..=100). Defaults to 30.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "GithubListReposParams",
+      "type": "object"
+    },
+    "name": "github_list_repos",
+    "output_schema": {
+      "$defs": {
+        "GithubRepoEntry": {
+          "properties": {
+            "account_login": {
+              "description": "Login of the account (user or org) the installation is scoped to.",
+              "type": "string"
+            },
+            "default_branch": {
+              "type": "string"
+            },
+            "description": {
+              "nullable": true,
+              "type": "string"
+            },
+            "installation_id": {
+              "description": "GitHub App installation id that surfaced this repo. Pass this back\nto [`project_add_from_github`] to pin the clone to the same\ninstallation without re-scanning.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "private": {
+              "type": "boolean"
+            },
+            "repo": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "default_branch",
+            "private",
+            "installation_id",
+            "account_login"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "repos": {
+          "items": {
+            "$ref": "#/$defs/GithubRepoEntry"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "repos"
+      ],
+      "title": "GithubListReposResponse",
       "type": "object"
     }
   },
@@ -4253,23 +4418,42 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "installation_id": {
+          "default": null,
+          "description": "GitHub App installation id that has access to this repo. When\nomitted, the server scans the user's installations and picks one\nthat contains `owner/repo`.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
         "name": {
-          "description": "Human-readable project name (unique identifier).",
+          "default": null,
+          "description": "Optional project display name. Defaults to `{owner}/{repo}`.",
+          "nullable": true,
           "type": "string"
         },
-        "path": {
-          "description": "Absolute path to the project directory.",
+        "owner": {
+          "description": "GitHub owner (user or organization).",
+          "type": "string"
+        },
+        "ref": {
+          "default": null,
+          "description": "Optional branch to check out after cloning. Defaults to the repo's\ndefault branch as reported by the GitHub API.",
+          "nullable": true,
+          "type": "string"
+        },
+        "repo": {
+          "description": "GitHub repository name.",
           "type": "string"
         }
       },
       "required": [
-        "name",
-        "path"
+        "owner",
+        "repo"
       ],
-      "title": "ProjectAddParams",
+      "title": "ProjectAddFromGithubParams",
       "type": "object"
     },
-    "name": "project_add",
+    "name": "project_add_from_github",
     "output_schema": {
       "$defs": {
         "ProjectInfo": {
@@ -4306,6 +4490,47 @@ expression: signatures
         "project"
       ],
       "title": "ProjectAddResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project_id": {
+          "description": "Project UUID to resolve the server-owned clone path for.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "title": "ProjectBranchesParams",
+      "type": "object"
+    },
+    "name": "project_branches",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "current": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "branches"
+      ],
+      "title": "ProjectBranchesResponse",
       "type": "object"
     }
   },

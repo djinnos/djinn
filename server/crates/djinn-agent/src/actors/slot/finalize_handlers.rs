@@ -402,7 +402,7 @@ mod tests {
         let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
 
         // Seed AC with met=false.
-        sqlx::query("UPDATE tasks SET acceptance_criteria = ?1 WHERE id = ?2")
+        sqlx::query("UPDATE tasks SET acceptance_criteria = ? WHERE id = ?")
             .bind(r#"[{"criterion":"write tests","met":false},{"criterion":"passes ci","met":false}]"#)
             .bind(&task.id)
             .execute(db.pool())

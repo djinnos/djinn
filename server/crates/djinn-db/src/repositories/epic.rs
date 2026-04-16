@@ -474,7 +474,7 @@ impl EpicRepository {
                 // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
                 let sql = format!(
                     "SELECT status, COUNT(*) FROM epics WHERE {where_sql}
-                     GROUP BY status ORDER BY COUNT(*) DESC"
+                     GROUP BY status ORDER BY COUNT(*) DESC, status"
                 );
                 let mut q = sqlx::query_as::<_, (String, i64)>(&sql);
                 for p in &params {

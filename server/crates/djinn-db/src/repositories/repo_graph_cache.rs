@@ -36,16 +36,26 @@ impl RepoGraphCacheRepository {
 
     pub async fn get(&self, project_id: &str, commit_sha: &str) -> Result<Option<CachedRepoGraph>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            CachedRepoGraph,
+        // NOTE: Dolt reports LONGBLOB columns without the binary-charset
+        // flag that sqlx-mysql's macro relies on to pick a `Vec<u8>` decoder,
+        // so the `query_as!` form attempts a UTF-8 decode and fails on
+        // bincoded payloads. We pull the blob out of a row explicitly.
+        use sqlx::Row;
+        Ok(sqlx::query(
             "SELECT project_id, commit_sha, graph_blob, built_at
              FROM repo_graph_cache
              WHERE project_id = ? AND commit_sha = ?",
-            project_id,
-            commit_sha,
         )
+        .bind(project_id)
+        .bind(commit_sha)
         .fetch_optional(self.db.pool())
-        .await?)
+        .await?
+        .map(|row| CachedRepoGraph {
+            project_id: row.get("project_id"),
+            commit_sha: row.get("commit_sha"),
+            graph_blob: row.get("graph_blob"),
+            built_at: row.get("built_at"),
+        }))
     }
 
     pub async fn upsert(&self, entry: RepoGraphCacheInsert<'_>) -> Result<()> {

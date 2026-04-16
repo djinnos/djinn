@@ -25,7 +25,7 @@ async fn health_returns_ok() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["database"]["backend_label"], "sqlite");
+    assert_eq!(json["database"]["backend_label"], "dolt");
     assert_eq!(json["memory_mount"]["enabled"], false);
     assert_eq!(json["memory_mount"]["active"], false);
     assert_eq!(json["memory_mount"]["lifecycle"], "disabled");
@@ -176,7 +176,7 @@ async fn db_info_reports_selected_backend() {
 
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["backend"], "sqlite");
+    assert_eq!(json["backend"], "dolt");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
