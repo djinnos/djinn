@@ -269,21 +269,27 @@ pub async fn import(
     project_id: &str,
     db: &Database,
     events: &broadcast::Sender<DjinnEventEnvelope>,
+    force: bool,
 ) -> Result<usize> {
     // Two-phase pull (SYNC-08): cheap SHA check before expensive fetch.
     let settings =
         djinn_db::SettingsRepository::new(db.clone(), crate::events::event_bus_for(events));
     let sha_key = sha_settings_key(project_id);
     let remote_sha = ls_remote_sha(project).await;
-    if let Some(ref sha) = remote_sha {
-        let stored = settings.get(&sha_key).await.ok().flatten();
-        if stored.as_ref().map(|s| &s.value) == Some(sha) {
-            tracing::trace!(
-                sha,
-                project_id,
-                "two-phase pull: SHA unchanged, skipping import"
-            );
-            return Ok(0);
+    if force {
+        tracing::info!(project_id = %project_id, "forcing task sync import; bypassing SHA checkpoint");
+    }
+    if !force {
+        if let Some(ref sha) = remote_sha {
+            let stored = settings.get(&sha_key).await.ok().flatten();
+            if stored.as_ref().map(|s| &s.value) == Some(sha) {
+                tracing::debug!(
+                    project_id = %project_id,
+                    remote_sha = %sha,
+                    "task sync import skipped; remote SHA already imported"
+                );
+                return Ok(0);
+            }
         }
     }
 

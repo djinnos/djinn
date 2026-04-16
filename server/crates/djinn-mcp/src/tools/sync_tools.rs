@@ -31,8 +31,10 @@ pub struct TaskSyncExportParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskSyncImportParams {
-    /// Project path (accepted for API compatibility, currently unused).
+    /// Optional project path. When provided, import only that project.
     pub project: Option<String>,
+    /// Force import even if the remote branch SHA matches the last imported SHA.
+    pub force: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -287,17 +289,38 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<TaskSyncImportParams>,
     ) -> Json<TaskSyncRunResponse> {
-        if let Some(path) = p.project.as_ref()
-            && self.project_id_for_path(path).await.is_none()
-        {
-            return Json(TaskSyncRunResponse {
-                ok: None,
-                channels: None,
-                error: Some(format!("project not found: {path}")),
-            });
-        }
         let mgr = self.state.sync_manager();
-        let results = mgr.import_all().await;
+        let force = p.force.unwrap_or(false);
+
+        let results: Vec<SyncChannelResult> = if let Some(path) = p.project.as_ref() {
+            let project_id = match self.project_id_for_path(path).await {
+                Some(id) => id,
+                None => {
+                    return Json(TaskSyncRunResponse {
+                        ok: None,
+                        channels: None,
+                        error: Some(format!("project not found: {}", path)),
+                    });
+                }
+            };
+
+            match mgr.import_project(&project_id, force).await {
+                Ok(result) => vec![result.into()],
+                Err(error) => {
+                    return Json(TaskSyncRunResponse {
+                        ok: None,
+                        channels: None,
+                        error: Some(error),
+                    });
+                }
+            }
+        } else {
+            mgr.import_all(force)
+                .await
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        };
 
         if results.is_empty() {
             return Json(TaskSyncRunResponse {
@@ -307,10 +330,11 @@ impl DjinnMcpServer {
             });
         }
 
-        let all_ok = results.iter().all(|r| r.ok);
+        let ok = results.iter().all(|r| r.ok);
+
         Json(TaskSyncRunResponse {
-            ok: Some(all_ok),
-            channels: Some(results.into_iter().map(SyncChannelResult::from).collect()),
+            ok: Some(ok),
+            channels: Some(results),
             error: None,
         })
     }

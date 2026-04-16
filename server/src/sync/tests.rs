@@ -183,7 +183,7 @@ async fn import_all_skips_when_disabled() {
     let db = crate::test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(16);
     let mgr = SyncManager::new(db, tx);
-    let results = mgr.import_all().await;
+    let results = mgr.import_all(false).await;
     assert!(results.is_empty());
 }
 

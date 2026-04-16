@@ -243,9 +243,9 @@ impl SyncOps for SyncBridge {
             .collect()
     }
 
-    async fn import_all(&self) -> Vec<SyncResult> {
+    async fn import_all(&self, force: bool) -> Vec<SyncResult> {
         self.0
-            .import_all()
+            .import_all(force)
             .await
             .into_iter()
             .map(|r| SyncResult {
@@ -255,6 +255,16 @@ impl SyncOps for SyncBridge {
                 error: r.error,
             })
             .collect()
+    }
+
+    async fn import_project(&self, project_id: &str, force: bool) -> Result<SyncResult, String> {
+        let r = self.0.import_project(project_id, force).await;
+        Ok(SyncResult {
+            channel: r.channel,
+            ok: r.ok,
+            count: r.count,
+            error: r.error,
+        })
     }
 
     async fn status(&self) -> Vec<ChannelStatus> {
