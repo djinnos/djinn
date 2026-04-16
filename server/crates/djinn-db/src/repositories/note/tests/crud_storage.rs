@@ -392,9 +392,7 @@ async fn file_backed_note_crud_persists_db_and_filesystem_state_changes() {
     assert_eq!(updated.content, "updated body");
     assert_eq!(updated.tags, r#"["updated"]"#);
 
-    // NOTE: uses shared const NOTE_SELECT_WHERE_ID; sqlx macros require a literal, keep runtime
-    let persisted_updated = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-        .bind(&created.id)
+    let persisted_updated = note_select_where_id!(&created.id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -438,9 +436,7 @@ async fn db_backed_note_crud_persists_state_without_filesystem_side_effects() {
     assert_eq!(created.storage, "db");
     assert_eq!(created.file_path, "");
 
-    // NOTE: uses shared const NOTE_SELECT_WHERE_ID; sqlx macros require a literal, keep runtime
-    let persisted_created = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-        .bind(&created.id)
+    let persisted_created = note_select_where_id!(&created.id)
         .fetch_one(db.pool())
         .await
         .unwrap();

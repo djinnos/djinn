@@ -6,7 +6,7 @@ use djinn_core::models::{
     ConsolidationNote, ConsolidationRunMetric, DbNoteGroup, Note, NoteDedupCandidate,
 };
 
-use super::{NOTE_SELECT_WHERE_ID, NoteRepository};
+use super::{NoteRepository, note_select_where_id};
 use crate::Database;
 use crate::error::{DbError as Error, DbResult as Result};
 
@@ -243,8 +243,7 @@ impl NoteConsolidationRepository {
             provenance.push(self.add_provenance(&created.id, session_id).await?);
         }
 
-        let note = sqlx::query_as::<_, Note>(NOTE_SELECT_WHERE_ID)
-            .bind(&created.id)
+        let note = note_select_where_id!(&created.id)
             .fetch_one(self.db.pool())
             .await?;
 

@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT project_id FROM epics WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "95287caf965c754caa1375e713bc75496548d6c7976d0dd2bda8ed6cd2d02c8d"
+}

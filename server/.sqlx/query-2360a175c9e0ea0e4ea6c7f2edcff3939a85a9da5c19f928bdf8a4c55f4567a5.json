@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT short_id FROM epics WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "short_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 128
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2360a175c9e0ea0e4ea6c7f2edcff3939a85a9da5c19f928bdf8a4c55f4567a5"
+}

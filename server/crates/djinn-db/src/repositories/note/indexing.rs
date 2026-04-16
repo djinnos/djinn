@@ -163,9 +163,7 @@ impl NoteRepository {
         )
         .await?;
 
-        // NOTE: uses shared const NOTE_SELECT_WHERE_ID; sqlx macros require a literal, keep runtime
-        let note = sqlx::query_as::<_, Note>(super::NOTE_SELECT_WHERE_ID)
-            .bind(&id)
+        let note = super::note_select_where_id!(id)
             .fetch_one(&mut *tx)
             .await?;
 
@@ -222,9 +220,7 @@ impl NoteRepository {
         index_links_for_note(&mut tx, id, project_id, content).await?;
         resolve_links_for_note(&mut tx, id, title, permalink, project_id).await?;
 
-        // NOTE: uses shared const NOTE_SELECT_WHERE_ID; sqlx macros require a literal, keep runtime
-        let note = sqlx::query_as::<_, Note>(super::NOTE_SELECT_WHERE_ID)
-            .bind(id)
+        let note = super::note_select_where_id!(id)
             .fetch_one(&mut *tx)
             .await?;
 

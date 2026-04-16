@@ -1,6 +1,51 @@
 # SQLx compile-time conversion status
 
-Branch: `feat/sqlx-compile-time-convert` (batch 1) + `feat/sqlx-compile-time-convert-batch2` (batch 2).
+Branch: `feat/sqlx-compile-time-convert` (batch 1) + `feat/sqlx-compile-time-convert-batch2` (batch 2) + `feat/sqlx-compile-time-convert-batch3` (batch 3).
+
+## Batch 3 summary
+
+Phase A: Converted `NOTE_SELECT_WHERE_ID` and `TASK_SELECT_WHERE_ID`
+from `const &str` to full `macro_rules!` macros that expand directly
+into `sqlx::query_as!(T, "...", id)` calls. Critical detail: sqlx's
+`query_as!` demands a string-literal SQL argument at the token level
+— neither `concat!` nor macro-produced literals satisfy it. The
+macros take the id as an expression parameter and inline the query
+themselves. All ~17 NOTE call sites (crud, indexing, consolidation,
+tests/crud_storage) and ~20 TASK call sites (mod, reads, status,
+writes, queries) now use the macro.
+
+Phase B: Deferred. Keeping `#[sqlx(default)]` on `Task.pr_url`,
+`Task.agent_type`, `Task.unresolved_blocker_count` is the lower-risk
+path — removing those attributes would cascade into every runtime
+`query_as::<_, Task>` list call (there are many, built with
+`format!()` on top of dynamic WHERE clauses). Instead, the
+`task_select_where_id!` macro and all new `query_as!` list calls
+explicitly project `agent_type` plus a `CAST(0 AS SIGNED) AS
+"unresolved_blocker_count!: i64"` so that `query_as!` (which ignores
+`#[sqlx(default)]`) can still bind every field. Runtime paths that
+don't project those columns keep working through the `sqlx(default)`
+attributes as before.
+
+Phase C (files touched):
+
+| File | Converted this batch | Annotated runtime | Notes |
+|------|---------------------:|------------------:|-------|
+| `repositories/note/crud.rs`   | 18 (7 via macro + 10 static + 1 delete) | 0 | File now free of runtime-typed `sqlx::query(...)` calls. |
+| `repositories/note/indexing.rs` | 2 (via macro) | 0 (on top of batch 2) | The two `NOTE_SELECT_WHERE_ID` runtime callers that were deferred in batch 2 are now macro-typed. |
+| `repositories/note/consolidation.rs` | 1 (via macro) | — | Only the `NOTE_SELECT_WHERE_ID` call site here; rest of file untouched this batch. |
+| `repositories/note/tests/crud_storage.rs` | 2 (via macro) | — | Completes the deferred items from batch 2. |
+| `repositories/task/mod.rs`    | 3 (via macro) | — | Previously-runtime `TASK_SELECT_WHERE_ID` callers in tests + `maybe_reopen_epic` fixtures. |
+| `repositories/task/reads.rs`  | 7 (6 static Task list + 1 macro + 1 scalar) | 2 (format!()-built list/export) | Task SELECTs now explicitly project `agent_type` + `CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"`. |
+| `repositories/task/status.rs` | 13 (7 macro + 6 static) | 1 (format!() closed_at fragment) | Full transition/update/insert path compile-checked. |
+| `repositories/task/writes.rs` | 19 (8 macro + 11 static)   | 0 | Entire file free of runtime `sqlx::query(...)`. |
+| `repositories/task/queries.rs`| 7 (2 macro + 5 static)     | 6 (format!()-built list/count + 2 `Row::get()` aggregations in `board_health`) | Static claim/reconcile paths macro-typed. |
+
+Batch-3 new compile-time checked call sites: **~41** on top of Phase-A
+macro refactor touching **~40** additional call sites.
+
+**Converted total (cumulative) end of batch 3**: **~158** out of ~355 queries.
+**Annotated-as-dynamic (cumulative)**: **~60**.
+**`.sqlx/` cache**: 144 entries (from 118 at end of batch 2, +26 new).
 
 ## Done (fully or partially converted to macros)
 
