@@ -32,7 +32,6 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -274,7 +273,6 @@ impl SessionRuntime for TestRuntime {
             task_run_id,
             container_id: None,
             pod_ref: None,
-            ipc_socket: PathBuf::from("/tmp/djinn-test-runtime.sock"),
             started_at: SystemTime::now(),
         })
     }

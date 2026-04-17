@@ -189,9 +189,6 @@ impl SessionRuntime for KubernetesRuntime {
             task_run_id: task_run_id_str,
             container_id: None,
             pod_ref: Some(resource_name),
-            // K8s runtime has no unix socket — the worker dials the
-            // launcher's TCP listener advertised via `config.server_addr`.
-            ipc_socket: std::path::PathBuf::new(),
             started_at: SystemTime::now(),
         })
     }
