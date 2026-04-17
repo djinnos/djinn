@@ -14,14 +14,21 @@
 //! up. A 404 from the apiserver is treated as success — the call is
 //! idempotent.
 //!
-//! `teardown` polls the Job status for completion with a short timeout
-//! (60s), deletes the Job, and returns a [`TaskRunReport`] describing the
-//! outcome. The Secret GCs automatically via its OwnerReference.
+//! `teardown` polls the Job status for completion with a five-minute cap,
+//! best-effort deletes the Secret (the OwnerReference also GCs it), and
+//! foreground-deletes the Job so Pods cascade-clean. Returns a minimal
+//! [`TaskRunReport`] with `outcome: TaskRunOutcome::Interrupted` — real
+//! terminal reports flow over the launcher's TCP connection in a later PR.
 //!
 //! `attach_stdio` is a placeholder — see the method doc comment. The real
 //! BiStream semantics arrive in PR 4 pt2 when dispatch wiring formalises
 //! how the launcher-side TCP connection hands back a `BiStream` to the
 //! supervisor.
+//!
+//! End-to-end `prepare`/`cancel`/`teardown` against a live kind cluster is
+//! covered by `tests/kind_smoke.rs` (DJINN_TEST_KIND-gated). The unit tests
+//! in this file are builder-parity invariants only — they DO NOT exercise
+//! the runtime methods, which require a `kube::Client`.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -42,9 +49,14 @@ use crate::job::build_task_run_job;
 use crate::secret::{build_task_run_secret, job_owner_reference, task_run_resource_name};
 
 /// Grace period observed while polling `teardown` for job completion.
-const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(60);
+///
+/// Per the Phase 2 K8s plan, we bound this at five minutes: worker tasks
+/// typically finish in well under 60s, but the supervisor occasionally
+/// ships tasks that post-process large diffs and we'd rather surface a
+/// clean timeout than an indeterminate hang.
+const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Poll interval used inside [`poll_job_terminal_state`].
-const TEARDOWN_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const TEARDOWN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Kubernetes-backed `SessionRuntime`.
 ///
@@ -146,16 +158,25 @@ impl SessionRuntime for KubernetesRuntime {
                 "ownerReferences": [owner],
             }
         });
-        secrets
+        // Owner-ref patch is best-effort: the Job's `ttlSecondsAfterFinished`
+        // already guarantees cleanup, so patch failure shouldn't block the
+        // task-run starting. Log at warn level and continue.
+        if let Err(e) = secrets
             .patch(
                 &resource_name,
                 &PatchParams::default(),
                 &Patch::Merge(&patch),
             )
             .await
-            .map_err(|e| {
-                RuntimeError::Prepare(format!("patch secret owner-ref {resource_name}: {e}"))
-            })?;
+        {
+            warn!(
+                task_run_id = %task_run_id_str,
+                namespace = %ns,
+                secret = %resource_name,
+                error = %e,
+                "kubernetes_runtime: owner-ref patch failed (continuing; TTL-based GC still applies)"
+            );
+        }
 
         info!(
             task_run_id = %task_run_id_str,
@@ -212,12 +233,17 @@ impl SessionRuntime for KubernetesRuntime {
     }
 
     /// Wait for the Job to reach a terminal state (`succeeded` / `failed`),
-    /// then delete it. Returns a [`TaskRunReport`] describing the outcome.
+    /// best-effort delete the Secret, then foreground-delete the Job so its
+    /// Pods cascade-clean.
     ///
-    /// Polls for at most [`TEARDOWN_POLL_TIMEOUT`]; on timeout, returns a
-    /// `TaskRunOutcome::Interrupted` report and still attempts Job deletion.
-    /// The Secret is GC'd automatically by the OwnerReference patched in
-    /// `prepare`.
+    /// Polls for at most [`TEARDOWN_POLL_TIMEOUT`]; on timeout, cleanup is
+    /// still attempted and then an `Err(RuntimeError::Teardown)` is returned.
+    ///
+    /// Returns a MINIMAL [`TaskRunReport`] with `TaskRunOutcome::Interrupted`.
+    /// Real terminal reports flow over the launcher's TCP connection and are
+    /// surfaced by the supervisor (deferred to PR 4 pt2). This method's role
+    /// is purely resource cleanup — the supervisor has already observed the
+    /// outcome by the time it calls `teardown`.
     async fn teardown(&self, handle: RunHandle) -> Result<TaskRunReport, RuntimeError> {
         let job_name = handle
             .pod_ref
@@ -225,10 +251,38 @@ impl SessionRuntime for KubernetesRuntime {
             .ok_or_else(|| RuntimeError::Teardown("RunHandle.pod_ref missing".into()))?
             .to_string();
         let ns = self.config.namespace.clone();
+        // Secret shares the Job's name — both produced via
+        // `task_run_resource_name(&task_run_id)` in `prepare`.
+        let secret_name = job_name.clone();
 
         let terminal = poll_job_terminal_state(&self.client, &ns, &job_name).await;
 
-        // Delete the Job regardless of terminal state. 404 is fine.
+        // Best-effort Secret delete. The OwnerReference from `prepare` also
+        // GCs it, but deleting explicitly tightens the window. 404 is fine.
+        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), &ns);
+        match secrets
+            .delete(&secret_name, &DeleteParams::background())
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(resp)) if resp.code == 404 => {
+                debug!(
+                    secret = %secret_name,
+                    namespace = %ns,
+                    "kubernetes_runtime: teardown secret already gone (404)"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    secret = %secret_name,
+                    namespace = %ns,
+                    error = %e,
+                    "kubernetes_runtime: teardown secret-delete failed (ignored)"
+                );
+            }
+        }
+
+        // Foreground-delete the Job so Pods cascade-clean. 404 is fine.
         if let Err(e) =
             delete_job_foreground(&self.client, &ns, &job_name, 30 /* seconds */).await
         {
@@ -240,29 +294,36 @@ impl SessionRuntime for KubernetesRuntime {
             );
         }
 
-        let outcome = match terminal {
-            JobTerminal::Succeeded => TaskRunOutcome::Closed {
-                reason: "job completed".into(),
-            },
-            JobTerminal::Failed(reason) => TaskRunOutcome::Failed {
-                stage: "worker".into(),
-                reason,
-            },
-            JobTerminal::TimedOut => TaskRunOutcome::Interrupted,
-        };
+        // On timeout, surface the error AFTER cleanup so the caller knows
+        // the Job is still being torn down but didn't complete in-window.
+        if matches!(terminal, JobTerminal::TimedOut) {
+            warn!(
+                job = %job_name,
+                namespace = %ns,
+                timeout_secs = TEARDOWN_POLL_TIMEOUT.as_secs(),
+                "kubernetes_runtime: teardown poll timed out; cleanup attempted"
+            );
+            return Err(RuntimeError::Teardown(format!(
+                "timeout waiting for Job {job_name} to complete"
+            )));
+        }
 
         Ok(TaskRunReport {
-            task_run_id: handle.task_run_id,
-            outcome,
+            task_run_id: handle.task_run_id.clone(),
+            outcome: TaskRunOutcome::Interrupted,
             stages_completed: Vec::<RoleKind>::new(),
         })
     }
 }
 
 /// Terminal state discovered by [`poll_job_terminal_state`].
+///
+/// `Failed` carries the apiserver's condition message for future use (log
+/// enrichment, richer reports in PR 4 pt2) — the PR 3 teardown path flattens
+/// all non-timeout terminal states to `TaskRunOutcome::Interrupted`.
 enum JobTerminal {
     Succeeded,
-    Failed(String),
+    Failed(#[allow(dead_code)] String),
     TimedOut,
 }
 
@@ -358,12 +419,14 @@ mod tests {
     }
 
     /// Confirms the polling helper's timeout constant matches the plan's
-    /// "short timeout, e.g. 60s" guidance so a regression bumping it won't
-    /// go unnoticed.
+    /// 5-minute cap guidance so a regression shrinking or inflating it
+    /// won't go unnoticed.
     #[test]
     fn teardown_timeout_is_bounded() {
-        assert!(TEARDOWN_POLL_TIMEOUT <= Duration::from_secs(120));
-        assert!(TEARDOWN_POLL_TIMEOUT >= Duration::from_secs(30));
+        // Plan §teardown pins this at five minutes. Allow a small window
+        // either side so minor tuning doesn't force a test update.
+        assert!(TEARDOWN_POLL_TIMEOUT >= Duration::from_secs(60));
+        assert!(TEARDOWN_POLL_TIMEOUT <= Duration::from_secs(600));
         assert!(TEARDOWN_POLL_INTERVAL < TEARDOWN_POLL_TIMEOUT);
     }
 
@@ -381,5 +444,80 @@ mod tests {
                 JobTerminal::Succeeded | JobTerminal::Failed(_) | JobTerminal::TimedOut => {}
             }
         }
+    }
+
+    /// Builder-parity invariant: the Secret built by `build_task_run_secret`
+    /// and the Job built by `build_task_run_job` share the resource name
+    /// that `prepare` threads between them. This is the load-bearing
+    /// coupling `prepare` relies on — assert it so a future refactor of
+    /// either builder can't silently break the Job↔Secret link without
+    /// failing here first.
+    ///
+    /// This test does NOT exercise `prepare` itself (that requires a live
+    /// cluster — see `tests/kind_smoke.rs` gated by `DJINN_TEST_KIND=1`).
+    #[test]
+    fn prepare_builds_expected_job_and_secret_via_builders() {
+        use std::collections::HashMap;
+
+        use djinn_core::models::TaskRunTrigger;
+        use djinn_runtime::{SupervisorFlow, TaskRunSpec};
+
+        use crate::secret::task_run_resource_name;
+
+        let cfg = KubernetesConfig::for_testing();
+        let task_run_id = Uuid::now_v7();
+        let resource_name = task_run_resource_name(&task_run_id);
+
+        let spec = TaskRunSpec {
+            task_id: "task-abc".to_string(),
+            project_id: "proj-xyz".to_string(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".to_string(),
+            task_branch: "djinn/task-abc".to_string(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: HashMap::new(),
+        };
+
+        let secret = crate::secret::build_task_run_secret(&cfg.namespace, &task_run_id, &spec)
+            .expect("build per-task-run Secret");
+        let job = crate::job::build_task_run_job(&cfg, &task_run_id, &resource_name);
+
+        // The Secret and Job share the same resource name.
+        assert_eq!(
+            secret.metadata.name.as_deref(),
+            Some(resource_name.as_str()),
+            "Secret name must equal task_run_resource_name(task_run_id)"
+        );
+        assert_eq!(
+            job.metadata.name.as_deref(),
+            Some(resource_name.as_str()),
+            "Job name must equal task_run_resource_name(task_run_id)"
+        );
+
+        // Both live in the same namespace.
+        assert_eq!(secret.metadata.namespace.as_deref(), Some(cfg.namespace.as_str()));
+        assert_eq!(job.metadata.namespace.as_deref(), Some(cfg.namespace.as_str()));
+
+        // The Job's spec volume references the Secret by the name we just
+        // asserted is shared. This is the handshake `prepare` depends on.
+        let pod_spec = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("job.spec.template.spec present");
+        let spec_volume = pod_spec
+            .volumes
+            .as_ref()
+            .and_then(|vs| vs.iter().find(|v| v.name == "spec"))
+            .expect("spec volume present");
+        let secret_src = spec_volume
+            .secret
+            .as_ref()
+            .expect("spec volume must be backed by a Secret");
+        assert_eq!(
+            secret_src.secret_name.as_deref(),
+            Some(resource_name.as_str()),
+            "spec volume must reference the per-task-run Secret by name"
+        );
     }
 }
