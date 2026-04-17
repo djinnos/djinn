@@ -116,6 +116,28 @@ impl TaskRunRepository {
         .fetch_all(self.db.pool())
         .await?)
     }
+
+    /// Return the most recent non-null `workspace_path` recorded for any
+    /// `task_run` that belongs to the given task. Replaces the former
+    /// `SessionRepository::latest_worktree_path_for_task` now that workspace
+    /// lifetime is owned by `task_runs` rather than `sessions`.
+    pub async fn latest_workspace_path_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+
+        let row: Option<Option<String>> = sqlx::query_scalar!(
+            "SELECT workspace_path FROM task_runs
+             WHERE task_id = ? AND workspace_path IS NOT NULL
+             ORDER BY started_at DESC LIMIT 1",
+            task_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        Ok(row.flatten())
+    }
 }
 
 #[cfg(test)]

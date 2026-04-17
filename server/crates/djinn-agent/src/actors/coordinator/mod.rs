@@ -583,10 +583,27 @@ mod tests {
         )
         .unwrap();
 
-        // Real session row, with worktree_path set so the coordinator can find
-        // it.  Note: NO event_taxonomy is set — we want to prove the
-        // worktree-status signal is what actually fires.
+        // Real session row paired with a task_run row. Post-refactor the
+        // coordinator reads the workspace path from `task_runs.workspace_path`
+        // (migration 5) rather than `sessions.worktree_path`; both are
+        // populated here so the test stays truthful regardless of which
+        // source the dispatch signal chooses.
         let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let task_run_repo =
+            djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
+        let run_id = uuid::Uuid::now_v7().to_string();
+        task_run_repo
+            .create(djinn_db::repositories::task_run::CreateTaskRunParams {
+                id: &run_id,
+                project_id: &task.project_id,
+                task_id: &task.id,
+                trigger_type: "new_task",
+                status: None,
+                workspace_path: Some(worktree_path.to_str().unwrap()),
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
         let session = session_repo
             .create(CreateSessionParams {
                 project_id: &task.project_id,

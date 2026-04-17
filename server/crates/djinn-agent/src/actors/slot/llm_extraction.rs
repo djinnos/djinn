@@ -20,6 +20,7 @@ use djinn_db::{
     NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
     permalink_for,
 };
+use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use serde::Deserialize;
@@ -509,8 +510,23 @@ async fn run_llm_extraction_inner(
     );
 
     // ── Write notes ────────────────────────────────────────────────────────
+    // Resolve the workspace path from the session's task_run, if it has one.
+    // Post-refactor (task #10) the authoritative workspace lives on
+    // `task_runs.workspace_path`; legacy sessions with only `worktree_path`
+    // still fall back to that value until migration 6 drops the column.
+    let task_run_repo = TaskRunRepository::new(app_state.db.clone());
+    let workspace_path: Option<String> = match session.task_run_id.as_deref() {
+        Some(run_id) => task_run_repo
+            .get(run_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|run| run.workspace_path),
+        None => None,
+    }
+    .or_else(|| session.worktree_path.clone());
     let knowledge_branch_target = app_state
-        .knowledge_branch_target_for(Path::new(project_path), session.worktree_path.as_deref());
+        .knowledge_branch_target_for(Path::new(project_path), workspace_path.as_deref());
     tracing::debug!(
         session_id = %session_id,
         knowledge_branch_target = %knowledge_branch_target.intent_label(),

@@ -71,11 +71,19 @@ pub struct SessionToolSession {
     pub status: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
-    pub worktree_path: Option<String>,
+    /// Authoritative workspace path for the session. Sourced from the
+    /// attached `task_run` (via `sessions.task_run_id`) when present; falls
+    /// back to the legacy `sessions.worktree_path` column during the
+    /// migration window (migration 6 drops it).
+    pub workspace_path: Option<String>,
 }
 
 impl From<SessionRecord> for SessionToolSession {
     fn from(value: SessionRecord) -> Self {
+        // Prefer the legacy column at the From boundary (synchronous);
+        // callers with DB access should overwrite `workspace_path` after
+        // looking up `task_runs.workspace_path` via `task_run_id`.
+        let workspace_path = value.worktree_path.clone();
         Self {
             id: value.id,
             project_id: value.project_id,
@@ -87,7 +95,41 @@ impl From<SessionRecord> for SessionToolSession {
             status: value.status,
             tokens_in: value.tokens_in,
             tokens_out: value.tokens_out,
-            worktree_path: value.worktree_path,
+            workspace_path,
+        }
+    }
+}
+
+impl SessionToolSession {
+    /// Build a `SessionToolSession` by resolving `workspace_path` from
+    /// `task_runs` when the session has a `task_run_id`, falling back to the
+    /// legacy `sessions.worktree_path` column when no run is attached yet.
+    pub async fn from_session_with_run(
+        value: SessionRecord,
+        task_run_repo: &djinn_db::repositories::task_run::TaskRunRepository,
+    ) -> Self {
+        let run_workspace = match value.task_run_id.as_deref() {
+            Some(run_id) => task_run_repo
+                .get(run_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|run| run.workspace_path),
+            None => None,
+        };
+        let workspace_path = run_workspace.or_else(|| value.worktree_path.clone());
+        Self {
+            id: value.id,
+            project_id: value.project_id,
+            task_id: value.task_id,
+            model_id: value.model_id,
+            agent_type: value.agent_type,
+            started_at: value.started_at,
+            ended_at: value.ended_at,
+            status: value.status,
+            tokens_in: value.tokens_in,
+            tokens_out: value.tokens_out,
+            workspace_path,
         }
     }
 }
@@ -221,12 +263,20 @@ impl DjinnMcpServer {
         };
 
         let repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let task_run_repo =
+            djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());
         match repo.list_for_task_in_project(&project_id, &task.id).await {
-            Ok(sessions) => Json(SessionListResponse {
-                task_id: Some(task.id),
-                sessions: Some(sessions.into_iter().map(Into::into).collect()),
-                error: None,
-            }),
+            Ok(sessions) => {
+                let mut out = Vec::with_capacity(sessions.len());
+                for s in sessions {
+                    out.push(SessionToolSession::from_session_with_run(s, &task_run_repo).await);
+                }
+                Json(SessionListResponse {
+                    task_id: Some(task.id),
+                    sessions: Some(out),
+                    error: None,
+                })
+            }
             Err(e) => Json(SessionListResponse {
                 task_id: None,
                 sessions: None,
@@ -299,9 +349,23 @@ impl DjinnMcpServer {
                     recovery_triggered = true;
                 }
 
+                let task_run_repo =
+                    djinn_db::repositories::task_run::TaskRunRepository::new(
+                        self.state.db().clone(),
+                    );
+                let mut runtime_out = Vec::with_capacity(runtime_sessions.len());
+                for s in runtime_sessions {
+                    runtime_out
+                        .push(SessionToolSession::from_session_with_run(s, &task_run_repo).await);
+                }
+                let mut stale_out = Vec::with_capacity(stale_sessions.len());
+                for s in stale_sessions {
+                    stale_out
+                        .push(SessionToolSession::from_session_with_run(s, &task_run_repo).await);
+                }
                 Json(SessionActiveResponse {
-                    sessions: Some(runtime_sessions.into_iter().map(Into::into).collect()),
-                    stale_sessions: Some(stale_sessions.into_iter().map(Into::into).collect()),
+                    sessions: Some(runtime_out),
+                    stale_sessions: Some(stale_out),
                     recovery_triggered: Some(recovery_triggered),
                     error: None,
                 })
@@ -333,9 +397,13 @@ impl DjinnMcpServer {
             }
         };
         let repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let task_run_repo =
+            djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());
         match repo.get_in_project(&project_id, &p.id).await {
             Ok(Some(session)) => Json(SessionShowResponse {
-                session: Some(session.into()),
+                session: Some(
+                    SessionToolSession::from_session_with_run(session, &task_run_repo).await,
+                ),
                 error: None,
             }),
             Ok(None) => Json(SessionShowResponse {
@@ -556,8 +624,14 @@ impl DjinnMcpServer {
                     .collect()
             });
 
+        let task_run_repo =
+            djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());
+        let mut sessions_out = Vec::with_capacity(sessions.len());
+        for s in sessions {
+            sessions_out.push(SessionToolSession::from_session_with_run(s, &task_run_repo).await);
+        }
         Json(TaskTimelineResponse {
-            sessions: Some(sessions.into_iter().map(Into::into).collect()),
+            sessions: Some(sessions_out),
             messages: Some(messages),
             activity: Some(activity),
             verification_steps,

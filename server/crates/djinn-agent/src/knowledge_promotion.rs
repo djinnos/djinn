@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use djinn_db::repositories::note::{WorktreeNoteChangeKind, WorktreeNoteDiff};
+use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +26,7 @@ pub enum KnowledgeCleanupReason {
 pub struct KnowledgePromotionPreview {
     pub task_id: String,
     pub project_id: String,
-    pub worktree_path: Option<String>,
+    pub workspace_path: Option<String>,
     pub changed_notes: Vec<KnowledgePromotionNoteCandidate>,
     pub extraction_quality: Option<serde_json::Value>,
     pub quality_gate_applied: bool,
@@ -69,12 +70,12 @@ fn preview_candidate(diff: WorktreeNoteDiff) -> KnowledgePromotionNoteCandidate 
     }
 }
 
-async fn project_and_worktree_for_task(
+async fn project_and_workspace_for_task(
     task_id: &str,
     app_state: &AgentContext,
 ) -> Option<(String, String, String, PathBuf)> {
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task_run_repo = TaskRunRepository::new(app_state.db.clone());
     let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     let task = task_repo.get(task_id).await.ok().flatten()?;
@@ -84,8 +85,8 @@ async fn project_and_worktree_for_task(
         .ok()
         .flatten()?;
     let fallback_project_path = project_path.clone();
-    let worktree = session_repo
-        .latest_worktree_path_for_task(task_id)
+    let workspace = task_run_repo
+        .latest_workspace_path_for_task(task_id)
         .await
         .ok()
         .flatten();
@@ -94,7 +95,7 @@ async fn project_and_worktree_for_task(
         task.project_id,
         task_short_id.clone(),
         project_path,
-        worktree.map(PathBuf::from).unwrap_or_else(|| {
+        workspace.map(PathBuf::from).unwrap_or_else(|| {
             Path::new(&fallback_project_path)
                 .join(".djinn")
                 .join("worktrees")
@@ -107,8 +108,8 @@ pub async fn preview_task_knowledge_promotion(
     task_id: &str,
     app_state: &AgentContext,
 ) -> Option<KnowledgePromotionPreview> {
-    let (project_id, _task_short_id, project_path, worktree_path) =
-        project_and_worktree_for_task(task_id, app_state).await?;
+    let (project_id, _task_short_id, project_path, workspace_path) =
+        project_and_workspace_for_task(task_id, app_state).await?;
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
@@ -116,7 +117,7 @@ pub async fn preview_task_knowledge_promotion(
         .diff_worktree_notes_against_canonical(
             &project_id,
             Path::new(&project_path),
-            &worktree_path,
+            &workspace_path,
         )
         .await
         .ok()?
@@ -135,7 +136,7 @@ pub async fn preview_task_knowledge_promotion(
     Some(KnowledgePromotionPreview {
         task_id: task_id.to_string(),
         project_id,
-        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        workspace_path: Some(workspace_path.to_string_lossy().to_string()),
         changed_notes,
         extraction_quality,
         quality_gate_applied: true,
@@ -148,8 +149,8 @@ pub async fn apply_task_knowledge_decision(
     cleanup_reason: KnowledgeCleanupReason,
     app_state: &AgentContext,
 ) -> Option<KnowledgePromotionResult> {
-    let (project_id, task_short_id, project_path, worktree_path) =
-        project_and_worktree_for_task(task_id, app_state).await?;
+    let (project_id, task_short_id, project_path, workspace_path) =
+        project_and_workspace_for_task(task_id, app_state).await?;
     let preview = preview_task_knowledge_promotion(task_id, app_state).await?;
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -157,7 +158,11 @@ pub async fn apply_task_knowledge_decision(
 
     let promoted_count = match decision {
         KnowledgePromotionDecision::Promote => note_repo
-            .sync_worktree_notes_to_canonical(&project_id, Path::new(&project_path), &worktree_path)
+            .sync_worktree_notes_to_canonical(
+                &project_id,
+                Path::new(&project_path),
+                &workspace_path,
+            )
             .await
             .unwrap_or(0),
         KnowledgePromotionDecision::Discard => 0,
@@ -165,7 +170,7 @@ pub async fn apply_task_knowledge_decision(
     let discarded_count = match decision {
         KnowledgePromotionDecision::Promote => 0,
         KnowledgePromotionDecision::Discard => note_repo
-            .delete_worktree_notes_from_canonical(&project_id, &worktree_path)
+            .delete_worktree_notes_from_canonical(&project_id, &workspace_path)
             .await
             .unwrap_or(0),
     };

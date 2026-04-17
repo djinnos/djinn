@@ -67,7 +67,7 @@ fn canonical_view_resolution(
             task_short_id: None,
             task_project_id: None,
             mount_project_id: None,
-            session_worktree_path: None,
+            session_workspace_path: None,
         })
     });
 
@@ -416,7 +416,7 @@ impl AppState {
                     task_short_id: None,
                     task_project_id: None,
                     mount_project_id: Some(project_id.to_string()),
-                    session_worktree_path: None,
+                    session_workspace_path: None,
                 }),
             );
         };
@@ -438,7 +438,7 @@ impl AppState {
                     task_short_id: Some(task.short_id),
                     task_project_id: Some(task.project_id),
                     mount_project_id: Some(project_id.to_string()),
-                    session_worktree_path: None,
+                    session_workspace_path: None,
                 }),
             );
         }
@@ -460,13 +460,30 @@ impl AppState {
                     task_short_id: Some(task.short_id),
                     task_project_id: Some(project_id.to_string()),
                     mount_project_id: Some(project_id.to_string()),
-                    session_worktree_path: None,
+                    session_workspace_path: None,
                 }),
             );
         };
 
-        let Some(worktree_path) = session
-            .worktree_path
+        // Prefer the workspace_path owned by the session's task_run (migration
+        // 5 model); fall back to the legacy `sessions.worktree_path` until
+        // migration 6 drops the column. `task_run_id` is currently NULL for
+        // every session (supervisor is stubbed), so the fallback path is what
+        // all live traffic hits today.
+        let task_run_repo =
+            djinn_db::repositories::task_run::TaskRunRepository::new(self.db().clone());
+        let workspace_from_run: Option<String> = match session.task_run_id.as_deref() {
+            Some(run_id) => task_run_repo
+                .get(run_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|run| run.workspace_path),
+            None => None,
+        };
+        let workspace_source = workspace_from_run.or_else(|| session.worktree_path.clone());
+
+        let Some(workspace_path) = workspace_source
             .as_deref()
             .map(str::trim)
             .filter(|p| !p.is_empty())
@@ -474,25 +491,25 @@ impl AppState {
             tracing::debug!(
                 task_id = %task.id,
                 short_id = %task.short_id,
-                "memory mount falling back to main: active session has no worktree path"
+                "memory mount falling back to main: active session has no workspace path"
             );
             return canonical_view_resolution(
                 1,
                 Some(crate::server::MemoryMountViewFallback {
                     reason: crate::server::MemoryMountViewFallbackReason::MissingSessionWorktree,
-                    detail: Some("active session did not publish a worktree path".to_string()),
+                    detail: Some("active session did not publish a workspace path".to_string()),
                     active_task_count: Some(1),
                     task_id: Some(task.id),
                     task_short_id: Some(task.short_id),
                     task_project_id: Some(project_id.to_string()),
                     mount_project_id: Some(project_id.to_string()),
-                    session_worktree_path: None,
+                    session_workspace_path: None,
                 }),
             );
         };
 
-        let worktree_root = PathBuf::from(worktree_path);
-        if worktree_root == project_path {
+        let workspace_root = PathBuf::from(workspace_path);
+        if workspace_root == project_path {
             tracing::debug!(
                 task_id = %task.id,
                 short_id = %task.short_id,
@@ -503,7 +520,7 @@ impl AppState {
                 Some(crate::server::MemoryMountViewFallback {
                     reason: crate::server::MemoryMountViewFallbackReason::CanonicalProjectRoot,
                     detail: Some(
-                        "active session worktree resolves to the canonical project root"
+                        "active session workspace resolves to the canonical project root"
                             .to_string(),
                     ),
                     active_task_count: Some(1),
@@ -511,7 +528,7 @@ impl AppState {
                     task_short_id: Some(task.short_id),
                     task_project_id: Some(project_id.to_string()),
                     mount_project_id: Some(project_id.to_string()),
-                    session_worktree_path: Some(worktree_root.display().to_string()),
+                    session_workspace_path: Some(workspace_root.display().to_string()),
                 }),
             );
         }
@@ -519,12 +536,12 @@ impl AppState {
         crate::server::MemoryMountViewResolution {
             selection: MemoryViewSelection::Task {
                 task_short_id: Some(task.short_id.clone()),
-                worktree_root: Some(worktree_root.clone()),
+                worktree_root: Some(workspace_root.clone()),
             },
             health: crate::server::MemoryMountViewHealth {
                 kind: crate::server::MemoryMountViewKind::TaskScoped,
                 task_short_id: Some(task.short_id),
-                worktree_root: Some(worktree_root.display().to_string()),
+                worktree_root: Some(workspace_root.display().to_string()),
                 fallback: None,
             },
         }

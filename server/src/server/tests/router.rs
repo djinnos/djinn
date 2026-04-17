@@ -68,7 +68,7 @@ async fn health_reports_memory_mount_runtime_status_details() {
                         task_short_id: Some("u5qe".to_string()),
                         task_project_id: Some("project-123".to_string()),
                         mount_project_id: Some("project-123".to_string()),
-                        session_worktree_path: None,
+                        session_workspace_path: None,
                     }),
                 },
                 pending_writes: 0,

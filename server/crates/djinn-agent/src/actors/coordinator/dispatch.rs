@@ -109,16 +109,21 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
+        let task_run_repo =
+            djinn_db::repositories::task_run::TaskRunRepository::new(self.db.clone());
 
-        // Signal 1: real worktree git status (catches shell-driven changes
+        // Signal 1: real workspace git status (catches shell-driven changes
         // that the tool-call-based extraction in session_extraction.rs misses).
-        if let Ok(Some(worktree)) = session_repo.latest_worktree_path_for_task(task_id).await {
-            let path = std::path::PathBuf::from(&worktree);
+        // Post-refactor we read the workspace path from task_runs rather than
+        // sessions (migration 5); task_run_id is NULL for stubbed supervisor
+        // runs today, so this silently degrades to the taxonomy signal below.
+        if let Ok(Some(workspace)) = task_run_repo.latest_workspace_path_for_task(task_id).await {
+            let path = std::path::PathBuf::from(&workspace);
             if Self::worktree_has_uncommitted_changes(&path) {
                 tracing::info!(
                     task_id = %task_id,
-                    worktree = %worktree,
-                    "simple-lifecycle artifact detected: worktree has uncommitted changes"
+                    workspace = %workspace,
+                    "simple-lifecycle artifact detected: workspace has uncommitted changes"
                 );
                 return true;
             }

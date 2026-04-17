@@ -97,7 +97,7 @@ pub(crate) struct MemoryMountViewFallback {
     pub(crate) task_short_id: Option<String>,
     pub(crate) task_project_id: Option<String>,
     pub(crate) mount_project_id: Option<String>,
-    pub(crate) session_worktree_path: Option<String>,
+    pub(crate) session_workspace_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

@@ -58,7 +58,7 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -87,7 +87,7 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -147,7 +147,7 @@ impl SessionRepository {
         let running_sessions = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions WHERE `status` = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -181,7 +181,7 @@ impl SessionRepository {
         let orphans = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions WHERE task_id = ? AND `status` = 'running'"#,
             task_id
         )
@@ -214,7 +214,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -231,7 +231,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions WHERE project_id = ? AND id = ?"#,
             project_id,
             id
@@ -245,7 +245,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions WHERE task_id = ? ORDER BY started_at DESC"#,
             task_id
         )
@@ -262,7 +262,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions
              WHERE project_id = ? AND task_id = ? ORDER BY started_at DESC"#,
             project_id,
@@ -277,7 +277,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions
              WHERE `status` = 'running' ORDER BY started_at DESC"#
         )
@@ -290,7 +290,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions
              WHERE project_id = ? AND `status` = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -309,7 +309,8 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
                     s.started_at, s.ended_at,
-                    s.`status` AS "status!", s.tokens_in, s.tokens_out, s.worktree_path
+                    s.`status` AS "status!", s.tokens_in, s.tokens_out, s.worktree_path,
+                    s.task_run_id
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
              WHERE s.`status` = 'running' AND s.agent_type = 'planner' AND t.epic_id = ?
@@ -325,7 +326,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions
              WHERE task_id = ? AND `status` = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -400,7 +401,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions
              WHERE task_id = ? AND `status` = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -445,25 +446,6 @@ impl SessionRepository {
             .and_then(|json| serde_json::from_str::<Value>(&json).ok()))
     }
 
-    /// Return the most recent non-null `worktree_path` recorded for any session
-    /// that belongs to the given task.  Used by the coordinator to locate the
-    /// on-disk worktree of a finished simple-lifecycle session so it can probe
-    /// for uncommitted changes before deciding whether to short-circuit close.
-    pub async fn latest_worktree_path_for_task(&self, task_id: &str) -> Result<Option<String>> {
-        self.db.ensure_initialized().await?;
-
-        let row: Option<Option<String>> = sqlx::query_scalar!(
-            "SELECT worktree_path FROM sessions
-             WHERE task_id = ? AND worktree_path IS NOT NULL
-             ORDER BY started_at DESC LIMIT 1",
-            task_id
-        )
-        .fetch_optional(self.db.pool())
-        .await?;
-
-        Ok(row.flatten())
-    }
-
     /// Find the most recent paused session for a task that matches the given
     /// agent type.  Used during dispatch so that e.g. a PM session never
     /// accidentally resumes a worker's paused conversation.
@@ -476,7 +458,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path
+                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
              FROM sessions
              WHERE task_id = ? AND `status` = 'paused' AND agent_type = ?
              ORDER BY started_at DESC LIMIT 1"#,
