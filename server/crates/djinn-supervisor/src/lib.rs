@@ -39,9 +39,16 @@ use tracing::{debug, info};
 pub mod services;
 
 pub use services::SupervisorServices;
-pub use services::rpc::{RpcBackgroundTasks, RpcServices, StubRpcServices, UnimplementedRpcServices};
-pub use services::server::{ServeHandle, serve_on_unix_socket};
-pub use services::wire::{Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse};
+pub use services::rpc::{
+    ConnectTcpError, RpcBackgroundTasks, RpcServices, StubRpcServices, UnimplementedRpcServices,
+};
+pub use services::server::{
+    AllowAllValidator, DenyAllValidator, ExpectedTokenValidator, ServeHandle, TokenValidation,
+    TokenValidator, serve_on_tcp, serve_on_unix_socket,
+};
+pub use services::wire::{
+    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse,
+};
 
 // Re-export runtime spec types at the crate root so the thin
 // `djinn_agent::supervisor` shim preserves every existing import path.

@@ -60,6 +60,38 @@ pub enum FramePayload {
     /// Launcher → worker control signal — cancel / shutdown.  Travels
     /// out-of-band of the request/reply correlation.
     Control(ControlMsg),
+    /// Worker → launcher handshake.  MUST be the first frame on a TCP
+    /// connection (Phase 2 K8s PR 2).  The launcher validates the bearer
+    /// token via an injected [`crate::services::server::TokenValidator`]
+    /// before accepting any subsequent [`FramePayload::Rpc`].  Not used on
+    /// the legacy unix-socket path (that path trusts the filesystem
+    /// permissions on the socket).
+    AuthHello(AuthHelloMsg),
+    /// Launcher → worker auth result, delivered in response to an
+    /// [`FramePayload::AuthHello`] on the TCP path.  On rejection the
+    /// launcher writes this frame then closes the connection.
+    AuthResult(AuthResultMsg),
+}
+
+/// Contents of an [`FramePayload::AuthHello`] handshake frame.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthHelloMsg {
+    /// The task-run id the worker was launched to serve.  Used to
+    /// demultiplex connections on the single TCP listener.
+    pub task_run_id: String,
+    /// Bearer token the worker read from its projected ServiceAccount
+    /// token file (or any other equivalent source).  The server validates
+    /// this via the injected [`crate::services::server::TokenValidator`].
+    pub token: String,
+}
+
+/// Contents of an [`FramePayload::AuthResult`] handshake reply.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthResultMsg {
+    /// Whether the token was accepted.
+    pub accepted: bool,
+    /// Optional human-readable reason surfaced when `accepted == false`.
+    pub error: Option<String>,
 }
 
 /// Typed request variants — one per trait method on [`crate::SupervisorServices`]
@@ -272,5 +304,45 @@ mod tests {
             back.payload,
             FramePayload::Control(ControlMsg::Cancel)
         ));
+    }
+
+    #[test]
+    fn auth_hello_roundtrip() {
+        let f = Frame {
+            correlation_id: 0,
+            payload: FramePayload::AuthHello(AuthHelloMsg {
+                task_run_id: "run-7".into(),
+                token: "kubeSA-bearer-xyz".into(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::AuthHello(AuthHelloMsg { task_run_id, token }) => {
+                assert_eq!(task_run_id, "run-7");
+                assert_eq!(token, "kubeSA-bearer-xyz");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_result_roundtrip() {
+        let f = Frame {
+            correlation_id: 0,
+            payload: FramePayload::AuthResult(AuthResultMsg {
+                accepted: false,
+                error: Some("invalid bearer token".into()),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::AuthResult(AuthResultMsg { accepted, error }) => {
+                assert!(!accepted);
+                assert_eq!(error.as_deref(), Some("invalid bearer token"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

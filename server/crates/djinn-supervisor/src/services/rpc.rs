@@ -1,13 +1,15 @@
-//! Worker-side [`SupervisorServices`] impl that speaks bincode over a Unix
-//! domain socket to the launcher.
+//! Worker-side [`SupervisorServices`] impl that speaks bincode over a duplex
+//! byte stream.
 //!
-//! Phase 2 PR 5 of `/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md`.
+//! Phase 2 K8s PR 2 of `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`
+//! generalises this impl over any `AsyncRead + AsyncWrite + Unpin + Send`
+//! transport so the worker can dial either a Unix-domain socket (in-process
+//! tests + legacy path) or a TCP connection (the K8s Pod path).
 //!
-//! The worker process (`djinn-agent-worker`) dials the host-side socket the
-//! launcher bound in [`crate::services::server::serve_on_unix_socket`], hands
-//! the resulting `UnixStream` to [`RpcServices::spawn`], and stores the
-//! returned `Arc<RpcServices>` behind `Arc<dyn SupervisorServices>`.  Each
-//! trait method then:
+//! The worker process (`djinn-agent-worker`) dials the launcher, performs
+//! the transport-specific handshake (none on unix; [`AuthHelloMsg`] on TCP),
+//! then hands the resulting read/write halves to [`RpcServices::from_split`].
+//! Each trait method then:
 //!
 //! 1. allocates a fresh `correlation_id` via an atomic counter,
 //! 2. parks a `oneshot::Sender` for that id in a shared `pending` map,
@@ -30,6 +32,8 @@
 //! [objsafe]: crate::tests::_obj_safe
 
 use std::collections::HashMap;
+use std::io;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,33 +42,61 @@ use async_trait::async_trait;
 use djinn_core::models::Task;
 use djinn_runtime::wire::{ControlMsg, WorkspaceRef, read_frame, write_frame};
 use djinn_workspace::Workspace;
-use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use super::SupervisorServices;
-use super::wire::{Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse};
+use super::wire::{
+    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse,
+};
 use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
+
+/// Failure mode for [`RpcServices::connect_tcp`].
+///
+/// Distinguishes three error shapes callers can act on:
+///
+/// - [`ConnectTcpError::Io`] — the TCP dial, a frame read, or a frame write
+///   hit an underlying socket error.  Retry-eligible for transient faults.
+/// - [`ConnectTcpError::Rejected`] — the server answered the handshake with
+///   an `AuthResult { accepted: false, .. }`.  Carries the server's
+///   human-readable reason if any.  Not retry-eligible: the token is bad.
+/// - [`ConnectTcpError::Protocol`] — the server's first post-handshake
+///   frame was not an `AuthResult` (or was otherwise malformed).  Never
+///   expected in production — the server unconditionally replies with an
+///   `AuthResult` after the `AuthHello`.
+#[derive(Debug, Error)]
+pub enum ConnectTcpError {
+    #[error("io: {0}")]
+    Io(#[from] io::Error),
+    #[error("auth rejected: {0}")]
+    Rejected(String),
+    #[error("protocol: {0}")]
+    Protocol(String),
+}
+
+/// Wrap an arbitrary description into an `io::Error` so the `?` operator in
+/// [`RpcServices::connect_tcp`] can funnel non-io handshake mishaps through
+/// the same `Io` variant without hiding the frame-codec diagnostic.
+fn io_other(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, msg.into())
+}
 
 // ── Real RPC client ──────────────────────────────────────────────────────────
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<ServiceRpcResponse>>>>;
 
-/// Bincode-over-unix-socket [`SupervisorServices`] client.
+/// Bincode RPC client for [`SupervisorServices`].
 ///
-/// Constructed via [`RpcServices::spawn`] on the worker side once the
-/// launcher's socket has been dialed.  Internally holds:
-///
-/// * `tx` — outbound [`Frame`] channel drained by a dedicated writer task.
-/// * `pending` — correlation-id → `oneshot::Sender` map.  The reader task
-///   consults this on every inbound `RpcReply` to route the response back to
-///   the awaiting caller.
-/// * `cancel` — supervisor-wide token returned by [`SupervisorServices::cancel`].
-/// * `next_id` — monotonic `AtomicU64` that hands out correlation ids.
+/// The struct itself is transport-agnostic — it holds the outbound mpsc
+/// sender, the correlation-id → oneshot map, and the supervisor-wide
+/// cancellation token.  Transport-specific setup lives in the
+/// [`RpcServices::from_split`] / [`RpcServices::from_stream`] /
+/// [`RpcServices::connect_unix`] constructors.
 pub struct RpcServices {
     tx: mpsc::Sender<Frame>,
     pending: PendingMap,
@@ -72,7 +104,7 @@ pub struct RpcServices {
     next_id: AtomicU64,
 }
 
-/// Join handle bundle returned by [`RpcServices::spawn`].
+/// Join handle bundle returned by every [`RpcServices`] constructor.
 ///
 /// The caller keeps this around for the lifetime of the task-run and awaits
 /// both halves on shutdown so the socket is drained cleanly.
@@ -82,13 +114,24 @@ pub struct RpcBackgroundTasks {
 }
 
 impl RpcServices {
-    /// Spin up the reader / writer tasks against a connected [`UnixStream`].
+    /// Canonical constructor: spin up the reader / writer tasks against a
+    /// pre-split byte stream.
     ///
-    /// `cancel` is returned verbatim from [`SupervisorServices::cancel`];
-    /// the caller owns it and can pass the same token to the supervisor so
-    /// both sides observe the same cancellation.
-    pub fn spawn(stream: UnixStream, cancel: CancellationToken) -> (Arc<Self>, RpcBackgroundTasks) {
-        let (read_half, write_half) = stream.into_split();
+    /// Generic over any `AsyncRead + AsyncWrite + Unpin + Send + 'static`
+    /// half-pair so the worker can feed it either a `UnixStream` split or
+    /// a `TcpStream` split.  Pre-handshake bytes (e.g. the `AuthHello`
+    /// round-trip on TCP) MUST be consumed by the caller before handing
+    /// the halves in — this function assumes the stream is positioned at
+    /// the start of the post-handshake RPC byte stream.
+    pub fn from_split<R, W>(
+        read_half: R,
+        write_half: W,
+        cancel: CancellationToken,
+    ) -> (Arc<Self>, RpcBackgroundTasks)
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (tx, rx) = mpsc::channel::<Frame>(64);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
@@ -105,13 +148,117 @@ impl RpcServices {
         (services, RpcBackgroundTasks { reader, writer })
     }
 
-    /// Convenience wrapper: dial `path`, then call [`RpcServices::spawn`].
-    pub async fn connect(
+    /// Split a [`UnixStream`] and delegate to [`RpcServices::from_split`].
+    pub fn from_unix_stream(
+        stream: UnixStream,
+        cancel: CancellationToken,
+    ) -> (Arc<Self>, RpcBackgroundTasks) {
+        let (read_half, write_half) = stream.into_split();
+        Self::from_split(read_half, write_half, cancel)
+    }
+
+    /// Split a [`TcpStream`] and delegate to [`RpcServices::from_split`].
+    pub fn from_stream(
+        stream: TcpStream,
+        cancel: CancellationToken,
+    ) -> (Arc<Self>, RpcBackgroundTasks) {
+        let (read_half, write_half) = stream.into_split();
+        Self::from_split(read_half, write_half, cancel)
+    }
+
+    /// Historical alias.  Delegates to [`RpcServices::from_unix_stream`];
+    /// preserved so existing call sites that pre-dated the TCP path compile
+    /// without change.
+    pub fn spawn(
+        stream: UnixStream,
+        cancel: CancellationToken,
+    ) -> (Arc<Self>, RpcBackgroundTasks) {
+        Self::from_unix_stream(stream, cancel)
+    }
+
+    /// Convenience wrapper: dial `path` via `UnixStream`, then delegate to
+    /// [`RpcServices::from_unix_stream`].
+    pub async fn connect_unix(
         path: impl AsRef<Path>,
         cancel: CancellationToken,
     ) -> std::io::Result<(Arc<Self>, RpcBackgroundTasks)> {
         let stream = UnixStream::connect(path.as_ref()).await?;
-        Ok(Self::spawn(stream, cancel))
+        Ok(Self::from_unix_stream(stream, cancel))
+    }
+
+    /// Historical alias of [`RpcServices::connect_unix`].
+    pub async fn connect(
+        path: impl AsRef<Path>,
+        cancel: CancellationToken,
+    ) -> std::io::Result<(Arc<Self>, RpcBackgroundTasks)> {
+        Self::connect_unix(path, cancel).await
+    }
+
+    /// Dial `addr`, perform the [`FramePayload::AuthHello`] handshake, and —
+    /// on `AuthResult { accepted: true, .. }` — hand the split stream off to
+    /// [`RpcServices::from_split`].
+    ///
+    /// Called by `djinn-agent-worker` after it has read its projected
+    /// ServiceAccount token from `/var/run/secrets/tokens/djinn`.  The
+    /// handshake is a single request/response round-trip on `correlation_id
+    /// = 0`; after the ack, the same socket enters the normal RPC dispatch
+    /// loop unchanged.
+    ///
+    /// # Errors
+    ///
+    /// See [`ConnectTcpError`].  Transport/socket errors surface as
+    /// [`ConnectTcpError::Io`]; a server-side token rejection surfaces as
+    /// [`ConnectTcpError::Rejected`]; anything else the server sends back
+    /// in place of an `AuthResult` surfaces as [`ConnectTcpError::Protocol`].
+    pub async fn connect_tcp(
+        addr: SocketAddr,
+        task_run_id: String,
+        token: String,
+        cancel: CancellationToken,
+    ) -> Result<(Arc<Self>, RpcBackgroundTasks), ConnectTcpError> {
+        let mut stream = TcpStream::connect(addr).await?;
+        info!(%addr, %task_run_id, "tcp dialed launcher; sending AuthHello");
+
+        // 1. Send the AuthHello on correlation_id 0.
+        let hello = Frame {
+            correlation_id: 0,
+            payload: FramePayload::AuthHello(AuthHelloMsg {
+                task_run_id: task_run_id.clone(),
+                token,
+            }),
+        };
+        write_frame(&mut stream, &hello)
+            .await
+            .map_err(|e| ConnectTcpError::Io(io_other(format!("write AuthHello: {e}"))))?;
+
+        // 2. Read the AuthResult reply.
+        let reply: Frame = read_frame(&mut stream)
+            .await
+            .map_err(|e| ConnectTcpError::Io(io_other(format!("read AuthResult: {e}"))))?;
+
+        match reply.payload {
+            FramePayload::AuthResult(AuthResultMsg {
+                accepted: true, ..
+            }) => {
+                info!(%task_run_id, "tcp auth accepted");
+            }
+            FramePayload::AuthResult(AuthResultMsg {
+                accepted: false,
+                error,
+            }) => {
+                let reason = error.unwrap_or_else(|| "token rejected".into());
+                return Err(ConnectTcpError::Rejected(reason));
+            }
+            other => {
+                return Err(ConnectTcpError::Protocol(format!(
+                    "expected AuthResult, got {other:?}"
+                )));
+            }
+        }
+
+        // 3. Split the stream and enter the shared dispatch loop.
+        let (read_half, write_half) = stream.into_split();
+        Ok(Self::from_split(read_half, write_half, cancel))
     }
 
     /// Allocate a fresh correlation id, send the request, and await the
@@ -219,7 +366,10 @@ impl SupervisorServices for RpcServices {
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
 
-async fn reader_loop(mut read_half: OwnedReadHalf, pending: PendingMap, cancel: CancellationToken) {
+async fn reader_loop<R>(mut read_half: R, pending: PendingMap, cancel: CancellationToken)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     loop {
         tokio::select! {
             biased;
@@ -263,11 +413,13 @@ async fn reader_loop(mut read_half: OwnedReadHalf, pending: PendingMap, cancel: 
     }
 }
 
-async fn writer_loop(
-    mut write_half: OwnedWriteHalf,
+async fn writer_loop<W>(
+    mut write_half: W,
     mut rx: mpsc::Receiver<Frame>,
     cancel: CancellationToken,
-) {
+) where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     loop {
         tokio::select! {
             biased;
@@ -400,7 +552,7 @@ mod tests {
         });
 
         let cancel = CancellationToken::new();
-        let (services, bg) = RpcServices::spawn(client, cancel.clone());
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
         let result = services.load_task("hello-task".into()).await;
         let task = result.expect("load_task ok");
         assert_eq!(task.id, "hello-task");

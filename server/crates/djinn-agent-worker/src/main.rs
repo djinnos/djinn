@@ -1,41 +1,63 @@
-//! `djinn-agent-worker` — the binary the `LocalDockerRuntime` launches inside
-//! the per-task-run container.
+//! `djinn-agent-worker` — the binary the `KubernetesRuntime` launches inside
+//! each per-task-run Pod.
 //!
-//! Phase 2 PR 5 of `/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md`.
+//! Phase 2 K8s PR 2 of `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`.
 //!
-//! ## What this binary does (PR 5)
+//! ## What this binary does (PR 2 shape)
 //!
-//! 1. Parse CLI args (`--ipc-socket`).
-//! 2. Read a bincode-serialized [`TaskRunSpec`] from stdin.
-//! 3. Dial the launcher's Unix-domain socket and spin up a real
-//!    [`RpcServices`] — reader/writer tasks + correlation-id tracking —
-//!    so every `SupervisorServices` call the in-container supervisor makes
-//!    goes over the wire as a bincode frame.
-//! 4. Attach to the bind-mounted `/workspace` the host handed us
-//!    (`Workspace::attach_existing`) — no re-clone inside the container.
-//! 5. Invoke `services.load_task(spec.task_id)` to prove the full
+//! 1. Reads its environment (or matching flags): `DJINN_SERVER_ADDR`,
+//!    `DJINN_SPEC_PATH`, `DJINN_TOKEN_PATH`, `DJINN_TASK_RUN_ID`,
+//!    `DJINN_WORKSPACE_PATH`.  The launcher projects those values onto the
+//!    Pod as container env vars; `clap`'s `env` integration keeps the
+//!    out-of-cluster invocation path usable by integration tests that spawn
+//!    the binary with an `env()` bag instead of flags.
+//! 2. Reads the bincode-serialized [`TaskRunSpec`] from `DJINN_SPEC_PATH`
+//!    (mounted read-only from the per-task-run Secret at
+//!    `/var/run/djinn/spec.bin` in-cluster).
+//! 3. Reads the bearer token from `DJINN_TOKEN_PATH` (the kubelet projects a
+//!    rotating ServiceAccount token at `/var/run/secrets/tokens/djinn`).
+//! 4. Dials djinn-server's ClusterIP Service via
+//!    [`RpcServices::connect_tcp`], which sends an
+//!    [`djinn_supervisor::FramePayload::AuthHello`] carrying
+//!    `(task_run_id, token)` and awaits an accepted
+//!    [`djinn_supervisor::FramePayload::AuthResult`] before entering the
+//!    shared bincode-RPC dispatch loop.  Every `SupervisorServices` trait
+//!    call from here on is a round-trip over that TCP connection.
+//! 5. Attaches to the bind-mounted `/workspace` the launcher materialised
+//!    (`Workspace::attach_existing`) — no re-clone inside the Pod.
+//! 6. Invokes `services.load_task(spec.task_id)` to prove the full
 //!    request/reply round-trip works end-to-end.  A future PR swaps this
 //!    placeholder driver for the full `TaskRunSupervisor::new(...).run(spec)`
 //!    (the supervisor needs a real `TaskRunRepository` + `MirrorManager`
 //!    which we won't plumb into the worker until PR 6/7).
-//! 6. Emit the [`TaskRunReport`] frame on stderr as length-prefixed bincode
-//!    so the host-side launcher can observe it without conflating with
-//!    whatever structured logs land on stdout later.
+//! 7. Emits the terminal [`TaskRunReport`] as a length-prefixed bincode
+//!    frame on stdout so the launcher / test harness can observe the
+//!    terminal outcome without stripping the tracing log lines that land on
+//!    stderr.
 //!
-//! ## What this binary does NOT do yet
+//! ## What this binary deliberately does NOT do
 //!
-//! * No `TaskRunSupervisor::run` drive — that needs `TaskRunRepository` and
-//!   `MirrorManager`, which PR 6/7 wires up through `SessionRuntime`.
-//! * No Docker image wiring — PR 6.
-//! * Nothing in the production dispatch path launches this binary — PR 6/7.
+//! * No `TaskRunSupervisor::run` drive — PR 6/7.
+//! * No Kubernetes-API calls.  The worker never speaks to the apiserver; it
+//!   only dials the djinn-server Service and trusts the in-cluster DNS +
+//!   bearer-token handshake for auth.
+//! * No stdin spec slurp, no Unix-domain socket dial — those are retired
+//!   with this PR's K8s-only cut-over.  The unix-socket path survives on
+//!   the launcher side ([`djinn_supervisor::serve_on_unix_socket`]) for
+//!   in-process tests, but no production worker dials it.
 //!
-//! ## Why we don't depend on `djinn-agent`
+//! ## Why we don't depend on `djinn-agent` or `djinn-k8s`
 //!
-//! The worker lives behind an RPC boundary; linking `djinn-agent` would drag
-//! in the whole actor framework, coordinator, LSP manager, etc. — the exact
-//! surface we're trying to host-side.  Only `djinn-supervisor` +
-//! `djinn-runtime` + `djinn-workspace` + `djinn-core` cross the boundary.
+//! The worker lives behind an RPC boundary; linking `djinn-agent` would
+//! drag in the whole actor framework, coordinator, LSP manager, etc. — the
+//! exact surface we're trying to keep host-side.  Linking `djinn-k8s` would
+//! pull kube-rs + k8s-openapi into the Pod image for no benefit — the
+//! worker's only authenticated peer is djinn-server over the
+//! handshake-guarded TCP connection, not the apiserver.  Only
+//! `djinn-supervisor` + `djinn-runtime` + `djinn-workspace` + `djinn-core`
+//! cross the boundary.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -50,26 +72,48 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 mod ipc;
-mod stdio;
 
 /// Command-line arguments for the worker binary.
+///
+/// Every field is environment-driven so the production Pod manifest can
+/// populate them without having to author a bespoke `command:` argv; the
+/// same arguments are also exposed as long-form flags so out-of-cluster
+/// integration tests can call the binary with `--server-addr ...` etc.
 #[derive(Debug, Parser)]
 #[command(
     name = "djinn-agent-worker",
-    about = "In-container task-run supervisor (Phase 2 PR 5 — real RPC wire)"
+    about = "In-Pod task-run supervisor (Phase 2 K8s PR 2 — TCP + AuthHello wire)"
 )]
 struct WorkerArgs {
-    /// Path to the Unix-domain socket the host-side launcher is listening
-    /// on.  The worker dials this socket and (in PR 5+) speaks bincode RPC
-    /// over it for `SupervisorServices`.
-    ///
-    /// Also accepts `DJINN_IPC_SOCKET` from the environment — the launcher
-    /// always sets this inside the container, but the flag is the canonical
-    /// form for unit-level invocations.
-    #[arg(long, env = "DJINN_IPC_SOCKET")]
-    ipc_socket: PathBuf,
+    /// `host:port` of the djinn-server ClusterIP Service (usually
+    /// `djinn.<namespace>.svc.cluster.local:8443`).
+    #[arg(long, env = "DJINN_SERVER_ADDR")]
+    server_addr: SocketAddr,
 
-    /// Path the host bind-mounted `/workspace` at.  Defaults to the
+    /// Path the launcher mounted the bincode-serialized `TaskRunSpec` at.
+    /// Contractual default is `/var/run/djinn/spec.bin` — projected
+    /// read-only from the per-task-run Secret.
+    #[arg(long, env = "DJINN_SPEC_PATH", default_value = "/var/run/djinn/spec.bin")]
+    spec_path: PathBuf,
+
+    /// Path the kubelet projected the rotating ServiceAccount token at.
+    /// Contractual default is `/var/run/secrets/tokens/djinn` (audience =
+    /// `djinn`).  See the Pod manifest in `djinn-k8s::job` for the
+    /// projected-volume source.
+    #[arg(
+        long,
+        env = "DJINN_TOKEN_PATH",
+        default_value = "/var/run/secrets/tokens/djinn"
+    )]
+    token_path: PathBuf,
+
+    /// Task-run id the launcher allocated.  Carried verbatim in the
+    /// [`djinn_supervisor::AuthHelloMsg`] frame so the server can
+    /// demultiplex per-task-run state on a single TCP listener.
+    #[arg(long, env = "DJINN_TASK_RUN_ID")]
+    task_run_id: String,
+
+    /// Path the launcher bind-mounted `/workspace` at.  Defaults to the
     /// contractual `/workspace` — exposed as a flag so tests can run the
     /// binary outside a container against a tempdir.
     #[arg(long, env = "DJINN_WORKSPACE_PATH", default_value = "/workspace")]
@@ -95,53 +139,82 @@ async fn run() -> Result<()> {
         .init();
 
     let args = WorkerArgs::parse();
-    info!(socket = %args.ipc_socket.display(), workspace = %args.workspace_path.display(), "worker starting");
+    info!(
+        server = %args.server_addr,
+        spec = %args.spec_path.display(),
+        token = %args.token_path.display(),
+        task_run_id = %args.task_run_id,
+        workspace = %args.workspace_path.display(),
+        "worker starting"
+    );
 
-    // 1. Slurp the TaskRunSpec off stdin.
-    let mut stdin = tokio::io::stdin();
-    let spec: TaskRunSpec = stdio::read_bincode_from_stdin(&mut stdin)
+    // 1. Slurp the TaskRunSpec off the mounted Secret file.
+    let spec_bytes = tokio::fs::read(&args.spec_path)
         .await
-        .context("read TaskRunSpec from stdin")?;
+        .with_context(|| format!("read TaskRunSpec from {}", args.spec_path.display()))?;
+    let spec: TaskRunSpec =
+        bincode::deserialize(&spec_bytes).context("bincode deserialize TaskRunSpec")?;
     info!(task_id = %spec.task_id, flow = ?spec.flow, "received spec");
 
-    // 2. Dial the launcher's Unix socket and build the real RpcServices.
-    //    `RpcServices::connect` spawns the reader / writer tasks that drive
-    //    the bincode frame codec; every SupervisorServices trait call from
-    //    here on is a round-trip over that socket.
-    let cancel = CancellationToken::new();
-    let (rpc, background) = RpcServices::connect(&args.ipc_socket, cancel.clone())
+    // 2. Read the projected ServiceAccount token.  Kubelet-projected tokens
+    //    typically land without a trailing newline but be defensive — the
+    //    token is a JWT and any surrounding whitespace would poison the
+    //    Authorization: Bearer header on any future HTTP path.
+    let raw_token = tokio::fs::read_to_string(&args.token_path)
         .await
-        .with_context(|| format!("dial IPC socket at {}", args.ipc_socket.display()))?;
-    info!("dialed IPC socket");
+        .with_context(|| format!("read bearer token from {}", args.token_path.display()))?;
+    let token = raw_token.trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!(
+            "bearer token at {} is empty after trim",
+            args.token_path.display()
+        );
+    }
 
-    // 3. Attach to the host-materialised workspace.
+    // 3. Dial djinn-server and perform the AuthHello handshake.  `connect_tcp`
+    //    blocks on a single request/response round-trip on correlation_id 0,
+    //    then hands the now-authenticated socket to the shared RPC dispatch
+    //    loop.  Any post-handshake `SupervisorServices` call round-trips over
+    //    that same TCP connection.
+    let cancel = CancellationToken::new();
+    let (rpc, background) = RpcServices::connect_tcp(
+        args.server_addr,
+        args.task_run_id.clone(),
+        token,
+        cancel.clone(),
+    )
+    .await
+    .with_context(|| format!("dial djinn-server at {}", args.server_addr))?;
+    info!(server = %args.server_addr, "tcp connection up, RPC handshake accepted");
+
+    // 4. Attach to the host-materialised workspace.
     let workspace = Workspace::attach_existing(args.workspace_path.as_path(), &spec.task_branch)
         .context("attach workspace")?;
     info!(path = %workspace.path().display(), branch = %workspace.branch(), "workspace attached");
 
-    // 4. Wrap the RpcServices as `Arc<dyn SupervisorServices>` — the shape
+    // 5. Wrap the RpcServices as `Arc<dyn SupervisorServices>` — the shape
     //    `TaskRunSupervisor::new` consumes.  PR 6/7 will hand this `Arc` to
-    //    a real supervisor that also owns a `TaskRunRepository` + `MirrorManager`.
+    //    a real supervisor that also owns a `TaskRunRepository` +
+    //    `MirrorManager`.
     let services: Arc<dyn SupervisorServices> = rpc.clone();
 
-    // 5. Drive — today just a `load_task` round-trip.  The full
-    //    `TaskRunSupervisor::new(...).run(spec).await` requires DB / mirror
-    //    handles that live host-side; PR 6/7 wires those in.
+    // 6. Drive — today just a `load_task` round-trip.  PR 6/7 plugs the full
+    //    `TaskRunSupervisor::new(...).run(spec).await` in here.
     let report = drive_placeholder(&services, &spec)
         .await
         .context("placeholder supervisor drive")?;
 
-    // 6. Emit the terminal report as a bincode frame on stdout.  Tracing
+    // 7. Emit the terminal report as a bincode frame on stdout.  Tracing
     //    logs stay on stderr so test harnesses can decode the report byte
     //    stream without stripping log lines first.  A later PR may move the
-    //    report onto the IPC socket entirely.
+    //    report onto the RPC connection entirely.
     let mut stdout = tokio::io::stdout();
     ipc::write_frame(&mut stdout, &report)
         .await
         .context("emit TaskRunReport frame on stdout")?;
     stdout.flush().await.ok();
 
-    // 7. Shut down the RPC background tasks cleanly.
+    // 8. Shut down the RPC background tasks cleanly.
     cancel.cancel();
     let _ = background.reader.await;
     let _ = background.writer.await;
@@ -172,11 +245,15 @@ async fn drive_placeholder(
     })
 }
 
-/// Compile-time sanity: the path the worker contract publishes to the
-/// container image must be a valid `&Path` literal.  Catches typos in the
-/// default workspace path without a runtime surprise.
+/// Compile-time sanity: the paths the worker contract publishes to the
+/// container image must be valid `&Path` literals.  Catches typos in the
+/// default workspace / spec / token paths without a runtime surprise.
 #[allow(dead_code)]
 const _CONTRACT_WORKSPACE: &str = "/workspace";
+#[allow(dead_code)]
+const _CONTRACT_SPEC_PATH: &str = "/var/run/djinn/spec.bin";
+#[allow(dead_code)]
+const _CONTRACT_TOKEN_PATH: &str = "/var/run/secrets/tokens/djinn";
 #[allow(dead_code)]
 fn _assert_contract_workspace_path() -> &'static Path {
     Path::new(_CONTRACT_WORKSPACE)

@@ -1,58 +1,205 @@
-//! Launcher-side bincode-over-unix-socket server for [`SupervisorServices`].
+//! Launcher-side bincode-RPC server for [`SupervisorServices`].
 //!
-//! Phase 2 PR 5 of `/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md`.
+//! Phase 2 K8s PR 2 of `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`.
 //!
-//! The `LocalDockerRuntime` (PR 6) will call [`serve_on_unix_socket`] just
-//! before launching the container: it binds a per-task-run socket at
-//! `<ipc_root>/<task_run_id>.sock`, accepts exactly one connection (the
-//! worker's `RpcServices::connect`), and routes every inbound
-//! [`ServiceRpcRequest`] to a host-side `Arc<dyn SupervisorServices>` impl
-//! (`DirectServices` today, maybe a fancier composite later).
+//! The original [`serve_on_unix_socket`] (Phase 2 PR 5 of the retired
+//! `phase2-localdocker-scaffolding.md`) lives on for tests and the in-process
+//! supervisor path.  Alongside it, PR 2 lands [`serve_on_tcp`] — the same
+//! dispatch loop over a TCP listener guarded by an [`AuthHello`] handshake
+//! validated through an injected [`TokenValidator`].
 //!
-//! ## Scope of this PR
+//! ## Transports
 //!
-//! The server accepts **one** connection per socket lifetime — the worker
-//! container is 1:1 with the socket, so connection pooling is not a concern.
-//! Once the worker disconnects the reader task returns, the writer task
-//! drains, and the `ServeHandle` resolves.  Callers that want to tear the
-//! server down early can call [`ServeHandle::cancel`] or drop the handle.
+//! | Transport | Handshake | Intended caller |
+//! |---|---|---|
+//! | `serve_on_unix_socket` | none — filesystem perms | in-process tests + legacy path |
+//! | `serve_on_tcp` | `FramePayload::AuthHello { task_run_id, token }` | K8s Pod workers hitting the ClusterIP Service |
+//!
+//! ## Dispatch loop
+//!
+//! After the handshake both transports share [`dispatch_loop`], which owns
+//! the per-connection reader/writer pair and routes every inbound
+//! [`FramePayload::Rpc`] to the `Arc<dyn SupervisorServices>` the launcher
+//! injected.  Control frames (`Cancel` / `Shutdown`) flow the same way they
+//! do today.
 //!
 //! ## Cancellation
 //!
-//! [`serve_on_unix_socket`] returns a [`ServeHandle`] carrying a
-//! [`CancellationToken`].  Firing that token causes both the accept loop
-//! (before a connection arrives) and the reader/writer pair (after) to tear
-//! down.  When the launcher observes the worker's terminal report and wants
-//! to reclaim the socket, it cancels the handle and awaits the join handle.
+//! Both `serve_*` entry points return a [`ServeHandle`] carrying a
+//! [`CancellationToken`].  Firing that token tears the accept loop and any
+//! active connection down.
 
+use std::collections::HashMap;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use djinn_runtime::wire::{ControlMsg, read_frame, write_frame};
-use tokio::io::AsyncWriteExt;
-use tokio::net::UnixListener;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, UnixListener};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::SupervisorServices;
-use super::wire::{Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse};
+use super::wire::{
+    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse,
+};
 
-/// Handle returned by [`serve_on_unix_socket`].
+// ── TokenValidator ───────────────────────────────────────────────────────────
+
+/// Decoded outcome of a [`TokenValidator::validate`] call.
 ///
-/// Dropping the handle does not automatically cancel the server — the
-/// accept loop keeps the socket open until the cancellation token fires or
-/// the worker disconnects.  Call [`ServeHandle::cancel`] to force-stop.
+/// The real implementation lives in `djinn-k8s::token_review` (wired up
+/// during PR 3) and forwards to the apiserver's `TokenReview` subresource.
+/// This crate never depends on `djinn-k8s` — that would introduce a cycle
+/// through `djinn-server`'s wiring layer.  Instead, the server receives any
+/// impl via `Arc<V>` at boot time.
+#[derive(Debug, Clone)]
+pub struct TokenValidation {
+    /// Whether the token was accepted.
+    pub authenticated: bool,
+    /// ServiceAccount username when authenticated; `None` otherwise.
+    /// Used for audit logging only in v1.
+    pub username: Option<String>,
+}
+
+/// Object-safe trait the TCP listener calls before accepting RPC traffic.
+///
+/// Impls live outside this crate:
+///
+/// - `djinn-k8s::KubernetesTokenValidator` (follow-up PR) — posts a
+///   `TokenReview` against the in-cluster apiserver and verifies the SA
+///   identity encodes the expected task-run id.
+/// - [`AllowAllValidator`] / [`DenyAllValidator`] / [`ExpectedTokenValidator`]
+///   — test stubs in this crate.
+#[async_trait]
+pub trait TokenValidator: Send + Sync + 'static {
+    /// Validate `token` against `expected_task_run_id` and return a decoded
+    /// [`TokenValidation`].  The return `Err(String)` is reserved for
+    /// transport-level failures against the validator (e.g. apiserver
+    /// unreachable); a token that simply failed authentication returns
+    /// `Ok(TokenValidation { authenticated: false, .. })`.
+    ///
+    /// The `expected_task_run_id` comes from the worker's [`AuthHelloMsg`]
+    /// payload.  Real K8s impls use it to verify that the SA identity
+    /// encoded in the bearer token is scoped to the same task run — a
+    /// foreign worker presenting another task-run's token is rejected.
+    async fn validate(
+        &self,
+        token: &str,
+        expected_task_run_id: &str,
+    ) -> Result<TokenValidation, String>;
+}
+
+/// Trivial [`TokenValidator`] that accepts every token.  Used by the
+/// unix-socket path (the filesystem is the auth barrier there) and by
+/// tests.  NEVER wire this into a production server.
+pub struct AllowAllValidator;
+
+#[async_trait]
+impl TokenValidator for AllowAllValidator {
+    async fn validate(
+        &self,
+        _token: &str,
+        _expected_task_run_id: &str,
+    ) -> Result<TokenValidation, String> {
+        Ok(TokenValidation {
+            authenticated: true,
+            username: Some("allow-all".into()),
+        })
+    }
+}
+
+/// Trivial [`TokenValidator`] that rejects every token.  Used as a safe
+/// default + in contrast tests.
+pub struct DenyAllValidator;
+
+#[async_trait]
+impl TokenValidator for DenyAllValidator {
+    async fn validate(
+        &self,
+        _token: &str,
+        _expected_task_run_id: &str,
+    ) -> Result<TokenValidation, String> {
+        Ok(TokenValidation {
+            authenticated: false,
+            username: None,
+        })
+    }
+}
+
+/// Exact-match [`TokenValidator`] for tests.  Accepts iff *both* the
+/// presented bearer token and the task-run id on the [`AuthHelloMsg`]
+/// match the values pinned at construction time.
+///
+/// Mismatched task-run id → `authenticated: false` with a descriptive
+/// username slot so rejecting tests can tell the two failure modes apart.
+/// Invalid token → `authenticated: false` with `username: None`.
+pub struct ExpectedTokenValidator {
+    pub expected_token: String,
+    pub expected_task_run_id: String,
+}
+
+impl ExpectedTokenValidator {
+    pub fn new(
+        expected_token: impl Into<String>,
+        expected_task_run_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            expected_token: expected_token.into(),
+            expected_task_run_id: expected_task_run_id.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl TokenValidator for ExpectedTokenValidator {
+    async fn validate(
+        &self,
+        token: &str,
+        expected_task_run_id: &str,
+    ) -> Result<TokenValidation, String> {
+        if token != self.expected_token {
+            return Ok(TokenValidation {
+                authenticated: false,
+                username: None,
+            });
+        }
+        if expected_task_run_id != self.expected_task_run_id {
+            return Ok(TokenValidation {
+                authenticated: false,
+                username: Some(format!(
+                    "mismatched task_run_id (expected {}, got {})",
+                    self.expected_task_run_id, expected_task_run_id
+                )),
+            });
+        }
+        Ok(TokenValidation {
+            authenticated: true,
+            username: Some(format!("expected:{}", self.expected_task_run_id)),
+        })
+    }
+}
+
+// ── ServeHandle ──────────────────────────────────────────────────────────────
+
+/// Handle returned by either [`serve_on_unix_socket`] or [`serve_on_tcp`].
+///
+/// Dropping the handle does not automatically cancel the server.  Call
+/// [`ServeHandle::cancel`] (or drop the token you passed in) to force-stop.
 pub struct ServeHandle {
     /// Fire to tear the accept loop and any active connection down.
     pub cancel_server: CancellationToken,
     /// Await to join the accept loop (and the per-connection tasks it spawned).
     pub join: JoinHandle<()>,
-    /// Path the socket was bound to — exposed for debug / teardown unlink.
-    pub socket_path: PathBuf,
+    /// Path the socket was bound to, for the unix-socket path.  `None` on TCP.
+    pub socket_path: Option<PathBuf>,
+    /// Bound TCP address, for the TCP path.  `None` on the unix-socket path.
+    pub bound_addr: Option<SocketAddr>,
 }
 
 impl ServeHandle {
@@ -62,14 +209,14 @@ impl ServeHandle {
     }
 }
 
+// ── serve_on_unix_socket (legacy path, kept for tests) ───────────────────────
+
 /// Bind a Unix-domain socket at `path` and spawn the accept loop.
 ///
-/// `services` is used to dispatch every incoming RPC.  Typically this is a
-/// `DirectServices` the launcher owns, but any `Arc<dyn SupervisorServices>`
-/// works (tests inject a minimal fake).
-///
-/// Returns once the socket is bound and the accept loop is running — the
-/// worker can connect immediately.
+/// Intended for in-process tests and the legacy launcher path.  The TCP
+/// path ([`serve_on_tcp`]) is the production transport after Phase 2 K8s
+/// PR 2; this entry point stays functional so `rpc_roundtrip.rs` keeps
+/// exercising the dispatch without extra auth machinery.
 pub async fn serve_on_unix_socket<P: AsRef<Path>>(
     path: P,
     services: Arc<dyn SupervisorServices>,
@@ -78,7 +225,7 @@ pub async fn serve_on_unix_socket<P: AsRef<Path>>(
     // Tolerate a stale socket from a previous run.
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
-    info!(socket = %socket_path.display(), "SupervisorServices RPC server listening");
+    info!(socket = %socket_path.display(), "SupervisorServices RPC server listening (unix)");
 
     let cancel_server = CancellationToken::new();
     let cancel_child = cancel_server.clone();
@@ -94,11 +241,12 @@ pub async fn serve_on_unix_socket<P: AsRef<Path>>(
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _addr)) => {
-                        debug!(socket = %path_for_task.display(), "worker connected");
-                        run_connection(stream, services_arc, cancel_child.clone()).await;
+                        debug!(socket = %path_for_task.display(), "worker connected (unix)");
+                        let (read_half, write_half) = stream.into_split();
+                        dispatch_loop(read_half, write_half, services_arc, cancel_child.clone()).await;
                     }
                     Err(e) => {
-                        error!(error = %e, "SupervisorServices accept failed");
+                        error!(error = %e, "SupervisorServices accept failed (unix)");
                     }
                 }
             }
@@ -110,17 +258,237 @@ pub async fn serve_on_unix_socket<P: AsRef<Path>>(
     Ok(ServeHandle {
         cancel_server,
         join,
-        socket_path,
+        socket_path: Some(socket_path),
+        bound_addr: None,
     })
 }
 
-/// Drive the read/write loop for a single connection.
-async fn run_connection(
-    stream: tokio::net::UnixStream,
+// ── serve_on_tcp (PR 2) ──────────────────────────────────────────────────────
+
+/// Per-task-run connection state stored on the listener.
+///
+/// Single entry per `task_run_id`; the listener rejects a second AuthHello
+/// bearing an already-bound task_run_id.  In PR 2 the value is minimal —
+/// PR 4 extends it with a reference to the outbound control channel so the
+/// host-side dispatcher can push `Cancel` / `Shutdown` frames to the right
+/// connection.
+#[derive(Debug)]
+struct ConnState {
+    /// Username the validator returned — useful for audit logs.
+    #[allow(dead_code)]
+    username: Option<String>,
+}
+
+/// Bind a TCP listener at `addr` and spawn the accept loop.
+///
+/// Every accepted connection must send an [`FramePayload::AuthHello`] as
+/// its first frame.  The server validates the embedded token via
+/// `validator.validate(token, &hello.task_run_id)` and rejects the
+/// connection on failure.  On success it records `task_run_id → ConnState`
+/// and enters the shared [`dispatch_loop`] — from that point on the TCP
+/// path is byte-for-byte identical to the unix-socket path.
+pub async fn serve_on_tcp<V: TokenValidator>(
+    addr: SocketAddr,
+    services: Arc<dyn SupervisorServices>,
+    validator: Arc<V>,
+) -> io::Result<ServeHandle> {
+    let listener = TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
+    info!(addr = %bound_addr, "SupervisorServices RPC server listening (tcp)");
+
+    let cancel_server = CancellationToken::new();
+    let cancel_child = cancel_server.clone();
+
+    // Task-run id → connection state.  Guards against a second handshake
+    // re-using an already-bound task_run_id within the lifetime of this
+    // listener.
+    let conns: Arc<Mutex<HashMap<String, ConnState>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    let join = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel_child.cancelled() => {
+                    debug!(addr = %bound_addr, "tcp server cancelled");
+                    return;
+                }
+                accept = listener.accept() => {
+                    match accept {
+                        Ok((stream, peer)) => {
+                            debug!(%peer, "worker connected (tcp)");
+                            // One per-connection task so a slow validator
+                            // does not block other handshakes.
+                            let services = services.clone();
+                            let validator = validator.clone();
+                            let conns = conns.clone();
+                            let cancel_conn = cancel_child.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_tcp_connection(
+                                    stream,
+                                    services,
+                                    validator,
+                                    conns,
+                                    cancel_conn,
+                                )
+                                .await
+                                {
+                                    warn!(%peer, error = %e, "tcp connection terminated");
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!(error = %e, "tcp accept failed");
+                            // Transient errors are retried on the next iteration;
+                            // there's no obvious way to partially fail.
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(ServeHandle {
+        cancel_server,
+        join,
+        socket_path: None,
+        bound_addr: Some(bound_addr),
+    })
+}
+
+/// Run one TCP connection: read the AuthHello, validate, register, then
+/// enter the shared dispatch loop.
+async fn handle_tcp_connection<V: TokenValidator>(
+    stream: tokio::net::TcpStream,
+    services: Arc<dyn SupervisorServices>,
+    validator: Arc<V>,
+    conns: Arc<Mutex<HashMap<String, ConnState>>>,
+    cancel: CancellationToken,
+) -> Result<(), String> {
+    let (read_half, mut write_half) = stream.into_split();
+
+    // Use a small adapter so read_frame works on the owned read half.
+    // (`OwnedReadHalf` already impls `AsyncRead`, so no wrapper needed.)
+    let mut read_half = read_half;
+
+    // 1. First frame must be AuthHello.
+    let first = match read_frame::<_, Frame>(&mut read_half).await {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(format!("read AuthHello: {e}"));
+        }
+    };
+    let (task_run_id, token) = match first.payload {
+        FramePayload::AuthHello(AuthHelloMsg { task_run_id, token }) => (task_run_id, token),
+        other => {
+            // Best-effort reject and close.
+            let reject = Frame {
+                correlation_id: first.correlation_id,
+                payload: FramePayload::AuthResult(AuthResultMsg {
+                    accepted: false,
+                    error: Some("first frame must be AuthHello".into()),
+                }),
+            };
+            let _ = write_frame(&mut write_half, &reject).await;
+            let _ = write_half.shutdown().await;
+            return Err(format!("handshake: expected AuthHello, got {other:?}"));
+        }
+    };
+
+    // 2. Validate the bearer token.  The validator is free to interpret
+    //    `task_run_id` however it wants — the real K8s impl checks the SA
+    //    identity encoded in the token matches this string, `ExpectedTokenValidator`
+    //    does exact-match, and `AllowAllValidator` ignores it entirely.
+    let validation = match validator.validate(&token, &task_run_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            let reject = Frame {
+                correlation_id: first.correlation_id,
+                payload: FramePayload::AuthResult(AuthResultMsg {
+                    accepted: false,
+                    error: Some(format!("validator error: {e}")),
+                }),
+            };
+            let _ = write_frame(&mut write_half, &reject).await;
+            let _ = write_half.shutdown().await;
+            return Err(format!("validator: {e}"));
+        }
+    };
+    if !validation.authenticated {
+        let reject = Frame {
+            correlation_id: first.correlation_id,
+            payload: FramePayload::AuthResult(AuthResultMsg {
+                accepted: false,
+                error: Some("token rejected".into()),
+            }),
+        };
+        let _ = write_frame(&mut write_half, &reject).await;
+        let _ = write_half.shutdown().await;
+        return Err(format!("token rejected for task_run_id={task_run_id}"));
+    }
+
+    // 3. Register the connection; reject double-binds.
+    {
+        let mut map = conns.lock().await;
+        if map.contains_key(&task_run_id) {
+            let reject = Frame {
+                correlation_id: first.correlation_id,
+                payload: FramePayload::AuthResult(AuthResultMsg {
+                    accepted: false,
+                    error: Some(format!(
+                        "task_run_id {task_run_id} already bound to another connection"
+                    )),
+                }),
+            };
+            let _ = write_frame(&mut write_half, &reject).await;
+            let _ = write_half.shutdown().await;
+            return Err(format!("duplicate handshake for {task_run_id}"));
+        }
+        map.insert(
+            task_run_id.clone(),
+            ConnState {
+                username: validation.username.clone(),
+            },
+        );
+    }
+
+    // 4. Ack the handshake.
+    let ack = Frame {
+        correlation_id: first.correlation_id,
+        payload: FramePayload::AuthResult(AuthResultMsg {
+            accepted: true,
+            error: None,
+        }),
+    };
+    if let Err(e) = write_frame(&mut write_half, &ack).await {
+        conns.lock().await.remove(&task_run_id);
+        return Err(format!("write AuthResult ack: {e}"));
+    }
+    info!(%task_run_id, username = ?validation.username, "tcp handshake accepted");
+
+    // 5. Enter the shared dispatch loop.
+    dispatch_loop(read_half, write_half, services, cancel).await;
+
+    // 6. Deregister.
+    conns.lock().await.remove(&task_run_id);
+    Ok(())
+}
+
+// ── Shared dispatch loop ─────────────────────────────────────────────────────
+
+/// Drive the read/write pair for one post-handshake connection.
+///
+/// Parameterised on any split `AsyncRead` + `AsyncWrite` so it works over
+/// both the unix-socket halves and the TCP halves without duplicating the
+/// reader/writer boilerplate.
+async fn dispatch_loop<R, W>(
+    read_half: R,
+    write_half: W,
     services: Arc<dyn SupervisorServices>,
     cancel: CancellationToken,
-) {
-    let (read_half, write_half) = stream.into_split();
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let (reply_tx, reply_rx) = mpsc::channel::<Frame>(64);
 
     let writer = tokio::spawn(writer_loop(write_half, reply_rx, cancel.clone()));
@@ -130,12 +498,14 @@ async fn run_connection(
     let _ = writer.await;
 }
 
-async fn reader_loop(
-    mut read_half: OwnedReadHalf,
+async fn reader_loop<R>(
+    mut read_half: R,
     services: Arc<dyn SupervisorServices>,
     reply_tx: mpsc::Sender<Frame>,
     cancel: CancellationToken,
-) {
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     loop {
         tokio::select! {
             biased;
@@ -188,11 +558,13 @@ async fn reader_loop(
     }
 }
 
-async fn writer_loop(
-    mut write_half: OwnedWriteHalf,
+async fn writer_loop<W>(
+    mut write_half: W,
     mut rx: mpsc::Receiver<Frame>,
     cancel: CancellationToken,
-) {
+) where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     loop {
         tokio::select! {
             biased;
@@ -265,6 +637,8 @@ mod tests {
     use async_trait::async_trait;
     use djinn_core::models::Task;
     use djinn_workspace::Workspace;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpStream;
 
     use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
 
@@ -298,11 +672,11 @@ mod tests {
             _task_run_id: &str,
             _spec: &TaskRunSpec,
         ) -> Result<StageOutcome, StageError> {
-            unimplemented!("not exercised in PR 5 server tests")
+            unimplemented!("not exercised in server tests")
         }
 
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
-            unimplemented!("not exercised in PR 5 server tests")
+            unimplemented!("not exercised in server tests")
         }
     }
 
@@ -356,7 +730,7 @@ mod tests {
 
         // Drive the worker side via RpcServices.
         let client_cancel = CancellationToken::new();
-        let (rpc, bg) = super::super::rpc::RpcServices::connect(&sock, client_cancel.clone())
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
             .await
             .expect("connect rpc");
         let task = rpc
@@ -371,6 +745,149 @@ mod tests {
         handle.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
+        let _ = handle.join.await;
+    }
+
+    /// A TCP connection that presents a token the validator rejects MUST
+    /// receive an AuthResult { accepted: false } frame and then see the
+    /// server close the stream.
+    #[tokio::test]
+    async fn serve_on_tcp_rejects_bad_token() {
+        let services: Arc<dyn SupervisorServices> = Arc::new(FakeServices {
+            cancel: CancellationToken::new(),
+            canned_task_id: "never-reached".into(),
+        });
+        // ExpectedTokenValidator rejects every token that does not match.
+        let validator = Arc::new(ExpectedTokenValidator::new("good-token", "run-denied"));
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let handle = serve_on_tcp(addr, services, validator)
+            .await
+            .expect("bind tcp");
+        let bound = handle.bound_addr.expect("bound addr");
+
+        // Dial and present an AuthHello with a bogus token.
+        let mut stream = TcpStream::connect(bound).await.expect("connect");
+        let hello = Frame {
+            correlation_id: 1,
+            payload: FramePayload::AuthHello(AuthHelloMsg {
+                task_run_id: "run-denied".into(),
+                token: "not-a-real-token".into(),
+            }),
+        };
+        write_frame(&mut stream, &hello).await.expect("write hello");
+
+        // Expect an AuthResult reject.
+        let reply: Frame = read_frame(&mut stream).await.expect("read reply");
+        match reply.payload {
+            FramePayload::AuthResult(AuthResultMsg { accepted, .. }) => {
+                assert!(!accepted, "expected reject");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // After the reject the server shuts down its write half; a read
+        // should return EOF (0 bytes).
+        let mut buf = [0u8; 16];
+        let n = stream.read(&mut buf).await.expect("read after close");
+        assert_eq!(n, 0, "expected EOF after reject");
+
+        handle.cancel();
+        let _ = handle.join.await;
+    }
+
+    /// A TCP connection whose AuthHello presents the correct token but the
+    /// *wrong* task-run id MUST be rejected.  This proves the
+    /// `expected_task_run_id` validator argument is enforced separately from
+    /// the token bytes.
+    #[tokio::test]
+    async fn serve_on_tcp_rejects_mismatched_task_run_id() {
+        let services: Arc<dyn SupervisorServices> = Arc::new(FakeServices {
+            cancel: CancellationToken::new(),
+            canned_task_id: "never-reached".into(),
+        });
+        let validator = Arc::new(ExpectedTokenValidator::new(
+            "matched-token",
+            "run-expected",
+        ));
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let handle = serve_on_tcp(addr, services, validator)
+            .await
+            .expect("bind tcp");
+        let bound = handle.bound_addr.expect("bound addr");
+
+        let mut stream = TcpStream::connect(bound).await.expect("connect");
+        let hello = Frame {
+            correlation_id: 1,
+            payload: FramePayload::AuthHello(AuthHelloMsg {
+                // Right token, WRONG task_run_id.
+                task_run_id: "run-imposter".into(),
+                token: "matched-token".into(),
+            }),
+        };
+        write_frame(&mut stream, &hello).await.expect("write hello");
+
+        let reply: Frame = read_frame(&mut stream).await.expect("read reply");
+        match reply.payload {
+            FramePayload::AuthResult(AuthResultMsg { accepted, .. }) => {
+                assert!(!accepted, "expected mismatched-id reject");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // EOF after reject.
+        let mut buf = [0u8; 16];
+        let n = stream.read(&mut buf).await.expect("read after close");
+        assert_eq!(n, 0);
+
+        handle.cancel();
+        let _ = handle.join.await;
+    }
+
+    /// A TCP connection with an accepted token MUST be able to round-trip
+    /// a LoadTask through the shared dispatch loop.
+    #[tokio::test]
+    async fn serve_on_tcp_accepts_valid_token_and_routes_rpc() {
+        let services: Arc<dyn SupervisorServices> = Arc::new(FakeServices {
+            cancel: CancellationToken::new(),
+            canned_task_id: "tcp-task-1".into(),
+        });
+        let validator = Arc::new(AllowAllValidator);
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let handle = serve_on_tcp(addr, services, validator)
+            .await
+            .expect("bind tcp");
+        let bound = handle.bound_addr.expect("bound addr");
+
+        // Dial, handshake, then go through RpcServices for the round-trip.
+        let mut stream = TcpStream::connect(bound).await.expect("connect");
+        let hello = Frame {
+            correlation_id: 1,
+            payload: FramePayload::AuthHello(AuthHelloMsg {
+                task_run_id: "tcp-run-1".into(),
+                token: "any-token".into(),
+            }),
+        };
+        write_frame(&mut stream, &hello).await.expect("write hello");
+        let reply: Frame = read_frame(&mut stream).await.expect("read ack");
+        match reply.payload {
+            FramePayload::AuthResult(AuthResultMsg { accepted: true, .. }) => {}
+            other => panic!("expected accepted auth, got {other:?}"),
+        }
+
+        // Now the stream is in the shared dispatch loop.  Hand it to
+        // `RpcServices::from_stream` and round-trip a load_task.
+        let cancel = CancellationToken::new();
+        let (rpc, bg) = super::super::rpc::RpcServices::from_stream(stream, cancel.clone());
+        let task = rpc
+            .load_task("tcp-task-1".into())
+            .await
+            .expect("rpc load_task");
+        assert_eq!(task.id, "tcp-task-1");
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        handle.cancel();
         let _ = handle.join.await;
     }
 }
