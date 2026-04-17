@@ -116,8 +116,11 @@ secrets:
   vaultKey:
     existingSecret: ""
     # Base64-encoded 32-byte AES key used by djinn-db's credential vault.
-    # When empty, a placeholder secret is still rendered so the volume mount
-    # is always valid — djinn-server will refuse to start without a real key.
+    # When empty, the chart self-provisions: on first install it generates a
+    # fresh 32-byte key via Sprig `randBytes`, and on subsequent `helm upgrade`
+    # runs it looks up and preserves the existing Secret's value so data
+    # already encrypted under that key stays decryptable. Set this to pin a
+    # specific key (e.g. to share across environments or restore from backup).
     key: ""
 
 # -----------------------------------------------------------------------------
