@@ -1,5 +1,6 @@
 use super::*;
 use crate::verification::StepEvent;
+use djinn_workspace::MirrorManager;
 
 impl CoordinatorActor {
     /// Spawn background health-check tasks for all projects (or one) that have
@@ -104,8 +105,8 @@ impl CoordinatorActor {
             let sender = self.self_sender.clone();
             let events_tx = self.events_tx.clone();
             let project_id = project.id.clone();
-            let path = project.path.clone();
             let db = self.db.clone();
+            let mirror = self.mirror.clone();
 
             tracing::info!(
                 project_id = %project_id,
@@ -116,7 +117,8 @@ impl CoordinatorActor {
 
             tokio::spawn(async move {
                 let (healthy, error) =
-                    match run_project_health_check(project_id.clone(), path, db, events_tx).await {
+                    match run_project_health_check(project_id.clone(), mirror, db, events_tx).await
+                    {
                         Ok(()) => (true, None),
                         Err(e) => (false, Some(e)),
                     };
@@ -134,16 +136,19 @@ impl CoordinatorActor {
 
 // ─── Project health check (ADR-014) ──────────────────────────────────────────
 
-/// Create a temporary git worktree, run setup + verification commands, clean up,
-/// and return `Ok(())` if all commands pass or `Err(reason)` if any fail.
+/// Clone a hardlinked ephemeral workspace from the project's bare mirror,
+/// run setup + verification commands inside it, and return `Ok(())` if all
+/// commands pass or `Err(reason)` if any fail.
+///
+/// The workspace is owned by a `TempDir` and cleans itself up on drop —
+/// no explicit teardown is needed, and no `.djinn/worktrees/_health_check`
+/// debris is ever left behind (unlike the legacy worktree flow this replaced).
 pub(super) async fn run_project_health_check(
     project_id: String,
-    path: String,
+    mirror: Option<Arc<MirrorManager>>,
     db: djinn_db::Database,
     events_tx: broadcast::Sender<DjinnEventEnvelope>,
 ) -> Result<(), String> {
-    let project_path = std::path::PathBuf::from(&path);
-
     // Resolve target branch (falls back to "main").
     let target_branch =
         GitSettingsRepository::new(db.clone(), crate::events::event_bus_for(&events_tx))
@@ -152,56 +157,86 @@ pub(super) async fn run_project_health_check(
             .map(|s| s.target_branch)
             .unwrap_or_else(|_| "main".to_string());
 
-    let git = GitActorHandle::spawn(project_path.clone())
-        .map_err(|e| format!("failed to open git repo at {path}: {e}"))?;
+    let mirror = mirror.ok_or_else(|| {
+        "health check requires a configured MirrorManager (none attached to coordinator)"
+            .to_string()
+    })?;
 
-    // Remove any stale health-check worktree from a previous crashed run.
-    let stale = project_path
-        .join(".djinn")
-        .join("worktrees")
-        .join("_health_check");
-    if stale.exists() {
-        let _ = tokio::fs::remove_dir_all(&stale).await;
+    let workspace = mirror
+        .clone_ephemeral(&project_id, &target_branch)
+        .await
+        .map_err(|e| format!("failed to clone ephemeral workspace for health check: {e}"))?;
+    let wt_path = workspace.path().to_path_buf();
+
+    // Resolve HEAD inside the ephemeral clone — `--branch` checked out
+    // `target_branch`, so `HEAD` points at its tip commit.
+    let head_out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(&wt_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .await
+        .map_err(|e| format!("failed to resolve target branch HEAD: {e}"))?;
+    if !head_out.status.success() {
+        let stderr = String::from_utf8_lossy(&head_out.stderr);
+        return Err(format!(
+            "failed to resolve target branch HEAD: {}",
+            stderr.trim()
+        ));
     }
-    let _ = git
-        .run_command(vec!["worktree".into(), "prune".into()])
-        .await;
+    let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+    if commit_sha.is_empty() {
+        return Err("failed to resolve non-empty target branch HEAD".to_string());
+    }
 
-    let wt_path = git
-        .create_worktree("_health_check", &target_branch, true)
-        .await
-        .map_err(|e| format!("failed to create health-check worktree: {e}"))?;
+    // For health checks there is no task/role, so no override; fall back to
+    // full-project commands (resolve_scoped_commands will use the full
+    // verification list when no rules are configured or nothing matches).
+    let scoped_commands =
+        crate::verification::scoped::resolve_scoped_commands(&wt_path, &target_branch, None);
+    let verification = crate::verification::service::verify_commit(
+        &project_id,
+        &commit_sha,
+        &wt_path,
+        &db,
+        &scoped_commands,
+    )
+    .await
+    .map_err(|e| format!("health-check verification error: {e}"))?;
 
-    let result = async {
-        let head = git
-            .run_command(vec!["rev-parse".into(), "HEAD".into()])
-            .await
-            .map_err(|e| format!("failed to resolve target branch HEAD: {e}"))?;
-        let commit_sha = head.stdout.trim().to_string();
-        if commit_sha.is_empty() {
-            return Err("failed to resolve non-empty target branch HEAD".to_string());
-        }
-
-        // For health checks there is no task/role, so no override; fall back to
-        // full-project commands (resolve_scoped_commands will use the full
-        // verification list when no rules are configured or nothing matches).
-        let scoped_commands =
-            crate::verification::scoped::resolve_scoped_commands(&wt_path, &target_branch, None);
-        let verification = crate::verification::service::verify_commit(
+    for r in &verification.setup_results {
+        let _ = events_tx.send(DjinnEventEnvelope::verification_step(
             &project_id,
-            &commit_sha,
-            &wt_path,
-            &db,
-            &scoped_commands,
-        )
-        .await
-        .map_err(|e| format!("health-check verification error: {e}"))?;
+            None,
+            "setup",
+            &StepEvent::Finished {
+                index: 0,
+                name: r.name.clone(),
+                exit_code: r.exit_code,
+                duration_ms: r.duration_ms,
+                stdout: r.stdout.clone(),
+                stderr: r.stderr.clone(),
+            },
+        ));
+    }
 
-        for r in &verification.setup_results {
+    if verification.cached {
+        let _ = events_tx.send(DjinnEventEnvelope::verification_step(
+            &project_id,
+            None,
+            "verification",
+            &StepEvent::CacheHit {
+                commit_sha: commit_sha.clone(),
+                cached_at: String::new(),
+                original_duration_ms: verification.total_duration_ms,
+            },
+        ));
+    } else {
+        for r in &verification.verification_results {
             let _ = events_tx.send(DjinnEventEnvelope::verification_step(
                 &project_id,
                 None,
-                "setup",
+                "verification",
                 &StepEvent::Finished {
                     index: 0,
                     name: r.name.clone(),
@@ -212,66 +247,28 @@ pub(super) async fn run_project_health_check(
                 },
             ));
         }
-
-        if verification.cached {
-            let _ = events_tx.send(DjinnEventEnvelope::verification_step(
-                &project_id,
-                None,
-                "verification",
-                &StepEvent::CacheHit {
-                    commit_sha: commit_sha.clone(),
-                    cached_at: String::new(),
-                    original_duration_ms: verification.total_duration_ms,
-                },
-            ));
-        } else {
-            for r in &verification.verification_results {
-                let _ = events_tx.send(DjinnEventEnvelope::verification_step(
-                    &project_id,
-                    None,
-                    "verification",
-                    &StepEvent::Finished {
-                        index: 0,
-                        name: r.name.clone(),
-                        exit_code: r.exit_code,
-                        duration_ms: r.duration_ms,
-                        stdout: r.stdout.clone(),
-                        stderr: r.stderr.clone(),
-                    },
-                ));
-            }
-        }
-
-        if verification.passed {
-            Ok(())
-        } else {
-            let msg = verification
-                .verification_results
-                .last()
-                .map(|f| {
-                    format!(
-                        "verification command '{}' failed (exit {}): {}",
-                        f.name,
-                        f.exit_code,
-                        f.stderr.trim()
-                    )
-                })
-                .unwrap_or_else(|| "verification failed".to_string());
-            Err(msg)
-        }
-    }
-    .await;
-
-    // Always remove the temporary worktree.
-    if let Err(e) = git.remove_worktree(&wt_path).await {
-        tracing::warn!(
-            project_id = %project_id,
-            error = %e,
-            "CoordinatorActor: failed to remove health-check worktree"
-        );
     }
 
-    result
+    // `workspace` drops here — the `TempDir` deletes its contents on drop and
+    // the object db was only hardlinked from the mirror, so nothing is left
+    // behind on disk.
+    if verification.passed {
+        Ok(())
+    } else {
+        let msg = verification
+            .verification_results
+            .last()
+            .map(|f| {
+                format!(
+                    "verification command '{}' failed (exit {}): {}",
+                    f.name,
+                    f.exit_code,
+                    f.stderr.trim()
+                )
+            })
+            .unwrap_or_else(|| "verification failed".to_string());
+        Err(msg)
+    }
 }
 
 pub(super) async fn sweep_stale_resources(

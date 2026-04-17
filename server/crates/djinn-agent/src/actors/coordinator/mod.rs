@@ -25,7 +25,6 @@ use djinn_db::GitSettingsRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::{ActivityQuery, ReadyQuery, TaskRepository};
-use djinn_git::GitActorHandle;
 // These additional imports are only used by `#[cfg(test)]` blocks in child
 // submodules (rules, health, prompt_eval, etc.) via `use super::*;`.
 #[cfg(test)]
