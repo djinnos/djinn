@@ -24,4 +24,7 @@ uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
+async-trait = "0.1"
+djinn-workspace = { path = "../djinn-workspace" }
 tokio = { version = "1", features = ["full", "test-util"] }
+tokio-util = "0.7"

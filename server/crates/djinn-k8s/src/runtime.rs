@@ -20,35 +20,59 @@
 //! [`TaskRunReport`] with `outcome: TaskRunOutcome::Interrupted` — real
 //! terminal reports flow over the launcher's TCP connection in a later PR.
 //!
-//! `attach_stdio` is a placeholder — see the method doc comment. The real
-//! BiStream hand-off between `serve_on_tcp` (which owns the post-handshake
-//! TCP connection) and the runtime's `attach_stdio` return value is a
-//! Phase 2.1 follow-up; the Kubernetes dispatch path today synthesises the
-//! terminal `TaskRunReport` from the Job's terminal state in `teardown`
-//! instead (see `djinn_agent::actors::slot::supervisor_runner`).
+//! `attach_stdio` is Phase 2.1's real BiStream hand-off: it awaits the
+//! [`PendingConnection`] that `prepare` reserved on the shared
+//! [`ConnectionRegistry`], consumes it via `into_parts`, and spawns a pair
+//! of forwarder / translator tasks that bridge the TCP frame channel and
+//! the returned [`BiStream`].  `cancel` pushes a
+//! `FramePayload::Control(Cancel)` at the live worker before deleting the
+//! Job.  `teardown` drains any remaining `events_rx` for a
+//! [`StreamEvent::Report`]; if `attach_stdio` already consumed the slot
+//! (the forwarder owns `events_rx` for the BiStream's lifetime), teardown
+//! falls back to the Job-status polling path immediately.
 //!
 //! End-to-end `prepare`/`cancel`/`teardown` against a live kind cluster is
 //! covered by `tests/kind_smoke.rs` (DJINN_TEST_KIND-gated). The unit tests
-//! in this file are builder-parity invariants only — they DO NOT exercise
-//! the runtime methods, which require a `kube::Client`.
+//! in this file exercise both the builder-parity invariants and the
+//! forwarder topology in `attach_stdio` via an in-memory registry.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
+use djinn_runtime::wire::ControlMsg;
 use djinn_runtime::{
-    BiStream, RoleKind, RunHandle, RuntimeError, SessionRuntime, TaskRunOutcome, TaskRunReport,
-    TaskRunSpec,
+    BiStream, RoleKind, RunHandle, RuntimeError, SessionRuntime, StreamEvent, StreamFrame,
+    TaskRunOutcome, TaskRunReport, TaskRunSpec,
 };
+use djinn_supervisor::{ConnectionRegistry, Frame, FramePayload, PendingConnection};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use serde_json::json;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
 use crate::job::build_task_run_job;
 use crate::secret::{build_task_run_secret, job_owner_reference, task_run_resource_name};
+
+/// Bound on the [`ConnectionRegistry::register_pending`] buffer used by
+/// `prepare`.  Large enough that a busy worker doesn't back-pressure on
+/// frame-rate, small enough that we don't hoard memory if the launcher
+/// stalls between prepares.
+const PENDING_CONNECTION_BUFFER: usize = 64;
+
+/// How long [`KubernetesRuntime::teardown`] will drain an un-consumed
+/// `events_rx` looking for a terminal [`StreamEvent::Report`] before
+/// falling back to the Job-status poll path.  Short because the worker
+/// always emits the terminal report as its last frame before exiting, so
+/// any observable delay here is purely network latency; when the events
+/// stream is closed without a report we want to fall through to the
+/// Job-status poll quickly.
+const TEARDOWN_EVENTS_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Grace period observed while polling `teardown` for job completion.
 ///
@@ -63,10 +87,24 @@ const TEARDOWN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Kubernetes-backed `SessionRuntime`.
 ///
 /// Owns the cluster-side configuration plus a `kube::Client` acquired from
-/// the ambient kubeconfig / in-cluster ServiceAccount.
+/// the ambient kubeconfig / in-cluster ServiceAccount, plus a shared
+/// [`ConnectionRegistry`] the launcher-side `serve_on_tcp` routes worker
+/// event frames through.  The registry is process-wide (one `Arc` lives in
+/// `server::AppState`) and threaded into every `KubernetesRuntime`
+/// instance so multiple parallel task-runs share a single TCP listener.
 pub struct KubernetesRuntime {
     client: kube::Client,
     config: KubernetesConfig,
+    registry: Arc<ConnectionRegistry>,
+    /// Per-task-run [`PendingConnection`] handles reserved during `prepare`
+    /// and drained by `attach_stdio` / `teardown`.  Keyed by
+    /// `task_run_id`.  Entries stay present until whichever method lands
+    /// first: if `attach_stdio` runs, it consumes the handle via
+    /// `into_parts` and stores nothing back; if `teardown` runs without a
+    /// matching attach (e.g. the worker never dialled), it drains the
+    /// handle's `events_rx` for a short window before falling back to the
+    /// Job-status poll.
+    pending: Arc<Mutex<HashMap<String, PendingConnection>>>,
 }
 
 impl KubernetesRuntime {
@@ -77,15 +115,32 @@ impl KubernetesRuntime {
     /// Returns the underlying `kube::Error` on discovery failure rather than
     /// panicking — callers on a dev box without a cluster can surface the
     /// error and fall back to another runtime.
-    pub async fn new(config: KubernetesConfig) -> Result<Self, kube::Error> {
+    pub async fn new(
+        config: KubernetesConfig,
+        registry: Arc<ConnectionRegistry>,
+    ) -> Result<Self, kube::Error> {
         let client = kube::Client::try_default().await?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            registry,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     /// Construct a runtime from an already-built client — handy for tests and
     /// for call sites that share a client across multiple consumers.
-    pub fn from_client(client: kube::Client, config: KubernetesConfig) -> Self {
-        Self { client, config }
+    pub fn from_client(
+        client: kube::Client,
+        config: KubernetesConfig,
+        registry: Arc<ConnectionRegistry>,
+    ) -> Self {
+        Self {
+            client,
+            config,
+            registry,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Reference to the active config (used by tests + the kind smoke suite).
@@ -96,6 +151,13 @@ impl KubernetesRuntime {
     /// Reference to the underlying `kube::Client`.
     pub fn client(&self) -> &kube::Client {
         &self.client
+    }
+
+    /// Reference to the shared [`ConnectionRegistry`].  Exposed so call
+    /// sites that boot their own runtime can wire the same registry into
+    /// a concurrent `serve_on_tcp` spawn.
+    pub fn registry(&self) -> &Arc<ConnectionRegistry> {
+        &self.registry
     }
 }
 
@@ -124,36 +186,69 @@ impl SessionRuntime for KubernetesRuntime {
             "kubernetes_runtime: preparing task-run resources"
         );
 
+        // 0. Reserve the registry slot BEFORE creating the Job.  This closes
+        //    the race where the Pod starts up and completes the AuthHello
+        //    handshake faster than `prepare` returns — without a reservation
+        //    the serve_on_tcp accept loop would drop the worker's event
+        //    frames as "unrecognised task_run_id".  The handle is stashed in
+        //    `self.pending` for `attach_stdio` / `teardown` to consume.
+        let pending = self
+            .registry
+            .register_pending(task_run_id_str.clone(), PENDING_CONNECTION_BUFFER)
+            .await
+            .map_err(|e| RuntimeError::Prepare(format!("register pending: {e}")))?;
+        self.pending
+            .lock()
+            .await
+            .insert(task_run_id_str.clone(), pending);
+
         // 1. Build + create the per-task-run Secret.
-        let secret = build_task_run_secret(ns, &task_run_id, spec)
-            .map_err(|e| RuntimeError::Prepare(format!("build secret: {e}")))?;
+        let secret = match build_task_run_secret(ns, &task_run_id, spec) {
+            Ok(s) => s,
+            Err(e) => {
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(format!("build secret: {e}")));
+            }
+        };
 
         let secrets: Api<Secret> = Api::namespaced(self.client.clone(), ns);
-        secrets
-            .create(&PostParams::default(), &secret)
-            .await
-            .map_err(|e| RuntimeError::Prepare(format!("create secret {resource_name}: {e}")))?;
+        if let Err(e) = secrets.create(&PostParams::default(), &secret).await {
+            self.drop_pending(&task_run_id_str).await;
+            return Err(RuntimeError::Prepare(format!(
+                "create secret {resource_name}: {e}"
+            )));
+        }
 
         // 2. Build + create the Job manifest.
         let job = build_task_run_job(&self.config, &task_run_id, &resource_name);
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
-        let created_job = jobs.create(&PostParams::default(), &job).await.map_err(|e| {
-            // Best-effort cleanup of the orphan Secret — don't shadow the
-            // original error if cleanup also fails.
-            let secrets = secrets.clone();
-            let name = resource_name.clone();
-            tokio::spawn(async move {
-                let _ = secrets.delete(&name, &DeleteParams::default()).await;
-            });
-            RuntimeError::Prepare(format!("create job {resource_name}: {e}"))
-        })?;
+        let created_job = match jobs.create(&PostParams::default(), &job).await {
+            Ok(j) => j,
+            Err(e) => {
+                // Best-effort cleanup of the orphan Secret — don't shadow the
+                // original error if cleanup also fails.
+                let secrets_bg = secrets.clone();
+                let name = resource_name.clone();
+                tokio::spawn(async move {
+                    let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
+                });
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(format!(
+                    "create job {resource_name}: {e}"
+                )));
+            }
+        };
 
         // 3. Attach an OwnerReference so the Secret GCs with the Job.
-        let job_uid = created_job
-            .metadata
-            .uid
-            .clone()
-            .ok_or_else(|| RuntimeError::Prepare("created Job missing metadata.uid".into()))?;
+        let job_uid = match created_job.metadata.uid.clone() {
+            Some(uid) => uid,
+            None => {
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(
+                    "created Job missing metadata.uid".into(),
+                ));
+            }
+        };
         let owner = job_owner_reference(&resource_name, &job_uid);
         let patch = json!({
             "metadata": {
@@ -195,56 +290,131 @@ impl SessionRuntime for KubernetesRuntime {
         })
     }
 
-    /// Placeholder BiStream — the real event stream is fed by the launcher's
-    /// TCP dispatch loop (see `djinn-supervisor::services::server::serve_on_tcp`),
-    /// which is invoked OUTSIDE the runtime by the supervisor runner. The
-    /// worker's connection and the dispatched `BiStream` are joined by the
-    /// supervisor, not by this method.
+    /// Await the worker Pod's TCP handshake and wire a [`BiStream`] onto
+    /// its event + control channels.
     ///
-    /// Returning a detached in-memory `BiStream` keeps trait-shape parity so
-    /// the existing `SessionRuntime` consumer code compiles; callers on the
-    /// Kubernetes path today ignore the return value and rely on `teardown`
-    /// to derive the terminal `TaskRunReport` from the Job's exit state
-    /// instead. Formalising the serve_on_tcp → attach_stdio hand-off is a
-    /// Phase 2.1 follow-up.
-    async fn attach_stdio(&self, _handle: &RunHandle) -> Result<BiStream, RuntimeError> {
-        let (stream, _events_tx, _requests_rx) = BiStream::new_in_memory(16);
-        // _events_tx and _requests_rx are dropped here — callers observing
-        // the returned `BiStream` will see `events_rx` closed on the next
-        // poll. PR 4 pt2 replaces this with the real launcher-side stream.
-        Ok(stream)
+    /// Flow:
+    ///   1. Pull the [`PendingConnection`] reserved by `prepare` out of
+    ///      `self.pending` — error out if `prepare` never ran for this
+    ///      `task_run_id` or `attach_stdio` was already called once.
+    ///   2. Consume the handle via [`PendingConnection::into_parts`],
+    ///      bypassing the handle's [`Drop`] auto-deregister.  The
+    ///      Kubernetes runtime now owns the registry slot for the rest of
+    ///      the run; `teardown` deregisters explicitly after cleanup.
+    ///   3. Await `connected_rx` so we don't spawn forwarder tasks before
+    ///      the worker actually finishes `AuthHello` — the outbound
+    ///      sender isn't populated until that point.
+    ///   4. Spawn a forwarder: `events_rx` (TCP → registry) → the
+    ///      `BiStream::events_rx` the caller reads.  Terminates naturally
+    ///      when `events_rx` closes (the worker exits and
+    ///      `serve_on_tcp`'s dispatch loop drops its side).
+    ///   5. Spawn a translator: the `BiStream::requests_tx` the caller
+    ///      writes → outbound `Frame`s pushed back down the worker TCP
+    ///      connection.  `StreamFrame::Cancel` maps onto
+    ///      `FramePayload::Control(ControlMsg::Cancel)`; `RpcResponse`
+    ///      frames are logged — they belong to a future PR (they'd carry
+    ///      correlated worker-originated RPC replies).
+    ///
+    /// Both spawned tasks are fully detached — they own their ends of the
+    /// channels and drop cleanly when either side closes.  Returning the
+    /// `BiStream` here hands live event ownership back to the supervisor
+    /// runner; nothing in the runtime continues to hold the consumed
+    /// `events_rx`, so a later `teardown` falls straight through to the
+    /// Job-status poll path.
+    async fn attach_stdio(&self, handle: &RunHandle) -> Result<BiStream, RuntimeError> {
+        let task_run_id = handle.task_run_id.clone();
+
+        let pending = {
+            let mut pending_map = self.pending.lock().await;
+            pending_map.remove(&task_run_id)
+        };
+        let pending = pending.ok_or_else(|| {
+            RuntimeError::Attach(format!(
+                "no pending connection reserved for task_run_id={task_run_id} \
+                 (prepare not called, or attach_stdio already consumed it)"
+            ))
+        })?;
+
+        bridge_pending_to_bistream(&task_run_id, pending).await
     }
 
-    /// Request graceful cancellation by deleting the Job with `Foreground`
-    /// propagation and the configured grace period. Idempotent: a 404 from
-    /// the apiserver is mapped to success.
+    /// Request graceful cancellation by first nudging the worker with a
+    /// `FramePayload::Control(Cancel)` over its outbound sender (best-
+    /// effort — if the worker never dialled, or the sender has already
+    /// closed, we skip it) and then deleting the Job with `Foreground`
+    /// propagation and the configured grace period.  Idempotent: a 404
+    /// from the apiserver is mapped to success.
     ///
-    /// Uses a default grace of 30 seconds — matches kubelet defaults. A
-    /// richer `cancel(handle, grace_ms)` shape is not currently exposed by
-    /// the `SessionRuntime` trait, so this stays fixed for now.
+    /// Sending the Cancel frame *before* the Job delete gives the
+    /// supervisor inside the worker Pod a chance to flush the terminal
+    /// report and cleanly close — otherwise the Pod delete races the
+    /// supervisor's final `TaskRunReport` write and we lose it.
     async fn cancel(&self, handle: &RunHandle) -> Result<(), RuntimeError> {
         let job_name = handle
             .pod_ref
             .as_deref()
             .ok_or_else(|| RuntimeError::Cancel("RunHandle.pod_ref missing".into()))?;
 
+        // Best-effort cancel-frame delivery.  Errors here are never
+        // propagated: the worker may already be dead, the handshake may
+        // never have landed, or the outbound writer may have closed.
+        if let Some(outbound) = self
+            .registry
+            .outbound_sender_for(&handle.task_run_id)
+            .await
+        {
+            let cancel_frame = Frame {
+                correlation_id: 0,
+                payload: FramePayload::Control(ControlMsg::Cancel),
+            };
+            if let Err(e) = outbound.send(cancel_frame).await {
+                debug!(
+                    task_run_id = %handle.task_run_id,
+                    error = %e,
+                    "kubernetes_runtime: cancel-frame send failed (continuing)"
+                );
+            } else {
+                debug!(
+                    task_run_id = %handle.task_run_id,
+                    "kubernetes_runtime: cancel-frame sent to worker"
+                );
+            }
+        } else {
+            debug!(
+                task_run_id = %handle.task_run_id,
+                "kubernetes_runtime: no outbound sender registered; skipping cancel-frame"
+            );
+        }
+
         delete_job_foreground(&self.client, &self.config.namespace, job_name, 30)
             .await
             .map_err(|e| RuntimeError::Cancel(format!("delete job {job_name}: {e}")))
     }
 
-    /// Wait for the Job to reach a terminal state (`succeeded` / `failed`),
-    /// best-effort delete the Secret, then foreground-delete the Job so its
-    /// Pods cascade-clean.
+    /// Drain any remaining `events_rx` for a terminal
+    /// [`StreamEvent::Report`], best-effort delete the Secret, foreground-
+    /// delete the Job so its Pods cascade-clean, and return the
+    /// [`TaskRunReport`].
     ///
-    /// Polls for at most [`TEARDOWN_POLL_TIMEOUT`]; on timeout, cleanup is
-    /// still attempted and then an `Err(RuntimeError::Teardown)` is returned.
+    /// Decision tree for the terminal report:
     ///
-    /// Returns a MINIMAL [`TaskRunReport`] with `TaskRunOutcome::Interrupted`.
-    /// Real terminal reports flow over the launcher's TCP connection and are
-    /// surfaced by the supervisor (deferred to PR 4 pt2). This method's role
-    /// is purely resource cleanup — the supervisor has already observed the
-    /// outcome by the time it calls `teardown`.
+    /// 1. `self.pending` still holds the [`PendingConnection`] for this
+    ///    task_run_id ⇒ `attach_stdio` never ran (the Kubernetes path
+    ///    currently ignores the `BiStream` in `supervisor_runner`).  We
+    ///    drain `events_rx` for a bounded
+    ///    [`TEARDOWN_EVENTS_DRAIN_TIMEOUT`] window; the terminal report,
+    ///    if it landed, becomes the returned `TaskRunReport`.
+    /// 2. On drain timeout / channel close without a Report, or when
+    ///    `attach_stdio` already consumed the slot (the forwarder owns
+    ///    `events_rx` and has already delivered the report to the
+    ///    BiStream — teardown sees an empty `pending` map), we fall
+    ///    through to the Job-status poll path and synthesise a
+    ///    minimal [`TaskRunOutcome::Interrupted`] report the way PR 3
+    ///    always did.
+    ///
+    /// Polls for at most [`TEARDOWN_POLL_TIMEOUT`]; on poll timeout,
+    /// cleanup is still attempted and then an `Err(RuntimeError::Teardown)`
+    /// is returned.
     async fn teardown(&self, handle: RunHandle) -> Result<TaskRunReport, RuntimeError> {
         let job_name = handle
             .pod_ref
@@ -255,6 +425,54 @@ impl SessionRuntime for KubernetesRuntime {
         // Secret shares the Job's name — both produced via
         // `task_run_resource_name(&task_run_id)` in `prepare`.
         let secret_name = job_name.clone();
+
+        // Drain an un-consumed `events_rx` if `attach_stdio` never ran.
+        let mut report_from_events: Option<TaskRunReport> = None;
+        let pending = {
+            let mut pending_map = self.pending.lock().await;
+            pending_map.remove(&handle.task_run_id)
+        };
+        if let Some(pending) = pending {
+            let mut parts = pending.into_parts();
+            let drain = tokio::time::timeout(TEARDOWN_EVENTS_DRAIN_TIMEOUT, async {
+                while let Some(event) = parts.events_rx.recv().await {
+                    if let StreamEvent::Report(report) = event {
+                        return Some(report);
+                    }
+                }
+                None
+            })
+            .await;
+            report_from_events = match drain {
+                Ok(Some(report)) => {
+                    debug!(
+                        task_run_id = %handle.task_run_id,
+                        "kubernetes_runtime: teardown drained terminal report from events_rx"
+                    );
+                    Some(report)
+                }
+                Ok(None) => {
+                    debug!(
+                        task_run_id = %handle.task_run_id,
+                        "kubernetes_runtime: teardown events_rx closed without Report (falling back to Job poll)"
+                    );
+                    None
+                }
+                Err(_) => {
+                    debug!(
+                        task_run_id = %handle.task_run_id,
+                        timeout_ms = TEARDOWN_EVENTS_DRAIN_TIMEOUT.as_millis(),
+                        "kubernetes_runtime: teardown events_rx drain timed out (falling back to Job poll)"
+                    );
+                    None
+                }
+            };
+        } else {
+            debug!(
+                task_run_id = %handle.task_run_id,
+                "kubernetes_runtime: teardown has no pending entry — attach_stdio already consumed events_rx; falling back to Job poll"
+            );
+        }
 
         let terminal = poll_job_terminal_state(&self.client, &ns, &job_name).await;
 
@@ -295,6 +513,10 @@ impl SessionRuntime for KubernetesRuntime {
             );
         }
 
+        // Always release the registry slot, regardless of the report path
+        // (drain-from-events, forwarder-consumed, or Job-poll fallback).
+        self.registry.deregister(&handle.task_run_id).await;
+
         // On timeout, surface the error AFTER cleanup so the caller knows
         // the Job is still being torn down but didn't complete in-window.
         if matches!(terminal, JobTerminal::TimedOut) {
@@ -309,11 +531,22 @@ impl SessionRuntime for KubernetesRuntime {
             )));
         }
 
-        Ok(TaskRunReport {
+        Ok(report_from_events.unwrap_or(TaskRunReport {
             task_run_id: handle.task_run_id.clone(),
             outcome: TaskRunOutcome::Interrupted,
             stages_completed: Vec::<RoleKind>::new(),
-        })
+        }))
+    }
+}
+
+impl KubernetesRuntime {
+    /// Drop a reserved pending-connection slot — used on `prepare` failure
+    /// paths so we don't leak registry entries when Job / Secret creation
+    /// errors out after the slot was reserved.  Best-effort; the caller
+    /// logs the primary error.
+    async fn drop_pending(&self, task_run_id: &str) {
+        self.pending.lock().await.remove(task_run_id);
+        self.registry.deregister(task_run_id).await;
     }
 }
 
@@ -375,6 +608,114 @@ async fn poll_job_terminal_state(
         }
         tokio::time::sleep(TEARDOWN_POLL_INTERVAL).await;
     }
+}
+
+/// Consume a [`PendingConnection`] and return a live [`BiStream`] wired to
+/// its event channel + outbound control sender.
+///
+/// Extracted into a free function so unit tests can exercise the forwarder
+/// / translator topology without constructing a full [`KubernetesRuntime`]
+/// (which needs a real `kube::Client`).  The production [`SessionRuntime::
+/// attach_stdio`] impl is a thin wrapper that pulls the `PendingConnection`
+/// out of `self.pending` and defers to this helper.
+///
+/// Topology (see `attach_stdio` doc for the decision tree):
+/// - Forwarder: `events_rx` (TCP → registry) → `BiStream::events_rx`
+/// - Translator: `BiStream::requests_tx` → outbound `Frame`s down the
+///   worker TCP connection.
+/// - Both spawned tasks terminate when either end of their channel closes.
+pub(crate) async fn bridge_pending_to_bistream(
+    task_run_id: &str,
+    pending: PendingConnection,
+) -> Result<BiStream, RuntimeError> {
+    // `into_parts` bypasses `PendingConnection::Drop`'s auto-deregister so
+    // the registry slot stays alive for the rest of the run.  The caller
+    // deregisters explicitly from `teardown`.
+    let mut parts = pending.into_parts();
+
+    // Wait for the worker to complete the handshake so the outbound
+    // sender is live before we spawn the translator.  No hard timeout
+    // here — the upstream supervisor runner wraps `attach_stdio` with
+    // its own cancel-token gating, and the kube Job's activeDeadline
+    // bounds total run time server-side.
+    parts.wait_for_connection().await.map_err(|e| {
+        RuntimeError::Attach(format!(
+            "wait_for_connection for task_run_id={task_run_id}: {e}"
+        ))
+    })?;
+
+    let outbound_tx = parts.outbound_sender().await.ok_or_else(|| {
+        RuntimeError::Attach(format!(
+            "outbound sender unavailable after handshake for task_run_id={task_run_id} — \
+             registry slot missing or already deregistered"
+        ))
+    })?;
+
+    // Build the BiStream the caller reads/writes on.  `events_tx` and
+    // `requests_rx` are kept on this side; the forwarder + translator
+    // tasks own them for the rest of the run.
+    let (bistream, bistream_events_tx, mut bistream_requests_rx) =
+        BiStream::new_in_memory(PENDING_CONNECTION_BUFFER);
+
+    // Forwarder: registry events → BiStream.events_rx.
+    let forwarder_task_run_id = task_run_id.to_string();
+    let mut events_rx = parts.events_rx;
+    tokio::spawn(async move {
+        while let Some(event) = events_rx.recv().await {
+            if bistream_events_tx.send(event).await.is_err() {
+                debug!(
+                    task_run_id = %forwarder_task_run_id,
+                    "attach_stdio forwarder: BiStream consumer dropped; terminating"
+                );
+                return;
+            }
+        }
+        debug!(
+            task_run_id = %forwarder_task_run_id,
+            "attach_stdio forwarder: upstream events channel closed"
+        );
+    });
+
+    // Translator: BiStream.requests_tx → outbound control frames.
+    let translator_task_run_id = task_run_id.to_string();
+    let outbound = outbound_tx;
+    tokio::spawn(async move {
+        while let Some(frame) = bistream_requests_rx.recv().await {
+            match frame {
+                StreamFrame::Cancel => {
+                    let control = Frame {
+                        correlation_id: 0,
+                        payload: FramePayload::Control(ControlMsg::Cancel),
+                    };
+                    if outbound.send(control).await.is_err() {
+                        debug!(
+                            task_run_id = %translator_task_run_id,
+                            "attach_stdio translator: outbound dropped during Cancel; terminating"
+                        );
+                        return;
+                    }
+                }
+                StreamFrame::RpcResponse { correlation_id, .. } => {
+                    // Worker-originated RPC (e.g. `mcp_tool_call`) isn't
+                    // wired through the BiStream on the Kubernetes path
+                    // yet — the TCP dispatch loop owns those correlation
+                    // ids directly.  Log at debug so the gap is visible
+                    // but the translator keeps running.
+                    debug!(
+                        task_run_id = %translator_task_run_id,
+                        correlation_id,
+                        "attach_stdio translator: RpcResponse frame ignored (not wired)"
+                    );
+                }
+            }
+        }
+        debug!(
+            task_run_id = %translator_task_run_id,
+            "attach_stdio translator: downstream requests channel closed"
+        );
+    });
+
+    Ok(bistream)
 }
 
 /// Delete a Job with `Foreground` propagation and the given grace period,
@@ -520,5 +861,168 @@ mod tests {
             Some(resource_name.as_str()),
             "spec volume must reference the per-task-run Secret by name"
         );
+    }
+
+    /// Drive the forwarder + translator topology that
+    /// [`SessionRuntime::attach_stdio`] spawns — without a live
+    /// `kube::Client`.  Reserves a `PendingConnection` on an in-memory
+    /// `ConnectionRegistry`, simulates the `serve_on_tcp` handshake by
+    /// populating the outbound sender via `attach`, hands the pending
+    /// connection to [`bridge_pending_to_bistream`], and asserts:
+    ///
+    /// 1. `StreamEvent`s delivered on the registry's inbound event channel
+    ///    surface on the returned `BiStream::events_rx`.
+    /// 2. A `StreamFrame::Cancel` written into `BiStream::requests_tx`
+    ///    lands as a `FramePayload::Control(ControlMsg::Cancel)` on the
+    ///    outbound sender the registry published.
+    ///
+    /// This is the minimum guarantee `cancel()` and the supervisor
+    /// runner's event-drain loop rely on.
+    #[tokio::test]
+    async fn attach_stdio_forwards_events_and_translates_cancel() {
+        use djinn_runtime::spec::TaskRunOutcome;
+        use djinn_runtime::{RoleKind, StreamEvent, StreamFrame, TaskRunReport};
+        use djinn_supervisor::{ConnectionRegistry, FramePayload};
+        use djinn_supervisor::{Frame as SupFrame, services::server::serve_on_tcp};
+        use std::net::SocketAddr;
+
+        // We need the accept loop to publish the outbound sender into the
+        // registry, so we spin up a real `serve_on_tcp` + dial handshake
+        // just like the supervisor test.  `FakeServices` from the
+        // supervisor test isn't exported, so we roll a minimal one inline.
+        use async_trait::async_trait;
+        use djinn_core::models::Task;
+        use djinn_supervisor::{
+            AllowAllValidator, AuthHelloMsg, AuthResultMsg, RoleKind as SupRoleKind, StageError,
+            StageOutcome, SupervisorServices, TaskRunOutcome as SupTaskRunOutcome, TaskRunSpec,
+        };
+        use djinn_workspace::Workspace;
+        use tokio::net::TcpStream;
+        use tokio_util::sync::CancellationToken;
+
+        struct NoopServices {
+            cancel: CancellationToken,
+        }
+        #[async_trait]
+        impl SupervisorServices for NoopServices {
+            fn cancel(&self) -> &CancellationToken {
+                &self.cancel
+            }
+            async fn load_task(&self, _: String) -> Result<Task, String> {
+                Err("not used".into())
+            }
+            async fn execute_stage(
+                &self,
+                _: &Task,
+                _: &Workspace,
+                _: SupRoleKind,
+                _: &str,
+                _: &TaskRunSpec,
+            ) -> Result<StageOutcome, StageError> {
+                unimplemented!()
+            }
+            async fn open_pr(&self, _: &TaskRunSpec, _: &Task) -> SupTaskRunOutcome {
+                unimplemented!()
+            }
+        }
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {
+            cancel: CancellationToken::new(),
+        });
+        let validator = Arc::new(AllowAllValidator);
+        let registry = Arc::new(ConnectionRegistry::new());
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server = serve_on_tcp(addr, services, validator, Some(registry.clone()))
+            .await
+            .expect("bind tcp");
+        let bound = server.bound_addr.expect("bound addr");
+
+        let task_run_id = "attach-test-run".to_string();
+        let pending = registry
+            .register_pending(task_run_id.clone(), 8)
+            .await
+            .expect("register_pending");
+
+        // Dial + handshake so the registry publishes the outbound sender.
+        let mut stream = TcpStream::connect(bound).await.expect("connect");
+        let hello = SupFrame {
+            correlation_id: 1,
+            payload: FramePayload::AuthHello(AuthHelloMsg {
+                task_run_id: task_run_id.clone(),
+                token: "any".into(),
+            }),
+        };
+        djinn_runtime::wire::write_frame(&mut stream, &hello)
+            .await
+            .expect("write hello");
+        let reply: SupFrame = djinn_runtime::wire::read_frame(&mut stream)
+            .await
+            .expect("read ack");
+        match reply.payload {
+            FramePayload::AuthResult(AuthResultMsg { accepted: true, .. }) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Hand the pending connection to the bridge.  This is the exact
+        // call `KubernetesRuntime::attach_stdio` makes post-dequeue.
+        let mut bistream = bridge_pending_to_bistream(&task_run_id, pending)
+            .await
+            .expect("bridge_pending_to_bistream");
+
+        // Worker emits a terminal report → should surface on BiStream.
+        let report = TaskRunReport {
+            task_run_id: task_run_id.clone(),
+            outcome: TaskRunOutcome::Closed {
+                reason: "bridge-test".into(),
+            },
+            stages_completed: vec![RoleKind::Planner],
+        };
+        let event_frame = SupFrame {
+            correlation_id: 0,
+            payload: FramePayload::Event(djinn_runtime::wire::WorkerEvent::TerminalReport(
+                report.clone(),
+            )),
+        };
+        djinn_runtime::wire::write_frame(&mut stream, &event_frame)
+            .await
+            .expect("write event");
+
+        let got = tokio::time::timeout(Duration::from_secs(2), bistream.events_rx.recv())
+            .await
+            .expect("BiStream event within 2s")
+            .expect("BiStream events channel open");
+        match got {
+            StreamEvent::Report(r) => assert_eq!(r.task_run_id, task_run_id),
+            other => panic!("expected StreamEvent::Report, got {other:?}"),
+        }
+
+        // Consumer pushes `Cancel` on BiStream.requests_tx → translator
+        // writes a `FramePayload::Control(ControlMsg::Cancel)` back on
+        // the TCP connection (reads from the worker's POV).
+        bistream
+            .requests_tx
+            .send(StreamFrame::Cancel)
+            .await
+            .expect("send Cancel on BiStream");
+
+        let cancel_frame: SupFrame =
+            tokio::time::timeout(Duration::from_secs(2), djinn_runtime::wire::read_frame(&mut stream))
+                .await
+                .expect("inbound cancel frame within 2s")
+                .expect("read cancel frame");
+        match cancel_frame.payload {
+            FramePayload::Control(ControlMsg::Cancel) => {}
+            other => panic!("expected Control(Cancel), got {other:?}"),
+        }
+
+        // Teardown.  Drop the BiStream + TCP stream first so the server's
+        // per-connection task observes a clean EOF; then cancel the accept
+        // loop and join.  `drop(stream)` is implicit at scope end but the
+        // server writer races against it — cancelling the server token is
+        // what actually tears the writer down.
+        drop(bistream);
+        drop(stream);
+        server.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server.join).await;
     }
 }

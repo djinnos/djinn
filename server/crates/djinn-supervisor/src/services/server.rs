@@ -288,11 +288,62 @@ struct ConnSlot {
 /// - [`PendingConnection::outbound_sender`] — grabs the outbound sender so
 ///   the runtime can push `Control` frames.  Returns `None` until the
 ///   handshake completes.
+/// - [`PendingConnection::into_parts`] — consume the handle, transferring
+///   ownership of `events_rx` / `connected_rx` / the registry back-pointer
+///   to the caller.  Crucially, this bypasses the [`Drop`] impl's auto-
+///   deregister path so the runtime can keep the registry slot alive for
+///   the lifetime of the worker connection.  This is the hook
+///   [`djinn_k8s::KubernetesRuntime::attach_stdio`] uses to build its
+///   forwarder / translator pair.
 pub struct PendingConnection {
     task_run_id: String,
     registry: Arc<ConnectionRegistry>,
     pub events_rx: mpsc::Receiver<StreamEvent>,
     connected_rx: watch::Receiver<bool>,
+}
+
+/// Parts produced by [`PendingConnection::into_parts`].
+///
+/// Each field is taken by-value from the consumed `PendingConnection`.
+/// Consumers own the [`ConnectionRegistry`] slot after this call — in
+/// particular, `Drop` will NOT auto-deregister the slot on behalf of the
+/// original handle.  Callers are responsible for invoking
+/// [`ConnectionRegistry::deregister`] (typically from their own teardown
+/// path) once they're done with the connection.
+pub struct PendingConnectionParts {
+    pub task_run_id: String,
+    pub registry: Arc<ConnectionRegistry>,
+    pub events_rx: mpsc::Receiver<StreamEvent>,
+    pub connected_rx: watch::Receiver<bool>,
+}
+
+impl PendingConnectionParts {
+    /// Wait until the worker has completed the handshake — same semantics as
+    /// [`PendingConnection::wait_for_connection`] but operating on the
+    /// consumed-parts form.  Useful in `attach_stdio` paths that take
+    /// ownership of [`Self::events_rx`] up front (via `into_parts`) and
+    /// then await the watch channel.
+    pub async fn wait_for_connection(&mut self) -> Result<(), String> {
+        if *self.connected_rx.borrow() {
+            return Ok(());
+        }
+        loop {
+            self.connected_rx
+                .changed()
+                .await
+                .map_err(|e| format!("pending connection watch closed: {e}"))?;
+            if *self.connected_rx.borrow() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Grab a clone of the outbound [`Frame`] sender the accept loop
+    /// published on handshake acceptance.  Returns `None` until
+    /// [`Self::wait_for_connection`] has resolved `Ok(())`.
+    pub async fn outbound_sender(&self) -> Option<mpsc::Sender<Frame>> {
+        self.registry.outbound_sender_for(&self.task_run_id).await
+    }
 }
 
 impl PendingConnection {
@@ -328,6 +379,41 @@ impl PendingConnection {
     /// [`Self::wait_for_connection`] has resolved `Ok(())`.
     pub async fn outbound_sender(&self) -> Option<mpsc::Sender<Frame>> {
         self.registry.outbound_sender_for(&self.task_run_id).await
+    }
+
+    /// Consume `self` and return its fields as a [`PendingConnectionParts`],
+    /// bypassing the [`Drop`] impl's best-effort deregister path.
+    ///
+    /// Chosen consume-API shape (over `Option`-wrapped `take_*` getters or a
+    /// `consumed: bool` flag pair): keeps every existing test path that
+    /// still accesses `pending.events_rx` directly working unchanged while
+    /// giving external callers — notably `djinn_k8s::KubernetesRuntime` — a
+    /// single-point handoff that takes ownership of the slot.
+    ///
+    /// Once consumed, the caller is responsible for deregistering the
+    /// registry slot (usually from its own teardown path) so a later
+    /// `register_pending` with the same task-run id doesn't find a stale
+    /// entry.
+    pub fn into_parts(self) -> PendingConnectionParts {
+        // `ManuallyDrop` suppresses the auto-deregister in `Drop::drop`.
+        // `std::ptr::read` then pulls each field out by value without
+        // running their individual drops (they move into the returned
+        // struct).  SAFETY: `self` is consumed, `ManuallyDrop::new` guards
+        // it against double-drop, and each `ptr::read` reads a field
+        // exactly once before the struct is forgotten.
+        let me = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            let task_run_id = std::ptr::read(&me.task_run_id);
+            let registry = std::ptr::read(&me.registry);
+            let events_rx = std::ptr::read(&me.events_rx);
+            let connected_rx = std::ptr::read(&me.connected_rx);
+            PendingConnectionParts {
+                task_run_id,
+                registry,
+                events_rx,
+                connected_rx,
+            }
+        }
     }
 }
 
@@ -1337,6 +1423,118 @@ mod tests {
 
         // Teardown.
         drop(pending);
+        handle.cancel();
+        let _ = handle.join.await;
+    }
+
+    /// `PendingConnection::into_parts` transfers `events_rx` to the caller
+    /// without tripping the `Drop` auto-deregister, so the registry slot
+    /// stays alive and `attach` still routes incoming event frames into
+    /// the returned `events_rx`.  This is the exact handoff the Kubernetes
+    /// runtime relies on in `attach_stdio`.
+    #[tokio::test]
+    async fn pending_connection_into_parts_preserves_registry_slot() {
+        use djinn_runtime::{RoleKind, StreamEvent, TaskRunOutcome, TaskRunReport, WorkerEvent};
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(FakeServices {
+            cancel: CancellationToken::new(),
+            canned_task_id: "consume-task-1".into(),
+        });
+        let validator = Arc::new(AllowAllValidator);
+        let registry = Arc::new(ConnectionRegistry::new());
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let handle = serve_on_tcp(addr, services, validator, Some(registry.clone()))
+            .await
+            .expect("bind tcp with registry");
+        let bound = handle.bound_addr.expect("bound addr");
+
+        let task_run_id = "consume-run-1".to_string();
+        let pending = registry
+            .register_pending(task_run_id.clone(), 16)
+            .await
+            .expect("register_pending");
+
+        // Consume the handle BEFORE the worker dials, simulating the
+        // KubernetesRuntime path where `prepare` registers + then stashes
+        // the handle for `attach_stdio` to consume later.
+        let mut parts = pending.into_parts();
+        assert_eq!(parts.task_run_id, task_run_id);
+
+        // The registry slot must still be populated — `into_parts` does
+        // NOT auto-deregister.  Dialling + handshaking against the same
+        // task_run_id still flips the connected watch.
+        let mut stream = tokio::net::TcpStream::connect(bound).await.expect("connect");
+        let hello = Frame {
+            correlation_id: 1,
+            payload: FramePayload::AuthHello(AuthHelloMsg {
+                task_run_id: task_run_id.clone(),
+                token: "any-token".into(),
+            }),
+        };
+        write_frame(&mut stream, &hello).await.expect("write hello");
+        let reply: Frame = read_frame(&mut stream).await.expect("read ack");
+        match reply.payload {
+            FramePayload::AuthResult(AuthResultMsg { accepted: true, .. }) => {}
+            other => panic!("expected accepted auth, got {other:?}"),
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), parts.wait_for_connection())
+            .await
+            .expect("wait_for_connection should resolve within 2s post-handshake")
+            .expect("wait_for_connection Ok");
+
+        // The outbound sender is live — same guarantee as the non-consumed
+        // path.
+        let outbound = parts
+            .outbound_sender()
+            .await
+            .expect("outbound sender populated after attach");
+        assert!(!outbound.is_closed());
+
+        // Event frames still land on the consumed `events_rx`.
+        let report = TaskRunReport {
+            task_run_id: task_run_id.clone(),
+            outcome: TaskRunOutcome::Closed {
+                reason: "into_parts held the slot".into(),
+            },
+            stages_completed: vec![RoleKind::Planner],
+        };
+        let event_frame = Frame {
+            correlation_id: 0,
+            payload: FramePayload::Event(WorkerEvent::TerminalReport(report.clone())),
+        };
+        write_frame(&mut stream, &event_frame)
+            .await
+            .expect("write Event frame");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match parts.events_rx.recv().await {
+                    Some(StreamEvent::Report(r)) => return r,
+                    Some(other) => {
+                        tracing::debug!(?other, "non-terminal event");
+                    }
+                    None => panic!("events_rx closed before terminal report"),
+                }
+            }
+        })
+        .await
+        .expect("terminal report should land within 2s");
+        assert_eq!(received.task_run_id, report.task_run_id);
+
+        // Caller is responsible for deregistering when consuming via
+        // `into_parts`.  Exercise it + confirm a later `register_pending`
+        // for the same id now succeeds.
+        registry.deregister(&task_run_id).await;
+        assert!(
+            registry
+                .register_pending(task_run_id.clone(), 4)
+                .await
+                .is_ok(),
+            "slot should be free after explicit deregister"
+        );
+
         handle.cancel();
         let _ = handle.join.await;
     }

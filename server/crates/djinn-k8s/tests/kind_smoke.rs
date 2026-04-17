@@ -23,12 +23,13 @@
 //!
 //! 1. `prepare` materialises the Secret + Job the launcher needs and backfills
 //!    the Secret's `OwnerReference` to the Job.
-//! 2. `attach_stdio` returns an `Ok(BiStream)` (a placeholder in PR 3 — the
-//!    real event stream is wired by the launcher's dispatch loop in PR 4 pt2).
-//! 3. `cancel` followed by `teardown` drives both the `Foreground`-propagated
+//! 2. `cancel` followed by `teardown` drives both the `Foreground`-propagated
 //!    Job delete path AND `teardown`'s 404-shortcut in the polling loop,
 //!    leaving no Job/Secret behind. This keeps the test fast even when the
 //!    worker image would otherwise take minutes to reach a terminal state.
+//!    `attach_stdio` is skipped on this path because Phase 2.1 blocks until
+//!    the worker's RPC handshake lands — which never happens here (no real
+//!    worker image connects back).
 
 use std::collections::HashMap;
 use std::env;
@@ -142,7 +143,8 @@ async fn kind_smoke_prepare_then_cancel() {
         .expect("kind_smoke: kube::Client::try_default");
 
     let config = test_config();
-    let runtime = KubernetesRuntime::from_client(client.clone(), config.clone());
+    let registry = std::sync::Arc::new(djinn_supervisor::ConnectionRegistry::new());
+    let runtime = KubernetesRuntime::from_client(client.clone(), config.clone(), registry);
 
     let spec = sample_spec("task-kind-smoke-prep");
 
@@ -222,7 +224,8 @@ async fn kind_smoke_runtime_lifecycle() {
         .expect("kind_smoke: kube::Client::try_default");
 
     let config = test_config();
-    let runtime = KubernetesRuntime::from_client(client.clone(), config.clone());
+    let registry = std::sync::Arc::new(djinn_supervisor::ConnectionRegistry::new());
+    let runtime = KubernetesRuntime::from_client(client.clone(), config.clone(), registry);
 
     let spec = sample_spec("task-kind-smoke-life");
 
@@ -236,12 +239,12 @@ async fn kind_smoke_runtime_lifecycle() {
         .clone()
         .expect("kind_smoke: RunHandle.pod_ref");
 
-    // 2) attach_stdio — PR 3 returns a detached in-memory BiStream; we only
-    //    verify the call returns Ok.  PR 4 pt2 will make this meaningful.
-    let _stream = runtime
-        .attach_stdio(&handle)
-        .await
-        .expect("kind_smoke: attach_stdio() should return a placeholder BiStream");
+    // 2) attach_stdio — Phase 2.1 blocks on the worker handshake, which
+    //    never completes in this smoke test because the image never boots
+    //    reachably against `server_addr`.  Skip the call; the smoke test
+    //    only asserts the `prepare → cancel → teardown` K8s resource
+    //    lifecycle, and `teardown` now falls through to the Job-status
+    //    poll when no handshake ever landed.
 
     // 3) Cancel gets the Job deleting in the background so teardown's polling
     //    loop sees a 404 and returns immediately rather than waiting 5 min.
