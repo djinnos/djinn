@@ -445,9 +445,25 @@ async fn github_callback(
 
     // 3. Phase 2: enforce "one deployment = one GitHub org". Look up the
     //    deployment's locked org; if absent the deployment isn't set up.
+    //
+    //    Exception: the bootstrap flow (`want_install=true` on a fresh
+    //    deployment) routes through this handler *before* `org_config` can
+    //    possibly exist — the install redirect we emit at the end of this
+    //    function is what lets GitHub invoke `app_setup_callback`, which is
+    //    what writes `org_config`. If we rejected here, the setup flow could
+    //    never complete. So in that case we skip the org checks and create
+    //    the session; `app_setup_callback` still writes the binding on its
+    //    own authority (App JWT against `GET /app/installations/{id}`).
     let org_repo = OrgConfigRepository::new(state.db().clone());
     let org_cfg = match org_repo.get().await {
-        Ok(Some(cfg)) => cfg,
+        Ok(Some(cfg)) => Some(cfg),
+        Ok(None) if want_install => {
+            tracing::info!(
+                user = %user.login,
+                "auth callback: bootstrap flow — skipping org_config/membership checks",
+            );
+            None
+        }
         Ok(None) => {
             tracing::warn!("auth callback: rejecting login — deployment has no org_config yet");
             return (
@@ -468,33 +484,39 @@ async fn github_callback(
     //    *user* token we just got; it returns `state: "active"|"pending"` on
     //    2xx and 404 for non-members. We treat only `state == "active"` as
     //    a pass; pending invites still count as "not a member".
-    match check_org_membership(&access_token, &org_cfg.github_org_login).await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::warn!(
-                user = %user.login,
-                org = %org_cfg.github_org_login,
-                "auth callback: rejecting non-member",
-            );
-            let body = format!(
-                "Access denied. This deployment is locked to the GitHub org '{org}', \
-                 and the GitHub account '{login}' is not an active member.",
-                org = org_cfg.github_org_login,
-                login = user.login,
-            );
-            return (StatusCode::FORBIDDEN, body).into_response();
-        }
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                org = %org_cfg.github_org_login,
-                "auth callback: membership check failed",
-            );
-            return (
-                StatusCode::BAD_GATEWAY,
-                "failed to verify GitHub org membership",
-            )
-                .into_response();
+    //
+    //    Skipped during bootstrap — there's no org yet to check membership
+    //    against; `app_setup_callback` validates the installation target
+    //    separately.
+    if let Some(cfg) = &org_cfg {
+        match check_org_membership(&access_token, &cfg.github_org_login).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    user = %user.login,
+                    org = %cfg.github_org_login,
+                    "auth callback: rejecting non-member",
+                );
+                let body = format!(
+                    "Access denied. This deployment is locked to the GitHub org '{org}', \
+                     and the GitHub account '{login}' is not an active member.",
+                    org = cfg.github_org_login,
+                    login = user.login,
+                );
+                return (StatusCode::FORBIDDEN, body).into_response();
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    org = %cfg.github_org_login,
+                    "auth callback: membership check failed",
+                );
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    "failed to verify GitHub org membership",
+                )
+                    .into_response();
+            }
         }
     }
 
