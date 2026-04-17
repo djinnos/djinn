@@ -367,13 +367,22 @@ async fn github_callback(
     Query(q): Query<CallbackQuery>,
     headers: HeaderMap,
 ) -> Response {
-    // Install-completion redirect (no OAuth state, just ?installation_id=X&setup_action=install).
-    // Happens when the manifest doesn't set setup_url and GitHub falls back
-    // to the callback URL. Harmless — already authenticated earlier in the
-    // flow, so just send the user home.
-    if q.installation_id.is_some() && q.setup_action.as_deref() == Some("install") {
+    // Install-completion redirect routed to `callback_urls` instead of
+    // `setup_url`. Happens either when the manifest has no `setup_url`, or
+    // when `request_oauth_on_install` was set to `true` (GitHub then
+    // bypasses `setup_url`). Forward to `app_setup_callback` so the
+    // `installation_id` actually gets captured and `org_config` is written
+    // — bouncing straight home (the old behaviour) silently lost the
+    // binding and left the deployment half-configured.
+    if let Some(installation_id) = q.installation_id.as_ref()
+        && q.setup_action.as_deref() == Some("install")
+    {
         let mut resp_headers = HeaderMap::new();
-        let target = format!("{}/", web_url().trim_end_matches('/'));
+        let target = format!(
+            "{}/auth/github/app-setup-callback?installation_id={}&setup_action=install",
+            public_url().trim_end_matches('/'),
+            urlencode(installation_id),
+        );
         resp_headers.insert(
             header::LOCATION,
             HeaderValue::from_str(&target).unwrap_or_else(|_| HeaderValue::from_static("/")),
@@ -898,7 +907,14 @@ pub(crate) fn build_manifest_json(public_url: &str) -> serde_json::Value {
         // org_config write has to live here, not in the manifest callback.
         "setup_url": format!("{public_url}/auth/github/app-setup-callback"),
         "setup_on_update": false,
-        "request_oauth_on_install": true,
+        // We OAuth the user *before* the install redirect (via
+        // `/auth/github/start?install=1`), so an install-time OAuth here
+        // is redundant — and harmful: with this flag set to `true`, GitHub
+        // bypasses `setup_url` post-install and redirects to
+        // `callback_urls[0]` with `code + state + installation_id` instead.
+        // That defeats the two-redirect design because `org_config` only
+        // gets written on the `setup_url` path.
+        "request_oauth_on_install": false,
         "public": false,
         "default_permissions": permissions,
     })
@@ -1514,7 +1530,10 @@ mod tests {
             manifest.get("hook_attributes").is_none(),
             "webhooks are off — omit hook_attributes so GitHub doesn't reject loopback URLs"
         );
-        assert_eq!(manifest["request_oauth_on_install"], true);
+        assert_eq!(
+            manifest["request_oauth_on_install"], false,
+            "must stay false so GitHub honours setup_url post-install instead of diverting to callback_urls"
+        );
         assert_eq!(manifest["public"], false);
         assert_eq!(manifest["default_permissions"]["contents"], "write");
         assert_eq!(manifest["default_permissions"]["pull_requests"], "write");
