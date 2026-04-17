@@ -55,7 +55,6 @@ pub struct SlotPoolConfig {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 pub(crate) const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
-pub(crate) const MERGE_VALIDATION_PREFIX: &str = "merge_validation_failed:";
 
 // ─── Shared metadata structs ─────────────────────────────────────────────────
 
@@ -64,32 +63,6 @@ pub(crate) struct MergeConflictMetadata {
     pub(crate) conflicting_files: Vec<String>,
     pub(crate) base_branch: String,
     pub(crate) merge_target: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MergeValidationFailureMetadata {
-    pub(crate) base_branch: String,
-    pub(crate) merge_target: String,
-    pub(crate) command: String,
-    pub(crate) cwd: String,
-    pub(crate) exit_code: i32,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
-}
-
-impl MergeValidationFailureMetadata {
-    pub(crate) fn as_prompt_context(&self) -> String {
-        format!(
-            "Post-review merge validation failed. Fix the underlying issue, rerun verification, and commit the fix.\n\nmerge_base_branch: {}\nmerge_target_branch: {}\ncommand: git {}\nexit_code: {}\ncwd: {}\nstdout:\n{}\nstderr:\n{}",
-            self.base_branch,
-            self.merge_target,
-            self.command,
-            self.exit_code,
-            self.cwd,
-            self.stdout,
-            self.stderr,
-        )
-    }
 }
 
 // ─── Submodules ───────────────────────────────────────────────────────────────

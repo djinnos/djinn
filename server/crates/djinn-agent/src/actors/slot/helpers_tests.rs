@@ -1,5 +1,5 @@
 use super::helpers::*;
-use super::{MERGE_CONFLICT_PREFIX, MERGE_VALIDATION_PREFIX};
+use super::MERGE_CONFLICT_PREFIX;
 use crate::test_helpers::{
     agent_context_from_db, create_test_db, create_test_epic, create_test_project, create_test_task,
 };
@@ -13,14 +13,6 @@ fn parse_conflict_metadata_patterns() {
     assert!(parse_conflict_metadata(&format!("{MERGE_CONFLICT_PREFIX}{raw}")).is_some());
     assert!(parse_conflict_metadata(raw).is_none());
     assert!(parse_conflict_metadata(&format!("{MERGE_CONFLICT_PREFIX}{{not-json")).is_none());
-}
-
-#[test]
-fn parse_merge_validation_metadata_patterns() {
-    let raw = r#"{"base_branch":"feature","merge_target":"main","command":"merge --no-ff","cwd":"/tmp/repo","exit_code":1,"stdout":"out","stderr":"err"}"#;
-    assert!(parse_merge_validation_metadata(&format!("{MERGE_VALIDATION_PREFIX}{raw}")).is_some());
-    assert!(parse_merge_validation_metadata(raw).is_none());
-    assert!(parse_merge_validation_metadata(&format!("{MERGE_VALIDATION_PREFIX}{{oops")).is_none());
 }
 
 #[test]
@@ -194,47 +186,6 @@ async fn recent_feedback_filters_orders_and_limits() {
     assert_eq!(capped_feedback.len(), 2);
     assert!(capped_feedback[0].contains("Reviewer feedback"));
     assert!(capped_feedback[1].contains("Verification failure"));
-}
-
-#[tokio::test]
-async fn resume_context_for_rejection_conflict_and_no_activity() {
-    let db = create_test_db();
-    let state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
-    let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
-
-    repo.log_activity(
-        Some(&task.id),
-        "reviewer",
-        "task_reviewer",
-        "status_changed",
-        r#"{"from_status":"in_task_review","to_status":"open","reason":"Needs tests"}"#,
-    )
-    .await
-    .unwrap();
-    let msg = resume_context_for_task(&task.id, &state).await;
-    assert!(msg.contains("IMPORTANT"));
-    assert!(msg.contains("Needs tests"));
-
-    let task2 = create_test_task(&db, &project.id, &epic.id).await;
-    repo.log_activity(
-        Some(&task2.id),
-        "system",
-        "system",
-        "merge_conflict",
-        r#"{"base_branch":"feature","merge_target":"main","conflicting_files":["src/lib.rs"]}"#,
-    )
-    .await
-    .unwrap();
-    let msg2 = resume_context_for_task(&task2.id, &state).await;
-    assert!(msg2.contains("merge conflict"));
-    assert!(msg2.contains("src/lib.rs"));
-
-    let task3 = create_test_task(&db, &project.id, &epic.id).await;
-    let msg3 = resume_context_for_task(&task3.id, &state).await;
-    assert!(msg3.contains("previous submission was rejected"));
 }
 
 #[tokio::test]

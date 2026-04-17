@@ -5,16 +5,13 @@ use crate::message::{Message, Role};
 pub(crate) enum CompactionContext {
     /// Mid-session compaction: context window threshold reached while working.
     MidSession(String),
-    /// Pre-resume compaction: compacting before re-prompting with reviewer feedback.
-    PreResume(String),
 }
 
 /// Build the compaction prompt based on context.
 pub(crate) fn compaction_prompt(ctx: &CompactionContext) -> &'static str {
     match ctx {
-        CompactionContext::PreResume(role) if role == "worker" => PRE_RESUME_WORKER_PROMPT,
         CompactionContext::MidSession(role) if role == "worker" => MID_SESSION_WORKER_PROMPT,
-        CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
+        CompactionContext::MidSession(role)
             if role == "reviewer" || role == "task_reviewer" =>
         {
             REVIEWER_PROMPT
@@ -26,13 +23,10 @@ pub(crate) fn compaction_prompt(ctx: &CompactionContext) -> &'static str {
 /// Build the system instruction for the summariser based on context.
 pub(crate) fn summariser_system(ctx: &CompactionContext) -> &'static str {
     match ctx {
-        CompactionContext::PreResume(role) if role == "worker" => {
-            SUMMARISER_SYSTEM_WORKER_PRE_RESUME
-        }
         CompactionContext::MidSession(role) if role == "worker" => {
             SUMMARISER_SYSTEM_WORKER_MID_SESSION
         }
-        CompactionContext::MidSession(role) | CompactionContext::PreResume(role)
+        CompactionContext::MidSession(role)
             if role == "reviewer" || role == "task_reviewer" =>
         {
             SUMMARISER_SYSTEM_TASK_REVIEWER
@@ -40,30 +34,6 @@ pub(crate) fn summariser_system(ctx: &CompactionContext) -> &'static str {
         _ => SUMMARISER_SYSTEM_GENERIC,
     }
 }
-
-pub(crate) const PRE_RESUME_WORKER_PROMPT: &str = r#"## Compaction Context
-A coding agent's session is being compacted before re-prompting with reviewer feedback.
-The agent's previous work was rejected or needs fixes. Summarise what happened so the
-agent can efficiently address the feedback without re-doing research.
-
-**Conversation History:**
-{messages}
-
-Wrap reasoning in `<analysis>` tags.
-
-### Include These Sections (in order of importance):
-1. **Files Changed** – Every file path that was read, created, or edited, with a brief description of changes made
-2. **Implementation State** – What was actually implemented vs. what was planned but not done
-3. **Code Decisions** – Key architectural or design decisions made and why
-4. **Errors Encountered** – Compile errors, test failures, and how they were (or weren't) resolved
-5. **Codebase Context** – Important patterns, types, or structures discovered during research that are needed for implementation
-6. **Outstanding Issues** – Known problems, incomplete work, or things the agent said it would do but didn't
-
-### IMPORTANT:
-- Do NOT include any claims that the work is "done", "complete", or "implemented successfully"
-- Do NOT include the agent's final sign-off or completion messages
-- Focus on FACTS: what files exist, what code was written, what errors remain
-- Preserve exact file paths, function names, and type names"#;
 
 pub(crate) const MID_SESSION_WORKER_PROMPT: &str = r#"## Compaction Context
 A coding agent's context window is full and needs compaction to continue working.
@@ -155,7 +125,6 @@ Wrap reasoning in `<analysis>` tags.
 
 pub(super) const PARTIAL_COMPACTION_SUMMARISER_SYSTEM: &str = "You are summarising the tail portion of a conversation. The beginning of the conversation is preserved separately and the reader will have it. Produce a dense, faithful summary of only the provided messages, connecting naturally to the earlier context the reader already has. Do not repeat early context.";
 
-pub(crate) const SUMMARISER_SYSTEM_WORKER_PRE_RESUME: &str = "You are summarising a coding agent's work session that is about to receive reviewer feedback. Produce a dense, faithful summary focused on what was implemented, what files were changed, and what the current state of the code is. Do NOT include any statements about work being complete or done — the reviewer has determined it is not.";
 pub(crate) const SUMMARISER_SYSTEM_WORKER_MID_SESSION: &str = "You are summarising a coding agent's in-progress work session. Produce a dense, faithful summary that preserves all implementation context so the agent can continue working without re-reading files.";
 pub(crate) const SUMMARISER_SYSTEM_TASK_REVIEWER: &str = "You are summarising a code review session. Produce a dense, faithful summary that preserves the review findings, issues identified, and assessment progress.";
 pub(crate) const SUMMARISER_SYSTEM_GENERIC: &str =
@@ -190,18 +159,9 @@ pub(super) fn rebuild_full_compaction_messages(
 
     new_messages.push(Message::user(summary));
 
-    let continuation_msg = match ctx {
-        CompactionContext::PreResume(_) => {
-            "Your context was compacted before receiving reviewer feedback. \
-             The previous message contains a summary of your prior work session. \
-             You will receive feedback in the next message — read it carefully and \
-             use your tools to make the necessary changes."
-        }
-        _ => {
-            "Your context was compacted. The previous message contains a summary of the \
-             conversation so far. Continue calling tools as necessary to complete the task."
-        }
-    };
+    let continuation_msg =
+        "Your context was compacted. The previous message contains a summary of the \
+         conversation so far. Continue calling tools as necessary to complete the task.";
     new_messages.push(Message::assistant(continuation_msg));
 
     if matches!(ctx, CompactionContext::MidSession(_))
@@ -234,18 +194,10 @@ pub(super) fn rebuild_partial_compaction_messages(
         tail_len, summary,
     )));
 
-    let continuation_msg = match ctx {
-        CompactionContext::PreResume(_) => {
-            "Part of your context was compacted. The messages above the summary are \
-             preserved verbatim; the summary covers your more recent work. You will \
-             receive feedback in the next message."
-        }
-        _ => {
-            "Part of your context was compacted. The messages above the summary are \
-             preserved verbatim; the summary covers your more recent work. Continue \
-             calling tools as necessary to complete the task."
-        }
-    };
+    let continuation_msg =
+        "Part of your context was compacted. The messages above the summary are \
+         preserved verbatim; the summary covers your more recent work. Continue \
+         calling tools as necessary to complete the task.";
     new_messages.push(Message::assistant(continuation_msg));
 
     if matches!(ctx, CompactionContext::MidSession(_))
@@ -270,14 +222,11 @@ mod tests {
 
     #[test]
     fn compaction_prompt_varies_by_context() {
-        let worker_resume = compaction_prompt(&CompactionContext::PreResume("worker".to_string()));
         let worker_mid = compaction_prompt(&CompactionContext::MidSession("worker".to_string()));
         let reviewer = compaction_prompt(&CompactionContext::MidSession("reviewer".to_string()));
 
-        assert!(worker_resume.contains("rejected or needs fixes"));
         assert!(worker_mid.contains("context window is full"));
         assert!(reviewer.contains("code review"));
-        assert!(worker_resume.contains("{messages}"));
         assert!(worker_mid.contains("{messages}"));
         assert!(reviewer.contains("{messages}"));
     }
@@ -286,7 +235,6 @@ mod tests {
     fn prompts_exist_for_expected_compaction_contexts() {
         let contexts = [
             CompactionContext::MidSession("worker".to_string()),
-            CompactionContext::PreResume("worker".to_string()),
             CompactionContext::MidSession("reviewer".to_string()),
         ];
 

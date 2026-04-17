@@ -4,10 +4,9 @@ use crate::actors::coordinator::pr_poller::PR_REVIEW_FEEDBACK_EVENT;
 use crate::context::AgentContext;
 use djinn_core::models::Task;
 use djinn_core::models::parse_json_array;
-use djinn_core::models::{SessionRecord, SessionStatus, TransitionAction};
+use djinn_core::models::TransitionAction;
 use djinn_db::ActivityQuery;
 use djinn_db::ProjectRepository;
-use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
 use djinn_provider::repos::CredentialRepository;
 
@@ -405,39 +404,6 @@ pub(crate) fn runtime_env_diagnostics(
     )
 }
 
-// ─── Session record helpers ───────────────────────────────────────────────────
-
-pub(crate) async fn update_session_record(
-    record_id: Option<&str>,
-    status: SessionStatus,
-    tokens_in: i64,
-    tokens_out: i64,
-    app_state: &AgentContext,
-) {
-    let Some(record_id) = record_id else {
-        return;
-    };
-    let repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Err(e) = repo.update(record_id, status, tokens_in, tokens_out).await {
-        tracing::warn!(record_id = %record_id, error = %e, "failed to update session record");
-    }
-}
-
-pub(crate) async fn update_session_record_paused(
-    record_id: Option<&str>,
-    tokens_in: i64,
-    tokens_out: i64,
-    app_state: &AgentContext,
-) {
-    let Some(record_id) = record_id else {
-        return;
-    };
-    let repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Err(e) = repo.pause(record_id, tokens_in, tokens_out).await {
-        tracing::warn!(record_id = %record_id, error = %e, "failed to pause session record");
-    }
-}
-
 // ─── Task / project helpers ───────────────────────────────────────────────────
 
 pub(crate) async fn load_task(task_id: &str, app_state: &AgentContext) -> anyhow::Result<Task> {
@@ -455,18 +421,6 @@ pub(crate) async fn default_target_branch(project_id: &str, app_state: &AgentCon
         return config.target_branch;
     }
     "main".to_string()
-}
-
-pub(crate) async fn find_paused_session_record(
-    task_id: &str,
-    role_name: &str,
-    app_state: &AgentContext,
-) -> Option<SessionRecord> {
-    let repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    repo.paused_for_task_by_type(task_id, role_name)
-        .await
-        .ok()
-        .flatten()
 }
 
 /// Extract the `reason` field from the most recent `status_changed` activity
@@ -525,100 +479,9 @@ pub(crate) async fn conflict_context_for_dispatch(
         .and_then(|e| serde_json::from_str(&e.payload).ok())
 }
 
-pub(crate) async fn merge_validation_context_for_dispatch(
-    task_id: &str,
-    app_state: &AgentContext,
-) -> Option<String> {
-    let reason = last_review_rejection_reason(task_id, app_state).await?;
-    let metadata = parse_merge_validation_metadata(&reason)?;
-    Some(metadata.as_prompt_context())
-}
-
 pub(crate) fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetadata> {
     let raw = reason.strip_prefix(MERGE_CONFLICT_PREFIX)?;
     serde_json::from_str(raw).ok()
-}
-
-pub(crate) fn parse_merge_validation_metadata(
-    reason: &str,
-) -> Option<MergeValidationFailureMetadata> {
-    let raw = reason.strip_prefix(MERGE_VALIDATION_PREFIX)?;
-    serde_json::from_str(raw).ok()
-}
-
-pub(crate) async fn resume_context_for_task(task_id: &str, app_state: &AgentContext) -> String {
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
-
-    // Preamble reminding the model that any prior "I'm done" statements are
-    // stale and it MUST use tools to make real changes.
-    const RESUME_PREAMBLE: &str = "\
-**IMPORTANT: Your session is being resumed after a review rejection.** \
-Disregard any prior statements where you claimed the work was complete — the \
-reviewer determined it was NOT. You MUST use your tools (shell, editor, etc.) \
-to make concrete changes before stopping. A text-only response with no tool \
-calls will be treated as a failure.\n\n";
-
-    // PR review feedback takes priority — it's the most actionable signal.
-    // When a human reviewer has left specific inline comments on the PR, include
-    // them prominently so the worker addresses each one.
-    if let Some(pr_feedback) = pr_review_feedback_context(task_id, app_state).await {
-        return format!(
-            "{RESUME_PREAMBLE}{pr_feedback}\n\nAddress every reviewer comment listed above. \
-            Push fixup commits to the same branch. Do not open a new PR."
-        );
-    }
-
-    // Last 3 high-signal comments (lead, reviewer, verification) in
-    // chronological order. Simple and gives the worker full recent context.
-    let sections = recent_feedback(&activity, 3);
-
-    if !sections.is_empty() {
-        return format!(
-            "{RESUME_PREAMBLE}{}\n\nAddress this feedback, make the necessary changes, then stop.",
-            sections.join("\n\n---\n\n")
-        );
-    }
-
-    if let Some(context) = merge_validation_context_for_dispatch(task_id, app_state).await {
-        return context;
-    }
-
-    for entry in activity.iter().rev() {
-        if entry.event_type == "merge_conflict"
-            && let Ok(meta) = serde_json::from_str::<MergeConflictMetadata>(&entry.payload)
-        {
-            let files = meta
-                .conflicting_files
-                .iter()
-                .map(|f| format!("- {f}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return format!(
-                "A merge conflict was detected when merging your branch into `{}`. Resolve the conflicts in these files:\n\n{files}\n\nAfter resolving, commit and stop.",
-                meta.merge_target
-            );
-        }
-    }
-
-    // Also check the transition reason as a fallback — the status_changed
-    // event from TaskReviewReject/TaskReviewRejectStale stores a reason.
-    for entry in activity.iter().rev() {
-        if entry.event_type == "status_changed"
-            && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload)
-            && payload.get("to_status").and_then(|v| v.as_str()) == Some("open")
-            && let Some(reason) = payload.get("reason").and_then(|v| v.as_str())
-            && !reason.is_empty()
-        {
-            return format!(
-                "{RESUME_PREAMBLE}Your work was returned with this reason:\n\n{reason}\n\nAddress the issues, make the necessary changes, then stop."
-            );
-        }
-    }
-
-    format!(
-        "{RESUME_PREAMBLE}Your previous submission was rejected. Re-read the task acceptance criteria with `task_show`, identify what is unmet, make changes, then stop."
-    )
 }
 
 /// Build an initial user message for a fresh worker session. If the activity
