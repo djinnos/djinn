@@ -12,6 +12,15 @@
 //! is recorded in the note content footer.
 //!
 //! All errors are logged as warnings; nothing propagates to the caller.
+//!
+//! # Dead code caveat — handoff #5 / Phase 2.2
+//!
+//! Until the supervisor's `stage::teardown` rewires this pipeline
+//! (tracked in `/home/fernando/.claude/plans/compiled-tinkering-island.md`),
+//! the module compiles but has no production caller. The file-level
+//! `#[allow(dead_code)]` is intentional — it is NOT a bug report.
+
+#![allow(dead_code)]
 
 use std::path::Path;
 use std::sync::Arc;

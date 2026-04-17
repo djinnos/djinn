@@ -10,6 +10,15 @@
 //! 5. Flush co-access pairs from the read notes to `note_associations`.
 //!
 //! No LLM calls are made here — this is purely structural parsing.
+//!
+//! # Dead code caveat — handoff #5 / Phase 2.2
+//!
+//! Until the supervisor's `stage::teardown` rewires this pipeline
+//! (tracked in `/home/fernando/.claude/plans/compiled-tinkering-island.md`),
+//! the module compiles but has no production caller. The file-level
+//! `#[allow(dead_code)]` is intentional — it is NOT a bug report.
+
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
