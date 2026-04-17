@@ -534,23 +534,12 @@ pub(crate) async fn merge_and_transition(
     .await
     {
         Ok(Some(pr_url)) => {
-            // PR created and auto-merge enabled. Teardown worktree but keep
-            // the branch — it must stay on the remote for the PR to merge.
-            // The branch will be cleaned up by GitHub when the PR is merged
-            // (if "Automatically delete head branches" is enabled in repo settings)
-            // or by the PR poller after merge.
-            let worktree_path = project_dir
-                .join(".djinn")
-                .join("worktrees")
-                .join(&task.short_id);
-            crate::actors::slot::teardown_worktree(
-                &task.short_id,
-                &worktree_path,
-                &project_dir,
-                app_state,
-                false, // keep the branch — PR needs it
-            )
-            .await;
+            // PR created and auto-merge enabled.  Under the mirror-native
+            // dispatch path (task #8) the task never had a user-visible
+            // worktree to tear down — the supervisor used an ephemeral
+            // clone that was already dropped.  The task branch stays on
+            // the remote for the PR to merge; GitHub cleans it up after
+            // merge if "Automatically delete head branches" is enabled.
             let _ = apply_task_knowledge_decision(
                 task_id,
                 KnowledgePromotionDecision::Promote,
@@ -581,23 +570,24 @@ pub(crate) async fn merge_and_transition(
         Err(reason) if reason.starts_with(EMPTY_BRANCH_PREFIX) => {
             // Branch has no unique commits vs the merge target — the work was
             // already absorbed (e.g. prerequisite tasks merged separately).
-            // Close the task and clean up the branch.
+            // Close the task and delete the task branch from the remote so
+            // it doesn't linger.  No worktree teardown under the mirror-
+            // native dispatch path (task #8).
             tracing::info!(
                 task_id = %task.short_id,
                 "Branch has no unique commits vs merge target; closing as already merged"
             );
-            let worktree_path = project_dir
-                .join(".djinn")
-                .join("worktrees")
-                .join(&task.short_id);
-            crate::actors::slot::teardown_worktree(
-                &task.short_id,
-                &worktree_path,
-                &project_dir,
-                app_state,
-                true, // delete the branch — nothing to keep
-            )
-            .await;
+            let base_branch_to_delete = format!("task/{}", task.short_id);
+            if let Ok(git) = app_state.git_actor(&project_dir).await
+                && let Err(e) = git.delete_branch(&base_branch_to_delete).await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    branch = %base_branch_to_delete,
+                    error = %e,
+                    "Lifecycle: failed to delete absorbed task branch"
+                );
+            }
             let _ = apply_task_knowledge_decision(
                 task_id,
                 KnowledgePromotionDecision::Discard,
@@ -692,20 +682,21 @@ pub(crate) async fn merge_and_transition(
                     Some(format!("merged but failed to store merge SHA: {e}")),
                 ));
             }
-            // Tear down in correct order: LSP → worktree dir → branch (branch deletion
-            // always failed before because the worktree still held a ref to it).
-            let worktree_path = project_dir
-                .join(".djinn")
-                .join("worktrees")
-                .join(&task.short_id);
-            crate::actors::slot::teardown_worktree(
-                &task.short_id,
-                &worktree_path,
-                &project_dir,
-                app_state,
-                true,
-            )
-            .await;
+            // Delete the task branch from the local clone — it's been squashed
+            // onto the target branch and pushed.  Under the mirror-native
+            // dispatch path (task #8) there's no worktree to tear down; the
+            // supervisor used an ephemeral workspace that was already dropped.
+            let base_branch_to_delete = format!("task/{}", task.short_id);
+            if let Ok(git) = app_state.git_actor(&project_dir).await
+                && let Err(e) = git.delete_branch(&base_branch_to_delete).await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    branch = %base_branch_to_delete,
+                    error = %e,
+                    "Lifecycle: failed to delete merged task branch"
+                );
+            }
             let _ = apply_task_knowledge_decision(
                 task_id,
                 KnowledgePromotionDecision::Promote,
@@ -817,37 +808,13 @@ pub(crate) async fn cleanup_paused_worker_session(task_id: &str, app_state: &Age
         );
     }
 
-    if let Some(worktree_str) = paused.worktree_path.as_deref() {
-        let worktree_path = PathBuf::from(worktree_str);
-        // Use teardown_worktree for correct ordering (LSP shutdown before dir removal).
-        // Look up task + project path for the full teardown; fall back to raw remove if
-        // the lookup fails.
-        if let Some(project_path_str) = resolve_project_path_for_task(task_id, app_state).await {
-            crate::actors::slot::teardown_worktree(
-                &project_path_str.0,
-                &worktree_path,
-                Path::new(&project_path_str.1),
-                app_state,
-                false,
-            )
-            .await;
-        } else {
-            let _ = tokio::fs::remove_dir_all(&worktree_path).await;
-        }
-    }
-}
-
-/// Returns `(task_short_id, project_path_str)` for the given task UUID, or `None` if either
-/// lookup fails.  Used by `cleanup_paused_worker_session` to supply arguments to
-/// `teardown_worktree`.
-async fn resolve_project_path_for_task(
-    task_id: &str,
-    app_state: &AgentContext,
-) -> Option<(String, String)> {
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let task = task_repo.get(task_id).await.ok().flatten()?;
-    let project_path = resolve_project_path_for_id(&task.project_id, app_state).await?;
-    Some((task.short_id, project_path))
+    // Task #8: paused worker sessions from the legacy lifecycle used to
+    // persist `.djinn/worktrees/<short_id>` directories alongside the DB
+    // record.  The supervisor-driven path doesn't create those, so there's
+    // nothing to remove from the filesystem — the session row is enough.
+    // Any stale directories from pre-migration runs are harvested by the
+    // coordinator's `sweep_stale_resources` GC on the next tick.
+    let _ = paused;
 }
 
 pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &AgentContext) {

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::context::AgentContext;
 use crate::verification::StepEvent;
 use crate::verification::scoped::resolve_scoped_commands;
@@ -185,41 +183,65 @@ async fn role_verification_command_for_task(
 
 async fn run_verification_pipeline(
     task_id: &str,
-    project_path: &str,
+    _project_path: &str,
     app_state: &AgentContext,
 ) -> anyhow::Result<()> {
     let task = load_task(task_id, app_state).await?;
-    let project_dir = PathBuf::from(project_path);
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
-    // Create a fresh worktree from the task branch.  If the worktree path
-    // exists but is broken (missing .git), clean it up first so
-    // prepare_worktree can recreate it instead of crashing with ENOENT.
-    let stale_wt = project_dir
-        .join(".djinn")
-        .join("worktrees")
-        .join(&task.short_id);
-    if stale_wt.exists() && !stale_wt.join(".git").exists() {
-        tracing::warn!(
-            task_id = %task_id,
-            worktree = %stale_wt.display(),
-            "Verification: removing broken worktree remnant before prepare"
-        );
-        let _ = tokio::fs::remove_dir_all(&stale_wt).await;
-    }
-    let (worktree_path, _) = prepare_worktree(&project_dir, &task, app_state).await?;
-    let commit_sha = resolve_head_commit(&worktree_path)?;
+    // Task #8: verification now runs against a mirror-native ephemeral
+    // workspace instead of a user-visible `.djinn/worktrees/<short_id>` task
+    // worktree.  We clone-ephemeral on the target branch, then fetch + check
+    // out the task branch so verification sees the same tree the worker just
+    // pushed to.  The workspace tempdir is dropped at the end of the pipeline.
+    let mirror = app_state.mirror.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "verification requires a MirrorManager on AgentContext; none configured"
+        )
+    })?;
+    let target_branch = default_target_branch(&task.project_id, app_state).await;
+    let task_branch = format!("task/{}", task.short_id);
+
+    let workspace = mirror
+        .clone_ephemeral(&task.project_id, &target_branch)
+        .await
+        .map_err(|e| anyhow::anyhow!("verification clone_ephemeral: {e}"))?;
+    let workspace_path = workspace.path_buf();
+
+    // Fetch the task branch from the mirror so we can check it out.
+    djinn_git::run_git_command(
+        workspace_path.clone(),
+        vec![
+            "fetch".into(),
+            "origin".into(),
+            format!("{task_branch}:refs/remotes/origin/{task_branch}"),
+        ],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("verification fetch task branch: {e}"))?;
+    djinn_git::run_git_command(
+        workspace_path.clone(),
+        vec![
+            "checkout".into(),
+            "-B".into(),
+            task_branch.clone(),
+            format!("origin/{task_branch}"),
+        ],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("verification checkout task branch: {e}"))?;
+
+    let commit_sha = resolve_head_commit(&workspace_path)?;
 
     // Resolve scoped verification commands (AC-1 through AC-7).
     let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
-    let target_branch = default_target_branch(&task.project_id, app_state).await;
     let scoped_commands =
-        resolve_scoped_commands(&worktree_path, &target_branch, role_cmd_override.as_deref());
+        resolve_scoped_commands(&workspace_path, &target_branch, role_cmd_override.as_deref());
 
     let result = verify_commit(
         &task.project_id,
         &commit_sha,
-        &worktree_path,
+        &workspace_path,
         &app_state.db,
         &scoped_commands,
     )
@@ -230,7 +252,6 @@ async fn run_verification_pipeline(
         let feedback = format_verification_failure_feedback(&result);
         tracing::info!(task_id = %task_id, "Verification: verification commands failed");
         handle_verification_failure(task_id, &feedback, &task_repo, app_state).await;
-        cleanup_worktree(task_id, &worktree_path, app_state).await;
         return Ok(());
     }
 
@@ -246,7 +267,6 @@ async fn run_verification_pipeline(
             None,
         )
         .await;
-    cleanup_worktree(task_id, &worktree_path, app_state).await;
     Ok(())
 }
 

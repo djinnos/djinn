@@ -96,16 +96,12 @@ impl MergeValidationFailureMetadata {
 
 mod actor;
 mod commands;
-// Task #7: conversation_store is part of the legacy lifecycle resume path.
-// No production caller after the supervisor switch; kept for rollback and
-// deleted wholesale in task #8.
-#[allow(dead_code)]
-mod conversation_store;
 pub(crate) mod finalize_handlers;
 pub mod helpers;
-// Task #7: legacy per-agent lifecycle.  Still exercised by `lifecycle_tests`
-// but unreachable from the production dispatch path.
-#[allow(dead_code)]
+// Task #8: `lifecycle` is now a thin module owning only the per-stage helpers
+// (setup / model / mcp / prompt-context / teardown / retry) reused by the
+// supervisor's `execute_stage`.  The legacy `run_task_lifecycle` entry point
+// and worktree orchestration have been deleted.
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
 mod pool;
@@ -116,24 +112,14 @@ pub(crate) mod session_extraction;
 mod supervisor_runner;
 pub(crate) mod task_review;
 pub(crate) mod verification;
-pub mod worktree;
 
 pub use actor::*;
 pub(crate) use commands::*;
 pub use helpers::*;
-#[allow(unused_imports)]
-pub(crate) use lifecycle::run_task_lifecycle;
 pub use pool::*;
-pub use worktree::*;
 
 #[cfg(test)]
 mod helpers_tests;
 
 #[cfg(test)]
-mod lifecycle_tests;
-
-#[cfg(test)]
 mod llm_extraction_tests;
-
-#[cfg(test)]
-mod worktree_tests;

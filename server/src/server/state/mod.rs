@@ -466,13 +466,11 @@ impl AppState {
         };
 
         // Prefer the workspace_path owned by the session's task_run (migration
-        // 5 model); fall back to the legacy `sessions.worktree_path` until
-        // migration 6 drops the column. `task_run_id` is currently NULL for
-        // every session (supervisor is stubbed), so the fallback path is what
-        // all live traffic hits today.
+        // 5 model).  Task #8 removed the `sessions.worktree_path` migration-
+        // window fallback; task #13 will drop the column.
         let task_run_repo =
             djinn_db::repositories::task_run::TaskRunRepository::new(self.db().clone());
-        let workspace_from_run: Option<String> = match session.task_run_id.as_deref() {
+        let workspace_source: Option<String> = match session.task_run_id.as_deref() {
             Some(run_id) => task_run_repo
                 .get(run_id)
                 .await
@@ -481,7 +479,6 @@ impl AppState {
                 .and_then(|run| run.workspace_path),
             None => None,
         };
-        let workspace_source = workspace_from_run.or_else(|| session.worktree_path.clone());
 
         let Some(workspace_path) = workspace_source
             .as_deref()

@@ -510,10 +510,9 @@ async fn run_llm_extraction_inner(
     );
 
     // ── Write notes ────────────────────────────────────────────────────────
-    // Resolve the workspace path from the session's task_run, if it has one.
-    // Post-refactor (task #10) the authoritative workspace lives on
-    // `task_runs.workspace_path`; legacy sessions with only `worktree_path`
-    // still fall back to that value until migration 6 drops the column.
+    // Resolve the workspace path from the session's task_run.  Task #8
+    // removed the `sessions.worktree_path` migration-window fallback; task
+    // #13 will drop the column outright.
     let task_run_repo = TaskRunRepository::new(app_state.db.clone());
     let workspace_path: Option<String> = match session.task_run_id.as_deref() {
         Some(run_id) => task_run_repo
@@ -523,8 +522,7 @@ async fn run_llm_extraction_inner(
             .flatten()
             .and_then(|run| run.workspace_path),
         None => None,
-    }
-    .or_else(|| session.worktree_path.clone());
+    };
     let knowledge_branch_target = app_state
         .knowledge_branch_target_for(Path::new(project_path), workspace_path.as_deref());
     tracing::debug!(

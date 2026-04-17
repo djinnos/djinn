@@ -133,27 +133,28 @@ pub(super) async fn call_task_delete_branch(
     // Interrupt the paused worker session record.
     crate::task_merge::interrupt_paused_worker_session(&task.id, state).await;
 
-    // Resolve project dir — needed for teardown_worktree.
+    // Resolve project dir so we can delete the branch from the local clone.
     let project_dir =
         match crate::task_merge::resolve_project_path_for_id(&task.project_id, state).await {
             Some(p) => std::path::PathBuf::from(p),
             None => return Ok(serde_json::json!({ "error": "project not found" })),
         };
 
-    // Tear down: LSP shutdown → worktree removal → branch deletion (correct order).
-    let worktree_path = project_dir
-        .join(".djinn")
-        .join("worktrees")
-        .join(&task.short_id);
+    // Task #8: the supervisor-driven dispatch path does not create user-
+    // visible `.djinn/worktrees/<short_id>` directories, so there's nothing
+    // to tear down.  Just delete the local task branch; the remote branch
+    // (if any) is cleaned up by the PR pipeline / GitHub settings.
     let base_branch = format!("task/{}", task.short_id);
-    crate::actors::slot::teardown_worktree(
-        &task.short_id,
-        &worktree_path,
-        &project_dir,
-        state,
-        true,
-    )
-    .await;
+    if let Ok(git) = state.git_actor(&project_dir).await
+        && let Err(e) = git.delete_branch(&base_branch).await
+    {
+        tracing::warn!(
+            task_id = %task.short_id,
+            branch = %base_branch,
+            error = %e,
+            "task_delete_branch: failed to delete local task branch"
+        );
+    }
     let _ = apply_task_knowledge_decision(
         &task.id,
         KnowledgePromotionDecision::Discard,
@@ -226,31 +227,15 @@ pub(super) async fn call_task_kill_session(
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
 
-    // Interrupt the paused session record; clean up the worktree without deleting the branch
-    // so the task can resume on the same branch next dispatch.
+    // Interrupt the paused session record.  Task #8: no worktree cleanup
+    // is needed under the supervisor-driven dispatch path — the paused
+    // session doesn't have a persistent task worktree associated with it.
     crate::task_merge::interrupt_paused_worker_session(&task.id, state).await;
-    if let Some(project_path_str) =
-        crate::task_merge::resolve_project_path_for_id(&task.project_id, state).await
-    {
-        let project_dir = std::path::PathBuf::from(&project_path_str);
-        let worktree_path = project_dir
-            .join(".djinn")
-            .join("worktrees")
-            .join(&task.short_id);
-        crate::actors::slot::teardown_worktree(
-            &task.short_id,
-            &worktree_path,
-            &project_dir,
-            state,
-            false,
-        )
-        .await;
-    }
 
     Ok(serde_json::json!({
         "ok": true,
         "task_id": task.short_id,
-        "message": "Paused session interrupted and worktree cleaned up. Next dispatch will start a fresh session."
+        "message": "Paused session interrupted. Next dispatch will start a fresh session."
     }))
 }
 

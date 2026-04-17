@@ -3,10 +3,12 @@ use std::sync::Arc;
 use djinn_core::models::TransitionAction;
 use djinn_db::TaskRepository;
 
+use crate::actors::slot::helpers::load_task;
+use crate::context::AgentContext;
+use crate::roles::AgentRole;
 use crate::task_merge::interrupt_paused_worker_session;
 
 use super::retry::retry_task_transition_on_locked;
-use super::*;
 
 pub(crate) struct PostSessionParams {
     pub(crate) task_id: String,

@@ -5,7 +5,6 @@ use crate::prompts::TaskContext;
 use djinn_core::models::{Task, TransitionAction};
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::Arc;
 
 mod architect;
@@ -59,14 +58,6 @@ pub(crate) trait AgentRole: Send + Sync + 'static {
         output: &'a ParsedAgentOutput,
         app_state: &'a AgentContext,
     ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>>;
-    fn prepare_worktree<'a>(
-        &'a self,
-        _worktree: &'a Path,
-        _task: &'a Task,
-        _app_state: &'a AgentContext,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
     /// The primary MCP tool name this role uses to signal session completion.
     fn finalize_tool_name(&self) -> &'static str {
         self.config()

@@ -1514,59 +1514,11 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn runtime_branch_selection_uses_active_task_session_worktree() {
-        let db = create_test_db();
-        let state = AppState::new(db.clone(), CancellationToken::new());
-        let (project, _project_dir) = create_test_project_with_dir(&db).await;
-        let epic = create_test_epic(&db, &project.id).await;
-        let task = create_test_task(&db, &project.id, &epic.id).await;
-        let worktree_dir = workspace_tempdir("memory-mount-task-worktree-");
-
-        SessionRepository::new(db.clone(), test_events())
-            .create(CreateSessionParams {
-                project_id: &project.id,
-                task_id: Some(&task.id),
-                model: "test-model",
-                agent_type: "worker",
-                worktree_path: Some(&worktree_dir.path().to_string_lossy()),
-                metadata_json: None,
-            task_run_id: None,
-            })
-            .await
-            .expect("create running session");
-
-        state.agent_context().register_activity(&task.id);
-
-        let selection = state
-            .resolve_memory_mount_view_selection(&project.id, Path::new(&project.path))
-            .await;
-
-        assert_eq!(
-            selection,
-            MemoryViewSelection::Task {
-                task_short_id: Some(task.short_id.clone()),
-                worktree_root: Some(worktree_dir.path().to_path_buf()),
-            }
-        );
-
-        let resolution = state
-            .resolve_memory_mount_view_resolution(&project.id, Path::new(&project.path))
-            .await;
-        assert_eq!(
-            resolution.health.kind,
-            crate::server::MemoryMountViewKind::TaskScoped
-        );
-        assert_eq!(
-            resolution.health.task_short_id.as_deref(),
-            Some(task.short_id.as_str())
-        );
-        assert_eq!(
-            resolution.health.worktree_root.as_deref(),
-            Some(worktree_dir.path().to_string_lossy().as_ref())
-        );
-        assert!(resolution.health.fallback.is_none());
-    }
+    // Task #8: the `runtime_branch_selection_uses_active_task_session_worktree`
+    // test covered the `sessions.worktree_path` migration-window fallback that
+    // let `resolve_memory_mount_view_selection` pick a per-task worktree root
+    // before the supervisor owned the task_run workspace_path.  That fallback
+    // has been removed — task #13 drops the column outright.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_branch_selection_falls_back_without_running_session_context() {
