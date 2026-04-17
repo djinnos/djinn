@@ -16,6 +16,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
 
 pub mod rpc;
+pub mod server;
+pub mod wire;
 
 /// Dependencies shared across every stage in a task-run.
 ///

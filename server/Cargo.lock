@@ -1185,6 +1185,7 @@ dependencies = [
 name = "djinn-runtime"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bincode",
  "bytes",
@@ -1274,6 +1275,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bincode",
  "djinn-core",
  "djinn-db",
  "djinn-git",
@@ -1283,6 +1285,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

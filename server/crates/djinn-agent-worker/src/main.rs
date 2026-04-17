@@ -1,31 +1,31 @@
 //! `djinn-agent-worker` — the binary the `LocalDockerRuntime` launches inside
 //! the per-task-run container.
 //!
-//! Phase 2 PR 4 of `/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md`.
+//! Phase 2 PR 5 of `/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md`.
 //!
-//! ## What this binary does today (PR 4)
+//! ## What this binary does (PR 5)
 //!
 //! 1. Parse CLI args (`--ipc-socket`).
 //! 2. Read a bincode-serialized [`TaskRunSpec`] from stdin.
-//! 3. Dial the launcher's Unix-domain socket so the wire is plumbed through.
+//! 3. Dial the launcher's Unix-domain socket and spin up a real
+//!    [`RpcServices`] — reader/writer tasks + correlation-id tracking —
+//!    so every `SupervisorServices` call the in-container supervisor makes
+//!    goes over the wire as a bincode frame.
 //! 4. Attach to the bind-mounted `/workspace` the host handed us
 //!    (`Workspace::attach_existing`) — no re-clone inside the container.
-//! 5. Construct [`StubRpcServices`] wrapped in `Arc<dyn SupervisorServices>`
-//!    to pin the supervisor's dispatch shape.
-//! 6. Invoke `services.load_task(spec.task_id)` as a **placeholder** drive —
-//!    today this hits `unimplemented!()` inside the stub, which is the
-//!    correct behaviour for a scaffold PR: it proves the binary links, the
-//!    stdin decode works, the socket dial works, and the supervisor surface
-//!    is reachable.  PR 5 replaces this with the real
-//!    `TaskRunSupervisor::new(...).run(spec).await`.
-//! 7. Emit the [`TaskRunReport`] frame on stderr as length-prefixed bincode
+//! 5. Invoke `services.load_task(spec.task_id)` to prove the full
+//!    request/reply round-trip works end-to-end.  A future PR swaps this
+//!    placeholder driver for the full `TaskRunSupervisor::new(...).run(spec)`
+//!    (the supervisor needs a real `TaskRunRepository` + `MirrorManager`
+//!    which we won't plumb into the worker until PR 6/7).
+//! 6. Emit the [`TaskRunReport`] frame on stderr as length-prefixed bincode
 //!    so the host-side launcher can observe it without conflating with
 //!    whatever structured logs land on stdout later.
 //!
 //! ## What this binary does NOT do yet
 //!
-//! * No real RPC codec — `ipc.rs` is a placeholder length-prefixed frame
-//!   helper; PR 5 introduces `ServiceRpcRequest` / `ServiceRpcResponse`.
+//! * No `TaskRunSupervisor::run` drive — that needs `TaskRunRepository` and
+//!   `MirrorManager`, which PR 6/7 wires up through `SessionRuntime`.
 //! * No Docker image wiring — PR 6.
 //! * Nothing in the production dispatch path launches this binary — PR 6/7.
 //!
@@ -42,10 +42,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use djinn_runtime::{RoleKind, TaskRunOutcome, TaskRunReport, TaskRunSpec};
-use djinn_supervisor::{StubRpcServices, SupervisorServices};
+use djinn_supervisor::{RpcServices, SupervisorServices};
 use djinn_workspace::Workspace;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -56,7 +56,7 @@ mod stdio;
 #[derive(Debug, Parser)]
 #[command(
     name = "djinn-agent-worker",
-    about = "In-container task-run supervisor (Phase 2 PR 4 scaffold)"
+    about = "In-container task-run supervisor (Phase 2 PR 5 — real RPC wire)"
 )]
 struct WorkerArgs {
     /// Path to the Unix-domain socket the host-side launcher is listening
@@ -104,10 +104,12 @@ async fn run() -> Result<()> {
         .context("read TaskRunSpec from stdin")?;
     info!(task_id = %spec.task_id, flow = ?spec.flow, "received spec");
 
-    // 2. Dial the launcher's Unix socket so the wire is proven end-to-end.
-    //    PR 5 hands this stream to the RPC codec; PR 4 just holds it open
-    //    to verify the launcher is reachable.
-    let ipc = UnixStream::connect(&args.ipc_socket)
+    // 2. Dial the launcher's Unix socket and build the real RpcServices.
+    //    `RpcServices::connect` spawns the reader / writer tasks that drive
+    //    the bincode frame codec; every SupervisorServices trait call from
+    //    here on is a round-trip over that socket.
+    let cancel = CancellationToken::new();
+    let (rpc, background) = RpcServices::connect(&args.ipc_socket, cancel.clone())
         .await
         .with_context(|| format!("dial IPC socket at {}", args.ipc_socket.display()))?;
     info!("dialed IPC socket");
@@ -117,51 +119,52 @@ async fn run() -> Result<()> {
         .context("attach workspace")?;
     info!(path = %workspace.path().display(), branch = %workspace.branch(), "workspace attached");
 
-    // 4. Build the stub supervisor services.  Wrap in `Arc<dyn ...>` to mirror
-    //    the dispatch shape `TaskRunSupervisor::new` will consume in PR 5.
-    let services: Arc<dyn SupervisorServices> = Arc::new(StubRpcServices::new());
+    // 4. Wrap the RpcServices as `Arc<dyn SupervisorServices>` — the shape
+    //    `TaskRunSupervisor::new` consumes.  PR 6/7 will hand this `Arc` to
+    //    a real supervisor that also owns a `TaskRunRepository` + `MirrorManager`.
+    let services: Arc<dyn SupervisorServices> = rpc.clone();
 
-    // 5. Drive — today this panics through `unimplemented!()` inside
-    //    `StubRpcServices::load_task`.  That's intentional for PR 4: it
-    //    proves the binary reaches the supervisor surface even though the
-    //    real `TaskRunSupervisor::new(...).run(spec).await` isn't wired until
-    //    the RPC codec lands in PR 5.
+    // 5. Drive — today just a `load_task` round-trip.  The full
+    //    `TaskRunSupervisor::new(...).run(spec).await` requires DB / mirror
+    //    handles that live host-side; PR 6/7 wires those in.
     let report = drive_placeholder(&services, &spec)
         .await
         .context("placeholder supervisor drive")?;
 
-    // 6. Emit the terminal report as a bincode frame on stderr.  stdout is
-    //    reserved for future structured logs; PR 5 may move the report onto
-    //    the IPC socket entirely.
-    let mut stderr = tokio::io::stderr();
-    ipc::write_frame(&mut stderr, &report)
+    // 6. Emit the terminal report as a bincode frame on stdout.  Tracing
+    //    logs stay on stderr so test harnesses can decode the report byte
+    //    stream without stripping log lines first.  A later PR may move the
+    //    report onto the IPC socket entirely.
+    let mut stdout = tokio::io::stdout();
+    ipc::write_frame(&mut stdout, &report)
         .await
-        .context("emit TaskRunReport frame on stderr")?;
-    stderr.flush().await.ok();
+        .context("emit TaskRunReport frame on stdout")?;
+    stdout.flush().await.ok();
 
-    drop(ipc); // keep the name in scope above so the socket stays alive through drive()
+    // 7. Shut down the RPC background tasks cleanly.
+    cancel.cancel();
+    let _ = background.reader.await;
+    let _ = background.writer.await;
+
     drop(workspace);
     Ok(())
 }
 
-/// Placeholder driver — calls `services.load_task` to exercise the trait
-/// surface and return a synthetic report.  Replaced by
-/// `TaskRunSupervisor::new(...).run(spec).await` in PR 5.
-///
-/// Today this panics via `unimplemented!()` inside `StubRpcServices`; the
-/// integration test in `tests/worker_smoke.rs` asserts the panic path
-/// surfaces as a non-zero exit.
+/// Placeholder driver — calls `services.load_task` through the real RPC
+/// wire to prove the round-trip works, then synthesises an `Interrupted`
+/// report.  Replaced by `TaskRunSupervisor::new(...).run(spec).await` in
+/// PR 6/7 once the supervisor can be instantiated with a `TaskRunRepository`
+/// and `MirrorManager` that reach the host side over the same RPC.
 async fn drive_placeholder(
     services: &Arc<dyn SupervisorServices>,
     spec: &TaskRunSpec,
 ) -> Result<TaskRunReport> {
-    let _task = services
+    let task = services
         .load_task(spec.task_id.clone())
         .await
         .map_err(|e| anyhow::anyhow!("load_task: {e}"))?;
+    info!(task_id = %task.id, title = %task.title, "round-tripped load_task");
 
-    // Unreachable until PR 5 replaces the stub — preserved so the function
-    // signature is honest about returning a `TaskRunReport`.
     Ok(TaskRunReport {
         task_run_id: String::new(),
         outcome: TaskRunOutcome::Interrupted,

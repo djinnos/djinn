@@ -32,13 +32,16 @@ use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_db::TaskRunRepository;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
 use djinn_workspace::{MirrorError, MirrorManager, WorkspaceError};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info};
 
 pub mod services;
 
 pub use services::SupervisorServices;
-pub use services::rpc::StubRpcServices;
+pub use services::rpc::{RpcBackgroundTasks, RpcServices, StubRpcServices, UnimplementedRpcServices};
+pub use services::server::{ServeHandle, serve_on_unix_socket};
+pub use services::wire::{Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse};
 
 // Re-export runtime spec types at the crate root so the thin
 // `djinn_agent::supervisor` shim preserves every existing import path.
@@ -72,7 +75,12 @@ pub enum SupervisorError {
 
 /// Pre-reply-loop failure surfaced by [`SupervisorServices::execute_stage`].
 /// Always fatal for the task-run.
-#[derive(Debug, Error)]
+///
+/// `Serialize + Deserialize` are derived (PR 5) so the variant can ride the
+/// bincode RPC envelope between worker and launcher.  The carried strings
+/// are all plain `String`s — no non-serializable fields hide here today, so
+/// a `#[serde(untagged)]` wrapper is not required.
+#[derive(Clone, Debug, Error, Serialize, Deserialize)]
 pub enum StageError {
     #[error("model resolution: {0}")]
     ModelResolution(String),
@@ -85,7 +93,10 @@ pub enum StageError {
 }
 
 /// Outcome of executing one role stage.
-#[derive(Clone, Debug)]
+///
+/// `Serialize + Deserialize` are derived (PR 5) so the variant can ride the
+/// bincode RPC envelope between worker and launcher.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StageOutcome {
     WorkerDone,
     PlannerExecute,

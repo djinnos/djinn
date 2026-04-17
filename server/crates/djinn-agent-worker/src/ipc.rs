@@ -58,6 +58,12 @@ where
 }
 
 /// Read a single length-prefixed bincode frame from `reader`.
+///
+/// Kept alongside [`write_frame`] even though PR 5's main path now uses
+/// `djinn_runtime::wire::read_frame` for the Unix-socket codec — the stderr
+/// write-only helper path lives here for the terminal `TaskRunReport` frame,
+/// and the symmetric reader stays so future tests / tools can decode it.
+#[allow(dead_code)]
 pub async fn read_frame<R, T>(reader: &mut R) -> Result<T>
 where
     R: AsyncReadExt + Unpin,

@@ -23,6 +23,7 @@ pub mod handle;
 pub mod session_runtime;
 pub mod spec;
 pub mod stream;
+pub mod wire;
 
 #[cfg(any(test, feature = "test-runtime"))]
 pub mod test_runtime;
@@ -33,6 +34,7 @@ pub use spec::{
     RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
 };
 pub use stream::{BiStream, StreamEvent, StreamFrame};
+pub use wire::{ControlMsg, MAX_FRAME_BYTES, WorkerEvent, WorkspaceRef, read_frame, write_frame};
 
 #[cfg(any(test, feature = "test-runtime"))]
 pub use test_runtime::TestRuntime;
