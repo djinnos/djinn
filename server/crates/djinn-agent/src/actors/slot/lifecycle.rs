@@ -11,5 +11,6 @@ pub(crate) mod mcp_resolve;
 pub(crate) mod model_resolution;
 pub(crate) mod prompt_context;
 pub(crate) mod retry;
+pub(crate) mod role_overrides;
 pub(crate) mod setup;
 pub(crate) mod teardown;
