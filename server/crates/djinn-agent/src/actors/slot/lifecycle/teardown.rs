@@ -8,19 +8,19 @@ use crate::task_merge::interrupt_paused_worker_session;
 use super::retry::retry_task_transition_on_locked;
 use super::*;
 
-pub(super) struct PostSessionParams {
-    pub(super) task_id: String,
-    pub(super) project_path: String,
-    pub(super) role: Arc<dyn AgentRole>,
-    pub(super) app_state: AgentContext,
-    pub(super) final_output: crate::output_parser::ParsedAgentOutput,
-    pub(super) final_result_ok: bool,
-    pub(super) final_error: Option<String>,
-    pub(super) tokens_in: i64,
-    pub(super) tokens_out: i64,
+pub(crate) struct PostSessionParams {
+    pub(crate) task_id: String,
+    pub(crate) project_path: String,
+    pub(crate) role: Arc<dyn AgentRole>,
+    pub(crate) app_state: AgentContext,
+    pub(crate) final_output: crate::output_parser::ParsedAgentOutput,
+    pub(crate) final_result_ok: bool,
+    pub(crate) final_error: Option<String>,
+    pub(crate) tokens_in: i64,
+    pub(crate) tokens_out: i64,
 }
 
-pub(super) fn spawn_post_session_work(params: PostSessionParams) {
+pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
     params.app_state.register_verification(&params.task_id);
     tokio::spawn(async move {
         let PostSessionParams {
@@ -120,7 +120,7 @@ pub(super) fn spawn_post_session_work(params: PostSessionParams) {
     });
 }
 
-pub(super) async fn apply_transition_and_dispatch(
+pub(crate) async fn apply_transition_and_dispatch(
     transition: Option<(TransitionAction, Option<String>)>,
     task_id: &str,
     project_path: &str,

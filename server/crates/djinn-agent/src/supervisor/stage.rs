@@ -38,14 +38,23 @@
 //   supervisor-driven flow owns the whole run and there is no external
 //   "pause, release slot, redispatch later" flow to resume across.
 //
-// TODO(phase-1): session teardown / post-session dispatch
-//   `run_task_lifecycle` runs `spawn_post_session_work` and
-//   `apply_transition_and_dispatch` so the coordinator knows to reopen /
-//   close / escalate the task.  The supervisor owns the whole task-run in
-//   one call, so it will synthesize the next stage itself once the
-//   cross-stage routing is implemented.  This function only touches the
-//   per-stage session-record status; broader task/flow transitions are the
-//   caller's job.
+// NOTE(phase-1): session teardown / post-session dispatch
+//   `execute_stage` now drives `spawn_post_session_work` after each stage, so
+//   the task row transitions through the role sequence (worker → reviewing,
+//   reviewer-approve → verifying, etc.) just like the old
+//   `run_task_lifecycle`.  Worker conversation-for-resume is not saved — the
+//   supervisor-driven flow does not release the slot between stages, so
+//   there is no external resume path to preserve.  See the block below that
+//   calls `spawn_post_session_work`.
+//
+// TODO(phase-1): knowledge extraction
+//   `run_task_lifecycle` additionally spawns structural + LLM knowledge
+//   extraction from the conversation transcript after each session.  The
+//   supervisor does NOT yet do this — the `ReplyLoopContext` doesn't hand
+//   back the conversation snapshot after the loop, and the supervisor
+//   currently consumes `conversation` by `&mut` which is dropped when the
+//   stage returns.  Wiring this is a follow-up once the supervisor-driven
+//   coordinator rewrite picks it up.
 
 use std::sync::Arc;
 
@@ -66,6 +75,7 @@ use crate::actors::slot::lifecycle::model_resolution::{
 use crate::actors::slot::lifecycle::setup::{
     SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context,
 };
+use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::message::{Conversation, Message};
 use crate::prompts::TaskContext;
@@ -405,13 +415,19 @@ pub(crate) async fn execute_stage(
     let _ = spec;
 
     // ── Map the reply-loop outcome to StageOutcome ───────────────────────────
-    match reply_result {
-        Err(e) => Ok(StageOutcome::Failed {
+    // We do this BEFORE dispatching post-session work so we can return the
+    // outcome to the supervisor immediately; the post-session background task
+    // then applies the task transition + finalize-payload side effects in
+    // parallel with the supervisor stepping to the next stage.
+    let final_result_ok = reply_result.is_ok();
+    let final_error = reply_result.as_ref().err().map(|e| e.to_string());
+    let stage_outcome = match reply_result {
+        Err(e) => StageOutcome::Failed {
             reason: format!("reply loop error: {e}"),
-        }),
+        },
         Ok(()) => {
             let finalize_name = final_output.finalize_tool_name.as_deref().unwrap_or("");
-            let outcome = match role_kind {
+            match role_kind {
                 RoleKind::Worker => match finalize_name {
                     "submit_work" => StageOutcome::WorkerDone,
                     "request_lead" => StageOutcome::Escalate {
@@ -501,10 +517,44 @@ pub(crate) async fn execute_stage(
                         ),
                     },
                 },
-            };
-            Ok(outcome)
+            }
         }
-    }
+    };
+
+    // ── Dispatch post-session work (transition + finalize side effects) ──────
+    //
+    // Mirrors `run_task_lifecycle`'s non-worker branch: the background task
+    // runs `process_finalize_payload`, `role.on_complete`, and
+    // `apply_transition_and_dispatch` so the task row transitions through the
+    // role sequence (reviewing → verifying → completed / reopened / …) and
+    // any queued verification dispatches fire.
+    //
+    // We take `project_path` from the ProjectRepository row rather than the
+    // ephemeral worktree because `apply_transition_and_dispatch` forwards it
+    // to `spawn_verification`, which expects a host-side project dir.  If
+    // the lookup fails we fall back to the ephemeral workspace path — that
+    // may break `submit_verification` follow-ups on legacy projects, but
+    // preserves the transition side effects (the common case).
+    let project_path = crate::task_merge::resolve_project_path_for_id(
+        &task.project_id,
+        &services.agent_context,
+    )
+    .await
+    .unwrap_or_else(|| worktree_path.display().to_string());
+
+    spawn_post_session_work(PostSessionParams {
+        task_id: task.id.clone(),
+        project_path,
+        role: role.clone(),
+        app_state: services.agent_context.clone(),
+        final_output,
+        final_result_ok,
+        final_error,
+        tokens_in,
+        tokens_out,
+    });
+
+    Ok(stage_outcome)
 }
 
 /// Map a [`RoleKind`] (flow enum) to a concrete `Arc<dyn AgentRole>`.

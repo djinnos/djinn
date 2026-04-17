@@ -32,6 +32,7 @@ use crate::context::AgentContext;
 use crate::roles::RoleRegistry;
 
 mod flow;
+mod pr;
 mod spec;
 mod stage;
 
@@ -180,10 +181,10 @@ impl TaskRunSupervisor {
     /// [`stage::execute_stage`] for each role.
     ///
     /// Short-circuits on terminal outcomes (close / escalate / rejection /
-    /// failure).  PR-open wiring is a Phase 2 task — on a clean traversal we
-    /// return `TaskRunOutcome::Failed { stage: "pr_open", reason: "not yet
-    /// wired" }` for the flows that land a PR, and synthesize a `Closed`
-    /// outcome for the simpler Spike / Planning flows that don't.
+    /// failure).  On a clean traversal, flows that land a PR (`NewTask`,
+    /// `ReviewResponse`, `ConflictRetry`) invoke [`pr::supervisor_pr_open`]
+    /// to squash-merge and open a GitHub PR; `Spike` / `Planning` synthesize
+    /// a `Closed` outcome directly because they don't touch the remote.
     async fn run_sequence(
         &self,
         spec: &TaskRunSpec,
@@ -247,8 +248,8 @@ impl TaskRunSupervisor {
             }
         }
 
-        // All stages completed successfully.  For flows that land a PR we
-        // would open one here; that wiring is deferred to a later task.
+        // All stages completed successfully.  Spike / Planning have no PR
+        // semantics; the merge-landing flows go through `supervisor_pr_open`.
         match spec.flow {
             SupervisorFlow::Planning | SupervisorFlow::Spike => Ok(TaskRunOutcome::Closed {
                 reason: format!(
@@ -259,10 +260,9 @@ impl TaskRunSupervisor {
             }),
             SupervisorFlow::NewTask
             | SupervisorFlow::ReviewResponse
-            | SupervisorFlow::ConflictRetry => Ok(TaskRunOutcome::Failed {
-                stage: "pr_open".into(),
-                reason: "PR-open stage not yet wired into supervisor".into(),
-            }),
+            | SupervisorFlow::ConflictRetry => {
+                Ok(pr::supervisor_pr_open(spec, task, &self.services).await)
+            }
         }
     }
 }

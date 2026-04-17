@@ -24,7 +24,7 @@ pub(crate) mod mcp_resolve;
 pub(crate) mod model_resolution;
 mod retry;
 pub(crate) mod setup;
-mod teardown;
+pub(crate) mod teardown;
 
 use mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use model_resolution::{ModelResolutionError, resolve_model_and_credential};
