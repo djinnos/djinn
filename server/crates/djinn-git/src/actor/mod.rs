@@ -60,10 +60,6 @@ pub(super) enum GitMessage {
         path: PathBuf,
         respond_to: Reply<()>,
     },
-    /// List all worktrees with structured metadata (GIT-02).
-    ListWorktrees {
-        respond_to: Reply<Vec<WorktreeInfo>>,
-    },
 }
 
 // ─── Submodules ──────────────────────────────────────────────────────────────

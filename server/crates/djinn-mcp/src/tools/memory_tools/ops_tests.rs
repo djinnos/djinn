@@ -46,7 +46,6 @@ mod tests {
 
         async fn reset_runtime_settings(&self) {}
         async fn persist_model_health_state(&self) {}
-        async fn purge_worktrees(&self) {}
     }
 
     #[async_trait::async_trait]
@@ -67,7 +66,6 @@ mod tests {
 
         async fn reset_runtime_settings(&self) {}
         async fn persist_model_health_state(&self) {}
-        async fn purge_worktrees(&self) {}
     }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {

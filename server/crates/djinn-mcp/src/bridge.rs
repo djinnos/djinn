@@ -146,8 +146,6 @@ pub trait RuntimeOps: Send + Sync {
     ) -> Result<Option<SemanticQueryEmbedding>, String>;
     async fn reset_runtime_settings(&self);
     async fn persist_model_health_state(&self);
-    /// Purge stale worktrees from all registered projects.
-    async fn purge_worktrees(&self);
 }
 
 // ── Git ─────────────────────────────────────────────────────────────────────────

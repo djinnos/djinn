@@ -130,12 +130,6 @@ impl GitActorHandle {
         })
         .await
     }
-
-    /// List all worktrees with structured metadata (GIT-02).
-    pub async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>, GitError> {
-        self.request(|tx| GitMessage::ListWorktrees { respond_to: tx })
-            .await
-    }
 }
 
 // ─── Registry helper ──────────────────────────────────────────────────────────

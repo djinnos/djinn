@@ -414,49 +414,6 @@ pub async fn remove_worktree(path: PathBuf, wt_path: PathBuf) -> Result<(), GitE
     Ok(())
 }
 
-pub async fn list_worktrees(path: PathBuf) -> Result<Vec<WorktreeInfo>, GitError> {
-    let out = run_git_command(
-        path,
-        vec!["worktree".into(), "list".into(), "--porcelain".into()],
-    )
-    .await?;
-
-    let mut worktrees = Vec::new();
-    let mut wt_path: Option<PathBuf> = None;
-    let mut head: Option<String> = None;
-    let mut branch: Option<String> = None;
-
-    for line in out.stdout.lines() {
-        if line.is_empty() {
-            if let (Some(p), Some(h)) = (wt_path.take(), head.take()) {
-                worktrees.push(WorktreeInfo {
-                    path: p,
-                    branch: branch.take(),
-                    head: h,
-                });
-            }
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("worktree ") {
-            wt_path = Some(PathBuf::from(rest));
-        } else if let Some(rest) = line.strip_prefix("HEAD ") {
-            head = Some(rest.to_string());
-        } else if let Some(rest) = line.strip_prefix("branch refs/heads/") {
-            branch = Some(rest.to_string());
-        }
-    }
-
-    if let (Some(p), Some(h)) = (wt_path, head) {
-        worktrees.push(WorktreeInfo {
-            path: p,
-            branch: branch.take(),
-            head: h,
-        });
-    }
-
-    Ok(worktrees)
-}
-
 pub async fn unmerged_files(path: PathBuf) -> Result<Vec<String>, GitError> {
     let out = run_git_command(
         path,

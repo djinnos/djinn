@@ -147,10 +147,6 @@ impl McpState {
     pub async fn persist_model_health_state(&self) {
         self.runtime.persist_model_health_state().await;
     }
-
-    pub async fn purge_worktrees(&self) {
-        self.runtime.purge_worktrees().await;
-    }
 }
 
 // ── Stub impls for test builds ─────────────────────────────────────────────────
@@ -275,7 +271,6 @@ pub(crate) mod stubs {
         }
         async fn reset_runtime_settings(&self) {}
         async fn persist_model_health_state(&self) {}
-        async fn purge_worktrees(&self) {}
     }
 
     pub struct StubGitOps;

@@ -88,11 +88,6 @@ impl GitActor {
                 let result = crate::remove_worktree(path, wt_path).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::ListWorktrees { respond_to } => {
-                let path = self.path.clone();
-                let result = crate::list_worktrees(path).await;
-                let _ = respond_to.send(result);
-            }
         }
     }
 

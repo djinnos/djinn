@@ -269,8 +269,6 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
             Err(e) => tracing::warn!(error = %e, "failed to serialize model health state"),
         }
     }
-
-    async fn purge_worktrees(&self) {}
 }
 
 /// Fallback `RepoGraphOps` implementation used when `AgentContext` is built

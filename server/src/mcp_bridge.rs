@@ -311,15 +311,6 @@ impl RuntimeOps for AppState {
     async fn persist_model_health_state(&self) {
         AppState::persist_model_health_state(self).await;
     }
-
-    async fn purge_worktrees(&self) {
-        // Task #8: the supervisor-driven dispatch path no longer creates
-        // user-visible `.djinn/worktrees/<short_id>` directories, so there
-        // are no per-task worktrees to purge on execution start.  Kept as
-        // a no-op so the MCP trait surface stays stable; the method (and
-        // the `/execution/start` precondition call) can be removed once
-        // the trait is audited in a follow-up.
-    }
 }
 
 #[async_trait]
