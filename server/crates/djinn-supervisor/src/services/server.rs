@@ -425,7 +425,11 @@ impl ConnectionRegistry {
 
     /// Grab the outbound sender for a task-run, when a pending connection
     /// has been attached.
-    async fn outbound_sender_for(&self, task_run_id: &str) -> Option<mpsc::Sender<Frame>> {
+    ///
+    /// Exposed so runtimes ([`djinn_k8s::KubernetesRuntime`]) can push
+    /// `FramePayload::Control(_)` at a specific worker during `cancel()`
+    /// without having to retain the `PendingConnection` handle.
+    pub async fn outbound_sender_for(&self, task_run_id: &str) -> Option<mpsc::Sender<Frame>> {
         let map = self.inner.lock().await;
         map.get(task_run_id)
             .and_then(|slot| slot.outbound_tx.clone())

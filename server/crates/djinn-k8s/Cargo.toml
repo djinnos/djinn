@@ -9,6 +9,7 @@ doctest = false
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-runtime = { path = "../djinn-runtime" }
+djinn-supervisor = { path = "../djinn-supervisor" }
 anyhow = "1"
 async-trait = "0.1"
 bincode = "1.3"
