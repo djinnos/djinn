@@ -167,16 +167,28 @@ pub(crate) async fn execute_stage(
         "Supervisor stage: starting"
     );
 
+    // Test seam: when a `provider_override` is installed on the services, we
+    // skip catalog + credential resolution entirely and use the injected
+    // provider directly.  Production callers always leave this `None` and go
+    // through the full resolution path below.
+    let override_provider = services.provider_override.clone();
+
     // Resolve the model for this stage.  Preference order:
     //   1. Per-role override threaded in via `TaskRunSpec::model_id_per_role`
     //      — populated by the coordinator when it has a resolved model from
     //      its dispatch priorities + project `model_preference` lookup.
     //   2. Catalog-default fallback (first model registered for any provider
     //      in the catalog), used by smoke tests / one-off callers.
+    //   3. When a `provider_override` is present (integration tests), fall
+    //      back to a synthetic identifier so the session record is still
+    //      well-formed.
     let model_id = match spec.model_id_per_role.get(&role_kind).cloned() {
         Some(m) => m,
         None => match default_model_for_role(role_name, services) {
             Some(m) => m,
+            None if override_provider.is_some() => {
+                "test/supervisor-stub".to_string()
+            }
             None => {
                 return Err(StageError::ModelResolution(format!(
                     "no model registered for role '{role_name}' in the provider catalog"
@@ -186,16 +198,19 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Model + credential ───────────────────────────────────────────────────
-    let resolved = match resolve_model_and_credential(
-        &model_id,
-        &task.id,
-        &services.agent_context,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(ModelResolutionError { reason }) => {
-            return Err(StageError::ModelResolution(reason));
+    // When a provider override is installed, skip the vault credential lookup
+    // entirely — the override carries its own transport.  The `ResolvedModel`
+    // fields below are still referenced by the non-override provider-
+    // construction branch, so we only populate `resolved` when we actually
+    // need it.
+    let resolved = if override_provider.is_some() {
+        None
+    } else {
+        match resolve_model_and_credential(&model_id, &task.id, &services.agent_context).await {
+            Ok(r) => Some(r),
+            Err(ModelResolutionError { reason }) => {
+                return Err(StageError::ModelResolution(reason));
+            }
         }
     };
 
@@ -313,47 +328,69 @@ pub(crate) async fn execute_stage(
         .find_model(&model_id)
         .map(|m| m.context_window)
         .unwrap_or(0);
-    let telemetry_meta = build_telemetry_meta(role_name, &task.id);
-    let provider: Box<dyn LlmProvider> = match resolved.provider_credential {
-        Some(ProviderCredential::OAuthConfig(mut cfg)) => {
-            cfg.model_id = resolved.model_name.clone();
-            cfg.context_window = context_window.max(0) as u32;
-            cfg.telemetry = Some(telemetry_meta);
-            cfg.session_affinity_key = Some(session_id.clone());
-            create_provider(*cfg)
-        }
-        Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
-            let format_family =
-                format_family_for_provider(&resolved.catalog_provider_id, &resolved.model_name);
-            let base_url = services
-                .agent_context
-                .catalog
-                .list_providers()
-                .iter()
-                .find(|p| p.id == resolved.catalog_provider_id)
-                .map(|p| p.base_url.clone())
-                .filter(|u| !u.is_empty())
-                .unwrap_or_else(|| default_base_url(&resolved.catalog_provider_id));
-            create_provider(ProviderConfig {
-                base_url,
-                auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
-                format_family,
-                model_id: resolved.model_name.clone(),
-                context_window: context_window.max(0) as u32,
-                telemetry: Some(telemetry_meta),
-                session_affinity_key: Some(session_id.clone()),
-                provider_headers: Default::default(),
-                capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
-            })
-        }
-        None => {
-            let _ = session_repo
-                .update(&session_id, SessionStatus::Failed, 0, 0)
-                .await;
-            return Err(StageError::ModelResolution(
-                "no provider credential resolved for model".into(),
-            ));
-        }
+
+    // Two branches below diverge on ownership: the test-override path keeps
+    // the provider as an `Arc<dyn LlmProvider>` so the caller retains a
+    // handle for assertions, while the production path owns a `Box<dyn
+    // LlmProvider>`.  We unify them into a borrowed `&dyn LlmProvider` at
+    // the reply-loop call site.
+    let provider_arc: Option<Arc<dyn LlmProvider>> = override_provider;
+    let provider_owned: Option<Box<dyn LlmProvider>> = if provider_arc.is_some() {
+        None
+    } else {
+        let resolved = resolved.expect(
+            "resolved model credential must be populated when provider_override is absent",
+        );
+        let telemetry_meta = build_telemetry_meta(role_name, &task.id);
+        let built = match resolved.provider_credential {
+            Some(ProviderCredential::OAuthConfig(mut cfg)) => {
+                cfg.model_id = resolved.model_name.clone();
+                cfg.context_window = context_window.max(0) as u32;
+                cfg.telemetry = Some(telemetry_meta);
+                cfg.session_affinity_key = Some(session_id.clone());
+                create_provider(*cfg)
+            }
+            Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
+                let format_family = format_family_for_provider(
+                    &resolved.catalog_provider_id,
+                    &resolved.model_name,
+                );
+                let base_url = services
+                    .agent_context
+                    .catalog
+                    .list_providers()
+                    .iter()
+                    .find(|p| p.id == resolved.catalog_provider_id)
+                    .map(|p| p.base_url.clone())
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or_else(|| default_base_url(&resolved.catalog_provider_id));
+                create_provider(ProviderConfig {
+                    base_url,
+                    auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
+                    format_family,
+                    model_id: resolved.model_name.clone(),
+                    context_window: context_window.max(0) as u32,
+                    telemetry: Some(telemetry_meta),
+                    session_affinity_key: Some(session_id.clone()),
+                    provider_headers: Default::default(),
+                    capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
+                })
+            }
+            None => {
+                let _ = session_repo
+                    .update(&session_id, SessionStatus::Failed, 0, 0)
+                    .await;
+                return Err(StageError::ModelResolution(
+                    "no provider credential resolved for model".into(),
+                ));
+            }
+        };
+        Some(built)
+    };
+    let provider_ref: &dyn LlmProvider = match (provider_arc.as_deref(), provider_owned.as_deref()) {
+        (Some(p), _) => p,
+        (None, Some(p)) => p,
+        (None, None) => unreachable!("either provider_override or a built provider is present"),
     };
 
     // ── Build the initial conversation ───────────────────────────────────────
@@ -372,7 +409,7 @@ pub(crate) async fn execute_stage(
     // ── Run the reply loop ───────────────────────────────────────────────────
     let (reply_result, final_output, tokens_in, tokens_out) = run_reply_loop(
         ReplyLoopContext {
-            provider: provider.as_ref(),
+            provider: provider_ref,
             tools: &tools,
             task_id: &task.id,
             task_short_id: &task.short_id,

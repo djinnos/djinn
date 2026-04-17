@@ -29,6 +29,7 @@ pub use self::stage::{StageError, StageOutcome};
 
 use crate::actors::slot::helpers::load_task;
 use crate::context::AgentContext;
+use crate::provider::LlmProvider;
 use crate::roles::RoleRegistry;
 
 mod flow;
@@ -70,6 +71,12 @@ pub struct SupervisorServices {
     /// (server shutdown, user kill).  The per-stage reply loop treats this
     /// as both `cancel` and `global_cancel` in the Phase 1 path.
     pub cancel: CancellationToken,
+    /// Optional LLM provider override.  When `Some`, [`stage::execute_stage`]
+    /// skips catalog / credential resolution and uses this provider directly
+    /// for the reply loop — the test seam that lets integration tests drive
+    /// the supervisor end-to-end without a real vault credential or live API.
+    /// Production callers leave this `None`.
+    pub provider_override: Option<Arc<dyn LlmProvider>>,
 }
 
 impl SupervisorServices {
@@ -89,7 +96,15 @@ impl SupervisorServices {
             session_repo,
             task_repo,
             cancel,
+            provider_override: None,
         }
+    }
+
+    /// Install a provider override — only used by integration tests that drive
+    /// the supervisor against a stubbed [`LlmProvider`].  See the field doc.
+    pub fn with_provider_override(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.provider_override = Some(provider);
+        self
     }
 }
 
