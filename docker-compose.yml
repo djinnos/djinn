@@ -65,11 +65,6 @@ services:
       dockerfile: Dockerfile
     image: djinn-server:local
     container_name: djinn-server
-    # Pinned so the credential-vault AES key (derived from hostname + USER
-    # in djinn-db::crypto) stays stable across `docker compose up --build`.
-    # Without this, each rebuild gets a random Docker-assigned hostname and
-    # old encrypted credentials (GitHub App config, etc.) become undecryptable.
-    hostname: djinn-server
     restart: unless-stopped
     depends_on:
       dolt:
