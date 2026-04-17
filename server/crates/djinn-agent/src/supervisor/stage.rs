@@ -7,30 +7,16 @@
 //! ## Scope
 //!
 //! This is the Phase 1 minimum — it wires the extracted lifecycle helpers
-//! ([`model_resolution`], [`setup`], [`mcp_resolve`]) into the reply loop so a
-//! single role stage can run end-to-end against a mirror-born ephemeral
-//! workspace, then map the reply-loop outcome onto [`StageOutcome`].  The full
-//! 340+ line prompt-context assembly from `run_task_lifecycle` is NOT
-//! replicated here; instead we build a **degenerate** [`TaskContext`] with only
-//! the fields the base prompt template actually reads for a single-stage
-//! worker run, and punt anything flow-specific (conflict context, activity
-//! digest, epic context, planner patrol context, knowledge notes…) to future
-//! tasks once the full supervisor-driven coordinator rewrite lands.
+//! ([`model_resolution`], [`setup`], [`mcp_resolve`], [`prompt_context`]) into
+//! the reply loop so a single role stage can run end-to-end against a mirror-
+//! born ephemeral workspace, then map the reply-loop outcome onto
+//! [`StageOutcome`].
 //!
 //! The old coordinator dispatch path (`run_task_lifecycle`) remains fully
 //! active and is the only path production traffic travels today.  This module
 //! is additive: only callers that explicitly opt into the supervisor see any
 //! change.
 
-// TODO(phase-1): prompt-context building
-//   `run_task_lifecycle` assembles ~340 lines of role-specific context —
-//   conflict metadata, activity log digest, epic context, knowledge notes,
-//   planner patrol context, worker resume context.  Until the coordinator
-//   rewrite (task #7) moves the full dispatch path onto the supervisor, this
-//   stage builds a degenerate `TaskContext` that covers the prompt fields
-//   the base template references for a Worker session.  See `build_prompt`
-//   below.
-//
 // TODO(phase-1): paused-session resume
 //   `run_task_lifecycle` resumes a paused Worker session (reuses worktree,
 //   reloads conversation, compacts before appending reviewer feedback).  The
@@ -72,13 +58,15 @@ use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_
 use crate::actors::slot::lifecycle::model_resolution::{
     ModelResolutionError, resolve_model_and_credential,
 };
+use crate::actors::slot::lifecycle::prompt_context::{
+    PromptContext, PromptContextInputs, build_prompt_context,
+};
 use crate::actors::slot::lifecycle::setup::{
     SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context,
 };
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::message::{Conversation, Message};
-use crate::prompts::TaskContext;
 use crate::provider::{LlmProvider, ProviderConfig, create_provider};
 use crate::roles::{AgentRole, role_impl_for};
 use crate::AgentType;
@@ -252,37 +240,48 @@ pub(crate) async fn execute_stage(
         }
     };
 
-    // ── Build degenerate prompt context ──────────────────────────────────────
-    // TODO(phase-1): enrich with conflict / activity / epic / knowledge /
-    // patrol context once the supervisor-driven coordinator rewrite picks
-    // them up from the new event stream.  See module-level TODO.
-    let task_ctx = TaskContext {
-        project_path: worktree_path.display().to_string(),
-        workspace_path: worktree_path.display().to_string(),
-        diff: None,
-        commits: None,
-        start_commit: None,
-        end_commit: None,
-        conflict_files: None,
-        merge_base_branch: None,
-        merge_target_branch: None,
-        merge_failure_context: None,
-        setup_commands: prompt_setup_commands,
-        verification_commands: prompt_verification_commands,
-        verification_rules: prompt_verification_rules,
-        activity: None,
-        worker_summary: None,
-        worker_concerns: None,
-        verification_failure: None,
-        epic_context: None,
-        knowledge_context: None,
-        planner_patrol_context: None,
-    };
-
-    let base_system_prompt = role.render_prompt(task, &task_ctx);
-    // No role extensions / learned prompts in the minimal path — the DB role
-    // override wiring is a future task.
-    let system_prompt = crate::prompts::apply_skills(&base_system_prompt, &resolved_skills);
+    // ── Build prompt context ─────────────────────────────────────────────────
+    // Reuses the same helper as `run_task_lifecycle`, so the supervisor path
+    // gets the same activity-log digest, epic context, knowledge notes,
+    // planner patrol context, and merge-conflict plumbing the legacy path
+    // produces today.
+    //
+    // TODO(phase-2): wire worker resume — the supervisor always starts a
+    // fresh conversation today (there is no paused-session / worktree-on-
+    // disk resume pairing in this path), so no `resume_context` is pulled
+    // into the initial user message here.
+    //
+    // TODO(phase-2): specialist overrides — the supervisor doesn't yet
+    // consume `task.agent_type`, so `system_prompt_extensions`,
+    // `learned_prompt`, and the specialist-role override remain empty
+    // / None here; that wiring lands when the coordinator rewrite picks up
+    // specialist dispatch.
+    //
+    // TODO(phase-2): conflict-retry flow — `conflict_ctx` /
+    // `merge_validation_ctx` come from the legacy `run_task_lifecycle`
+    // dispatch helpers that read `task.merge_conflict_metadata` +
+    // activity-log fallbacks; the supervisor equivalent will pull these
+    // off `TaskRunSpec` once the conflict-retry flow is plumbed end-to-end.
+    let project_path_str = worktree_path.display().to_string();
+    let PromptContext {
+        system_prompt, ..
+    } = build_prompt_context(PromptContextInputs {
+        task,
+        runtime_role: role.as_ref(),
+        role_for_epic_check: role.as_ref(),
+        project_path: &project_path_str,
+        worktree_path,
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands,
+        prompt_verification_commands,
+        prompt_verification_rules,
+        system_prompt_extensions: "",
+        learned_prompt: None,
+        resolved_skills: &resolved_skills,
+        app_state: &services.agent_context,
+    })
+    .await;
 
     // ── Create the session record linked to the task-run ─────────────────────
     let session_repo =

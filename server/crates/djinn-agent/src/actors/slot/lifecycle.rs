@@ -7,7 +7,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
 use crate::message::{Conversation, Message};
-use crate::prompts::TaskContext;
 use crate::provider::LlmProvider;
 use crate::provider::create_provider;
 use crate::roles::AgentRole;
@@ -22,12 +21,14 @@ use crate::AgentType;
 
 pub(crate) mod mcp_resolve;
 pub(crate) mod model_resolution;
+pub(crate) mod prompt_context;
 mod retry;
 pub(crate) mod setup;
 pub(crate) mod teardown;
 
 use mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use model_resolution::{ModelResolutionError, resolve_model_and_credential};
+use prompt_context::{PromptContext, PromptContextInputs, build_prompt_context};
 use setup::{SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context};
 use teardown::{PostSessionParams, apply_transition_and_dispatch, spawn_post_session_work};
 
@@ -668,180 +669,25 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         }
     };
 
-    let conflict_files = conflict_ctx.as_ref().map(|m| {
-        m.conflicting_files
-            .iter()
-            .map(|f| format!("- {f}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
-
-    // Fetch activity log for the prompt: last 3 high-signal comments plus a
-    // summary of total counts by role so the agent knows what to look up.
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let activity_entries = task_repo.list_activity(&task.id).await.ok();
-    let activity_text = match &activity_entries {
-        Some(entries) if !entries.is_empty() => {
-            // Last 3 high-signal comments (lead, reviewer, verification)
-            let feedback = recent_feedback(entries, 3);
-
-            // Count comments by role for the summary line
-            let mut counts: std::collections::BTreeMap<&str, usize> =
-                std::collections::BTreeMap::new();
-            for e in entries {
-                if e.event_type == "comment" {
-                    *counts.entry(e.actor_role.as_str()).or_default() += 1;
-                }
-            }
-            let count_summary: String = counts
-                .iter()
-                .map(|(role, n)| format!("{n} {role}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let mut parts = Vec::new();
-            if !feedback.is_empty() {
-                parts.push(format!(
-                    "**Recent feedback (newest last):**\n{}",
-                    feedback.join("\n\n---\n")
-                ));
-            }
-            if !count_summary.is_empty() {
-                parts.push(format!(
-                    "**Activity totals:** {count_summary} comments. Use `task_activity_list` with `actor_role` filter for full history."
-                ));
-            }
-
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join("\n\n"))
-            }
-        }
-        _ => None,
-    };
-
-    // Extract worker submission summary/concerns and last verification failure
-    // from the activity log so the reviewer can see why certain changes were made.
-    let (worker_summary, worker_concerns, verification_failure) =
-        extract_worker_context(&activity_entries);
-
-    // ── Build epic context for roles that need it (e.g. lead) ─────────────────
-    let epic_context = if role.needs_epic_context() {
-        if let Some(ref epic_id) = task.epic_id {
-            let epic_repo =
-                djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            let task_repo_ctx =
-                TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            match epic_repo.get(epic_id).await {
-                Ok(Some(epic)) => {
-                    let mut ctx_lines = vec![
-                        format!("**Epic:** {} ({})", epic.title, epic.short_id),
-                        format!("**Description:** {}", epic.description),
-                        format!("**Memory refs:** {}", epic.memory_refs),
-                    ];
-                    // Load sibling tasks
-                    if let Ok(result) = task_repo_ctx
-                        .list_filtered(djinn_db::ListQuery {
-                            parent: Some(epic_id.clone()),
-                            limit: 50,
-                            ..Default::default()
-                        })
-                        .await
-                    {
-                        let open = result.tasks.iter().filter(|t| t.status != "closed").count();
-                        let closed = result.tasks.iter().filter(|t| t.status == "closed").count();
-                        ctx_lines.push(format!(
-                            "\n### Sibling Tasks ({open} open, {closed} closed)"
-                        ));
-                        for t in &result.tasks {
-                            let status_marker = if t.status == "closed" {
-                                "closed"
-                            } else {
-                                &t.status
-                            };
-                            ctx_lines
-                                .push(format!("- [{}] {}: {}", status_marker, t.short_id, t.title));
-                        }
-                    }
-                    Some(ctx_lines.join("\n"))
-                }
-                _ => None,
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // ── Build knowledge context from scope-matched notes ─────────────
-    let knowledge_context = {
-        let note_repo =
-            djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
-        let task_paths = derive_task_scope_paths(&task, epic_context.as_deref());
-
-        match note_repo
-            .query_by_scope_overlap(
-                &task.project_id,
-                &task_paths,
-                &["pattern", "pitfall", "case"],
-                0.3,
-                10,
-            )
-            .await
-        {
-            Ok(notes) if !notes.is_empty() => Some(format_knowledge_notes(&notes, 2000)),
-            Ok(_) => None,
-            Err(e) => {
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "Lifecycle: failed to query knowledge context"
-                );
-                None
-            }
-        }
-    };
-
-    let planner_patrol_context =
-        super::helpers::build_planner_patrol_context(&task, &app_state, &project_path).await;
-
-    let base_system_prompt = runtime_role.render_prompt(
-        &task,
-        &TaskContext {
-            project_path: project_path.clone(),
-            workspace_path: worktree_path.display().to_string(),
-            diff: None,
-            commits: None,
-            start_commit: None,
-            end_commit: None,
-            conflict_files,
-            merge_base_branch: conflict_ctx.as_ref().map(|m| m.base_branch.clone()),
-            merge_target_branch: conflict_ctx.as_ref().map(|m| m.merge_target.clone()),
-            merge_failure_context: merge_validation_ctx,
-            setup_commands: prompt_setup_commands.clone(),
-            verification_commands: prompt_verification_commands.clone(),
-            verification_rules: prompt_verification_rules.clone(),
-            activity: activity_text,
-            worker_summary,
-            worker_concerns,
-            verification_failure,
-            epic_context,
-            knowledge_context,
-            planner_patrol_context,
-        },
-    );
-    // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).
-    let system_prompt_with_extensions = crate::prompts::apply_role_extensions(
-        &base_system_prompt,
-        &system_prompt_extensions,
-        learned_prompt.as_deref(),
-    );
-    // Append skills section after all other extensions.
-    let system_prompt =
-        crate::prompts::apply_skills(&system_prompt_with_extensions, &resolved_skills);
+    let PromptContext {
+        system_prompt, ..
+    } = build_prompt_context(PromptContextInputs {
+        task: &task,
+        runtime_role: runtime_role.as_ref(),
+        role_for_epic_check: role.as_ref(),
+        project_path: &project_path,
+        worktree_path: &worktree_path,
+        conflict_ctx: conflict_ctx.as_ref(),
+        merge_validation_ctx,
+        prompt_setup_commands,
+        prompt_verification_commands,
+        prompt_verification_rules,
+        system_prompt_extensions: &system_prompt_extensions,
+        learned_prompt: learned_prompt.as_deref(),
+        resolved_skills: &resolved_skills,
+        app_state: &app_state,
+    })
+    .await;
 
     let context_window = app_state
         .catalog
