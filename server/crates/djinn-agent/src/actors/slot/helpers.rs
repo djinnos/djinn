@@ -4,7 +4,6 @@ use crate::actors::coordinator::pr_poller::PR_REVIEW_FEEDBACK_EVENT;
 use crate::context::AgentContext;
 use djinn_core::models::Task;
 use djinn_core::models::parse_json_array;
-use djinn_core::models::TransitionAction;
 use djinn_db::ActivityQuery;
 use djinn_db::ProjectRepository;
 use djinn_db::TaskRepository;
@@ -515,104 +514,6 @@ pub(crate) async fn initial_user_message_for_task(
             "The activity log contains important feedback from prior sessions. Read it carefully and act on it:\n\n{}\n\nAddress this feedback, make the necessary changes, then stop.",
             sections.join("\n\n---\n\n")
         )
-    }
-}
-
-// ─── Retry helper for SQLite lock contention ─────────────────────────────────
-
-fn is_database_locked(e: &anyhow::Error) -> bool {
-    if let Some(djinn_db::Error::Sqlx(sqlx_err)) = e.downcast_ref::<djinn_db::Error>()
-        && let Some(db_err) = sqlx_err.as_database_error()
-    {
-        return db_err
-            .code()
-            .map(|c| matches!(c.as_ref(), "5" | "6"))
-            .unwrap_or(false);
-    }
-    false
-}
-
-/// Retry an async database operation up to 5 times with exponential backoff
-/// when SQLite returns "database is locked" errors.
-async fn retry_on_locked<F, Fut, T>(mut f: F) -> anyhow::Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    const MAX_RETRIES: u32 = 5;
-    const BASE_DELAY_MS: u64 = 200;
-
-    let mut attempt = 0;
-    loop {
-        match f().await {
-            Ok(val) => return Ok(val),
-            Err(e) if is_database_locked(&e) && attempt < MAX_RETRIES => {
-                attempt += 1;
-                let delay = BASE_DELAY_MS * 2u64.pow(attempt - 1);
-                tracing::debug!(
-                    attempt,
-                    delay_ms = delay,
-                    "database locked, retrying after backoff"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-// ─── Transition helpers ───────────────────────────────────────────────────────
-
-pub(crate) async fn transition_start(
-    task: &Task,
-    start_action: fn(&str) -> Option<TransitionAction>,
-    app_state: &AgentContext,
-) -> anyhow::Result<()> {
-    if let Some(action) = start_action(task.status.as_str()) {
-        let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-        retry_on_locked(|| async {
-            repo.transition(
-                &task.id,
-                action.clone(),
-                "agent-supervisor",
-                "system",
-                None,
-                None,
-            )
-            .await
-            .map_err(anyhow::Error::from)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("task transition failed for {}: {e}", task.id))?;
-    }
-    Ok(())
-}
-
-pub(crate) async fn transition_interrupted(
-    task_id: &str,
-    release_action: fn() -> TransitionAction,
-    reason: &str,
-    app_state: &AgentContext,
-) {
-    let action = release_action();
-
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let reason = reason.to_owned();
-    if let Err(e) = retry_on_locked(|| async {
-        repo.transition(
-            task_id,
-            action.clone(),
-            "agent-supervisor",
-            "system",
-            Some(&reason),
-            None,
-        )
-        .await
-        .map_err(anyhow::Error::from)
-    })
-    .await
-    {
-        tracing::warn!(task_id = %task_id, error = %e, "failed to transition interrupted task");
     }
 }
 
