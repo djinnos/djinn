@@ -12,9 +12,11 @@ djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-mcp = { path = "../djinn-mcp" }
-djinn-runtime = { path = "../djinn-runtime" }
+djinn-runtime = { path = "../djinn-runtime", features = ["test-runtime"] }
 djinn-supervisor = { path = "../djinn-supervisor" }
+djinn-k8s = { path = "../djinn-k8s" }
 djinn-workspace = { path = "../djinn-workspace" }
+kube = { version = "0.95", features = ["runtime", "derive"] }
 anyhow = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

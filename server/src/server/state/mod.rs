@@ -14,6 +14,8 @@ use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
+use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
+use djinn_supervisor::{AllowAllValidator, ServeHandle, serve_on_tcp};
 use djinn_db::{
     Database, NoopNoteVectorStore, NoteRepository, NoteVectorStore, ProjectRepository,
     QdrantNoteVectorStore, SettingsRepository,
@@ -152,6 +154,12 @@ struct Inner {
     /// Path resolution mirrors the vault key: `$DJINN_HOME/mirrors` or
     /// `$HOME/.djinn/mirrors`.
     pub mirror: Arc<MirrorManager>,
+    /// TCP listener for worker-pod RPC traffic.  Spawned in `initialize()` on
+    /// the `DJINN_RUNTIME=kubernetes` (default) path; `None` on the
+    /// `DJINN_RUNTIME=test` path and before boot finishes.  Wrapped in a
+    /// `Mutex<Option<ServeHandle>>` rather than `OnceCell` so `shutdown()`
+    /// can move the handle out and cancel it cleanly.
+    pub rpc_server: tokio::sync::Mutex<Option<ServeHandle>>,
 }
 
 impl AppState {
@@ -204,6 +212,7 @@ impl AppState {
                 memory_mount: Mutex::new(None),
                 app_config: tokio::sync::RwLock::new(None),
                 mirror: Arc::new(MirrorManager::new(mirrors_root())),
+                rpc_server: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -823,6 +832,116 @@ impl AppState {
         // leaves the locked org so their existing `djinn_session` cookie
         // stops working on the next request.
         crate::server::start_org_member_sync(self.clone());
+
+        // Phase 2 K8s PR 4 pt2: spawn the TCP listener that worker Pods dial
+        // back into.  Only runs on the `DJINN_RUNTIME=kubernetes` (default)
+        // path; the `DJINN_RUNTIME=test` path exercises the supervisor
+        // in-process through `TestRuntime` and does not need a TCP listener.
+        self.start_rpc_listener_if_needed().await;
+    }
+
+    /// Spawn `djinn_supervisor::serve_on_tcp` on the configured RPC address
+    /// when running under the Kubernetes runtime.  Idempotent — a second
+    /// call finds an existing handle and returns without rebinding.
+    ///
+    /// Binding is best-effort: on boot inside Docker Compose (or anywhere
+    /// without cluster access), `K8sTokenReviewValidator` falls back to
+    /// `AllowAllValidator` so tests and dev loops can still exercise the
+    /// RPC path.  Production Helm deployments always have cluster access
+    /// via the pod's projected SA token.
+    async fn start_rpc_listener_if_needed(&self) {
+        use std::net::SocketAddr;
+
+        if !matches!(runtime_kind(), RuntimeKind::Kubernetes) {
+            tracing::info!(
+                "rpc_server: DJINN_RUNTIME is not kubernetes; skipping TCP listener"
+            );
+            return;
+        }
+
+        {
+            let existing = self.inner.rpc_server.lock().await;
+            if existing.is_some() {
+                tracing::debug!("rpc_server: listener already started");
+                return;
+            }
+        }
+
+        let rpc_addr: SocketAddr = match std::env::var("DJINN_RPC_ADDR") {
+            Ok(raw) => match raw.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(
+                        value = %raw,
+                        error = %e,
+                        "rpc_server: invalid DJINN_RPC_ADDR; falling back to 0.0.0.0:8443"
+                    );
+                    "0.0.0.0:8443".parse().expect("fallback parses")
+                }
+            },
+            Err(_) => "0.0.0.0:8443".parse().expect("default parses"),
+        };
+
+        // Build the SupervisorServices the TCP server will dispatch to.  The
+        // listener uses the server's long-lived cancellation token as its
+        // supervisor-wide cancel — cancelling the server tears down any
+        // in-flight RPC cleanly without reaching into individual task-runs.
+        let agent_context = self.agent_context();
+        let services = djinn_agent::supervisor::services_for_agent_context(
+            agent_context,
+            self.cancel().clone(),
+        );
+
+        // Validator: prefer the real TokenReview path; fall back to
+        // AllowAllValidator if no kubeconfig is available (dev / CI).
+        let handle_result = match kube::Client::try_default().await {
+            Ok(client) => {
+                let validator = Arc::new(K8sTokenReviewValidator::new(client, "djinn"));
+                tracing::info!(
+                    addr = %rpc_addr,
+                    "rpc_server: binding TCP listener with K8sTokenReviewValidator"
+                );
+                serve_on_tcp(rpc_addr, services, validator).await
+            }
+            Err(e) => {
+                tracing::warn!(
+                    addr = %rpc_addr,
+                    error = %e,
+                    "rpc_server: kube::Client::try_default failed; \
+                     falling back to AllowAllValidator (dev mode)"
+                );
+                serve_on_tcp(rpc_addr, services, Arc::new(AllowAllValidator)).await
+            }
+        };
+
+        match handle_result {
+            Ok(handle) => {
+                tracing::info!(
+                    addr = ?handle.bound_addr,
+                    "rpc_server: TCP listener spawned"
+                );
+                *self.inner.rpc_server.lock().await = Some(handle);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    addr = %rpc_addr,
+                    error = %e,
+                    "rpc_server: failed to bind TCP listener; the K8s dispatch \
+                     path will not work until this is resolved"
+                );
+            }
+        }
+    }
+
+    /// Cancel and join the RPC TCP listener if it was spawned.  Called as
+    /// part of the process-wide shutdown path.
+    pub async fn shutdown_rpc_listener(&self) {
+        let handle = self.inner.rpc_server.lock().await.take();
+        if let Some(handle) = handle {
+            handle.cancel();
+            let _ = handle.join.await;
+            tracing::info!("rpc_server: TCP listener stopped");
+        }
     }
 
     async fn interrupt_stale_sessions_on_startup(&self) {
