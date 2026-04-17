@@ -1,23 +1,9 @@
-//! Length-prefixed bincode frame helpers over a `UnixStream`.
+//! Length-prefixed bincode frame helpers used by the worker to emit the
+//! terminal `TaskRunReport` on stdout.
 //!
-//! Phase 2 PR 4 — placeholder surface.  PR 5 replaces this with the richer
-//! `ServiceRpcRequest` / `ServiceRpcResponse` / `StreamEvent` codec sketched
-//! in the blueprint (`/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md` §3).
-//!
-//! Today we only need enough to prove the wire plumbing works end-to-end:
-//!   * dial the launcher's Unix socket,
-//!   * ship a single arbitrary bincode-serializable payload,
-//!   * read a single response back.
-//!
-//! Frames are `u32` big-endian length + bincode body.  This matches the
-//! framing `tokio_util::codec::LengthDelimitedCodec` produces by default, so
-//! PR 5 can swap these helpers for a `Framed<UnixStream, ...>` pipeline
-//! without breaking the wire format.
-//!
-//! The helpers are intentionally `async fn`s on raw halves rather than
-//! methods on a wrapper struct — that lets `main.rs` split a `UnixStream`
-//! into read/write halves and drive them from separate tasks as the codec
-//! gets richer.
+//! Frames are `u32` big-endian length + bincode body — same shape as the
+//! RPC wire codec in `djinn_runtime::wire` so a downstream observer can
+//! decode the stdout stream without a second parser.
 
 use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
