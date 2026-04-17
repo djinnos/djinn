@@ -8,16 +8,15 @@
 #   ${DJINN_HOME:-~/.djinn}/        -> /root/.djinn         (logs, tokens, data)
 #   ${DJINN_WORKSPACE_ROOT:-$HOME}  -> /workspace           (user codebases)
 #
-# Per-task-run sandbox surface (consumed by LocalDockerRuntime, NOT mounted
-# into djinn-server itself):
-#   ${DJINN_HOME:-~/.djinn}/mirrors       host-side mirror clones (ro in task)
-#   ${DJINN_HOME:-~/.djinn}/cache/cargo   shared cargo cache       (rw)
-#   ${DJINN_HOME:-~/.djinn}/cache/pnpm    shared pnpm store        (rw)
-#   ${DJINN_HOME:-~/.djinn}/cache/pip     shared pip cache         (rw)
-#   ${DJINN_HOME:-~/.djinn}/ipc           task-run IPC sockets     (rw)
-# These are pre-created by the djinn-server entrypoint (see below) so the
-# uid-10001 djinn user inside djinn-agent-runtime containers can write to
-# them when LocalDockerRuntime bind-mounts them.
+# Per-task-run sandbox surface (bind-mounted into djinn-server so it can
+# stage mirror clones + share build caches; K8s deploys bind the same paths
+# as PVCs):
+#   ${DJINN_HOME:-~/.djinn}/mirrors       host-side mirror clones
+#   ${DJINN_HOME:-~/.djinn}/cache/cargo   shared cargo cache
+#   ${DJINN_HOME:-~/.djinn}/cache/pnpm    shared pnpm store
+#   ${DJINN_HOME:-~/.djinn}/cache/pip     shared pip cache
+# Task-run containers are scheduled by KubernetesRuntime (future PR) and
+# mount these paths from PVCs inside the cluster.
 
 services:
   dolt:
@@ -108,17 +107,10 @@ services:
     volumes:
       - ${DJINN_HOME:-${HOME}/.djinn}:/root/.djinn
       - ${DJINN_WORKSPACE_ROOT:-${HOME}}:/workspace:rw
-      # Docker socket so djinn-server (LocalDockerRuntime) can launch
-      # djinn-agent-runtime sandboxes on the host's docker engine.
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Per-task-run sandbox surface. These are ALSO bind-mounted by
-      # LocalDockerRuntime into the djinn-agent-runtime container it
-      # launches per task; mounting them into djinn-server here ensures
-      # (a) the paths exist on the host under a single DJINN_HOME root,
-      # and (b) djinn-server can stage mirror clones + read back reports
-      # without extra indirection.
+      # Shared workspace surface: mirror clones + package caches. Same host
+      # paths become PVCs in the K8s deploy; djinn-server owns them either
+      # way so mirror fetching + cache warming live in one process.
       - ${DJINN_HOME:-${HOME}/.djinn}/mirrors:/var/lib/djinn/mirrors
       - ${DJINN_HOME:-${HOME}/.djinn}/cache/cargo:/var/lib/djinn/cache/cargo
       - ${DJINN_HOME:-${HOME}/.djinn}/cache/pnpm:/var/lib/djinn/cache/pnpm
       - ${DJINN_HOME:-${HOME}/.djinn}/cache/pip:/var/lib/djinn/cache/pip
-      - ${DJINN_HOME:-${HOME}/.djinn}/ipc:/var/run/djinn
