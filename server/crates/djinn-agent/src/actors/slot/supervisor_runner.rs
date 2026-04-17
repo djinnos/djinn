@@ -34,7 +34,7 @@ use djinn_db::{TaskRepository, task_branch_name};
 
 use crate::context::AgentContext;
 use crate::supervisor::{
-    RoleKind, SupervisorFlow, SupervisorServices, TaskRunSpec, TaskRunSupervisor,
+    RoleKind, SupervisorFlow, TaskRunSpec, TaskRunSupervisor, services_for_agent_context,
 };
 
 use super::helpers::{conflict_context_for_dispatch, default_target_branch};
@@ -143,7 +143,7 @@ pub(crate) async fn run_supervisor_dispatch(
     let task_runs = Arc::new(djinn_db::repositories::task_run::TaskRunRepository::new(
         app_state.db.clone(),
     ));
-    let services = SupervisorServices::new(app_state.clone(), kill);
+    let services = services_for_agent_context(app_state.clone(), kill);
     let supervisor = TaskRunSupervisor::new(task_runs, mirror, services);
 
     // ── Run the task-run to terminal state ────────────────────────────────

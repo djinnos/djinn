@@ -42,8 +42,8 @@ use djinn_agent::message::{ContentBlock, Conversation};
 use djinn_agent::provider::{LlmProvider, StreamEvent, ToolChoice};
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::supervisor::{
-    SupervisorError, SupervisorFlow, SupervisorServices, TaskRunOutcome, TaskRunSpec,
-    TaskRunSupervisor,
+    SupervisorError, SupervisorFlow, TaskRunOutcome, TaskRunSpec, TaskRunSupervisor,
+    services_for_agent_context, services_for_agent_context_with_provider_override,
 };
 use djinn_core::events::EventBus;
 use djinn_core::models::TaskRunTrigger;
@@ -224,7 +224,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
     let cancel = CancellationToken::new();
     let agent_ctx = test_agent_context(db.clone());
     let task_runs = Arc::new(TaskRunRepository::new(db.clone()));
-    let services = SupervisorServices::new(agent_ctx, cancel.clone());
+    let services = services_for_agent_context(agent_ctx, cancel.clone());
     let supervisor = TaskRunSupervisor::new(task_runs.clone(), mirror.clone(), services);
 
     // 5. Spike flow = single Architect stage — minimizes reply_loop surface.
@@ -472,8 +472,11 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     let cancel = CancellationToken::new();
     let agent_ctx = test_agent_context(db.clone());
     let task_runs = Arc::new(TaskRunRepository::new(db.clone()));
-    let services = SupervisorServices::new(agent_ctx, cancel.clone())
-        .with_provider_override(stub.clone() as Arc<dyn LlmProvider>);
+    let services = services_for_agent_context_with_provider_override(
+        agent_ctx,
+        cancel.clone(),
+        stub.clone() as Arc<dyn LlmProvider>,
+    );
     let supervisor = TaskRunSupervisor::new(task_runs.clone(), mirror.clone(), services);
 
     let spec = TaskRunSpec {

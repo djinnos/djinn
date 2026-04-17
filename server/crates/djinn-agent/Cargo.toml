@@ -13,6 +13,7 @@ djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-mcp = { path = "../djinn-mcp" }
 djinn-runtime = { path = "../djinn-runtime" }
+djinn-supervisor = { path = "../djinn-supervisor" }
 djinn-workspace = { path = "../djinn-workspace" }
 anyhow = "1"
 thiserror = "2"

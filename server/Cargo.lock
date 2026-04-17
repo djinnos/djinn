@@ -1003,6 +1003,7 @@ dependencies = [
  "djinn-mcp",
  "djinn-provider",
  "djinn-runtime",
+ "djinn-supervisor",
  "djinn-workspace",
  "futures",
  "git2",
@@ -1242,6 +1243,29 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-supervisor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "djinn-core",
+ "djinn-db",
+ "djinn-git",
+ "djinn-provider",
+ "djinn-runtime",
+ "djinn-workspace",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "uuid",
  "workspace-hack",
 ]

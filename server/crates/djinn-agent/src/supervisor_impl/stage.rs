@@ -1,54 +1,41 @@
-//! Per-stage execution driver for [`crate::supervisor::TaskRunSupervisor`].
+//! Per-stage execution driver invoked by [`crate::supervisor::TaskRunSupervisor`].
+//!
+//! The supervisor orchestration itself lives in `djinn-supervisor`; this file
+//! stays in `djinn-agent` because `execute_stage` reaches deeply into
+//! `AgentContext`, the role registry, the lifecycle helpers
+//! (`model_resolution`, `setup`, `mcp_resolve`, `prompt_context`,
+//! `teardown`), the MCP + provider + reply-loop plumbing, and `task_merge`.
+//!
+//! Phase 2 PR 2 (extraction): the supervisor body in `djinn-supervisor`
+//! invokes this function through an injected closure stored on
+//! `SupervisorServices::execute_stage_fn`; the closure is bound by
+//! `actors::slot::supervisor_runner::run_supervisor_dispatch`. Moving this
+//! body out of `djinn-agent` is deferred to PR 3 (or a follow-up
+//! `djinn-lifecycle` extraction) when we convert `SupervisorServices` into a
+//! trait.
 //!
 //! A *stage* is one role's session inside a supervisor-driven task-run: the
-//! supervisor walks the flow's `role_sequence()` and invokes [`execute_stage`]
-//! for each role against the shared [`Workspace`].
+//! supervisor walks the flow's `role_sequence()` and invokes this fn for each
+//! role against the shared [`Workspace`].
 //!
 //! ## Scope
 //!
-//! This is the Phase 1 minimum — it wires the extracted lifecycle helpers
-//! ([`model_resolution`], [`setup`], [`mcp_resolve`], [`prompt_context`]) into
-//! the reply loop so a single role stage can run end-to-end against a mirror-
-//! born ephemeral workspace, then map the reply-loop outcome onto
-//! [`StageOutcome`].
-//!
-//! The old coordinator dispatch path (`run_task_lifecycle`) remains fully
-//! active and is the only path production traffic travels today.  This module
-//! is additive: only callers that explicitly opt into the supervisor see any
-//! change.
-
-// TODO(phase-1): paused-session resume
-//   `run_task_lifecycle` resumes a paused Worker session (reuses worktree,
-//   reloads conversation, compacts before appending reviewer feedback).  The
-//   supervisor always starts a fresh session today — acceptable because the
-//   supervisor-driven flow owns the whole run and there is no external
-//   "pause, release slot, redispatch later" flow to resume across.
-//
-// NOTE(phase-1): session teardown / post-session dispatch
-//   `execute_stage` now drives `spawn_post_session_work` after each stage, so
-//   the task row transitions through the role sequence (worker → reviewing,
-//   reviewer-approve → verifying, etc.) just like the old
-//   `run_task_lifecycle`.  Worker conversation-for-resume is not saved — the
-//   supervisor-driven flow does not release the slot between stages, so
-//   there is no external resume path to preserve.  See the block below that
-//   calls `spawn_post_session_work`.
-//
-// TODO(phase-1): knowledge extraction
-//   `run_task_lifecycle` additionally spawns structural + LLM knowledge
-//   extraction from the conversation transcript after each session.  The
-//   supervisor does NOT yet do this — the `ReplyLoopContext` doesn't hand
-//   back the conversation snapshot after the loop, and the supervisor
-//   currently consumes `conversation` by `&mut` which is dropped when the
-//   stage returns.  Wiring this is a follow-up once the supervisor-driven
-//   coordinator rewrite picks it up.
+//! Wires the extracted lifecycle helpers ([`model_resolution`], [`setup`],
+//! [`mcp_resolve`], [`prompt_context`]) into the reply loop so a single role
+//! stage can run end-to-end against a mirror-born ephemeral workspace, then
+//! maps the reply-loop outcome onto [`StageOutcome`] (re-exported from
+//! `djinn-supervisor`).
 
 use std::sync::Arc;
 
 use djinn_core::models::{SessionStatus, Task};
 use djinn_db::SessionRepository;
 use djinn_db::repositories::session::CreateSessionParams;
+use djinn_runtime::spec::{RoleKind, TaskRunSpec};
+use djinn_supervisor::{StageError, StageOutcome, SupervisorServices};
 use djinn_workspace::Workspace;
 
+use crate::AgentType;
 use crate::actors::slot::helpers::ProviderCredential;
 use crate::actors::slot::helpers::{
     auth_method_for_provider, build_telemetry_meta, capabilities_for_provider, default_base_url,
@@ -66,76 +53,12 @@ use crate::actors::slot::lifecycle::setup::{
 };
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
+use crate::context::AgentContext;
 use crate::message::{Conversation, Message};
 use crate::provider::{LlmProvider, ProviderConfig, create_provider};
 use crate::roles::{AgentRole, role_impl_for};
-use crate::AgentType;
 
-use super::SupervisorServices;
-use super::flow::RoleKind;
-use super::spec::TaskRunSpec;
-
-/// Outcome of executing one role stage.  Mapped by [`execute_stage`] from the
-/// reply-loop result + finalize payload, then consumed by the supervisor to
-/// decide the next stage (or to terminate the task-run).
-#[derive(Clone, Debug)]
-pub enum StageOutcome {
-    /// Worker completed successfully.  The supervisor decides whether the
-    /// next stage (reviewer / verifier / PR open) follows based on the flow.
-    WorkerDone,
-    /// Planner called `submit_grooming` with `decision=execute` — the plan
-    /// is ready to hand off to a worker.
-    PlannerExecute,
-    /// Planner closed the task without execution (e.g. already done, not
-    /// actionable).
-    PlannerClose { reason: String },
-    /// Reviewer approved the worker's submission.
-    ReviewerApproved,
-    /// Reviewer rejected the worker's submission; feedback travels into the
-    /// next worker-resume cycle.
-    ReviewerRejected { feedback: String },
-    /// Verification suite passed.
-    VerifierPassed,
-    /// Verification suite failed.
-    VerifierFailed { reason: String },
-    /// Architect spike completed.
-    ArchitectDone,
-    /// Any role that surfaced an ambiguity / open question blocking automated
-    /// progress (e.g. planner `request_lead`).  Terminal for the task-run.
-    Escalate { reason: String },
-    /// Stage failed (reply loop error, provider error, session creation
-    /// failure, unexpected finalize tool, etc.).  Terminal for the task-run.
-    Failed { reason: String },
-}
-
-impl StageOutcome {
-    /// Whether this outcome should short-circuit the role sequence (the
-    /// supervisor stops stepping through further roles).
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            StageOutcome::PlannerClose { .. }
-                | StageOutcome::Escalate { .. }
-                | StageOutcome::Failed { .. }
-                | StageOutcome::ReviewerRejected { .. }
-                | StageOutcome::VerifierFailed { .. }
-        )
-    }
-}
-
-/// Failure that prevented [`execute_stage`] from reaching the reply loop —
-/// always fatal for the whole task-run.
-#[derive(Debug, thiserror::Error)]
-pub enum StageError {
-    #[error("model resolution: {0}")]
-    ModelResolution(String),
-
-    #[error("setup/verification: {0}")]
-    Setup(String),
-
-    #[error("session create: {0}")]
-    SessionCreate(String),
-}
+use super::SupervisorCallbackContext;
 
 /// Execute one role stage against the shared workspace.
 ///
@@ -143,9 +66,6 @@ pub enum StageError {
 /// MCP + skills → creates a fresh session record linked to `task_run_id` →
 /// builds a degenerate prompt → invokes the reply loop → finalizes the
 /// session record → maps the result to [`StageOutcome`].
-///
-/// See module-level TODOs for what's intentionally not yet wired (prompt
-/// enrichment, paused-session resume, post-session transitions).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_stage(
     task: &Task,
@@ -153,11 +73,14 @@ pub(crate) async fn execute_stage(
     role_kind: RoleKind,
     task_run_id: &str,
     spec: &TaskRunSpec,
-    services: &SupervisorServices,
+    callbacks: &SupervisorCallbackContext,
+    _services: &SupervisorServices,
 ) -> Result<StageOutcome, StageError> {
     let role = role_arc_for(role_kind);
     let role_name = role.config().name;
     let worktree_path = workspace.path();
+    let agent_context: &AgentContext = &callbacks.agent_context;
+    let provider_override = callbacks.provider_override.clone();
 
     tracing::info!(
         task_id = %task.short_id,
@@ -167,28 +90,17 @@ pub(crate) async fn execute_stage(
         "Supervisor stage: starting"
     );
 
-    // Test seam: when a `provider_override` is installed on the services, we
-    // skip catalog + credential resolution entirely and use the injected
-    // provider directly.  Production callers always leave this `None` and go
-    // through the full resolution path below.
-    let override_provider = services.provider_override.clone();
-
     // Resolve the model for this stage.  Preference order:
-    //   1. Per-role override threaded in via `TaskRunSpec::model_id_per_role`
-    //      — populated by the coordinator when it has a resolved model from
-    //      its dispatch priorities + project `model_preference` lookup.
-    //   2. Catalog-default fallback (first model registered for any provider
-    //      in the catalog), used by smoke tests / one-off callers.
+    //   1. Per-role override threaded in via `TaskRunSpec::model_id_per_role`.
+    //   2. Catalog-default fallback.
     //   3. When a `provider_override` is present (integration tests), fall
     //      back to a synthetic identifier so the session record is still
     //      well-formed.
     let model_id = match spec.model_id_per_role.get(&role_kind).cloned() {
         Some(m) => m,
-        None => match default_model_for_role(role_name, services) {
+        None => match default_model_for_role(role_name, agent_context) {
             Some(m) => m,
-            None if override_provider.is_some() => {
-                "test/supervisor-stub".to_string()
-            }
+            None if provider_override.is_some() => "test/supervisor-stub".to_string(),
             None => {
                 return Err(StageError::ModelResolution(format!(
                     "no model registered for role '{role_name}' in the provider catalog"
@@ -198,15 +110,10 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Model + credential ───────────────────────────────────────────────────
-    // When a provider override is installed, skip the vault credential lookup
-    // entirely — the override carries its own transport.  The `ResolvedModel`
-    // fields below are still referenced by the non-override provider-
-    // construction branch, so we only populate `resolved` when we actually
-    // need it.
-    let resolved = if override_provider.is_some() {
+    let resolved = if provider_override.is_some() {
         None
     } else {
-        match resolve_model_and_credential(&model_id, &task.id, &services.agent_context).await {
+        match resolve_model_and_credential(&model_id, &task.id, agent_context).await {
             Ok(r) => Some(r),
             Err(ModelResolutionError { reason }) => {
                 return Err(StageError::ModelResolution(reason));
@@ -215,11 +122,6 @@ pub(crate) async fn execute_stage(
     };
 
     // ── MCP + skills ─────────────────────────────────────────────────────────
-    // The supervisor always starts a fresh session, so role-level overrides
-    // from the agents DB table are skipped here — a default-role session
-    // receives project-level MCP + skills only.  (Specialist overrides land
-    // when the supervisor learns to consume `task.agent_type`; until then
-    // the old dispatch path retains that behaviour.)
     let McpAndSkills {
         settings,
         effective_mcp_servers,
@@ -234,7 +136,7 @@ pub(crate) async fn execute_stage(
         &[],  // role_skills — specialist path not wired yet
         #[cfg(test)]
         None,
-        &services.agent_context,
+        agent_context,
     )
     .await;
 
@@ -249,7 +151,7 @@ pub(crate) async fn execute_stage(
         worktree_path,
         &task.id,
         &task.short_id,
-        &services.agent_context,
+        agent_context,
     )
     .await
     {
@@ -260,31 +162,8 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Build prompt context ─────────────────────────────────────────────────
-    // Reuses the same helper as `run_task_lifecycle`, so the supervisor path
-    // gets the same activity-log digest, epic context, knowledge notes,
-    // planner patrol context, and merge-conflict plumbing the legacy path
-    // produces today.
-    //
-    // TODO(phase-2): wire worker resume — the supervisor always starts a
-    // fresh conversation today (there is no paused-session / worktree-on-
-    // disk resume pairing in this path), so no `resume_context` is pulled
-    // into the initial user message here.
-    //
-    // TODO(phase-2): specialist overrides — the supervisor doesn't yet
-    // consume `task.agent_type`, so `system_prompt_extensions`,
-    // `learned_prompt`, and the specialist-role override remain empty
-    // / None here; that wiring lands when the coordinator rewrite picks up
-    // specialist dispatch.
-    //
-    // TODO(phase-2): conflict-retry flow — `conflict_ctx` /
-    // `merge_validation_ctx` come from the legacy `run_task_lifecycle`
-    // dispatch helpers that read `task.merge_conflict_metadata` +
-    // activity-log fallbacks; the supervisor equivalent will pull these
-    // off `TaskRunSpec` once the conflict-retry flow is plumbed end-to-end.
     let project_path_str = worktree_path.display().to_string();
-    let PromptContext {
-        system_prompt, ..
-    } = build_prompt_context(PromptContextInputs {
+    let PromptContext { system_prompt, .. } = build_prompt_context(PromptContextInputs {
         task,
         runtime_role: role.as_ref(),
         role_for_epic_check: role.as_ref(),
@@ -298,13 +177,13 @@ pub(crate) async fn execute_stage(
         system_prompt_extensions: "",
         learned_prompt: None,
         resolved_skills: &resolved_skills,
-        app_state: &services.agent_context,
+        app_state: agent_context,
     })
     .await;
 
     // ── Create the session record linked to the task-run ─────────────────────
     let session_repo =
-        SessionRepository::new(services.agent_context.db.clone(), services.agent_context.event_bus.clone());
+        SessionRepository::new(agent_context.db.clone(), agent_context.event_bus.clone());
     let session_record = match session_repo
         .create(CreateSessionParams {
             project_id: &task.project_id,
@@ -322,25 +201,18 @@ pub(crate) async fn execute_stage(
     let session_id = session_record.id.clone();
 
     // ── Build the LLM provider ───────────────────────────────────────────────
-    let context_window = services
-        .agent_context
+    let context_window = agent_context
         .catalog
         .find_model(&model_id)
         .map(|m| m.context_window)
         .unwrap_or(0);
 
-    // Two branches below diverge on ownership: the test-override path keeps
-    // the provider as an `Arc<dyn LlmProvider>` so the caller retains a
-    // handle for assertions, while the production path owns a `Box<dyn
-    // LlmProvider>`.  We unify them into a borrowed `&dyn LlmProvider` at
-    // the reply-loop call site.
-    let provider_arc: Option<Arc<dyn LlmProvider>> = override_provider;
+    let provider_arc: Option<Arc<dyn LlmProvider>> = provider_override;
     let provider_owned: Option<Box<dyn LlmProvider>> = if provider_arc.is_some() {
         None
     } else {
-        let resolved = resolved.expect(
-            "resolved model credential must be populated when provider_override is absent",
-        );
+        let resolved = resolved
+            .expect("resolved model credential must be populated when provider_override is absent");
         let telemetry_meta = build_telemetry_meta(role_name, &task.id);
         let built = match resolved.provider_credential {
             Some(ProviderCredential::OAuthConfig(mut cfg)) => {
@@ -351,12 +223,9 @@ pub(crate) async fn execute_stage(
                 create_provider(*cfg)
             }
             Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
-                let format_family = format_family_for_provider(
-                    &resolved.catalog_provider_id,
-                    &resolved.model_name,
-                );
-                let base_url = services
-                    .agent_context
+                let format_family =
+                    format_family_for_provider(&resolved.catalog_provider_id, &resolved.model_name);
+                let base_url = agent_context
                     .catalog
                     .list_providers()
                     .iter()
@@ -387,7 +256,8 @@ pub(crate) async fn execute_stage(
         };
         Some(built)
     };
-    let provider_ref: &dyn LlmProvider = match (provider_arc.as_deref(), provider_owned.as_deref()) {
+    let provider_ref: &dyn LlmProvider = match (provider_arc.as_deref(), provider_owned.as_deref())
+    {
         (Some(p), _) => p,
         (None, Some(p)) => p,
         (None, None) => unreachable!("either provider_override or a built provider is present"),
@@ -401,9 +271,7 @@ pub(crate) async fn execute_stage(
 
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
-    let initial_user_message = role
-        .initial_user_message(&task.id, &services.agent_context)
-        .await;
+    let initial_user_message = role.initial_user_message(&task.id, agent_context).await;
     conversation.push(Message::user(initial_user_message));
 
     // ── Run the reply loop ───────────────────────────────────────────────────
@@ -420,15 +288,15 @@ pub(crate) async fn execute_stage(
             finalize_tool_names: role.config().finalize_tool_names,
             context_window,
             model_id: &model_id,
-            cancel: &services.cancel,
-            global_cancel: &services.cancel,
-            app_state: &services.agent_context,
+            cancel: &callbacks.cancel,
+            global_cancel: &callbacks.cancel,
+            app_state: agent_context,
             mcp_registry: mcp_registry.as_ref(),
             active_skill_names: &effective_skills,
             active_mcp_server_names: &effective_mcp_servers,
         },
         &mut conversation,
-        false, // is_resumed_session — supervisor always starts fresh (see TODO)
+        false,
     )
     .await;
 
@@ -450,10 +318,6 @@ pub(crate) async fn execute_stage(
     }
 
     // ── Map the reply-loop outcome to StageOutcome ───────────────────────────
-    // We do this BEFORE dispatching post-session work so we can return the
-    // outcome to the supervisor immediately; the post-session background task
-    // then applies the task transition + finalize-payload side effects in
-    // parallel with the supervisor stepping to the next stage.
     let final_result_ok = reply_result.is_ok();
     let final_error = reply_result.as_ref().err().map(|e| e.to_string());
     let stage_outcome = match reply_result {
@@ -493,9 +357,7 @@ pub(crate) async fn execute_stage(
                                     .unwrap_or_else(|| "planner escalated".into()),
                             },
                             other => StageOutcome::Failed {
-                                reason: format!(
-                                    "planner submitted unknown decision '{other}'"
-                                ),
+                                reason: format!("planner submitted unknown decision '{other}'"),
                             },
                         }
                     }
@@ -523,9 +385,7 @@ pub(crate) async fn execute_stage(
                                     .to_string(),
                             },
                             other => StageOutcome::Failed {
-                                reason: format!(
-                                    "reviewer submitted unknown verdict '{other}'"
-                                ),
+                                reason: format!("reviewer submitted unknown verdict '{other}'"),
                             },
                         }
                     }
@@ -537,51 +397,30 @@ pub(crate) async fn execute_stage(
                         reason: format!("reviewer finalized via unexpected tool '{other}'"),
                     },
                 },
-                // TODO(phase-1): the supervisor doesn't yet drive a dedicated
-                // verifier stage — verification runs as a post-session job in
-                // the old lifecycle.  Treat any "verifier" invocation here as
-                // unimplemented.
                 RoleKind::Verifier => StageOutcome::Failed {
                     reason: "verifier stage not yet wired in supervisor".into(),
                 },
                 RoleKind::Architect => match finalize_name {
                     "submit_work" => StageOutcome::ArchitectDone,
                     other => StageOutcome::Failed {
-                        reason: format!(
-                            "architect finalized via unexpected tool '{other}'"
-                        ),
+                        reason: format!("architect finalized via unexpected tool '{other}'"),
                     },
                 },
             }
         }
     };
 
-    // ── Dispatch post-session work (transition + finalize side effects) ──────
-    //
-    // Mirrors `run_task_lifecycle`'s non-worker branch: the background task
-    // runs `process_finalize_payload`, `role.on_complete`, and
-    // `apply_transition_and_dispatch` so the task row transitions through the
-    // role sequence (reviewing → verifying → completed / reopened / …) and
-    // any queued verification dispatches fire.
-    //
-    // We take `project_path` from the ProjectRepository row rather than the
-    // ephemeral worktree because `apply_transition_and_dispatch` forwards it
-    // to `spawn_verification`, which expects a host-side project dir.  If
-    // the lookup fails we fall back to the ephemeral workspace path — that
-    // may break `submit_verification` follow-ups on legacy projects, but
-    // preserves the transition side effects (the common case).
-    let project_path = crate::task_merge::resolve_project_path_for_id(
-        &task.project_id,
-        &services.agent_context,
-    )
-    .await
-    .unwrap_or_else(|| worktree_path.display().to_string());
+    // ── Dispatch post-session work ───────────────────────────────────────────
+    let project_path =
+        crate::task_merge::resolve_project_path_for_id(&task.project_id, agent_context)
+            .await
+            .unwrap_or_else(|| worktree_path.display().to_string());
 
     spawn_post_session_work(PostSessionParams {
         task_id: task.id.clone(),
         project_path,
         role: role.clone(),
-        app_state: services.agent_context.clone(),
+        app_state: agent_context.clone(),
         final_output,
         final_result_ok,
         final_error,
@@ -598,17 +437,11 @@ fn role_arc_for(kind: RoleKind) -> Arc<dyn AgentRole> {
         RoleKind::Planner => role_impl_for(AgentType::Planner),
         RoleKind::Worker => role_impl_for(AgentType::Worker),
         RoleKind::Reviewer => role_impl_for(AgentType::Reviewer),
-        // There is no VerifierRole today — verification runs as a
-        // post-session job outside any agent session.  Phase 1 maps this to
-        // Worker (harmless because execute_stage short-circuits Verifier to
-        // StageOutcome::Failed before invoking the role).
         RoleKind::Verifier => role_impl_for(AgentType::Worker),
         RoleKind::Architect => role_impl_for(AgentType::Architect),
     }
 }
 
-/// Pull a "reason"-shaped string out of a finalize payload (looks for common
-/// field names: `reason`, `message`, `summary`).
 fn extract_reason(payload: &Option<serde_json::Value>) -> Option<String> {
     let p = payload.as_ref()?;
     for key in ["reason", "message", "summary"] {
@@ -622,15 +455,8 @@ fn extract_reason(payload: &Option<serde_json::Value>) -> Option<String> {
 }
 
 /// Phase 1 model lookup: pick any model from the catalog.
-///
-/// TODO(phase-1): consult the slot pool's `role→model` map (see
-/// `ModelSlotConfig.roles` in `actors::slot::pool`) or the per-project
-/// role_preferred_model setting.  Until the coordinator rewrite (task #7)
-/// hands a resolved model into the supervisor directly, we grab whatever
-/// model the catalog has available for *any* provider — sufficient to
-/// compile + run an integration-level smoke test against a real provider.
-fn default_model_for_role(_role_name: &str, services: &SupervisorServices) -> Option<String> {
-    let catalog = &services.agent_context.catalog;
+fn default_model_for_role(_role_name: &str, app_state: &AgentContext) -> Option<String> {
+    let catalog = &app_state.catalog;
     for provider in catalog.list_providers() {
         if let Some(model) = catalog.list_models(&provider.id).first() {
             return Some(format!("{}/{}", provider.id, model.id));

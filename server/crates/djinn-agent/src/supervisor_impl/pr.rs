@@ -1,7 +1,12 @@
 //! Supervisor-driven PR-open orchestration.
 //!
-//! This is the mirror-native PR path the supervisor invokes after a flow's
-//! role sequence completes successfully.  It intentionally does **less** than
+//! Stays in `djinn-agent` (rather than moving to `djinn-supervisor`) because
+//! the PR path calls `task_merge::squash_merge_via_mirror` /
+//! `build_app_push_url` and reads `AgentContext.mirror`. It's invoked by the
+//! supervisor body through `SupervisorServices::open_pr_fn`, wired by
+//! `actors::slot::supervisor_runner::run_supervisor_dispatch`.
+//!
+//! Scope is intentionally narrower than
 //! [`crate::task_merge::merge_and_transition`]: no worktree teardown, no
 //! knowledge-promotion side effects, no activity-log writes.  The supervisor
 //! keeps those concerns inside [`super::stage::execute_stage`]'s post-session
@@ -11,39 +16,28 @@
 //! 2. Mints a GitHub-App installation token.
 //! 3. Runs [`crate::task_merge::squash_merge_via_mirror`] through the mirror.
 //! 4. Creates (or adopts/reopens) a GitHub PR for the squashed commit.
-//!
-//! The returned [`super::spec::TaskRunOutcome`] is either `PrOpened { url, sha }`
-//! on success or `Failed { stage: "pr_open", reason }` on any infra / auth /
-//! merge failure — the supervisor uses that directly to finalize the task-run.
 
 use djinn_db::{ProjectRepository, TaskRepository};
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
-use djinn_provider::github_app::{
-    app_id as github_app_id, installations::get_installation_token,
-};
+use djinn_provider::github_app::{app_id as github_app_id, installations::get_installation_token};
+use djinn_runtime::spec::{TaskRunOutcome, TaskRunSpec};
+use djinn_supervisor::SupervisorServices;
 
-use super::SupervisorServices;
-use super::spec::{TaskRunOutcome, TaskRunSpec};
+use super::SupervisorCallbackContext;
 use crate::actors::slot::helpers::default_target_branch;
 use crate::task_merge::{build_app_push_url, squash_merge_via_mirror};
 
 /// Open (or adopt) a GitHub PR for the completed task-run.
 ///
-/// See the module docstring for scope.  Returns:
+/// Returns:
 /// - `TaskRunOutcome::PrOpened { url, sha }` on success.
-/// - `TaskRunOutcome::Failed { stage: "pr_open", reason }` for any failure —
-///   missing GitHub App config, unknown project coords, token failure, merge
-///   conflict, push failure, PR-creation failure, etc.
+/// - `TaskRunOutcome::Failed { stage: "pr_open", reason }` for any failure.
 pub(crate) async fn supervisor_pr_open(
     spec: &TaskRunSpec,
     task: &djinn_core::models::Task,
-    services: &SupervisorServices,
+    callbacks: &SupervisorCallbackContext,
+    _services: &SupervisorServices,
 ) -> TaskRunOutcome {
-    // The GitHub App must be configured.  In no-App deployments the old
-    // coordinator path falls back to a direct-push merge through the mirror's
-    // origin; the supervisor doesn't yet expose that fallback because the
-    // multi-user roadmap assumes App-only deployments.  Surface it as a
-    // failure so the caller knows to configure the App.
     if github_app_id().is_err() {
         return TaskRunOutcome::Failed {
             stage: "pr_open".into(),
@@ -53,15 +47,14 @@ pub(crate) async fn supervisor_pr_open(
         };
     }
 
-    let app_state = &services.agent_context;
+    let app_state = &callbacks.agent_context;
     let mirror = match app_state.mirror.as_ref() {
         Some(m) => m.clone(),
         None => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
-                reason:
-                    "supervisor PR-open requires MirrorManager but AgentContext has none"
-                        .into(),
+                reason: "supervisor PR-open requires MirrorManager but AgentContext has none"
+                    .into(),
             };
         }
     };
@@ -125,7 +118,6 @@ pub(crate) async fn supervisor_pr_open(
 
     let merge_target = default_target_branch(&spec.project_id, app_state).await;
 
-    // Build the squash-commit message from the task's title + issue type.
     let commit_type = if task.issue_type == "task" {
         "chore"
     } else {
@@ -133,10 +125,6 @@ pub(crate) async fn supervisor_pr_open(
     };
     let message = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
-    // Squash-merge through the mirror into the target branch, pushing the
-    // result to the GitHub-App-authenticated URL.  `spec.task_branch` is the
-    // branch the supervisor committed onto inside the ephemeral workspace;
-    // `squash_merge_via_mirror` will fetch it from the bare mirror.
     let merge_result = match squash_merge_via_mirror(
         mirror.as_ref(),
         &spec.project_id,
@@ -156,8 +144,6 @@ pub(crate) async fn supervisor_pr_open(
         }
     };
 
-    // Persist the merge-commit SHA before opening the PR so observers see the
-    // commit even if the PR API call fails on infra.
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Err(e) = task_repo
         .set_merge_commit_sha(&task.id, &merge_result.commit_sha)
@@ -170,7 +156,6 @@ pub(crate) async fn supervisor_pr_open(
         );
     }
 
-    // Build PR title + body from task metadata.
     let pr_title = format!("{}({}): {}", commit_type, task.short_id, task.title);
     let pr_body = format!(
         "## Summary\n{description}\n\n---\nDjinn task: {short_id}",
@@ -181,7 +166,6 @@ pub(crate) async fn supervisor_pr_open(
     let github_client = GitHubApiClient::for_installation(installation_id);
     let head_ref = format!("{owner}:{}", spec.task_branch);
 
-    // Adopt / reopen an existing PR for this branch before creating a new one.
     let existing_pr = match github_client
         .list_pulls_by_head_with_state(&owner, &repo_name, &head_ref, "all")
         .await
@@ -265,8 +249,6 @@ pub(crate) async fn supervisor_pr_open(
         }
     };
 
-    // Store the PR URL on the task row (non-fatal on failure — the supervisor
-    // already has the URL and will return it in the outcome).
     if let Err(e) = task_repo.set_pr_url(&task.id, &pr.html_url).await {
         tracing::warn!(
             task_id = %task.id,

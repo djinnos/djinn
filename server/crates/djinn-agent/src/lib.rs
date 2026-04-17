@@ -29,6 +29,7 @@ pub mod roles;
 pub mod sandbox;
 pub mod skills;
 pub mod supervisor;
+pub(crate) mod supervisor_impl;
 pub(crate) mod truncate;
 
 // ─── Verification (was src/verification/) ────────────────────────────────────
