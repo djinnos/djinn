@@ -1,6 +1,5 @@
 use super::*;
 use djinn_db::NoteRepository;
-use djinn_db::ProjectRepository;
 
 pub(super) async fn board_health_impl(
     server: &DjinnMcpServer,
@@ -100,13 +99,6 @@ pub(super) async fn board_reconcile_impl(
             };
 
             let mut finalized_stale_session_ids = Vec::new();
-            // Migration 6 dropped `sessions.worktree_path`. Legacy `batch-*`
-            // worktrees are orphans by definition now — the supervisor path
-            // uses ephemeral mirror-clone workspaces that don't live under
-            // `.djinn/worktrees/`. Keep the cleanup pass but skip the
-            // active-path guard it used to need.
-            let active_worktree_paths: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
             for session in &running_sessions {
                 let has_runtime_session = if let Some(task_id) = session.task_id.as_deref() {
                     match pool.has_session(task_id).await {
@@ -144,77 +136,10 @@ pub(super) async fn board_reconcile_impl(
                     .is_ok()
             };
 
-            // ── batch-* worktree cleanup (ADR-016) ───────────────────
-            let mut stale_batch_worktrees: Vec<String> = Vec::new();
-            let project_repo =
-                ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
-            if let Ok(Some(project)) = project_repo.get(&project_id).await {
-                let project_path = std::path::PathBuf::from(&project.path);
-                let worktrees_dir = project_path.join(".djinn").join("worktrees");
-
-                if let Ok(entries) = std::fs::read_dir(&worktrees_dir) {
-                    let batch_dirs: Vec<std::path::PathBuf> = entries
-                        .filter_map(|e| e.ok())
-                        .filter(|e| {
-                            e.file_name()
-                                .to_str()
-                                .map(|n| n.starts_with("batch-"))
-                                .unwrap_or(false)
-                                && e.path().is_dir()
-                        })
-                        .map(|e| e.path())
-                        .collect();
-
-                    if !batch_dirs.is_empty() {
-                        // Phase 1 follow-up: the supervisor never creates
-                        // batch-* worktrees anymore — remaining directories
-                        // under `.djinn/worktrees/` are legacy debris.
-                        // Remove them via direct filesystem ops, then run a
-                        // single `git worktree prune` to clear any stale
-                        // administrative refs in the repo.
-                        for batch_dir in batch_dirs {
-                            let batch_str = batch_dir.display().to_string();
-                            if active_worktree_paths.contains(&batch_str) {
-                                continue;
-                            }
-                            tracing::info!(
-                                project_id = %project_id,
-                                worktree = %batch_dir.display(),
-                                "board_reconcile: removing stale batch-* worktree"
-                            );
-                            if let Err(e) = tokio::fs::remove_dir_all(&batch_dir).await {
-                                tracing::warn!(
-                                    project_id = %project_id,
-                                    worktree = %batch_dir.display(),
-                                    error = %e,
-                                    "board_reconcile: failed to remove stale batch worktree"
-                                );
-                            } else {
-                                stale_batch_worktrees.push(
-                                    batch_dir
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .into_owned(),
-                                );
-                            }
-                        }
-                        if !stale_batch_worktrees.is_empty()
-                            && let Ok(git) = server.state.git_actor(&project_path).await
-                            && let Err(e) = git
-                                .run_command(vec!["worktree".into(), "prune".into()])
-                                .await
-                        {
-                            tracing::warn!(
-                                project_id = %project_id,
-                                error = %e,
-                                "board_reconcile: `git worktree prune` failed; continuing"
-                            );
-                        }
-                    }
-                }
-            }
-
+            // `stale_batch_worktrees*` fields are retained on the response
+            // for schema stability but always report empty: the supervisor
+            // path never creates `.djinn/worktrees/batch-*` directories, so
+            // there is nothing to reconcile.
             let mut parsed = match serde_json::from_value::<BoardReconcileResponse>(
                 serde_json::json!({
                     "healed_tasks": result.get("healed_tasks").cloned().unwrap_or(serde_json::json!(0)),
@@ -224,8 +149,8 @@ pub(super) async fn board_reconcile_impl(
                     "stale_sessions_finalized": finalized_stale_session_ids.len(),
                     "stale_session_ids": finalized_stale_session_ids,
                     "recovery_triggered": recovery_triggered,
-                    "stale_batch_worktrees_removed": stale_batch_worktrees.len(),
-                    "stale_batch_worktrees": stale_batch_worktrees,
+                    "stale_batch_worktrees_removed": 0,
+                    "stale_batch_worktrees": Vec::<String>::new(),
                 }),
             ) {
                 Ok(v) => v,
