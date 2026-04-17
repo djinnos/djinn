@@ -15,9 +15,12 @@
 //! former inline block between lines ~671 and ~844 of `lifecycle.rs`.
 //!
 //! Worker-resume context is intentionally **not** handled here — that block
-//! hangs off a paused session record + saved conversation that lives later
-//! in the lifecycle, and the supervisor path doesn't have a resume analogue
-//! yet (see the `TODO(phase-2): wire worker resume` in `execute_stage`).
+//! hangs off a paused session record + saved conversation that the supervisor
+//! path does not currently materialize.  See the crate-level note in
+//! `supervisor_impl::stage::execute_stage` for the remaining blockers
+//! (`find_paused_session_record`, `resume_context_for_task`,
+//! `CompactionContext::PreResume` were all deleted as dead code in commit
+//! 6bf5d5931 — resurrecting cross-run session resume is a separate effort).
 
 use std::path::Path;
 
@@ -82,10 +85,13 @@ pub(crate) struct PromptContext {
 
 /// Inputs for [`build_prompt_context`].
 ///
-/// The supervisor path passes `conflict_ctx = None`, `merge_validation_ctx =
-/// None`, `system_prompt_extensions = ""`, `learned_prompt = None` because
-/// the specialist-override + conflict-retry code is not yet wired through
-/// the supervisor (see the TODOs in `supervisor::stage::execute_stage`).
+/// The supervisor path populates `conflict_ctx` from
+/// `conflict_context_for_dispatch` and fills
+/// `system_prompt_extensions` / `learned_prompt` from the resolved role
+/// overrides (`lifecycle::role_overrides::resolve_role_overrides`). The
+/// sibling `merge_validation_ctx` slot stays `None` because the legacy
+/// merge-validation prompt helper was deleted as dead code in commit
+/// 6bf5d5931 — resurrecting that path is a separate, scoped follow-up.
 #[allow(clippy::too_many_arguments)]
 pub(crate) struct PromptContextInputs<'a> {
     pub task: &'a Task,

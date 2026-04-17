@@ -41,6 +41,7 @@ use crate::actors::slot::helpers::{
     auth_method_for_provider, build_telemetry_meta, capabilities_for_provider, default_base_url,
     format_family_for_provider,
 };
+use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
     ModelResolutionError, resolve_model_and_credential,
@@ -48,6 +49,7 @@ use crate::actors::slot::lifecycle::model_resolution::{
 use crate::actors::slot::lifecycle::prompt_context::{
     PromptContext, PromptContextInputs, build_prompt_context,
 };
+use crate::actors::slot::lifecycle::role_overrides::{ResolvedRoleOverrides, resolve_role_overrides};
 use crate::actors::slot::lifecycle::setup::{
     SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context,
 };
@@ -81,10 +83,42 @@ pub(crate) async fn execute_stage(
     let agent_context: &AgentContext = &callbacks.agent_context;
     let provider_override = callbacks.provider_override.clone();
 
+    // ── Role-level overrides: specialist (Worker stage) or project default ────
+    // Picks up `system_prompt_extensions`, `learned_prompt`, role-level MCP
+    // server + skill lists, `verification_command`, and swaps `runtime_role`
+    // when a Worker stage's `task.agent_type` names a specialist whose
+    // `base_role` differs from the injected RoleKind.  Non-Worker stages
+    // always use the default-role path.
+    let ResolvedRoleOverrides {
+        runtime_role,
+        system_prompt_extensions,
+        learned_prompt,
+        mcp_servers: role_mcp_servers,
+        skills: role_skills,
+        verification_command: role_verification_command,
+        model_preference: _role_model_preference,
+        specialist_overrode_runtime_role,
+    } = resolve_role_overrides(task, role_kind, agent_context).await;
+
+    // ── Conflict-retry context ────────────────────────────────────────────────
+    // Populated when a prior task-run aborted with merge conflicts; drives
+    // the `TaskContext::conflict_files` + `merge_*_branch` prompt fields the
+    // worker template uses to steer a conflict-resolution session.
+    //
+    // `merge_validation_ctx` is deliberately left `None`: the legacy
+    // `merge_validation_context_for_dispatch` helper + `MergeValidationFailureMetadata`
+    // prompt renderer were deleted in commit 6bf5d5931 as dead code during
+    // the Phase 1 cut-over.  Resurrecting the merge-validation prompt path
+    // is a separate, out-of-scope change — not a supervisor-path gap.
+    let conflict_ctx = conflict_context_for_dispatch(&task.id, agent_context).await;
+
     tracing::info!(
         task_id = %task.short_id,
         task_run_id = %task_run_id,
         role = %role_name,
+        runtime_role = %runtime_role.config().name,
+        specialist_overrode_runtime_role,
+        has_conflict_context = conflict_ctx.is_some(),
         workspace = %worktree_path.display(),
         "Supervisor stage: starting"
     );
@@ -121,6 +155,9 @@ pub(crate) async fn execute_stage(
     };
 
     // ── MCP + skills ─────────────────────────────────────────────────────────
+    // `runtime_role` drives resolution so specialists can override the base
+    // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's
+    // parsed array (or `None` when no DB row exists).
     let McpAndSkills {
         settings,
         effective_mcp_servers,
@@ -129,10 +166,10 @@ pub(crate) async fn execute_stage(
         resolved_skills,
     } = resolve_mcp_and_skills(
         worktree_path,
-        role.as_ref(),
+        runtime_role.as_ref(),
         &task.short_id,
-        None, // role_mcp_servers — specialist path not wired yet
-        &[],  // role_skills — specialist path not wired yet
+        role_mcp_servers.as_deref(),
+        &role_skills,
         #[cfg(test)]
         None,
         agent_context,
@@ -146,7 +183,7 @@ pub(crate) async fn execute_stage(
         prompt_verification_rules,
     } = match resolve_setup_and_verification_context(
         settings,
-        None, // role_verification_command — specialist path not wired yet
+        role_verification_command.as_deref(),
         worktree_path,
         &task.id,
         &task.short_id,
@@ -161,20 +198,24 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Build prompt context ─────────────────────────────────────────────────
+    // `runtime_role` renders the template (may be the specialist's base role);
+    // `role_for_epic_check` stays the injected base role because the
+    // `needs_epic_context` contract is about what the flow-enum role does,
+    // not what the specialist's prompt variant says.
     let project_path_str = worktree_path.display().to_string();
     let PromptContext { system_prompt, .. } = build_prompt_context(PromptContextInputs {
         task,
-        runtime_role: role.as_ref(),
+        runtime_role: runtime_role.as_ref(),
         role_for_epic_check: role.as_ref(),
         project_path: &project_path_str,
         worktree_path,
-        conflict_ctx: None,
+        conflict_ctx: conflict_ctx.as_ref(),
         merge_validation_ctx: None,
         prompt_setup_commands,
         prompt_verification_commands,
         prompt_verification_rules,
-        system_prompt_extensions: "",
-        learned_prompt: None,
+        system_prompt_extensions: &system_prompt_extensions,
+        learned_prompt: learned_prompt.as_deref(),
         resolved_skills: &resolved_skills,
         app_state: agent_context,
     })
