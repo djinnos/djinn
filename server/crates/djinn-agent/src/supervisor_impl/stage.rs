@@ -6,13 +6,13 @@
 //! (`model_resolution`, `setup`, `mcp_resolve`, `prompt_context`,
 //! `teardown`), the MCP + provider + reply-loop plumbing, and `task_merge`.
 //!
-//! Phase 2 PR 2 (extraction): the supervisor body in `djinn-supervisor`
-//! invokes this function through an injected closure stored on
-//! `SupervisorServices::execute_stage_fn`; the closure is bound by
-//! `actors::slot::supervisor_runner::run_supervisor_dispatch`. Moving this
-//! body out of `djinn-agent` is deferred to PR 3 (or a follow-up
-//! `djinn-lifecycle` extraction) when we convert `SupervisorServices` into a
-//! trait.
+//! The supervisor body in `djinn-supervisor` invokes this function through
+//! an injected closure stored on `SupervisorServices::execute_stage_fn`;
+//! the closure is bound by
+//! `actors::slot::supervisor_runner::run_supervisor_dispatch`. This
+//! indirection is deliberate — it lets `djinn-supervisor` stay free of the
+//! lifecycle/MCP/provider crates this module depends on without moving the
+//! whole body across a crate boundary.
 //!
 //! A *stage* is one role's session inside a supervisor-driven task-run: the
 //! supervisor walks the flow's `role_sequence()` and invokes this fn for each
@@ -26,32 +26,40 @@
 //! ephemeral workspace, then maps the reply-loop outcome onto
 //! [`StageOutcome`] (re-exported from `djinn-supervisor`).
 //!
-//! ## Deferred: worker-resume
+//! ## Non-goal: worker-pause/resume
 //!
-//! The legacy `run_task_lifecycle` re-attached a paused session's
-//! conversation and carried forward the prior reply-loop state when a
-//! worker slot resumed a previously-paused task.  The supervisor path does
-//! **not** implement that yet — every stage starts a fresh session record
-//! with a freshly-built conversation.  Plumbing this through would require
-//! reviving three dead-code deletions from commit 6bf5d5931:
+//! The supervisor dispatch path deliberately does not support pausing a
+//! mid-stage session and resuming it on a later dispatch. Every stage
+//! starts a fresh session record with a freshly-built conversation; stages
+//! end as `Completed` or `Failed` and tear down at once.
 //!
-//! - `slot::helpers::find_paused_session_record` — scans
+//! This is a design choice, not an outstanding task. Pause/resume would
+//! need two pieces that don't exist yet and that span crates:
+//!
+//! 1. A stable serialized-conversation column in `djinn-db` (the old
+//!    `conversation_store.rs` was deleted in commit 110385b07), plus the
+//!    migrations and invariants to keep it consistent with the session
+//!    record.
+//! 2. A `SessionRuntime`/supervisor contract extension: a "pause this run
+//!    and let the next dispatch resume it" signal, and a place in the
+//!    stage flow that can actually write a `SessionStatus::Paused` row.
+//!
+//! Until that design lands, the feature is intentionally off the table.
+//! If it ever revives, the three helpers that would come back are named
+//! here so the archeology is easy:
+//!
+//! - `slot::helpers::find_paused_session_record` — would scan
 //!   `SessionStatus::Paused` rows for `(task_id, role, model_id)` matches.
-//! - `slot::helpers::resume_context_for_task` — builds the resume-prompt
-//!   preamble (activity log, rejection reasons, conflict context) the
-//!   resuming worker sees instead of a fresh `initial_user_message`.
-//! - `compaction::CompactionContext::PreResume` — compacts the restored
-//!   conversation before the resumed session enters the reply loop.
+//! - `slot::helpers::resume_context_for_task` — would build the
+//!   resume-prompt preamble (activity log, rejection reasons, conflict
+//!   context) the resuming worker sees instead of a fresh
+//!   `initial_user_message`.
+//! - `compaction::CompactionContext::PreResume` — would compact the
+//!   restored conversation before the resumed session enters the reply
+//!   loop.
 //!
-//! And even past those, the supervisor flow has no place to *write* a
-//! paused-session row today: stages end as `Completed` or `Failed` and
-//! tear down at once.  A mid-stage pause seam plus its cross-run
-//! conversation serialisation (the `conversation_store.rs` file deleted in
-//! commit 110385b07) is a cross-crate change — `djinn-db` would need a
-//! stable serialized conversation column, and the supervisor/runtime
-//! contract would need to surface a "pause this run and let the next
-//! dispatch resume it" signal.  Out of scope for the Phase 1 holdover
-//! cleanup.
+//! All three were deleted as dead code in commit 6bf5d5931; this note
+//! records the design, not a promise to revive them.
 
 use std::sync::Arc;
 
