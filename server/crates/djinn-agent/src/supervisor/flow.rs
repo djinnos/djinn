@@ -9,7 +9,7 @@
 ///
 /// Not the same as `djinn-agent`'s existing `AgentRole` trait objects — this
 /// is a lightweight enum suitable for flow templates and telemetry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RoleKind {
     Planner,
     Worker,

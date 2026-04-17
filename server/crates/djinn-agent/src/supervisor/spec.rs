@@ -1,5 +1,7 @@
 //! Supervisor input/output types.
 
+use std::collections::HashMap;
+
 use djinn_core::models::TaskRunTrigger;
 
 use super::flow::{RoleKind, SupervisorFlow};
@@ -7,8 +9,6 @@ use super::flow::{RoleKind, SupervisorFlow};
 /// Input to `TaskRunSupervisor::run`.
 ///
 /// All runtime-variable data the supervisor needs to execute one task-run.
-/// Provider/model selection per role and MCP config will be added here as
-/// per-role execution comes online.
 #[derive(Clone, Debug)]
 pub struct TaskRunSpec {
     pub task_id: String,
@@ -20,6 +20,14 @@ pub struct TaskRunSpec {
     /// when needed. Pushed to origin at PR-open time.
     pub task_branch: String,
     pub flow: SupervisorFlow,
+    /// Optional per-role model override.  When a [`RoleKind`] key is present,
+    /// [`crate::supervisor::stage::execute_stage`] uses the mapped
+    /// `provider/model` id for that stage instead of the catalog-default
+    /// fallback.  The coordinator populates this from its per-role model
+    /// resolution (dispatch priorities + project `model_preference`) so the
+    /// supervisor path keeps parity with the legacy `run_task_lifecycle` model
+    /// selection.  Empty = fall back to catalog-default for every stage.
+    pub model_id_per_role: HashMap<RoleKind, String>,
 }
 
 /// Terminal outcome of a task-run.

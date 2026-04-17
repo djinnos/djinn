@@ -167,18 +167,22 @@ pub(crate) async fn execute_stage(
         "Supervisor stage: starting"
     );
 
-    // Resolve the default model for this role from the role→model map.
-    // Phase 1 fallback: pick the first model registered for this role's
-    // dispatch role; if none is registered, bail with a StageError.  The
-    // production coordinator resolves this from the slot pool (ADR roadmap
-    // task #7) — until then we use the role's preferred model.
-    let model_id = match default_model_for_role(role_name, services) {
+    // Resolve the model for this stage.  Preference order:
+    //   1. Per-role override threaded in via `TaskRunSpec::model_id_per_role`
+    //      — populated by the coordinator when it has a resolved model from
+    //      its dispatch priorities + project `model_preference` lookup.
+    //   2. Catalog-default fallback (first model registered for any provider
+    //      in the catalog), used by smoke tests / one-off callers.
+    let model_id = match spec.model_id_per_role.get(&role_kind).cloned() {
         Some(m) => m,
-        None => {
-            return Err(StageError::ModelResolution(format!(
-                "no model registered for role '{role_name}' in the provider catalog"
-            )));
-        }
+        None => match default_model_for_role(role_name, services) {
+            Some(m) => m,
+            None => {
+                return Err(StageError::ModelResolution(format!(
+                    "no model registered for role '{role_name}' in the provider catalog"
+                )));
+            }
+        },
     };
 
     // ── Model + credential ───────────────────────────────────────────────────
@@ -408,10 +412,6 @@ pub(crate) async fn execute_stage(
             "Supervisor stage: failed to update session record"
         );
     }
-
-    // Drop `spec` reference once we no longer need it — avoids the unused-arg
-    // lint when Phase 1 doesn't dispatch based on spec.trigger yet.
-    let _ = spec;
 
     // ── Map the reply-loop outcome to StageOutcome ───────────────────────────
     // We do this BEFORE dispatching post-session work so we can return the

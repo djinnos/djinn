@@ -1,3 +1,12 @@
+// Task #7: `run_task_lifecycle` and its per-stage helpers are no longer on the
+// production dispatch path — `SlotHandle::spawn` now routes through
+// `TaskRunSupervisor::run` (see `supervisor_runner.rs`).  This module stays
+// in-tree for rollback and because `lifecycle_tests.rs` still exercises it
+// directly, but the helpers only have test callers now.  Task #8 will remove
+// the module wholesale after soak; until then we mark the lifecycle entry
+// points with `#[allow(dead_code)]` where needed so production builds stay
+// warning-clean.
+
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;

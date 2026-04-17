@@ -6,10 +6,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
-use crate::roles::role_for_task_dispatch;
 
-use super::helpers::conflict_context_for_dispatch;
-use super::{SlotCommand, SlotError, SlotEvent, run_task_lifecycle};
+use super::supervisor_runner::run_supervisor_dispatch;
+use super::{SlotCommand, SlotError, SlotEvent};
 
 type LifecycleFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
 type LifecycleRunner = Arc<
@@ -170,114 +169,27 @@ impl SlotHandle {
         app_state: AgentContext,
         cancel: CancellationToken,
     ) -> Self {
+        // Task #7: default slot dispatch now routes through
+        // `TaskRunSupervisor::run` (see `supervisor_runner`).  One slot
+        // dispatch = one task-run that internally sequences the entire
+        // role pipeline (planner → worker → reviewer → verifier for
+        // NewTask, or the flow-specific sequence for Spike / Planning /
+        // ReviewResponse / ConflictRetry).
+        //
+        // The legacy `run_task_lifecycle` path is kept behind
+        // `#[allow(dead_code)]` for rollback and test coverage; see
+        // `lifecycle_tests.rs` which exercises it directly.  Task #8 will
+        // delete the worktree/lifecycle code entirely after soak.
         let runner: LifecycleRunner = Arc::new(
             |task_id, project_path, model_id, app_state, kill, pause| {
-                Box::pin(async move {
-                    let (sink, _rx) = mpsc::channel::<SlotEvent>(1);
-                    // Resolve role before entering the lifecycle so the lifecycle
-                    // function receives a concrete `Arc<dyn AgentRole>` rather than
-                    // performing the lookup internally.
-                    let conflict_ctx = conflict_context_for_dispatch(&task_id, &app_state).await;
-                    let task = {
-                        use djinn_db::TaskRepository;
-                        let repo =
-                            TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                        repo.get(&task_id).await.ok().flatten()
-                    };
-                    let role = match task {
-                        Some(ref t) => role_for_task_dispatch(t, conflict_ctx.is_some()),
-                        None => {
-                            // Task not found — lifecycle will handle this gracefully.
-                            crate::roles::role_impl_for(crate::AgentType::Worker)
-                        }
-                    };
-
-                    // Look up the default DB AgentRole for this task's project + base_role.
-                    // Provides system_prompt_extensions, learned_prompt, mcp_servers, skills,
-                    // and verification_command overrides from the configurable role system.
-                    let (
-                        system_prompt_extensions,
-                        learned_prompt,
-                        mcp_servers,
-                        skills,
-                        role_verification_command,
-                    ) = if let Some(ref t) = task {
-                        use djinn_db::AgentRepository;
-                        let role_repo =
-                            AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                        let base_role_name = role.config().name;
-                        match role_repo
-                            .get_default_for_base_role(&t.project_id, base_role_name)
-                            .await
-                        {
-                            Ok(Some(db_role)) => {
-                                let mcp_servers =
-                                    djinn_core::models::parse_json_array(&db_role.mcp_servers);
-                                let skills = djinn_core::models::parse_json_array(&db_role.skills);
-                                tracing::debug!(
-                                    task_id = %t.short_id,
-                                    role_name = %db_role.name,
-                                    base_role = %base_role_name,
-                                    has_extensions = !db_role.system_prompt_extensions.trim().is_empty(),
-                                    has_learned_prompt = db_role.learned_prompt.is_some(),
-                                    mcp_server_count = mcp_servers.len(),
-                                    skill_count = skills.len(),
-                                    has_model_preference = db_role.model_preference.is_some(),
-                                    has_verification_command = db_role.verification_command.is_some(),
-                                    "Lifecycle: resolved default DB role config"
-                                );
-                                (
-                                    db_role.system_prompt_extensions,
-                                    db_role.learned_prompt,
-                                    Some(mcp_servers),
-                                    skills,
-                                    db_role.verification_command,
-                                )
-                            }
-                            Ok(None) => {
-                                tracing::debug!(
-                                    task_id = %t.short_id,
-                                    base_role = %base_role_name,
-                                    project_id = %t.project_id,
-                                    "Lifecycle: no default DB role configured; using base role defaults"
-                                );
-                                (String::new(), None, None, Vec::new(), None)
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    task_id = %t.short_id,
-                                    base_role = %base_role_name,
-                                    error = %e,
-                                    "Lifecycle: failed to load default DB role; using base role defaults"
-                                );
-                                (String::new(), None, None, Vec::new(), None)
-                            }
-                        }
-                    } else {
-                        (String::new(), None, None, Vec::new(), None)
-                    };
-
-                    run_task_lifecycle(crate::actors::slot::lifecycle::TaskLifecycleParams {
-                        task_id,
-                        project_path,
-                        model_id,
-                        role,
-                        app_state,
-                        cancel: kill,
-                        pause,
-                        event_tx: sink,
-                        system_prompt_extensions,
-                        learned_prompt,
-                        mcp_servers,
-                        skills,
-                        role_verification_command,
-                        #[cfg(test)]
-                        mcp_registry_override: None,
-                        #[cfg(test)]
-                        provider_override: None,
-                    })
-                    .await
-                })
+                Box::pin(run_supervisor_dispatch(
+                    task_id,
+                    project_path,
+                    model_id,
+                    app_state,
+                    kill,
+                    pause,
+                ))
             },
         );
         Self::spawn_with_runner(id, model_id, event_tx, app_state, cancel, runner)

@@ -130,6 +130,13 @@ pub(crate) fn role_impl_for(agent_type: AgentType) -> Arc<dyn AgentRole> {
 ///   reasoning.
 /// - anything else → whatever `AgentType::for_task_status` decides
 ///   (typically Worker for open/in_progress tasks).
+// Task #7: the production dispatch path no longer calls
+// `role_for_task_dispatch` — flow selection is now driven by
+// [`flow_for_task_dispatch`] and the supervisor resolves the concrete
+// `AgentRole` per stage internally via `stage::role_arc_for`.  We keep the
+// function for test coverage (and for the documented parity with
+// `flow_for_task_dispatch`) but mark it dead-code in non-test builds.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn role_for_task_dispatch(
     task: &Task,
     _has_conflict_context: bool,
@@ -165,6 +172,68 @@ pub(crate) fn role_for_task_dispatch(
         _ => {}
     }
     role_impl_for(AgentType::for_task_status(task.status.as_str(), false))
+}
+
+/// Coordinator-side flow selector mirroring [`role_for_task_dispatch`] for the
+/// supervisor-driven dispatch path (task #7 switch).
+///
+/// Decides which [`crate::supervisor::SupervisorFlow`] a task-run should drive
+/// based on task state + ambient dispatch context (merge-conflict metadata,
+/// review-response state).  Rules:
+///
+/// - `issue_type=spike` → [`SupervisorFlow::Spike`] (architect-only).
+/// - `issue_type=planning` / `decomposition` / `review` → [`SupervisorFlow::Planning`]
+///   (planner-only; these are the simple-lifecycle types — they do not flow
+///   through worker/reviewer/verifier).
+/// - `status=needs_task_review` / `in_task_review` → [`SupervisorFlow::ReviewResponse`]
+///   (worker → reviewer → verifier; the planner stage is skipped because the
+///   planner already decided `execute` on a prior run).
+/// - Any conflict context (merge-conflict or post-review merge-validation) →
+///   [`SupervisorFlow::ConflictRetry`] (worker → reviewer → verifier; conflict
+///   fixups bypass the planner).
+/// - Default → [`SupervisorFlow::NewTask`] (planner → worker → reviewer →
+///   verifier, the canonical NewTask flow).
+///
+/// Mirrors the two-layer dispatch routing doc note (see project memory): the
+/// coordinator keeps both `role_for_task_dispatch` and this flow-selector free
+/// function in sync — if you change one, consider whether the other needs
+/// parity.
+pub(crate) fn flow_for_task_dispatch(
+    task: &Task,
+    has_conflict_context: bool,
+    has_review_response_context: bool,
+) -> crate::supervisor::SupervisorFlow {
+    use crate::supervisor::SupervisorFlow;
+
+    // Issue-type-specific routing takes priority over status-based routing,
+    // matching `role_for_task_dispatch`.
+    match task.issue_type.as_str() {
+        "spike" => return SupervisorFlow::Spike,
+        // Simple-lifecycle types — planner-only flow.
+        "planning" | "decomposition" | "review" => return SupervisorFlow::Planning,
+        _ => {}
+    }
+
+    // Merge-conflict retry (detected via persistent metadata or activity-log
+    // fallback) bypasses the planner and re-enters the worker→reviewer→verifier
+    // pipeline directly.
+    if has_conflict_context {
+        return SupervisorFlow::ConflictRetry;
+    }
+
+    // Review response: the reviewer rejected a prior submission or a human
+    // requested more work.  The planner decision is preserved from the
+    // previous run, so the new run re-enters at worker.
+    if has_review_response_context
+        || matches!(
+            task.status.as_str(),
+            "needs_task_review" | "in_task_review"
+        )
+    {
+        return SupervisorFlow::ReviewResponse;
+    }
+
+    SupervisorFlow::NewTask
 }
 
 #[derive(Default)]
@@ -556,6 +625,99 @@ mod tests {
         assert!(
             model_pool_roles.contains(&"architect"),
             "model_pool_roles should include 'architect'"
+        );
+    }
+
+    // ── flow_for_task_dispatch ────────────────────────────────────────────────
+
+    #[test]
+    fn flow_for_spike_is_spike() {
+        use crate::supervisor::SupervisorFlow;
+        let task = make_task_with_type("open", "spike");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, false),
+            SupervisorFlow::Spike
+        );
+    }
+
+    #[test]
+    fn flow_for_planning_is_planning() {
+        use crate::supervisor::SupervisorFlow;
+        let task = make_task_with_type("open", "planning");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, false),
+            SupervisorFlow::Planning
+        );
+        // Legacy `decomposition` alias routes the same way.
+        let legacy = make_task_with_type("open", "decomposition");
+        assert_eq!(
+            flow_for_task_dispatch(&legacy, false, false),
+            SupervisorFlow::Planning
+        );
+        // Review tasks are simple-lifecycle / planner-only.
+        let review = make_task_with_type("open", "review");
+        assert_eq!(
+            flow_for_task_dispatch(&review, false, false),
+            SupervisorFlow::Planning
+        );
+    }
+
+    #[test]
+    fn flow_with_conflict_context_is_conflict_retry() {
+        use crate::supervisor::SupervisorFlow;
+        let task = make_task("open");
+        assert_eq!(
+            flow_for_task_dispatch(&task, true, false),
+            SupervisorFlow::ConflictRetry
+        );
+    }
+
+    #[test]
+    fn flow_for_needs_task_review_is_review_response() {
+        use crate::supervisor::SupervisorFlow;
+        let task = make_task("needs_task_review");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, false),
+            SupervisorFlow::ReviewResponse
+        );
+        let in_review = make_task("in_task_review");
+        assert_eq!(
+            flow_for_task_dispatch(&in_review, false, false),
+            SupervisorFlow::ReviewResponse
+        );
+    }
+
+    #[test]
+    fn flow_default_is_new_task() {
+        use crate::supervisor::SupervisorFlow;
+        let task = make_task("open");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, false),
+            SupervisorFlow::NewTask
+        );
+    }
+
+    #[test]
+    fn flow_conflict_takes_precedence_over_review_response() {
+        use crate::supervisor::SupervisorFlow;
+        // If a task is in needs_task_review AND has a merge conflict,
+        // conflict-retry wins because that's the blocker on landing.
+        let task = make_task("needs_task_review");
+        assert_eq!(
+            flow_for_task_dispatch(&task, true, true),
+            SupervisorFlow::ConflictRetry
+        );
+    }
+
+    #[test]
+    fn flow_spike_takes_precedence_over_status() {
+        use crate::supervisor::SupervisorFlow;
+        // Even if the task status is in_task_review, a spike issue_type
+        // short-circuits to the Spike flow.
+        let task = make_task_with_type("needs_task_review", "spike");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, true),
+            SupervisorFlow::Spike
         );
     }
 }
