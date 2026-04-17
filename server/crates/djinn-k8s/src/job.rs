@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 
-use djinn_runtime::TaskRunSpec;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EmptyDirVolumeSource, EnvVar, KeyToPath, PersistentVolumeClaimVolumeSource, PodSpec,
@@ -23,15 +22,8 @@ use crate::config::KubernetesConfig;
 
 /// Label key for the task-run id (Djinn's primary correlator).
 pub const LABEL_TASK_RUN_ID: &str = "djinn.app/task-run-id";
-/// Label key for the owning project — retained for use by helpers that still
-/// build labels from a `TaskRunSpec` (e.g. [`task_run_labels`]).
-pub const LABEL_PROJECT_ID: &str = "djinn.app/project-id";
-/// Label key for the owning task row — retained alongside `LABEL_PROJECT_ID`.
-pub const LABEL_TASK_ID: &str = "djinn.app/task-id";
 /// Label key identifying which djinn-internal component created the resource.
 pub const LABEL_COMPONENT: &str = "djinn.app/component";
-/// Standard Kubernetes `managed-by` label.
-pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 
 /// Value written to `LABEL_COMPONENT` on Job / Pod / Secret resources
 /// dispatched by the task-run runtime.
@@ -211,8 +203,7 @@ pub fn build_task_run_job(
     }
 }
 
-/// Build the label set attached to the Job, its Pod template, and (via
-/// `task_run_labels`) the sibling Secret.
+/// Build the label set attached to the Job and its Pod template.
 ///
 /// Labels are intentionally minimal: the task-run id is the primary
 /// correlator and the component marker lets controllers find task-run
@@ -224,25 +215,6 @@ fn job_labels(task_run_id: &str) -> BTreeMap<String, String> {
         LABEL_COMPONENT.to_string(),
         COMPONENT_TASK_RUN_WORKER.to_string(),
     );
-    labels
-}
-
-/// Build the label set attached to the Secret sibling of the Job.
-///
-/// Kept as a `TaskRunSpec`-taking helper for the benefit of
-/// [`crate::secret::build_taskrun_secret`], which composes Secrets before the
-/// Job manifest exists. The Job itself uses the slimmer [`job_labels`] keyed
-/// off the raw task-run id.
-pub fn task_run_labels(spec: &TaskRunSpec) -> BTreeMap<String, String> {
-    let mut labels = BTreeMap::new();
-    labels.insert(LABEL_TASK_RUN_ID.to_string(), spec.task_id.clone());
-    labels.insert(LABEL_PROJECT_ID.to_string(), spec.project_id.clone());
-    labels.insert(LABEL_TASK_ID.to_string(), spec.task_id.clone());
-    labels.insert(
-        LABEL_COMPONENT.to_string(),
-        COMPONENT_TASK_RUN_WORKER.to_string(),
-    );
-    labels.insert(LABEL_MANAGED_BY.to_string(), "djinn".to_string());
     labels
 }
 
