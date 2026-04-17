@@ -108,12 +108,7 @@ pub(crate) const PLANNER_CONFIG: RoleConfig = RoleConfig {
     display_name: "Planner",
     dispatch_role: "planner",
     tool_schemas: extension::tool_schemas_planner,
-    start_action: |status| match status {
-        "open" => Some(TransitionAction::Start),
-        _ => None,
-    },
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::PLANNER_TEMPLATE,
-    preserves_session: false,
     finalize_tool_names: &["submit_grooming"],
 };

@@ -26,10 +26,8 @@ pub(crate) struct RoleConfig {
     pub(crate) display_name: &'static str,
     pub(crate) dispatch_role: &'static str,
     pub(crate) tool_schemas: fn() -> Vec<serde_json::Value>,
-    pub(crate) start_action: fn(&str) -> Option<TransitionAction>,
     pub(crate) release_action: fn() -> TransitionAction,
     pub(crate) initial_message: &'static str,
-    pub(crate) preserves_session: bool,
     /// Tool names the agent can call to signal completion for this role.
     /// The first entry is the primary finalize tool; additional entries are
     /// alternate exit paths (e.g. `request_lead` for workers).

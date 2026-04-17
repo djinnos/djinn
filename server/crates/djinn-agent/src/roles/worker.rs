@@ -49,12 +49,7 @@ pub(crate) const WORKER_CONFIG: RoleConfig = RoleConfig {
     display_name: "Developer",
     dispatch_role: "worker",
     tool_schemas: extension::tool_schemas_worker,
-    start_action: |status| match status {
-        "open" => Some(TransitionAction::Start),
-        _ => None,
-    },
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::DEV_TEMPLATE,
-    preserves_session: true,
     finalize_tool_names: &["submit_work", "request_lead"],
 };

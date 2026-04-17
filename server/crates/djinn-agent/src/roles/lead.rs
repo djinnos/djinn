@@ -87,12 +87,7 @@ pub(crate) const LEAD_CONFIG: RoleConfig = RoleConfig {
     display_name: "Lead Intervention",
     dispatch_role: "lead",
     tool_schemas: extension::tool_schemas_lead,
-    start_action: |status| match status {
-        "needs_lead_intervention" => Some(TransitionAction::LeadInterventionStart),
-        _ => None,
-    },
     release_action: || TransitionAction::LeadInterventionRelease,
     initial_message: crate::prompts::LEAD_TEMPLATE,
-    preserves_session: false,
     finalize_tool_names: &["submit_decision"],
 };

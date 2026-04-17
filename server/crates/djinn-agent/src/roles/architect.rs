@@ -37,12 +37,7 @@ pub(crate) const ARCHITECT_CONFIG: RoleConfig = RoleConfig {
     display_name: "Architect",
     dispatch_role: "architect",
     tool_schemas: extension::tool_schemas_architect,
-    start_action: |status| match status {
-        "open" => Some(TransitionAction::Start),
-        _ => None,
-    },
     release_action: || TransitionAction::Release,
     initial_message: crate::prompts::ARCHITECT_TEMPLATE,
-    preserves_session: false,
     finalize_tool_names: &["submit_work"],
 };

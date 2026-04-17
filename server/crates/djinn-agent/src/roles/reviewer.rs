@@ -176,13 +176,8 @@ pub(crate) const REVIEWER_CONFIG: RoleConfig = RoleConfig {
     display_name: "Reviewer",
     dispatch_role: "reviewer",
     tool_schemas: extension::tool_schemas_reviewer,
-    start_action: |status| match status {
-        "needs_task_review" => Some(TransitionAction::TaskReviewStart),
-        _ => None,
-    },
     release_action: || TransitionAction::ReleaseTaskReview,
     initial_message: crate::prompts::REVIEWER_TEMPLATE,
-    preserves_session: false,
     finalize_tool_names: &["submit_review", "request_lead"],
 };
 

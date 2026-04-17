@@ -141,10 +141,6 @@ mod tests {
         let cfg = roles::config_for(agent_type);
         assert_eq!(agent_type.as_str(), cfg.name);
         assert_eq!(agent_type.dispatch_role(), cfg.dispatch_role);
-        assert_eq!(
-            agent_type.role_config().preserves_session,
-            cfg.preserves_session
-        );
         assert_eq!(agent_type.tool_schemas(), (cfg.tool_schemas)());
     }
 
@@ -191,31 +187,6 @@ mod tests {
         assert_eq!(AgentType::Lead.dispatch_role(), "lead");
         assert_eq!(AgentType::Planner.dispatch_role(), "planner");
         assert_eq!(AgentType::Architect.dispatch_role(), "architect");
-    }
-
-    #[test]
-    fn start_action_via_role_config() {
-        let cfg = AgentType::Worker.role_config();
-        assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
-        assert_eq!((cfg.start_action)("in_progress"), None);
-
-        let cfg = AgentType::Reviewer.role_config();
-        assert_eq!(
-            (cfg.start_action)("needs_task_review"),
-            Some(TransitionAction::TaskReviewStart)
-        );
-
-        let cfg = AgentType::Lead.role_config();
-        assert_eq!(
-            (cfg.start_action)("needs_lead_intervention"),
-            Some(TransitionAction::LeadInterventionStart)
-        );
-
-        let cfg = AgentType::Planner.role_config();
-        assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
-
-        let cfg = AgentType::Architect.role_config();
-        assert_eq!((cfg.start_action)("open"), Some(TransitionAction::Start));
     }
 
     #[test]
