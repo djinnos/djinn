@@ -28,6 +28,9 @@ pub mod wire;
 #[cfg(any(test, feature = "test-runtime"))]
 pub mod test_runtime;
 
+#[cfg(feature = "local-docker")]
+pub mod local_docker;
+
 pub use handle::RunHandle;
 pub use session_runtime::{RuntimeError, SessionRuntime};
 pub use spec::{
@@ -38,3 +41,9 @@ pub use wire::{ControlMsg, MAX_FRAME_BYTES, WorkerEvent, WorkspaceRef, read_fram
 
 #[cfg(any(test, feature = "test-runtime"))]
 pub use test_runtime::TestRuntime;
+
+#[cfg(feature = "local-docker")]
+pub use local_docker::{
+    IpcServerFactory, IpcServerHandle, LocalDockerConfig, LocalDockerConfigBuilder,
+    LocalDockerRuntime, MirrorBackend,
+};

@@ -12,19 +12,31 @@ default = []
 # eventual supervisor-runner cutover) can depend on an in-process
 # `SessionRuntime` implementation for integration tests.
 test-runtime = []
+# Enables the `local_docker` module — `LocalDockerRuntime` backed by the
+# bollard Docker client.  Gated because the Phase 2 RPC coordinator and any
+# CI crate that only links `djinn-runtime` for the `SessionRuntime` trait
+# don't need to pull bollard and its transitive deps.
+local-docker = ["dep:bollard", "dep:uuid", "dep:tracing"]
 
 [dependencies]
 djinn-core = { path = "../djinn-core" }
+djinn-workspace = { path = "../djinn-workspace" }
 anyhow = "1"
 async-trait = "0.1"
 bincode = "1.3"
+bollard = { version = "0.17", optional = true }
 bytes = "1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync", "macros", "io-util", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "macros", "io-util", "time", "net", "fs", "process"] }
 tokio-util = { version = "0.7", features = ["codec"] }
+tracing = { version = "0.1", optional = true }
+uuid = { version = "1", features = ["v7"], optional = true }
 workspace-hack.workspace = true
 
 [dev-dependencies]
+async-trait = "0.1"
+tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+tokio-util = "0.7"
