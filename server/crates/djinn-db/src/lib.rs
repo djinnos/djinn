@@ -48,7 +48,7 @@ pub use repositories::{
         CreatedCanonicalConsolidatedNote, DbNoteGroup, EmbeddedNote, LexicalSearchBackend,
         LexicalSearchMode, LexicalSearchPlan, NoopNoteVectorStore, NoteAssociationEntry,
         NoteConsolidationRepository, NoteDedupCandidate, NoteEmbeddingMatch, NoteEmbeddingProvider,
-        NoteEmbeddingRecord, NoteRepository, NoteSearchParams, NoteVectorStore,
+        NoteEmbeddingRecord, NoteRepository, NoteSearchParams, NoteVectorStore, QdrantConfig,
         QdrantNoteVectorStore, STALE_CITATION, UpdateNoteIndexParams, UpsertNoteEmbedding,
         build_lexical_search_plan, executable_lexical_search_sql, file_path_for,
         file_path_for_with_status, folder_for_type, folder_for_type_with_status,

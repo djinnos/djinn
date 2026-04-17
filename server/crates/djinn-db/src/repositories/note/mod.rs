@@ -38,7 +38,7 @@ pub use djinn_core::models::{
 };
 pub use embeddings::{
     EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
-    NoteEmbeddingProvider, NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore,
+    NoteEmbeddingProvider, NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore, QdrantConfig,
     QdrantNoteVectorStore, UpsertNoteEmbedding, infer_embedding_branch_from_worktree,
     task_branch_name,
 };

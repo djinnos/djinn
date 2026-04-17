@@ -18,7 +18,7 @@ use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_
 use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_db::{
     Database, NoopNoteVectorStore, NoteRepository, NoteVectorStore, ProjectRepository,
-    QdrantNoteVectorStore, SettingsRepository,
+    QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
@@ -609,7 +609,13 @@ impl AppState {
     pub fn note_vector_store(&self) -> Arc<dyn NoteVectorStore> {
         match std::env::var("DJINN_VECTOR_BACKEND") {
             Ok(value) if value.eq_ignore_ascii_case("qdrant") => {
-                Arc::new(QdrantNoteVectorStore::new(Default::default())) as Arc<dyn NoteVectorStore>
+                let mut config = QdrantConfig::default();
+                if let Ok(url) = std::env::var("QDRANT_URL") {
+                    if !url.is_empty() {
+                        config.url = url;
+                    }
+                }
+                Arc::new(QdrantNoteVectorStore::new(config)) as Arc<dyn NoteVectorStore>
             }
             Ok(value) if value.eq_ignore_ascii_case("noop") => {
                 Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>
