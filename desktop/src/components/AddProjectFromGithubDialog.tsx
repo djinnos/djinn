@@ -111,11 +111,7 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* Arbitrary width value dodges any tailwind-merge grouping quirks with
-          the base DialogContent's `sm:max-w-sm`. `overflow-hidden` belts the
-          width — any flex child with `min-w-0` + `truncate` will obey it
-          rather than blowing past the modal edge. */}
-      <DialogContent className="w-full max-w-[min(calc(100vw-2rem),42rem)] overflow-hidden">
+      <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>Add project from GitHub</DialogTitle>
           <DialogDescription>
@@ -174,12 +170,8 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
               autoFocus
             />
 
-            {/* `w-full` forces the ScrollArea root (base-ui defaults to
-                shrink-to-fit) to match the dialog column. `max-h-[60vh]`
-                bounds height. `min-w-0` on the <ul> lets the flex-children
-                truncation inside <li> actually engage. */}
-            <ScrollArea className="w-full max-h-[60vh] rounded-md border">
-              <ul className="w-full min-w-0 divide-y">
+            <ScrollArea className="h-80 rounded-md border">
+              <ul className="divide-y">
                 {filtered.length === 0 ? (
                   <li className="px-3 py-4 text-sm text-muted-foreground">
                     No repositories match.
@@ -190,15 +182,10 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
                     return (
                       <li
                         key={`${r.installation_id}:${key}`}
-                        className="flex w-full min-w-0 items-center gap-3 px-3 py-2 hover:bg-accent/40"
+                        className="flex items-center gap-3 px-3 py-2 hover:bg-accent/40"
                       >
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium">{key}</div>
-                          {r.description && (
-                            <div className="truncate text-xs text-muted-foreground">
-                              {r.description}
-                            </div>
-                          )}
+                        <div className="min-w-0 flex-1 truncate text-sm font-medium">
+                          {key}
                         </div>
                         <Button
                           size="sm"
