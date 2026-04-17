@@ -82,6 +82,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         canonical_graph_warmer: None,
         repo_graph_ops: None,
         mirror: None,
+        rpc_registry: None,
     }
 }
 

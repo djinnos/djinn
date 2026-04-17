@@ -15,7 +15,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
-use djinn_supervisor::{AllowAllValidator, ServeHandle, serve_on_tcp};
+use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_db::{
     Database, NoopNoteVectorStore, NoteRepository, NoteVectorStore, ProjectRepository,
     QdrantNoteVectorStore, SettingsRepository,
@@ -160,6 +160,12 @@ struct Inner {
     /// `Mutex<Option<ServeHandle>>` rather than `OnceCell` so `shutdown()`
     /// can move the handle out and cancel it cleanly.
     pub rpc_server: tokio::sync::Mutex<Option<ServeHandle>>,
+    /// Process-wide [`ConnectionRegistry`] shared with the TCP listener and
+    /// every [`djinn_k8s::KubernetesRuntime`] the slot runner constructs.
+    /// Always present (allocated eagerly in `new_inner`) so callers never
+    /// race against listener boot order — the registry is cheap to hold
+    /// around when the `DJINN_RUNTIME=test` path doesn't exercise it.
+    pub rpc_registry: Arc<ConnectionRegistry>,
 }
 
 impl AppState {
@@ -213,6 +219,7 @@ impl AppState {
                 app_config: tokio::sync::RwLock::new(None),
                 mirror: Arc::new(MirrorManager::new(mirrors_root())),
                 rpc_server: tokio::sync::Mutex::new(None),
+                rpc_registry: Arc::new(ConnectionRegistry::new()),
             }),
         }
     }
@@ -222,6 +229,14 @@ impl AppState {
     /// for mirror-direct pushes.
     pub fn mirror(&self) -> Arc<MirrorManager> {
         self.inner.mirror.clone()
+    }
+
+    /// Shared process-wide [`ConnectionRegistry`].  The same `Arc` is handed
+    /// to `serve_on_tcp` on boot and to every `KubernetesRuntime` constructed
+    /// by the slot runner, so workers dialling the TCP listener and the
+    /// runtime awaiting their handshake share a single bridge.
+    pub fn rpc_registry(&self) -> Arc<ConnectionRegistry> {
+        self.inner.rpc_registry.clone()
     }
 
     /// Read-only snapshot of the active GitHub App configuration, if any.
@@ -659,6 +674,7 @@ impl AppState {
                 self.clone(),
             ))),
             mirror: Some(self.inner.mirror.clone()),
+            rpc_registry: Some(self.inner.rpc_registry.clone()),
         }
     }
 
@@ -894,6 +910,12 @@ impl AppState {
 
         // Validator: prefer the real TokenReview path; fall back to
         // AllowAllValidator if no kubeconfig is available (dev / CI).
+        //
+        // Threads the process-wide `ConnectionRegistry` into the accept
+        // loop so per-task-run `PendingConnection` slots reserved by
+        // `KubernetesRuntime::prepare` pick up the worker's inbound
+        // `FramePayload::Event` frames once the handshake lands.
+        let registry = self.inner.rpc_registry.clone();
         let handle_result = match kube::Client::try_default().await {
             Ok(client) => {
                 let validator = Arc::new(K8sTokenReviewValidator::new(client, "djinn"));
@@ -901,7 +923,7 @@ impl AppState {
                     addr = %rpc_addr,
                     "rpc_server: binding TCP listener with K8sTokenReviewValidator"
                 );
-                serve_on_tcp(rpc_addr, services, validator, None).await
+                serve_on_tcp(rpc_addr, services, validator, Some(registry)).await
             }
             Err(e) => {
                 tracing::warn!(
@@ -910,7 +932,13 @@ impl AppState {
                     "rpc_server: kube::Client::try_default failed; \
                      falling back to AllowAllValidator (dev mode)"
                 );
-                serve_on_tcp(rpc_addr, services, Arc::new(AllowAllValidator), None).await
+                serve_on_tcp(
+                    rpc_addr,
+                    services,
+                    Arc::new(AllowAllValidator),
+                    Some(registry),
+                )
+                .await
             }
         };
 
@@ -935,10 +963,11 @@ impl AppState {
 
     /// Cancel and join the RPC TCP listener if it was spawned.
     ///
-    // TODO(phase 2.1): wire this into the process-wide graceful-shutdown
-    // path (see `server::run` / `server::embedded`). Today the listener is
-    // aborted implicitly when the tokio runtime shuts down — that's fine
-    // for SIGTERM but doesn't drain in-flight RPC calls cleanly.
+    /// Called from the process-wide graceful-shutdown path (`djinn-server`
+    /// binary's `async_main` runs `server::run(...).await` and then calls
+    /// this before dropping the `AppState`), so in-flight RPC connections
+    /// get a clean cancel + join instead of being torn down implicitly
+    /// when the tokio runtime exits.
     pub async fn shutdown_rpc_listener(&self) {
         let handle = self.inner.rpc_server.lock().await.take();
         if let Some(handle) = handle {

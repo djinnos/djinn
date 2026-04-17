@@ -82,6 +82,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         canonical_graph_warmer: None,
         repo_graph_ops: None,
         mirror: None,
+        rpc_registry: None,
     }
 }
 

@@ -154,9 +154,19 @@ async fn async_main() {
             std::process::exit(1);
         });
     state.initialize_agents().await;
+
+    // Keep a handle on AppState so we can tear the TCP RPC listener down
+    // gracefully after the HTTP server's shutdown future resolves.
+    // `server::router(state)` moves the state into the router.
+    let state_for_shutdown = state.clone();
     let router = server::router(state);
 
     server::run(router, cli.port, cancel).await;
+
+    // Graceful RPC teardown: cancel the TCP accept loop + join it so any
+    // in-flight worker RPCs drain cleanly.  Matches the HTTP server's
+    // `with_graceful_shutdown` semantics.
+    state_for_shutdown.shutdown_rpc_listener().await;
 
     // Flush any pending OTel spans before exit.
     djinn_agent::provider::telemetry::shutdown();

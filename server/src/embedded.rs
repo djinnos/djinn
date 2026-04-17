@@ -41,6 +41,9 @@ pub async fn start(config: Config, cancel: CancellationToken) -> Result<u16, Str
     state.initialize().await;
     state.initialize_agents().await;
 
+    // Hold a handle on AppState so we can tear the RPC TCP listener down
+    // cleanly after the HTTP server's shutdown future resolves.
+    let state_for_shutdown = state.clone();
     let app = crate::server::router(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port))
@@ -58,6 +61,9 @@ pub async fn start(config: Config, cancel: CancellationToken) -> Result<u16, Str
         if let Err(e) = srv.await {
             tracing::error!(error = %e, "embedded server error");
         }
+        // Graceful RPC teardown — matches the `djinn-server` binary's shutdown
+        // sequence in `main::async_main`.
+        state_for_shutdown.shutdown_rpc_listener().await;
         tracing::info!("embedded: server stopped");
     });
 

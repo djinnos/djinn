@@ -128,6 +128,13 @@ pub struct AgentContext {
     /// contexts never hit `squash_merge_via_mirror`, which bails out with a
     /// clear error when the field is absent.
     pub mirror: Option<Arc<MirrorManager>>,
+    /// Process-wide [`djinn_supervisor::ConnectionRegistry`].  Wired at the
+    /// server boundary into every `AgentContext` produced by
+    /// `AppState::agent_context()` so the slot runner (Phase 2.1 Phase E)
+    /// can hand it to `KubernetesRuntime::new` — the runtime and the
+    /// launcher's TCP listener share a single registry that way.  `None`
+    /// in test contexts that never exercise the K8s runtime.
+    pub rpc_registry: Option<Arc<djinn_supervisor::ConnectionRegistry>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

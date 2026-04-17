@@ -149,8 +149,19 @@ pub(crate) async fn run_supervisor_dispatch(
 
     let runtime: Arc<dyn SessionRuntime> = match runtime_kind {
         RuntimeKind::Kubernetes => {
-            let config = djinn_k8s::KubernetesConfig::for_testing(); // TODO(phase-2): load from djinn-server config file.
-            match djinn_k8s::KubernetesRuntime::new(config).await {
+            let config = djinn_k8s::KubernetesConfig::from_env();
+            let registry = match app_state.rpc_registry.as_ref() {
+                Some(reg) => reg.clone(),
+                None => {
+                    anyhow::bail!(
+                        "supervisor dispatch: AgentContext has no ConnectionRegistry \
+                         — the djinn-server boot path must plumb `rpc_registry` into \
+                         `AppState::agent_context()` before the Kubernetes runtime can \
+                         be constructed"
+                    );
+                }
+            };
+            match djinn_k8s::KubernetesRuntime::new(config, registry).await {
                 Ok(rt) => Arc::new(rt),
                 Err(e) => {
                     anyhow::bail!(
