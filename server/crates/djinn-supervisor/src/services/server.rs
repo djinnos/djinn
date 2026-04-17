@@ -37,9 +37,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use djinn_runtime::wire::{ControlMsg, read_frame, write_frame};
+use djinn_runtime::{StreamEvent, TaskRunReport, WorkerEvent};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -202,6 +203,10 @@ pub struct ServeHandle {
     pub socket_path: Option<PathBuf>,
     /// Bound TCP address, for the TCP path.  `None` on the unix-socket path.
     pub bound_addr: Option<SocketAddr>,
+    /// [`ConnectionRegistry`] the TCP accept loop routes event frames
+    /// through, when one was threaded into [`serve_on_tcp`].  `None` on the
+    /// unix-socket test path.
+    registry: Option<Arc<ConnectionRegistry>>,
 }
 
 impl ServeHandle {
@@ -209,7 +214,253 @@ impl ServeHandle {
     pub fn cancel(&self) {
         self.cancel_server.cancel();
     }
+
+    /// Read-only access to the [`ConnectionRegistry`] the server is routing
+    /// through, when one is present.  Runtimes ([`djinn_k8s::KubernetesRuntime`])
+    /// hold onto this to call [`ConnectionRegistry::register_pending`] before
+    /// dialling a worker.
+    pub fn registry(&self) -> Option<Arc<ConnectionRegistry>> {
+        self.registry.clone()
+    }
 }
+
+// ── ConnectionRegistry ───────────────────────────────────────────────────────
+
+/// Per-task-run connection table that bridges the host's `SessionRuntime`
+/// impls and the [`serve_on_tcp`] accept loop.
+///
+/// The registry solves two Phase 2.1 problems:
+///
+/// 1. **Inbound event routing** — when a worker Pod dials the launcher and
+///    completes the `AuthHello` handshake, the accept loop looks up the
+///    pending connection by `task_run_id` and forwards every subsequent
+///    `FramePayload::Event` onto the registered [`mpsc::Sender<StreamEvent>`].
+///    The runtime drains the matching receiver in its `teardown` path to
+///    pick up the real `WorkerEvent::TerminalReport` instead of synthesising
+///    one from Job status.
+/// 2. **Outbound control frames** — the accept loop publishes a per-connection
+///    [`mpsc::Sender<Frame>`] back into the pending slot so the runtime can
+///    send `Control(Cancel)` / `Control(Shutdown)` at a specific worker
+///    during `cancel()`.
+///
+/// Reservation and attachment are two phases so the runtime can reserve the
+/// slot *before* it creates the K8s Job (avoiding a race where the Pod
+/// connects back faster than `runtime.prepare` returns).  [`PendingConnection::
+/// wait_for_connection`] blocks until `attach` flips the watch channel true,
+/// so `attach_stdio` can await connectivity without polling.
+///
+/// `ConnectionRegistry` is cheap to clone (the inner state sits behind a
+/// `Mutex`) and designed to be held in an `Arc` on both sides.
+#[derive(Debug, Default)]
+pub struct ConnectionRegistry {
+    inner: Mutex<HashMap<String, ConnSlot>>,
+}
+
+/// Internal state for one registered task-run connection.
+#[derive(Debug)]
+struct ConnSlot {
+    /// Channel the accept loop forwards inbound `FramePayload::Event` frames
+    /// into after the handshake succeeds.
+    events_tx: mpsc::Sender<StreamEvent>,
+    /// Outbound frame sender the accept loop publishes on successful attach.
+    /// Runtimes route `FramePayload::Control(_)` through this.
+    /// `None` until the worker completes the handshake.
+    outbound_tx: Option<mpsc::Sender<Frame>>,
+    /// Flipped `true` when the handshake succeeds.  `PendingConnection::
+    /// wait_for_connection` awaits this watch channel.
+    connected_tx: watch::Sender<bool>,
+    /// Username the validator returned at handshake time — kept for audit
+    /// logs.
+    #[allow(dead_code)]
+    username: Option<String>,
+}
+
+/// Handle returned by [`ConnectionRegistry::register_pending`].
+///
+/// Carries the channels the runtime drains / pushes on during the task-run
+/// lifecycle:
+///
+/// - [`PendingConnection::events_rx`] — inbound `WorkerEvent` stream.  The
+///   runtime drains this until it observes the terminal report (or the
+///   sender closes).
+/// - [`PendingConnection::wait_for_connection`] — resolves `Ok(())` once the
+///   worker's `AuthHello` is accepted and the outbound sender is populated.
+/// - [`PendingConnection::outbound_sender`] — grabs the outbound sender so
+///   the runtime can push `Control` frames.  Returns `None` until the
+///   handshake completes.
+pub struct PendingConnection {
+    task_run_id: String,
+    registry: Arc<ConnectionRegistry>,
+    pub events_rx: mpsc::Receiver<StreamEvent>,
+    connected_rx: watch::Receiver<bool>,
+}
+
+impl PendingConnection {
+    /// The task-run id this pending connection is bound to.
+    pub fn task_run_id(&self) -> &str {
+        &self.task_run_id
+    }
+
+    /// Wait until the worker has completed the handshake.  Returns `Ok(())`
+    /// immediately if the connection is already live; otherwise awaits the
+    /// [`watch::Receiver`] transition to `true`.
+    ///
+    /// Returns `Err(String)` only when the watch channel is closed before
+    /// the connection goes live (the registry was deregistered without a
+    /// successful attach, e.g. the Pod failed before dialling).
+    pub async fn wait_for_connection(&mut self) -> Result<(), String> {
+        if *self.connected_rx.borrow() {
+            return Ok(());
+        }
+        loop {
+            self.connected_rx
+                .changed()
+                .await
+                .map_err(|e| format!("pending connection watch closed: {e}"))?;
+            if *self.connected_rx.borrow() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Grab a clone of the outbound [`Frame`] sender the accept loop
+    /// published on handshake acceptance.  Returns `None` until
+    /// [`Self::wait_for_connection`] has resolved `Ok(())`.
+    pub async fn outbound_sender(&self) -> Option<mpsc::Sender<Frame>> {
+        self.registry.outbound_sender_for(&self.task_run_id).await
+    }
+}
+
+impl Drop for PendingConnection {
+    fn drop(&mut self) {
+        // Best-effort: if the runtime dropped us without going through
+        // `teardown`, clean the registry slot so a later `register_pending`
+        // with the same id doesn't collide.  Done on a detached task because
+        // `Drop` isn't async.
+        let registry = self.registry.clone();
+        let task_run_id = self.task_run_id.clone();
+        tokio::spawn(async move {
+            registry.deregister(&task_run_id).await;
+        });
+    }
+}
+
+impl ConnectionRegistry {
+    /// Construct an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reserve a slot for the given `task_run_id` before the runtime
+    /// actually dials the worker.
+    ///
+    /// Returns a [`PendingConnection`] carrying the channels the runtime
+    /// will drain / push on during the task-run lifecycle.  The `buffer`
+    /// bounds both the inbound `StreamEvent` channel — if the runtime
+    /// stalls on `events_rx` the accept loop back-pressures the worker.
+    ///
+    /// Errors if a slot for the same `task_run_id` is already registered.
+    pub async fn register_pending(
+        self: &Arc<Self>,
+        task_run_id: impl Into<String>,
+        buffer: usize,
+    ) -> Result<PendingConnection, String> {
+        let task_run_id = task_run_id.into();
+        let (events_tx, events_rx) = mpsc::channel::<StreamEvent>(buffer);
+        let (connected_tx, connected_rx) = watch::channel(false);
+
+        let mut map = self.inner.lock().await;
+        if map.contains_key(&task_run_id) {
+            return Err(format!(
+                "task_run_id {task_run_id} already has a pending connection"
+            ));
+        }
+        map.insert(
+            task_run_id.clone(),
+            ConnSlot {
+                events_tx,
+                outbound_tx: None,
+                connected_tx,
+                username: None,
+            },
+        );
+        drop(map);
+
+        Ok(PendingConnection {
+            task_run_id,
+            registry: Arc::clone(self),
+            events_rx,
+            connected_rx,
+        })
+    }
+
+    /// Called by the TCP accept loop immediately after a successful
+    /// `AuthHello`.  Publishes the outbound frame sender into the pending
+    /// slot (if one was pre-registered) and flips the `connected` watch to
+    /// `true` so [`PendingConnection::wait_for_connection`] resolves.
+    ///
+    /// Returns an [`AttachedSlot`] carrying the `events_tx` the accept
+    /// loop should forward `FramePayload::Event` frames into.  Returns
+    /// `None` when no pending registration exists — the accept loop falls
+    /// back to the old generic-dispatch path (preserves back-compat for
+    /// unit tests that don't pre-register).
+    async fn attach(
+        &self,
+        task_run_id: &str,
+        outbound_tx: mpsc::Sender<Frame>,
+        username: Option<String>,
+    ) -> Option<AttachedSlot> {
+        let mut map = self.inner.lock().await;
+        let slot = map.get_mut(task_run_id)?;
+        slot.outbound_tx = Some(outbound_tx);
+        slot.username = username;
+        // watch::Sender::send ignores receivers; it only errors if all
+        // receivers dropped, in which case the runtime already gave up on
+        // the connection.  Either way, ignore send failures.
+        let _ = slot.connected_tx.send(true);
+        Some(AttachedSlot {
+            events_tx: slot.events_tx.clone(),
+        })
+    }
+
+    /// Grab the outbound sender for a task-run, when a pending connection
+    /// has been attached.
+    async fn outbound_sender_for(&self, task_run_id: &str) -> Option<mpsc::Sender<Frame>> {
+        let map = self.inner.lock().await;
+        map.get(task_run_id)
+            .and_then(|slot| slot.outbound_tx.clone())
+    }
+
+    /// Remove the slot for the given task-run.  Idempotent.
+    pub async fn deregister(&self, task_run_id: &str) {
+        let mut map = self.inner.lock().await;
+        map.remove(task_run_id);
+    }
+}
+
+/// Per-connection handle the accept loop uses after a successful attach.
+struct AttachedSlot {
+    events_tx: mpsc::Sender<StreamEvent>,
+}
+
+/// Lower a `WorkerEvent` frame into a [`StreamEvent`] the registry speaks.
+///
+/// Phase 2.1 only delivers [`WorkerEvent::TerminalReport`] upstream —
+/// everything else is either legacy (`Placeholder`) or not yet wired.  When
+/// new variants land, route them to the matching `StreamEvent` variants
+/// here (assistant deltas, tool calls, stage outcomes, heartbeats).
+fn worker_event_to_stream_event(event: WorkerEvent) -> Option<StreamEvent> {
+    match event {
+        WorkerEvent::TerminalReport(report) => Some(StreamEvent::Report(report)),
+        WorkerEvent::Placeholder => None,
+    }
+}
+
+/// Compile-time check that [`TaskRunReport`] is importable from this module
+/// (so a future refactor that hides it breaks here before it breaks at the
+/// K8s runtime).
+#[allow(dead_code)]
+fn _taskrunreport_is_in_scope(_: &TaskRunReport) {}
 
 // ── serve_on_unix_socket (in-process test path) ──────────────────────────────
 
@@ -245,7 +496,17 @@ pub async fn serve_on_unix_socket<P: AsRef<Path>>(
                     Ok((stream, _addr)) => {
                         debug!(socket = %path_for_task.display(), "worker connected (unix)");
                         let (read_half, write_half) = stream.into_split();
-                        dispatch_loop(read_half, write_half, services_arc, cancel_child.clone()).await;
+                        let (reply_tx, reply_rx) = mpsc::channel::<Frame>(64);
+                        dispatch_loop(
+                            read_half,
+                            write_half,
+                            services_arc,
+                            reply_tx,
+                            reply_rx,
+                            None, // unix path has no registry — events dropped as before
+                            cancel_child.clone(),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         error!(error = %e, "SupervisorServices accept failed (unix)");
@@ -262,6 +523,7 @@ pub async fn serve_on_unix_socket<P: AsRef<Path>>(
         join,
         socket_path: Some(socket_path),
         bound_addr: None,
+        registry: None,
     })
 }
 
@@ -271,10 +533,8 @@ pub async fn serve_on_unix_socket<P: AsRef<Path>>(
 ///
 /// Single entry per `task_run_id`; the listener rejects a second AuthHello
 /// bearing an already-bound task_run_id.  The value is intentionally
-/// minimal today.
-// TODO(phase 2.1): carry an `mpsc::Sender<Frame>` back into the
-// per-connection writer so the host-side dispatcher can push `Cancel` /
-// `Shutdown` control frames at a specific task-run.
+/// minimal — richer per-connection state lives in [`ConnectionRegistry`],
+/// which is the host-facing bridge.
 #[derive(Debug)]
 struct ConnState {
     /// Username the validator returned — useful for audit logs.
@@ -290,10 +550,19 @@ struct ConnState {
 /// connection on failure.  On success it records `task_run_id → ConnState`
 /// and enters the shared [`dispatch_loop`] — from that point on the TCP
 /// path is byte-for-byte identical to the unix-socket path.
+///
+/// `registry` — when `Some`, the accept loop looks up a pre-registered
+/// [`PendingConnection`] by `task_run_id` on handshake acceptance and
+/// forwards every subsequent `FramePayload::Event` frame into the pending
+/// connection's `events_tx`.  When `None`, the accept loop falls back to
+/// the old generic-dispatch path (Event frames are logged + dropped).
+/// This is the Phase 2.1 bridge the `KubernetesRuntime` uses to pick up
+/// real terminal reports instead of synthesising them from Job status.
 pub async fn serve_on_tcp<V: TokenValidator>(
     addr: SocketAddr,
     services: Arc<dyn SupervisorServices>,
     validator: Arc<V>,
+    registry: Option<Arc<ConnectionRegistry>>,
 ) -> io::Result<ServeHandle> {
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
@@ -306,6 +575,7 @@ pub async fn serve_on_tcp<V: TokenValidator>(
     // re-using an already-bound task_run_id within the lifetime of this
     // listener.
     let conns: Arc<Mutex<HashMap<String, ConnState>>> = Arc::new(Mutex::new(HashMap::new()));
+    let registry_for_handle = registry.clone();
 
     let join = tokio::spawn(async move {
         loop {
@@ -324,6 +594,7 @@ pub async fn serve_on_tcp<V: TokenValidator>(
                             let services = services.clone();
                             let validator = validator.clone();
                             let conns = conns.clone();
+                            let registry = registry.clone();
                             let cancel_conn = cancel_child.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_tcp_connection(
@@ -331,6 +602,7 @@ pub async fn serve_on_tcp<V: TokenValidator>(
                                     services,
                                     validator,
                                     conns,
+                                    registry,
                                     cancel_conn,
                                 )
                                 .await
@@ -355,6 +627,7 @@ pub async fn serve_on_tcp<V: TokenValidator>(
         join,
         socket_path: None,
         bound_addr: Some(bound_addr),
+        registry: registry_for_handle,
     })
 }
 
@@ -365,6 +638,7 @@ async fn handle_tcp_connection<V: TokenValidator>(
     services: Arc<dyn SupervisorServices>,
     validator: Arc<V>,
     conns: Arc<Mutex<HashMap<String, ConnState>>>,
+    registry: Option<Arc<ConnectionRegistry>>,
     cancel: CancellationToken,
 ) -> Result<(), String> {
     let (read_half, mut write_half) = stream.into_split();
@@ -468,11 +742,37 @@ async fn handle_tcp_connection<V: TokenValidator>(
     }
     info!(%task_run_id, username = ?validation.username, "tcp handshake accepted");
 
-    // 5. Enter the shared dispatch loop.
-    dispatch_loop(read_half, write_half, services, cancel).await;
+    // 5. Pre-allocate the outbound reply channel so the ConnectionRegistry
+    //    can expose it to the runtime — this is what lets the runtime push
+    //    `FramePayload::Control(_)` at a specific worker during `cancel()`.
+    let (reply_tx, reply_rx) = mpsc::channel::<Frame>(64);
 
-    // 6. Deregister.
+    // 6. If a registry was threaded in and a pending connection is waiting
+    //    for this `task_run_id`, attach — publishes the outbound sender and
+    //    flips `PendingConnection::wait_for_connection` to ready.  The
+    //    returned [`AttachedSlot::events_tx`] is the channel inbound Event
+    //    frames should land on.
+    let events_tx = if let Some(registry) = registry.as_ref() {
+        registry
+            .attach(
+                &task_run_id,
+                reply_tx.clone(),
+                validation.username.clone(),
+            )
+            .await
+            .map(|slot| slot.events_tx)
+    } else {
+        None
+    };
+
+    // 7. Enter the shared dispatch loop.
+    dispatch_loop(read_half, write_half, services, reply_tx, reply_rx, events_tx, cancel).await;
+
+    // 8. Deregister.
     conns.lock().await.remove(&task_run_id);
+    if let Some(registry) = registry.as_ref() {
+        registry.deregister(&task_run_id).await;
+    }
     Ok(())
 }
 
@@ -483,19 +783,26 @@ async fn handle_tcp_connection<V: TokenValidator>(
 /// Parameterised on any split `AsyncRead` + `AsyncWrite` so it works over
 /// both the unix-socket halves and the TCP halves without duplicating the
 /// reader/writer boilerplate.
+///
+/// `events_tx` — when `Some`, inbound `FramePayload::Event` frames are
+/// lowered to [`StreamEvent`] via [`worker_event_to_stream_event`] and
+/// forwarded into this channel.  When `None`, event frames are logged +
+/// dropped (preserves the pre-Phase-2.1 behaviour for the unix-socket test
+/// path and for TCP callers that don't supply a `ConnectionRegistry`).
 async fn dispatch_loop<R, W>(
     read_half: R,
     write_half: W,
     services: Arc<dyn SupervisorServices>,
+    reply_tx: mpsc::Sender<Frame>,
+    reply_rx: mpsc::Receiver<Frame>,
+    events_tx: Option<mpsc::Sender<StreamEvent>>,
     cancel: CancellationToken,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let (reply_tx, reply_rx) = mpsc::channel::<Frame>(64);
-
     let writer = tokio::spawn(writer_loop(write_half, reply_rx, cancel.clone()));
-    reader_loop(read_half, services, reply_tx, cancel.clone()).await;
+    reader_loop(read_half, services, reply_tx, events_tx, cancel.clone()).await;
 
     // Closing `reply_tx` drains the writer naturally.
     let _ = writer.await;
@@ -505,6 +812,7 @@ async fn reader_loop<R>(
     mut read_half: R,
     services: Arc<dyn SupervisorServices>,
     reply_tx: mpsc::Sender<Frame>,
+    events_tx: Option<mpsc::Sender<StreamEvent>>,
     cancel: CancellationToken,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
@@ -545,6 +853,25 @@ async fn reader_loop<R>(
                                 debug!("server reader: Shutdown from worker");
                                 cancel.cancel();
                                 return;
+                            }
+                            FramePayload::Event(event) => {
+                                match (events_tx.as_ref(), worker_event_to_stream_event(event)) {
+                                    (Some(tx), Some(stream_event)) => {
+                                        if tx.send(stream_event).await.is_err() {
+                                            debug!("server reader: events_tx dropped");
+                                        }
+                                    }
+                                    (Some(_tx), None) => {
+                                        debug!(
+                                            "server reader: received WorkerEvent with no StreamEvent mapping"
+                                        );
+                                    }
+                                    (None, _) => {
+                                        debug!(
+                                            "server reader: event frame on connection without registry — dropped"
+                                        );
+                                    }
+                                }
                             }
                             other => {
                                 debug!(?other, "server reader: unhandled frame");
@@ -763,7 +1090,7 @@ mod tests {
         // ExpectedTokenValidator rejects every token that does not match.
         let validator = Arc::new(ExpectedTokenValidator::new("good-token", "run-denied"));
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let handle = serve_on_tcp(addr, services, validator)
+        let handle = serve_on_tcp(addr, services, validator, None)
             .await
             .expect("bind tcp");
         let bound = handle.bound_addr.expect("bound addr");
@@ -813,7 +1140,7 @@ mod tests {
             "run-expected",
         ));
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let handle = serve_on_tcp(addr, services, validator)
+        let handle = serve_on_tcp(addr, services, validator, None)
             .await
             .expect("bind tcp");
         let bound = handle.bound_addr.expect("bound addr");
@@ -856,7 +1183,7 @@ mod tests {
         });
         let validator = Arc::new(AllowAllValidator);
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let handle = serve_on_tcp(addr, services, validator)
+        let handle = serve_on_tcp(addr, services, validator, None)
             .await
             .expect("bind tcp");
         let bound = handle.bound_addr.expect("bound addr");
@@ -890,6 +1217,122 @@ mod tests {
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
+        handle.cancel();
+        let _ = handle.join.await;
+    }
+
+    /// Pre-register a pending connection on a `ConnectionRegistry`, dial the
+    /// server, complete the handshake, send a `FramePayload::Event(
+    /// WorkerEvent::TerminalReport(..))`, and assert the event arrives on
+    /// the pending connection's `events_rx` as a `StreamEvent::Report`.
+    ///
+    /// Also verifies that `PendingConnection::wait_for_connection` resolves
+    /// once the handshake succeeds, and that `outbound_sender` yields a
+    /// live `mpsc::Sender<Frame>` post-handshake.
+    #[tokio::test]
+    async fn serve_on_tcp_routes_event_to_pending_connection() {
+        use djinn_runtime::{
+            RoleKind, StreamEvent, TaskRunOutcome, TaskRunReport, WorkerEvent,
+        };
+
+        let services: Arc<dyn SupervisorServices> = Arc::new(FakeServices {
+            cancel: CancellationToken::new(),
+            canned_task_id: "registry-task-1".into(),
+        });
+        let validator = Arc::new(AllowAllValidator);
+        let registry = Arc::new(ConnectionRegistry::new());
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let handle = serve_on_tcp(addr, services, validator, Some(registry.clone()))
+            .await
+            .expect("bind tcp with registry");
+        let bound = handle.bound_addr.expect("bound addr");
+
+        // Reserve a pending slot BEFORE the worker dials — this is the
+        // production sequence (runtime.prepare registers, then creates Job).
+        let task_run_id = "registry-run-1".to_string();
+        let mut pending = registry
+            .register_pending(task_run_id.clone(), 16)
+            .await
+            .expect("register_pending");
+
+        // Dial and present the AuthHello.
+        let mut stream = TcpStream::connect(bound).await.expect("connect");
+        let hello = Frame {
+            correlation_id: 1,
+            payload: FramePayload::AuthHello(AuthHelloMsg {
+                task_run_id: task_run_id.clone(),
+                token: "any-token".into(),
+            }),
+        };
+        write_frame(&mut stream, &hello).await.expect("write hello");
+        let reply: Frame = read_frame(&mut stream).await.expect("read ack");
+        match reply.payload {
+            FramePayload::AuthResult(AuthResultMsg { accepted: true, .. }) => {}
+            other => panic!("expected accepted auth, got {other:?}"),
+        }
+
+        // wait_for_connection should now resolve promptly.
+        tokio::time::timeout(std::time::Duration::from_secs(2), pending.wait_for_connection())
+            .await
+            .expect("wait_for_connection should resolve within 2s of handshake")
+            .expect("wait_for_connection Ok");
+
+        // Outbound sender is live post-handshake.
+        let outbound = pending
+            .outbound_sender()
+            .await
+            .expect("outbound sender should be populated after attach");
+
+        // Send a TerminalReport event from the "worker" side.  This is
+        // what `RpcServices::emit_event(WorkerEvent::TerminalReport(..))`
+        // would push on the production path.
+        let report = TaskRunReport {
+            task_run_id: task_run_id.clone(),
+            outcome: TaskRunOutcome::Closed {
+                reason: "planner-only flow finished".into(),
+            },
+            stages_completed: vec![RoleKind::Planner],
+        };
+        let event_frame = Frame {
+            correlation_id: 0,
+            payload: FramePayload::Event(WorkerEvent::TerminalReport(report.clone())),
+        };
+        write_frame(&mut stream, &event_frame)
+            .await
+            .expect("write Event frame");
+
+        // Drain pending.events_rx until we see the StreamEvent::Report.
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match pending.events_rx.recv().await {
+                    Some(StreamEvent::Report(r)) => return r,
+                    Some(other) => {
+                        tracing::debug!(?other, "skipping non-terminal event");
+                    }
+                    None => panic!("events_rx closed before receiving terminal report"),
+                }
+            }
+        })
+        .await
+        .expect("terminal report should land on pending.events_rx within 2s");
+
+        assert_eq!(received.task_run_id, report.task_run_id);
+        match received.outcome {
+            TaskRunOutcome::Closed { reason } => {
+                assert_eq!(reason, "planner-only flow finished");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        // Sanity: outbound_sender is the same channel the host will use for
+        // `Control(Cancel)`.  A round-trip through it would block the
+        // writer task (the test server's writer is draining it), so we only
+        // assert the channel is not closed.
+        assert!(!outbound.is_closed(), "outbound channel should stay open");
+
+        // Teardown.
+        drop(pending);
         handle.cancel();
         let _ = handle.join.await;
     }

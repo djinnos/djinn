@@ -138,7 +138,7 @@ async fn start_server(
     validator: Arc<ExpectedTokenValidator>,
 ) -> (SocketAddr, ServeHandle) {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let handle = serve_on_tcp(addr, services, validator)
+    let handle = serve_on_tcp(addr, services, validator, None)
         .await
         .expect("bind serve_on_tcp");
     let bound = handle.bound_addr.expect("bound addr");

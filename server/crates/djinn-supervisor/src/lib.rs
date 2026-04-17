@@ -43,8 +43,9 @@ pub use services::rpc::{
     ConnectTcpError, RpcBackgroundTasks, RpcServices, StubRpcServices, UnimplementedRpcServices,
 };
 pub use services::server::{
-    AllowAllValidator, DenyAllValidator, ExpectedTokenValidator, ServeHandle, TokenValidation,
-    TokenValidator, serve_on_tcp, serve_on_unix_socket,
+    AllowAllValidator, ConnectionRegistry, DenyAllValidator, ExpectedTokenValidator,
+    PendingConnection, ServeHandle, TokenValidation, TokenValidator, serve_on_tcp,
+    serve_on_unix_socket,
 };
 pub use services::wire::{
     AuthHelloMsg, AuthResultMsg, Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse,

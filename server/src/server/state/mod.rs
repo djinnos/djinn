@@ -901,7 +901,7 @@ impl AppState {
                     addr = %rpc_addr,
                     "rpc_server: binding TCP listener with K8sTokenReviewValidator"
                 );
-                serve_on_tcp(rpc_addr, services, validator).await
+                serve_on_tcp(rpc_addr, services, validator, None).await
             }
             Err(e) => {
                 tracing::warn!(
@@ -910,7 +910,7 @@ impl AppState {
                     "rpc_server: kube::Client::try_default failed; \
                      falling back to AllowAllValidator (dev mode)"
                 );
-                serve_on_tcp(rpc_addr, services, Arc::new(AllowAllValidator)).await
+                serve_on_tcp(rpc_addr, services, Arc::new(AllowAllValidator), None).await
             }
         };
 
