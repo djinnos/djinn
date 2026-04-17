@@ -21,9 +21,11 @@
 //! terminal reports flow over the launcher's TCP connection in a later PR.
 //!
 //! `attach_stdio` is a placeholder — see the method doc comment. The real
-//! BiStream semantics arrive in PR 4 pt2 when dispatch wiring formalises
-//! how the launcher-side TCP connection hands back a `BiStream` to the
-//! supervisor.
+//! BiStream hand-off between `serve_on_tcp` (which owns the post-handshake
+//! TCP connection) and the runtime's `attach_stdio` return value is a
+//! Phase 2.1 follow-up; the Kubernetes dispatch path today synthesises the
+//! terminal `TaskRunReport` from the Job's terminal state in `teardown`
+//! instead (see `djinn_agent::actors::slot::supervisor_runner`).
 //!
 //! End-to-end `prepare`/`cancel`/`teardown` against a live kind cluster is
 //! covered by `tests/kind_smoke.rs` (DJINN_TEST_KIND-gated). The unit tests
@@ -200,9 +202,11 @@ impl SessionRuntime for KubernetesRuntime {
     /// supervisor, not by this method.
     ///
     /// Returning a detached in-memory `BiStream` keeps trait-shape parity so
-    /// the existing `SessionRuntime` consumer code compiles; calls to its
-    /// `events_rx` will simply block forever until the PR 4 pt2 dispatch
-    /// cutover plumbs the real TCP-backed stream through.
+    /// the existing `SessionRuntime` consumer code compiles; callers on the
+    /// Kubernetes path today ignore the return value and rely on `teardown`
+    /// to derive the terminal `TaskRunReport` from the Job's exit state
+    /// instead. Formalising the serve_on_tcp → attach_stdio hand-off is a
+    /// Phase 2.1 follow-up.
     async fn attach_stdio(&self, _handle: &RunHandle) -> Result<BiStream, RuntimeError> {
         let (stream, _events_tx, _requests_rx) = BiStream::new_in_memory(16);
         // _events_tx and _requests_rx are dropped here — callers observing
