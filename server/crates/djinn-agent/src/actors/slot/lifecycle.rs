@@ -11,9 +11,6 @@ use crate::prompts::TaskContext;
 use crate::provider::LlmProvider;
 use crate::provider::create_provider;
 use crate::roles::AgentRole;
-use crate::verification::settings::{
-    effective_mcp_server_names, effective_skill_names, load_settings,
-};
 use djinn_core::models::SessionStatus;
 use djinn_db::SessionRepository;
 use djinn_db::TaskRepository;
@@ -23,11 +20,13 @@ use super::reply_loop::{ReplyLoopContext, run_reply_loop};
 use super::*;
 use crate::AgentType;
 
+mod mcp_resolve;
 mod model_resolution;
 mod retry;
 mod setup;
 mod teardown;
 
+use mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use model_resolution::{ModelResolutionError, resolve_model_and_credential};
 use setup::{SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context};
 use teardown::{PostSessionParams, apply_transition_and_dispatch, spawn_post_session_work};
@@ -611,100 +610,23 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
     }
     emit_step(&task.id, "preflight_passed", serde_json::json!({}));
 
-    let settings = load_settings(&worktree_path).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "failed to load project settings, using defaults");
-        Default::default()
-    });
-
-    let effective_mcp_servers = effective_mcp_server_names(
-        &settings,
-        runtime_role.config().name,
+    let McpAndSkills {
+        settings,
+        effective_mcp_servers,
+        effective_skills,
+        mcp_registry,
+        resolved_skills,
+    } = resolve_mcp_and_skills(
+        &worktree_path,
+        runtime_role.as_ref(),
+        &task.short_id,
         mcp_servers.as_deref(),
-    );
-    let effective_skills = effective_skill_names(&settings, &skills);
-
-    // ── Resolve role-level MCP servers ────────────────────────────────────────
-    // Load the project MCP server registry from standard discovery files. Legacy
-    // `.djinn/settings.json` entries are migrated into root `mcp.json` during
-    // registry load, then resolution proceeds from the discovered registry only.
-    // Unknown names are logged as warnings and skipped — they never block the
-    // session from starting.
-    //
-    // Default roles have empty mcp_servers, so this block is a no-op for them.
-    let resolved_mcp_servers = if !effective_mcp_servers.is_empty() {
-        let registry = crate::verification::settings::load_mcp_server_registry(&worktree_path);
-        let resolved = crate::verification::settings::resolve_mcp_servers(
-            &task.short_id,
-            runtime_role.config().name,
-            &effective_mcp_servers,
-            &registry,
-        );
-        tracing::info!(
-            task_id = %task.short_id,
-            role = %runtime_role.config().name,
-            requested_count = effective_mcp_servers.len(),
-            resolved_count = resolved.len(),
-            "Lifecycle: resolved role MCP servers"
-        );
-        resolved
-            .into_iter()
-            .map(|(name, cfg)| (name, cfg.clone()))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    // Connect to resolved MCP servers and discover their tool definitions.
-    // Unreachable or misconfigured servers are logged and skipped (non-fatal).
-    let mcp_registry = {
+        &skills,
         #[cfg(test)]
-        {
-            if let Some(registry) = mcp_registry_override {
-                Some(registry)
-            } else if !resolved_mcp_servers.is_empty() {
-                crate::mcp_client::connect_and_discover(
-                    &task.short_id,
-                    runtime_role.config().name,
-                    &resolved_mcp_servers,
-                    &app_state,
-                )
-                .await
-            } else {
-                None
-            }
-        }
-        #[cfg(not(test))]
-        {
-            if !resolved_mcp_servers.is_empty() {
-                crate::mcp_client::connect_and_discover(
-                    &task.short_id,
-                    runtime_role.config().name,
-                    &resolved_mcp_servers,
-                    &app_state,
-                )
-                .await
-            } else {
-                None
-            }
-        }
-    };
-
-    // ── Load and resolve skills from worktree .djinn/skills/ ─────────────────
-    // Skills are markdown files with YAML frontmatter. Missing skills are logged
-    // as warnings and skipped — they never block the session from starting.
-    let resolved_skills = if !effective_skills.is_empty() {
-        let loaded = crate::skills::load_skills(&worktree_path, &effective_skills);
-        tracing::info!(
-            task_id = %task.short_id,
-            role = %runtime_role.config().name,
-            requested_count = effective_skills.len(),
-            resolved_count = loaded.len(),
-            "Lifecycle: resolved role skills"
-        );
-        loaded
-    } else {
-        Vec::new()
-    };
+        mcp_registry_override,
+        &app_state,
+    )
+    .await;
 
     let SetupAndVerificationContext {
         prompt_setup_commands,
