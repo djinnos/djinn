@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use tokio::sync::{mpsc, oneshot};
 
-pub use crate::{CommandOutput, CommitInfo, GitError, MergeResult, StatusSummary, WorktreeInfo};
+pub use crate::{CommandOutput, CommitInfo, GitError, MergeResult, StatusSummary};
 
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
@@ -46,18 +46,6 @@ pub(super) enum GitMessage {
     /// Force-delete `branch` locally and from origin (post-merge cleanup).
     DeleteBranch {
         branch: String,
-        respond_to: Reply<()>,
-    },
-    /// Create a worktree at `.djinn/worktrees/{task_short_id}/` on `branch` (GIT-02).
-    CreateWorktree {
-        task_short_id: String,
-        branch: String,
-        detach: bool,
-        respond_to: Reply<PathBuf>,
-    },
-    /// Remove a worktree by path and prune stale entries (GIT-06).
-    RemoveWorktree {
-        path: PathBuf,
         respond_to: Reply<()>,
     },
 }

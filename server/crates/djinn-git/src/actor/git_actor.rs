@@ -70,24 +70,6 @@ impl GitActor {
                 let result = crate::delete_branch(path, branch).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::CreateWorktree {
-                task_short_id,
-                branch,
-                detach,
-                respond_to,
-            } => {
-                let path = self.path.clone();
-                let result = crate::create_worktree(path, task_short_id, branch, detach).await;
-                let _ = respond_to.send(result);
-            }
-            GitMessage::RemoveWorktree {
-                path: wt_path,
-                respond_to,
-            } => {
-                let path = self.path.clone();
-                let result = crate::remove_worktree(path, wt_path).await;
-                let _ = respond_to.send(result);
-            }
         }
     }
 

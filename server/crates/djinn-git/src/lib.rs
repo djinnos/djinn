@@ -182,13 +182,6 @@ pub struct MergeResult {
     pub commit_sha: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct WorktreeInfo {
-    pub path: PathBuf,
-    pub branch: Option<String>,
-    pub head: String,
-}
-
 pub async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<CommandOutput, GitError> {
     use std::process::Stdio;
     let mut cmd = tokio::process::Command::new("git");
@@ -375,42 +368,6 @@ pub async fn delete_branch(path: PathBuf, branch: String) -> Result<(), GitError
     )
     .await;
 
-    Ok(())
-}
-
-pub async fn create_worktree(
-    path: PathBuf,
-    task_short_id: String,
-    branch: String,
-    detach: bool,
-) -> Result<PathBuf, GitError> {
-    let _ = run_git_command(path.clone(), vec!["worktree".into(), "prune".into()]).await;
-
-    let wt_path = path.join(".djinn").join("worktrees").join(&task_short_id);
-    let mut args = vec!["worktree".into(), "add".into()];
-    if detach {
-        args.push("--detach".into());
-    }
-    args.push(wt_path.to_str().unwrap_or_default().into());
-    args.push(branch);
-
-    run_git_command(path, args).await?;
-    Ok(wt_path)
-}
-
-pub async fn remove_worktree(path: PathBuf, wt_path: PathBuf) -> Result<(), GitError> {
-    run_git_command(
-        path.clone(),
-        vec![
-            "worktree".into(),
-            "remove".into(),
-            "--force".into(),
-            wt_path.to_str().unwrap_or_default().into(),
-        ],
-    )
-    .await?;
-
-    let _ = run_git_command(path, vec!["worktree".into(), "prune".into()]).await;
     Ok(())
 }
 

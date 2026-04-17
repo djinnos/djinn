@@ -102,34 +102,6 @@ impl GitActorHandle {
         })
         .await
     }
-
-    /// Create a worktree at `.djinn/worktrees/{task_short_id}/` on `branch` (GIT-02).
-    ///
-    /// When `detach` is true, passes `--detach` to `git worktree add` so the
-    /// worktree gets a detached HEAD instead of checking out the branch.
-    pub async fn create_worktree(
-        &self,
-        task_short_id: &str,
-        branch: &str,
-        detach: bool,
-    ) -> Result<PathBuf, GitError> {
-        self.request(|tx| GitMessage::CreateWorktree {
-            task_short_id: task_short_id.into(),
-            branch: branch.into(),
-            detach,
-            respond_to: tx,
-        })
-        .await
-    }
-
-    /// Remove a worktree by path and prune stale entries (GIT-06).
-    pub async fn remove_worktree(&self, path: &Path) -> Result<(), GitError> {
-        self.request(|tx| GitMessage::RemoveWorktree {
-            path: path.to_path_buf(),
-            respond_to: tx,
-        })
-        .await
-    }
 }
 
 // ─── Registry helper ──────────────────────────────────────────────────────────
