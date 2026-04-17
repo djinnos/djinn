@@ -89,6 +89,13 @@ KIND_CLUSTER_NAME ?= djinn
 LOCAL_REGISTRY    ?= localhost:5001
 DJINN_IMAGE_TAG   ?= dev
 
+# Images the chart needs before a `helm install` can succeed. Each entry maps
+# a short name to its Dockerfile; the `image` / `image-push-local` targets
+# loop over it so adding a new image is a one-liner.
+DJINN_IMAGES := \
+	djinn-server:server/docker/djinn-server.Dockerfile \
+	djinn-agent-runtime:server/docker/djinn-agent-runtime.Dockerfile
+
 kind-up: ## Create the local kind cluster + registry (idempotent)
 	CLUSTER_NAME=$(KIND_CLUSTER_NAME) bash scripts/kind/setup-kind.sh
 
@@ -96,14 +103,20 @@ kind-down: ## Delete the local kind cluster (registry container survives)
 	kind delete cluster --name $(KIND_CLUSTER_NAME)
 
 image: ## Build djinn-server + djinn-agent-runtime container images
-	docker build -f Dockerfile -t djinn-server:$(DJINN_IMAGE_TAG) .
-	docker build -f server/docker/djinn-agent-runtime.Dockerfile -t djinn-agent-runtime:$(DJINN_IMAGE_TAG) .
+	@set -eu; for entry in $(DJINN_IMAGES); do \
+		name=$${entry%%:*}; \
+		dockerfile=$${entry#*:}; \
+		echo "==> docker build $$name:$(DJINN_IMAGE_TAG) ($$dockerfile)"; \
+		docker build -f $$dockerfile -t $$name:$(DJINN_IMAGE_TAG) .; \
+	done
 
 image-push-local: image ## Retag images for the local kind registry and push
-	docker tag djinn-server:$(DJINN_IMAGE_TAG)         $(LOCAL_REGISTRY)/djinn-server:$(DJINN_IMAGE_TAG)
-	docker tag djinn-agent-runtime:$(DJINN_IMAGE_TAG)  $(LOCAL_REGISTRY)/djinn-agent-runtime:$(DJINN_IMAGE_TAG)
-	docker push $(LOCAL_REGISTRY)/djinn-server:$(DJINN_IMAGE_TAG)
-	docker push $(LOCAL_REGISTRY)/djinn-agent-runtime:$(DJINN_IMAGE_TAG)
+	@set -eu; for entry in $(DJINN_IMAGES); do \
+		name=$${entry%%:*}; \
+		echo "==> docker tag + push $(LOCAL_REGISTRY)/$$name:$(DJINN_IMAGE_TAG)"; \
+		docker tag  $$name:$(DJINN_IMAGE_TAG) $(LOCAL_REGISTRY)/$$name:$(DJINN_IMAGE_TAG); \
+		docker push $(LOCAL_REGISTRY)/$$name:$(DJINN_IMAGE_TAG); \
+	done
 
 helm-install-local: ## Install djinn-crds + djinn into the local kind cluster
 	helm upgrade --install djinn-crds deploy/helm/djinn-crds
