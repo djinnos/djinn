@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
         .merge(auth::router())
+        .merge(crate::mirror_fetcher::router())
         .merge(org_sync::router())
         .merge(project_tools::router())
         .layer(cors_layer())

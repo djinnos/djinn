@@ -8,6 +8,7 @@ pub mod error;
 pub mod events;
 pub mod housekeeping;
 pub mod index_tree;
+pub mod mirror_fetcher;
 pub mod logging;
 mod mcp_bridge;
 pub mod memory_fs;

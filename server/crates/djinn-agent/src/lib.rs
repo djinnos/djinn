@@ -28,6 +28,7 @@ pub mod mcp_client;
 pub mod roles;
 pub mod sandbox;
 pub mod skills;
+pub mod supervisor;
 pub(crate) mod truncate;
 
 // ─── Verification (was src/verification/) ────────────────────────────────────

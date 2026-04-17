@@ -72,6 +72,7 @@ pub use repositories::{
         ActivityQuery, BlockerRef, CountQuery, CreateTaskInProjectParams, CreateTaskParams,
         ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
     },
+    task_run::{CreateTaskRunParams, TaskRunRepository},
     user::{User, UserRepository},
     verification_cache::{CachedVerification, VerificationCacheRepository},
     verification_result::{

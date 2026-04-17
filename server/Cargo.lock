@@ -1002,6 +1002,7 @@ dependencies = [
  "djinn-git",
  "djinn-mcp",
  "djinn-provider",
+ "djinn-workspace",
  "futures",
  "git2",
  "globset",
@@ -1180,6 +1181,7 @@ dependencies = [
  "djinn-git",
  "djinn-mcp",
  "djinn-provider",
+ "djinn-workspace",
  "fuser",
  "futures",
  "git2",
@@ -1224,6 +1226,19 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-workspace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "git2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "workspace-hack",
 ]
 

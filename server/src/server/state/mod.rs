@@ -21,6 +21,7 @@ use djinn_db::{
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
+use djinn_workspace::MirrorManager;
 
 mod canonical_graph_refresh_planner;
 mod settings;
@@ -34,6 +35,21 @@ use canonical_graph_refresh_planner::{
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
+
+/// Resolve the bare-mirror root directory, mirroring `vault_key_path`:
+/// `$DJINN_HOME/mirrors` if set, else `$HOME/.djinn/mirrors`. Directory is
+/// created on first mirror write (MirrorManager::ensure_mirror).
+fn mirrors_root() -> PathBuf {
+    if let Ok(djinn_home) = std::env::var("DJINN_HOME")
+        && !djinn_home.is_empty()
+    {
+        return PathBuf::from(djinn_home).join("mirrors");
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".djinn")
+        .join("mirrors")
+}
 
 fn canonical_view_resolution(
     active_task_count: usize,
@@ -131,6 +147,11 @@ struct Inner {
     /// callback so subsequent requests pick up new credentials without a
     /// process restart.
     pub app_config: tokio::sync::RwLock<Option<Arc<GitHubAppConfig>>>,
+    /// Per-project bare git mirrors on disk. Single shared instance so
+    /// fetches serialize correctly and clones hit the same hardlink pool.
+    /// Path resolution mirrors the vault key: `$DJINN_HOME/mirrors` or
+    /// `$HOME/.djinn/mirrors`.
+    pub mirror: Arc<MirrorManager>,
 }
 
 impl AppState {
@@ -182,8 +203,16 @@ impl AppState {
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 memory_mount: Mutex::new(None),
                 app_config: tokio::sync::RwLock::new(None),
+                mirror: Arc::new(MirrorManager::new(mirrors_root())),
             }),
         }
+    }
+
+    /// Shared MirrorManager. Used by the task-run supervisor for ephemeral
+    /// clones, the fetch watcher for periodic refreshes, and `task_merge`
+    /// for mirror-direct pushes.
+    pub fn mirror(&self) -> Arc<MirrorManager> {
+        self.inner.mirror.clone()
     }
 
     /// Read-only snapshot of the active GitHub App configuration, if any.

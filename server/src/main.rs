@@ -143,6 +143,7 @@ async fn async_main() {
 
     let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
     djinn_server::housekeeping::spawn(state.clone());
+    djinn_server::mirror_fetcher::spawn(state.clone());
     state.init_app_config().await;
     state.initialize().await;
     state

@@ -27,6 +27,7 @@ djinn-db = { path = "crates/djinn-db" }
 djinn-git = { path = "crates/djinn-git" }
 djinn-mcp = { path = "crates/djinn-mcp" }
 djinn-provider = { path = "crates/djinn-provider" }
+djinn-workspace = { path = "crates/djinn-workspace" }
 async-trait = "0.1"
 anyhow = "1"
 bincode = "1.3"

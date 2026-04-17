@@ -16,6 +16,7 @@ pub mod session_auth;
 pub mod session_message;
 pub mod settings;
 pub mod task;
+pub mod task_run;
 pub mod test_support;
 pub mod user;
 pub mod verification_cache;

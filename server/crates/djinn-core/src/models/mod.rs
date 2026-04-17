@@ -12,6 +12,7 @@ pub mod session;
 pub mod session_message;
 pub mod settings;
 pub mod task;
+pub mod task_run;
 
 pub use agent::Agent;
 pub use consolidation::{ConsolidatedNoteProvenance, ConsolidationRunMetric};
@@ -38,6 +39,7 @@ pub use task::{
     ActivityEntry, IssueType, PRIORITY_CRITICAL, Task, TaskStatus, TransitionAction,
     TransitionApply, compute_transition, compute_transition_for_issue_type,
 };
+pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.
 /// Returns an empty vec on any parse failure.
