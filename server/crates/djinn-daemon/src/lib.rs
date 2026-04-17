@@ -14,6 +14,15 @@ pub struct DaemonInfo {
     pub pid: u32,
     pub port: u16,
     pub started_at: String,
+    /// Process start time in clock ticks since system boot, read from
+    /// `/proc/<pid>/stat` field 22 on Linux. Used as a tiebreaker when the
+    /// PID is alive but potentially recycled — e.g. after a container
+    /// restart where the old lockfile's PID happens to be reused by a
+    /// tokio worker thread in the new container. `None` on non-Linux or
+    /// when the previous writer predates this field (parsed via
+    /// `serde(default)` for backward compatibility with old lockfiles).
+    #[serde(default)]
+    pub pid_starttime: Option<u64>,
 }
 
 pub struct DaemonLock {
@@ -48,7 +57,7 @@ pub fn acquire(port: u16) -> Result<DaemonLock, String> {
     if path.exists() {
         match read_daemon_info(&path) {
             Ok(Some(existing)) => {
-                if existing.pid != current_pid && pid_is_alive(existing.pid) {
+                if existing.pid != current_pid && process_matches_info(&existing) {
                     return Err(format!(
                         "another djinn-server is already running (pid={}, port={})",
                         existing.pid, existing.port
@@ -74,6 +83,7 @@ pub fn acquire(port: u16) -> Result<DaemonLock, String> {
         pid: current_pid,
         port,
         started_at,
+        pid_starttime: read_pid_starttime(current_pid),
     };
     write_daemon_info(&path, &info)?;
 
@@ -172,6 +182,60 @@ pub fn pid_is_alive(pid: u32) -> bool {
     }
 }
 
+/// Read field 22 (starttime, clock ticks since system boot) from
+/// `/proc/<pid>/stat` on Linux. Returns `None` on other platforms or if the
+/// PID has no `/proc` entry. Pairs with [`process_matches_info`] to detect
+/// PID recycling across container restarts.
+pub fn read_pid_starttime(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        // `/proc/<pid>/stat` layout: `pid (comm) state ppid ...` where
+        // `comm` may itself contain spaces or parens, so we can't naive-split.
+        // Convention: take the substring after the *last* ')' and split that.
+        let raw = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_comm = raw.rsplit_once(')').map(|(_, rest)| rest)?;
+        // `after_comm` now starts with " state ppid ...". starttime is at
+        // index 22 overall; index 20 after trimming the pid and comm fields.
+        after_comm.split_whitespace().nth(19)?.parse::<u64>().ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Return `true` iff the process recorded in `info` is actually still the
+/// one holding the daemon slot — i.e. its PID is alive AND its start time
+/// matches the one stored in the lockfile.
+///
+/// Without the start-time check, a stale lockfile whose PID happened to
+/// be recycled (common on container restart: tokio worker threads occupy
+/// the recently-freed PID range) would look alive and trigger a false
+/// "another djinn-server is already running" error. With it, a recycled
+/// PID is detected as a mismatch and the lockfile is correctly reclaimed.
+pub fn process_matches_info(info: &DaemonInfo) -> bool {
+    if !pid_is_alive(info.pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match (read_pid_starttime(info.pid), info.pid_starttime) {
+            (Some(current), Some(stored)) => current == stored,
+            // Lockfiles predating the pid_starttime field can't be
+            // verified — treat as stale so the new writer reclaims.
+            _ => false,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No cheap start-time source on non-Linux; pid-alive is the best
+        // we have. The container-restart-PID-recycling scenario this
+        // guards against is Linux-specific anyway.
+        true
+    }
+}
+
 /// Read daemon info from the default path (`~/.djinn/daemon.json`).
 pub fn read_info_default() -> Option<DaemonInfo> {
     let path = daemon_file_path().ok()?;
@@ -188,7 +252,7 @@ pub async fn ensure_running(
     server_bin: &Path,
 ) -> Result<DaemonInfo, String> {
     if let Some(info) = read_info_default()
-        && pid_is_alive(info.pid)
+        && process_matches_info(&info)
     {
         tracing::info!(pid = info.pid, port = info.port, "daemon already running");
         return Ok(info);
@@ -236,7 +300,7 @@ fn spawn_daemon(
 async fn wait_for_daemon(mut child: std::process::Child) -> Result<DaemonInfo, String> {
     for _ in 0..40 {
         if let Some(info) = read_info_default()
-            && pid_is_alive(info.pid)
+            && process_matches_info(&info)
         {
             tracing::info!(pid = info.pid, port = info.port, "daemon started");
             return Ok(info);
@@ -284,6 +348,7 @@ mod tests {
             pid: 123,
             port: 8372,
             started_at: "2026-03-03T18:00:00Z".to_string(),
+            pid_starttime: Some(1234567),
         };
 
         write_daemon_info(&path, &info).unwrap();
@@ -291,6 +356,7 @@ mod tests {
 
         assert_eq!(parsed.pid, 123);
         assert_eq!(parsed.port, 8372);
+        assert_eq!(parsed.pid_starttime, Some(1234567));
 
         #[cfg(unix)]
         {
@@ -299,6 +365,22 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn reads_legacy_daemon_file_without_pid_starttime() {
+        // Lockfiles written before the pid_starttime field existed should
+        // still parse — the field is `#[serde(default)]`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        fs::write(
+            &path,
+            r#"{"pid":123,"port":8372,"started_at":"2026-03-03T18:00:00Z"}"#,
+        )
+        .unwrap();
+        let parsed = read_daemon_info(&path).unwrap().unwrap();
+        assert_eq!(parsed.pid, 123);
+        assert_eq!(parsed.pid_starttime, None);
     }
 
     #[test]
@@ -333,40 +415,90 @@ mod tests {
     }
 
     #[test]
-    fn acquire_detects_running_daemon() {
-        // Simulate a lockfile written by the current process with a different
-        // "daemon PID" that is actually alive (PID 1 = init/launchd).
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.json");
-        let info = DaemonInfo {
-            pid: 1, // PID 1 is always alive on Unix
-            port: 9999,
-            started_at: "2026-01-01T00:00:00Z".to_string(),
-        };
-        write_daemon_info(&path, &info).unwrap();
-
-        // Verify pid_is_alive correctly detects PID 1 as alive.
-        #[cfg(unix)]
-        assert!(pid_is_alive(1));
+    fn process_matches_info_accepts_live_process_with_matching_starttime() {
+        // PID 1 is always alive on Unix; read its real starttime so the
+        // recorded value agrees with what the kernel reports right now.
+        #[cfg(target_os = "linux")]
+        {
+            let st = read_pid_starttime(1).expect("PID 1 has /proc/1/stat");
+            let info = DaemonInfo {
+                pid: 1,
+                port: 9999,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                pid_starttime: Some(st),
+            };
+            assert!(process_matches_info(&info));
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            // No /proc on macOS/BSD — fall back to pure PID-alive check.
+            let info = DaemonInfo {
+                pid: 1,
+                port: 9999,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                pid_starttime: None,
+            };
+            assert!(process_matches_info(&info));
+        }
     }
 
     #[test]
-    fn acquire_reclaims_stale_lockfile() {
-        // Simulate a lockfile from a dead process.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.json");
+    fn process_matches_info_rejects_recycled_pid_on_linux() {
+        // Regression for the container-restart bug: the previous
+        // container's djinn-server wrote pid=8 into the lockfile; in the
+        // new container PID 8 is a tokio worker thread. pid_is_alive(8)
+        // returns true, so without the start-time check the lockfile
+        // looked live and the server crash-looped.
+        //
+        // Simulate that by claiming PID 1 with a starttime that definitely
+        // doesn't match PID 1's actual starttime.
+        #[cfg(target_os = "linux")]
+        {
+            let info = DaemonInfo {
+                pid: 1,
+                port: 9999,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                pid_starttime: Some(u64::MAX), // impossible starttime
+            };
+            assert!(!process_matches_info(&info));
+        }
+    }
+
+    #[test]
+    fn process_matches_info_rejects_legacy_lockfile_on_linux() {
+        // Old lockfiles (pre-pid_starttime) parse with None. On Linux we
+        // treat them as stale so the new writer reclaims, rather than
+        // trusting a pure PID check that is known-broken across
+        // container restarts.
+        #[cfg(target_os = "linux")]
+        {
+            let info = DaemonInfo {
+                pid: 1,
+                port: 9999,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                pid_starttime: None,
+            };
+            assert!(!process_matches_info(&info));
+        }
+    }
+
+    #[test]
+    fn process_matches_info_rejects_dead_pid() {
         let info = DaemonInfo {
-            pid: 4_000_000, // dead PID
+            pid: 4_000_000,
             port: 8372,
             started_at: "2026-01-01T00:00:00Z".to_string(),
+            pid_starttime: Some(1234567),
         };
-        write_daemon_info(&path, &info).unwrap();
+        assert!(!process_matches_info(&info));
+    }
 
-        // pid_is_alive should return false for the dead PID.
-        assert!(!pid_is_alive(4_000_000));
-
-        // Read it back and verify it was the stale one.
-        let parsed = read_daemon_info(&path).unwrap().unwrap();
-        assert_eq!(parsed.pid, 4_000_000);
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn read_pid_starttime_for_self_is_stable() {
+        let a = read_pid_starttime(std::process::id()).expect("/proc/self/stat exists");
+        let b = read_pid_starttime(std::process::id()).expect("/proc/self/stat exists");
+        assert_eq!(a, b);
+        assert!(a > 0);
     }
 }
