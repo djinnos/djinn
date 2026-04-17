@@ -1002,6 +1002,7 @@ dependencies = [
  "djinn-git",
  "djinn-mcp",
  "djinn-provider",
+ "djinn-runtime",
  "djinn-workspace",
  "futures",
  "git2",
@@ -1155,6 +1156,22 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "bytes",
+ "djinn-core",
+ "futures",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "workspace-hack",
 ]
 
