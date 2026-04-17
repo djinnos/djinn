@@ -512,6 +512,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -683,6 +684,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -694,6 +696,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -705,6 +708,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -869,6 +873,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -880,6 +885,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();

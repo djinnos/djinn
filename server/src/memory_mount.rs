@@ -1531,6 +1531,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: Some(&worktree_dir.path().to_string_lossy()),
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .expect("create running session");

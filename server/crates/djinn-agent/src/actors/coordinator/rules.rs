@@ -832,6 +832,7 @@ mod tests {
                 agent_type: "planner",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();

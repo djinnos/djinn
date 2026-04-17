@@ -21,6 +21,9 @@ pub struct CreateSessionParams<'a> {
     pub agent_type: &'a str,
     pub worktree_path: Option<&'a str>,
     pub metadata_json: Option<&'a str>,
+    /// Link this session to a task-run row (Phase 1 supervisor path). `None`
+    /// preserves the pre-supervisor behaviour where sessions are standalone.
+    pub task_run_id: Option<&'a str>,
 }
 
 impl SessionRepository {
@@ -42,15 +45,16 @@ impl SessionRepository {
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, `status`, worktree_path,
-                 created_by_user_id)
-             VALUES (?, ?, ?, ?, ?, 'running', ?, ?)",
+                 created_by_user_id, task_run_id)
+             VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)",
             id,
             params.project_id,
             params.task_id,
             params.model,
             params.agent_type,
             params.worktree_path,
-            created_by_user_id
+            created_by_user_id,
+            params.task_run_id
         )
         .execute(self.db.pool())
         .await?;
@@ -534,6 +538,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: Some("/tmp/djinn-worktree-task"),
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -584,6 +589,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: Some("/tmp/djinn-worktree-resume"),
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -647,6 +653,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: Some("/tmp/target-running"),
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -659,6 +666,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: Some("/tmp/target-paused"),
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -672,6 +680,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: Some("/tmp/target-running-2"),
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -684,6 +693,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: Some("/tmp/other-running"),
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -765,6 +775,7 @@ mod tests {
                 agent_type: "planner",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -778,6 +789,7 @@ mod tests {
                 agent_type: "planner",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -791,6 +803,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -804,6 +817,7 @@ mod tests {
                 agent_type: "planner",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();

@@ -99,10 +99,10 @@ mod commands;
 mod conversation_store;
 pub(crate) mod finalize_handlers;
 pub mod helpers;
-mod lifecycle;
+pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
 mod pool;
-mod reply_loop;
+pub(crate) mod reply_loop;
 #[cfg(test)]
 mod reply_loop_tests;
 pub(crate) mod session_extraction;

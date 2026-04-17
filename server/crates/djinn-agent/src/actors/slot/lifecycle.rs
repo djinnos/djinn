@@ -20,10 +20,10 @@ use super::reply_loop::{ReplyLoopContext, run_reply_loop};
 use super::*;
 use crate::AgentType;
 
-mod mcp_resolve;
-mod model_resolution;
+pub(crate) mod mcp_resolve;
+pub(crate) mod model_resolution;
 mod retry;
-mod setup;
+pub(crate) mod setup;
 mod teardown;
 
 use mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
@@ -1071,6 +1071,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                         agent_type: runtime_role.config().name,
                         worktree_path: worktree_path.to_str(),
                         metadata_json: None,
+                        task_run_id: None,
                     })
                     .await
                 {
@@ -1111,6 +1112,7 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
                 agent_type: role.config().name,
                 worktree_path: worktree_path.to_str(),
                 metadata_json: None,
+                task_run_id: None,
             })
             .await
         {

@@ -7,25 +7,33 @@
 //! internally sequences the role phases, reusing the same workspace across
 //! them so warm build caches compound naturally between stages.
 //!
-//! Scaffolding: the `run` method currently creates the `TaskRunRecord`,
-//! clones an ephemeral workspace, and returns a stub report. Wiring the
-//! per-role execution to the existing `reply_loop` machinery is the next
-//! task on the Phase 1 board (see `coordinator` dispatch rewrite).
+//! Phase 1 status: the sequencing is wired end-to-end through
+//! [`stage::execute_stage`], but the path is additive — consumers must
+//! explicitly call `TaskRunSupervisor::run` to use it.  Production traffic
+//! still travels `run_task_lifecycle` under the old coordinator dispatch; the
+//! coordinator rewrite (task #7) will swap the default path.
 
 use std::sync::Arc;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
-use djinn_db::TaskRunRepository;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
+use djinn_db::{SessionRepository, TaskRepository, TaskRunRepository};
 use djinn_workspace::{MirrorError, MirrorManager, Workspace, WorkspaceError};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 pub use self::flow::{RoleKind, SupervisorFlow};
 pub use self::spec::{TaskRunOutcome, TaskRunReport, TaskRunSpec};
+pub use self::stage::{StageError, StageOutcome};
+
+use crate::actors::slot::helpers::load_task;
+use crate::context::AgentContext;
+use crate::roles::RoleRegistry;
 
 mod flow;
 mod spec;
+mod stage;
 
 #[derive(Debug, Error)]
 pub enum SupervisorError {
@@ -38,27 +46,77 @@ pub enum SupervisorError {
     #[error("db: {0}")]
     Db(#[from] djinn_db::Error),
 
-    #[error("stage not yet implemented: {0}")]
-    StageUnwired(String),
+    #[error("load task: {0}")]
+    LoadTask(String),
+
+    #[error("stage: {0}")]
+    Stage(#[from] StageError),
+}
+
+/// Dependencies shared across every stage in a task-run.
+///
+/// The supervisor owns this bundle for the lifetime of a `run()` call and
+/// passes it by reference into each [`stage::execute_stage`] invocation.
+/// Anything that is role-scoped or stage-scoped (provider, session record,
+/// conversation) is built inside `execute_stage` from these services.
+#[derive(Clone)]
+pub struct SupervisorServices {
+    pub agent_context: AgentContext,
+    pub role_registry: Arc<RoleRegistry>,
+    pub session_repo: Arc<SessionRepository>,
+    pub task_repo: Arc<TaskRepository>,
+    /// Supervisor-wide cancellation.  Flagged when the task-run is torn down
+    /// (server shutdown, user kill).  The per-stage reply loop treats this
+    /// as both `cancel` and `global_cancel` in the Phase 1 path.
+    pub cancel: CancellationToken,
+}
+
+impl SupervisorServices {
+    pub fn new(agent_context: AgentContext, cancel: CancellationToken) -> Self {
+        let session_repo = Arc::new(SessionRepository::new(
+            agent_context.db.clone(),
+            agent_context.event_bus.clone(),
+        ));
+        let task_repo = Arc::new(TaskRepository::new(
+            agent_context.db.clone(),
+            agent_context.event_bus.clone(),
+        ));
+        let role_registry = agent_context.role_registry.clone();
+        Self {
+            agent_context,
+            role_registry,
+            session_repo,
+            task_repo,
+            cancel,
+        }
+    }
 }
 
 pub struct TaskRunSupervisor {
     task_runs: Arc<TaskRunRepository>,
     mirror: Arc<MirrorManager>,
+    services: SupervisorServices,
 }
 
 impl TaskRunSupervisor {
-    pub fn new(task_runs: Arc<TaskRunRepository>, mirror: Arc<MirrorManager>) -> Self {
-        Self { task_runs, mirror }
+    /// Construct a supervisor bound to the given services.
+    ///
+    /// `task_runs` and `mirror` stay separate arguments because they are
+    /// infrastructure the supervisor owns directly (create the task-run row,
+    /// clone the workspace) rather than role-scoped services.
+    pub fn new(
+        task_runs: Arc<TaskRunRepository>,
+        mirror: Arc<MirrorManager>,
+        services: SupervisorServices,
+    ) -> Self {
+        Self {
+            task_runs,
+            mirror,
+            services,
+        }
     }
 
     /// Drive a task-run from start to terminal state.
-    ///
-    /// Stages are currently stubbed — see `TODO stage execution` below. The
-    /// supervisor skeleton already owns the TaskRunRecord lifecycle and the
-    /// workspace clone, which are the parts most-coupled to other subsystems
-    /// (DB, mirror, TempDir semantics). Per-stage wiring to `reply_loop`
-    /// lands in the coordinator-rewrite task.
     pub async fn run(&self, spec: TaskRunSpec) -> Result<TaskRunReport, SupervisorError> {
         let run_id = uuid::Uuid::now_v7().to_string();
         let trigger_str = spec.trigger.as_str().to_string();
@@ -82,17 +140,21 @@ impl TaskRunSupervisor {
             })
             .await?;
 
-        // Clone once; workspace is shared across stages so cargo target/ and
-        // node_modules compound between planner/worker/reviewer/verifier.
         let workspace = self
             .mirror
             .clone_ephemeral(&spec.project_id, &spec.base_branch)
             .await?;
         debug!(task_run_id = %run_id, path = ?workspace.path(), "ephemeral workspace ready");
 
+        let task = load_task(&spec.task_id, &self.services.agent_context)
+            .await
+            .map_err(|e| SupervisorError::LoadTask(e.to_string()))?;
+
         let sequence = spec.flow.role_sequence();
         let mut completed: Vec<RoleKind> = Vec::new();
-        let outcome = self.run_sequence(&spec, &workspace, sequence, &mut completed).await?;
+        let outcome = self
+            .run_sequence(&spec, &task, &workspace, &run_id, sequence, &mut completed)
+            .await?;
 
         let terminal_status = match &outcome {
             TaskRunOutcome::PrOpened { .. } | TaskRunOutcome::Closed { .. } => {
@@ -114,28 +176,94 @@ impl TaskRunSupervisor {
         })
     }
 
-    /// Execute the role sequence against the shared workspace.
+    /// Execute the role sequence against the shared workspace, calling
+    /// [`stage::execute_stage`] for each role.
     ///
-    /// **Scaffold only.** Each stage must eventually:
-    ///   - Create a child `SessionRecord` (`sessions.task_run_id = run.id`)
-    ///   - Invoke the role's agent loop via `reply_loop`
-    ///   - Interpret the role's output (planner's execute/close/escalate,
-    ///     reviewer's pass/block, verifier's pass/fail, etc.)
-    ///   - Branch or terminate the flow based on outcome
-    ///
-    /// For now it returns `StageUnwired` so callers can compile-integrate
-    /// the supervisor without deadlocking on the full wiring landing.
+    /// Short-circuits on terminal outcomes (close / escalate / rejection /
+    /// failure).  PR-open wiring is a Phase 2 task — on a clean traversal we
+    /// return `TaskRunOutcome::Failed { stage: "pr_open", reason: "not yet
+    /// wired" }` for the flows that land a PR, and synthesize a `Closed`
+    /// outcome for the simpler Spike / Planning flows that don't.
     async fn run_sequence(
         &self,
-        _spec: &TaskRunSpec,
-        _workspace: &Workspace,
+        spec: &TaskRunSpec,
+        task: &djinn_core::models::Task,
+        workspace: &Workspace,
+        task_run_id: &str,
         sequence: &[RoleKind],
-        _completed: &mut Vec<RoleKind>,
+        completed: &mut Vec<RoleKind>,
     ) -> Result<TaskRunOutcome, SupervisorError> {
-        let first = sequence.first().copied().unwrap_or(RoleKind::Worker);
-        Err(SupervisorError::StageUnwired(format!(
-            "role sequence execution not yet wired (first stage: {first:?})"
-        )))
+        let mut last_stage_role: Option<RoleKind> = None;
+        for &role_kind in sequence {
+            if self.services.cancel.is_cancelled() {
+                return Ok(TaskRunOutcome::Interrupted);
+            }
+
+            let outcome = stage::execute_stage(
+                task,
+                workspace,
+                role_kind,
+                task_run_id,
+                spec,
+                &self.services,
+            )
+            .await?;
+
+            last_stage_role = Some(role_kind);
+            completed.push(role_kind);
+
+            match outcome {
+                StageOutcome::WorkerDone
+                | StageOutcome::PlannerExecute
+                | StageOutcome::ReviewerApproved
+                | StageOutcome::VerifierPassed
+                | StageOutcome::ArchitectDone => {
+                    // Advance to the next stage.
+                }
+                StageOutcome::PlannerClose { reason } => {
+                    return Ok(TaskRunOutcome::Closed { reason });
+                }
+                StageOutcome::Escalate { reason } => {
+                    return Ok(TaskRunOutcome::Escalated { reason });
+                }
+                StageOutcome::ReviewerRejected { feedback } => {
+                    return Ok(TaskRunOutcome::Failed {
+                        stage: "reviewer".into(),
+                        reason: format!("review rejected: {feedback}"),
+                    });
+                }
+                StageOutcome::VerifierFailed { reason } => {
+                    return Ok(TaskRunOutcome::Failed {
+                        stage: "verifier".into(),
+                        reason,
+                    });
+                }
+                StageOutcome::Failed { reason } => {
+                    return Ok(TaskRunOutcome::Failed {
+                        stage: role_kind.as_str().into(),
+                        reason,
+                    });
+                }
+            }
+        }
+
+        // All stages completed successfully.  For flows that land a PR we
+        // would open one here; that wiring is deferred to a later task.
+        match spec.flow {
+            SupervisorFlow::Planning | SupervisorFlow::Spike => Ok(TaskRunOutcome::Closed {
+                reason: format!(
+                    "{} flow completed (last stage: {:?})",
+                    spec.flow.as_str(),
+                    last_stage_role
+                ),
+            }),
+            SupervisorFlow::NewTask
+            | SupervisorFlow::ReviewResponse
+            | SupervisorFlow::ConflictRetry => Ok(TaskRunOutcome::Failed {
+                stage: "pr_open".into(),
+                reason: "PR-open stage not yet wired into supervisor".into(),
+            }),
+        }
     }
 }
 

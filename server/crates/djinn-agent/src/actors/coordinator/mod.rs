@@ -429,6 +429,7 @@ mod tests {
                 agent_type: "architect",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();
@@ -612,6 +613,7 @@ mod tests {
                 agent_type: "architect",
                 worktree_path: Some(worktree_path.to_str().unwrap()),
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .unwrap();

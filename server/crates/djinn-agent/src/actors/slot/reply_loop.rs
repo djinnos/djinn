@@ -89,7 +89,7 @@ pub(crate) struct ReplyLoopContext<'a> {
 ///
 /// Context-length-exceeded errors trigger reactive compaction and retry
 /// (up to `MAX_COMPACTION_RETRIES` times) before failing the session.
-pub(super) async fn run_reply_loop(
+pub(crate) async fn run_reply_loop(
     ctx: ReplyLoopContext<'_>,
     conversation: &mut Conversation,
     is_resumed_session: bool,
@@ -856,6 +856,7 @@ mod tests {
                 agent_type: "worker",
                 worktree_path: None,
                 metadata_json: None,
+            task_run_id: None,
             })
             .await
             .expect("create session");

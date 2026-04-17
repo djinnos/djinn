@@ -176,6 +176,7 @@ pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str)
         agent_type: "worker",
         worktree_path: Some("/tmp/djinn-test-worktree"),
         metadata_json: None,
+    task_run_id: None,
     })
     .await
     .expect("failed to create test session")
