@@ -27,7 +27,7 @@ use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
 
-const DEFAULT_UPSTREAM_URL: &str = "http://127.0.0.1:8372/mcp";
+const DEFAULT_UPSTREAM_URL: &str = "http://127.0.0.1:3000/mcp";
 
 #[derive(Parser)]
 #[command(name = "djinn-server", about = "Djinn MCP server", version)]
@@ -45,7 +45,7 @@ struct Cli {
     mcp_url: Option<String>,
 
     /// Port to listen on
-    #[arg(short, long, default_value_t = 8372, env = "DJINN_PORT")]
+    #[arg(short, long, default_value_t = 3000, env = "DJINN_PORT")]
     port: u16,
 
     /// Database path (default: ~/.djinn/djinn.db)
