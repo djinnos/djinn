@@ -23,10 +23,12 @@ use super::reply_loop::{ReplyLoopContext, run_reply_loop};
 use super::*;
 use crate::AgentType;
 
+mod model_resolution;
 mod retry;
 mod setup;
 mod teardown;
 
+use model_resolution::{ModelResolutionError, resolve_model_and_credential};
 use setup::{SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context};
 use teardown::{PostSessionParams, apply_transition_and_dispatch, spawn_post_session_work};
 
@@ -274,55 +276,23 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         // Test seam: skip credential/catalog lookups.
         (String::new(), String::new(), None)
     } else {
-        let (cpid, mname) = match parse_model_id(&model_id) {
-            Ok((provider_id, name)) => {
-                // Settings may store display names (e.g. "GPT-5.3 Codex") or
-                // bare suffixes (e.g. "GLM-4.7" for internal "hf:zai-org/GLM-4.7").
-                // Resolve to the actual model ID for the provider API.
-                let resolved = app_state
-                    .catalog
-                    .list_models(&provider_id)
-                    .iter()
-                    .find(|m| {
-                        let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
-                        m.id == name || m.name == name || bare == name
-                    })
-                    .map(|m| m.id.clone())
-                    .unwrap_or(name);
-                (provider_id, resolved)
-            }
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
+        match resolve_model_and_credential(&model_id, &task_id, &app_state).await {
+            Ok(resolved) => (
+                resolved.catalog_provider_id,
+                resolved.model_name,
+                resolved.provider_credential,
+            ),
+            Err(ModelResolutionError { reason }) => {
                 transition_interrupted(
                     &task_id,
                     runtime_role.config().release_action,
-                    &e.to_string(),
+                    &reason,
                     &app_state,
                 )
                 .await;
                 return_free!();
             }
-        };
-        emit_step(
-            &task.id,
-            "credential_loading",
-            serde_json::json!({"provider_id": cpid}),
-        );
-        let cred = match load_provider_credential(&cpid, &app_state).await {
-            Ok(cred) => cred,
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: missing credential");
-                transition_interrupted(
-                    &task_id,
-                    runtime_role.config().release_action,
-                    &e.to_string(),
-                    &app_state,
-                )
-                .await;
-                return_free!();
-            }
-        };
-        (cpid, mname, Some(cred))
+        }
     };
 
     // ── Prepare worktree / paused-session resume context ──────────────────────
