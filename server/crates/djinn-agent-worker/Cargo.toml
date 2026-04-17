@@ -1,0 +1,36 @@
+[package]
+name = "djinn-agent-worker"
+version = "0.1.0"
+edition = "2024"
+
+# Binary-only crate: the worker exists to be executed inside the
+# `LocalDockerRuntime` container.  No library surface is published — every
+# helper lives under `src/` and is exercised through the integration tests.
+# Depending on `djinn-agent` from here would create a cycle
+# (`djinn-agent` will depend on this crate transitively through the runtime
+# wiring in PR 6/7), so we deliberately stop at `djinn-supervisor` +
+# `djinn-runtime` + `djinn-workspace` + `djinn-core`.
+
+[[bin]]
+name = "djinn-agent-worker"
+path = "src/main.rs"
+
+[dependencies]
+djinn-core = { path = "../djinn-core" }
+djinn-runtime = { path = "../djinn-runtime" }
+djinn-supervisor = { path = "../djinn-supervisor" }
+djinn-workspace = { path = "../djinn-workspace" }
+anyhow = "1"
+async-trait = "0.1"
+bincode = "1.3"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -1033,6 +1033,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-agent-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "clap",
+ "djinn-core",
+ "djinn-runtime",
+ "djinn-supervisor",
+ "djinn-workspace",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-core"
 version = "0.1.0"
 dependencies = [

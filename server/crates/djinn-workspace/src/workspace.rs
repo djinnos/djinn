@@ -24,29 +24,85 @@ pub struct GitIdentity<'a> {
     pub email: &'a str,
 }
 
-/// A tempdir-backed ephemeral clone of a project mirror.
+/// How the workspace's on-disk root is owned.
 ///
-/// Scope = one task-run. Contents (including the git object db, since clones
-/// are `--local --shared`) are discarded when the `TempDir` is dropped.
+/// `Owned` drops the underlying `TempDir` when the workspace is dropped —
+/// the in-process / host-side path. `Attached` just remembers a borrowed
+/// path; someone else (e.g. the Docker runtime that bind-mounted
+/// `/workspace` into the container) is responsible for cleanup.
+#[derive(Debug)]
+enum WorkspaceRoot {
+    Owned(TempDir),
+    Attached(PathBuf),
+}
+
+impl WorkspaceRoot {
+    fn path(&self) -> &Path {
+        match self {
+            WorkspaceRoot::Owned(dir) => dir.path(),
+            WorkspaceRoot::Attached(path) => path.as_path(),
+        }
+    }
+}
+
+/// A tempdir-backed (or externally-bound) ephemeral clone of a project mirror.
+///
+/// Scope = one task-run. For the default `Owned` variant, contents (including
+/// the git object db, since clones are `--local --shared`) are discarded when
+/// the `TempDir` is dropped.  The `Attached` variant — constructed via
+/// [`Workspace::attach_existing`] — wraps a directory the caller manages
+/// (e.g. a bind-mounted `/workspace` inside a container); drop is a no-op.
+///
 /// Mutations that must survive the task-run are pushed to the origin remote
 /// via `commit` → push-by-the-supervisor.
 #[derive(Debug)]
 pub struct Workspace {
-    dir: TempDir,
+    root: WorkspaceRoot,
     branch: String,
 }
 
 impl Workspace {
     pub(crate) fn new(dir: TempDir, branch: String) -> Self {
-        Self { dir, branch }
+        Self {
+            root: WorkspaceRoot::Owned(dir),
+            branch,
+        }
+    }
+
+    /// Attach to an existing on-disk workspace the caller already owns.
+    ///
+    /// Used by `djinn-agent-worker` when the host-side runtime has already
+    /// cloned the mirror into a bind mount (`/workspace` inside the
+    /// container) — the in-container supervisor reuses the same path instead
+    /// of re-cloning.  The returned [`Workspace`] never drops the directory
+    /// itself; lifetime is bound to the caller's mount lifecycle.
+    ///
+    /// Fails if `path` does not exist or is not a directory — the runtime is
+    /// expected to materialise the clone before calling this.
+    pub fn attach_existing(
+        path: impl Into<PathBuf>,
+        branch: impl Into<String>,
+    ) -> Result<Self, WorkspaceError> {
+        let path = path.into();
+        let meta = std::fs::metadata(&path).map_err(WorkspaceError::Io)?;
+        if !meta.is_dir() {
+            return Err(WorkspaceError::Git(format!(
+                "attach_existing: {} is not a directory",
+                path.display()
+            )));
+        }
+        Ok(Self {
+            root: WorkspaceRoot::Attached(path),
+            branch: branch.into(),
+        })
     }
 
     pub fn path(&self) -> &Path {
-        self.dir.path()
+        self.root.path()
     }
 
     pub fn path_buf(&self) -> PathBuf {
-        self.dir.path().to_path_buf()
+        self.root.path().to_path_buf()
     }
 
     pub fn branch(&self) -> &str {
@@ -94,7 +150,7 @@ impl Workspace {
         extra_env: &[(&str, &str)],
     ) -> Result<String, WorkspaceError> {
         let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(self.dir.path()).args(args);
+        cmd.arg("-C").arg(self.root.path()).args(args);
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
@@ -108,5 +164,42 @@ impl Workspace {
             )));
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_existing_wraps_existing_dir_without_temp_ownership() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().to_path_buf();
+        let ws = Workspace::attach_existing(&path, "main").expect("attach");
+        assert_eq!(ws.path(), path);
+        assert_eq!(ws.branch(), "main");
+        // Dropping the workspace must NOT remove the caller-owned directory.
+        drop(ws);
+        assert!(path.exists(), "attach_existing must not delete the dir");
+    }
+
+    #[test]
+    fn attach_existing_rejects_missing_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let missing = tmp.path().join("nope");
+        let err = Workspace::attach_existing(&missing, "main").unwrap_err();
+        assert!(matches!(err, WorkspaceError::Io(_)));
+    }
+
+    #[test]
+    fn attach_existing_rejects_non_directory() {
+        let tmp = TempDir::new().expect("tempdir");
+        let file = tmp.path().join("file.txt");
+        std::fs::write(&file, b"not a dir").expect("write");
+        let err = Workspace::attach_existing(&file, "main").unwrap_err();
+        match err {
+            WorkspaceError::Git(msg) => assert!(msg.contains("not a directory")),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
