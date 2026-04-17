@@ -183,7 +183,6 @@ mod tests {
                 task_id: Some(&task.id),
                 model: "openai/gpt-5",
                 agent_type: "planner",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })

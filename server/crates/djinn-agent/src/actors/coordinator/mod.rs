@@ -427,7 +427,6 @@ mod tests {
                 task_id: Some(&task.id),
                 model: "test-model",
                 agent_type: "architect",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -584,11 +583,9 @@ mod tests {
         )
         .unwrap();
 
-        // Real session row paired with a task_run row. Post-refactor the
-        // coordinator reads the workspace path from `task_runs.workspace_path`
-        // (migration 5) rather than `sessions.worktree_path`; both are
-        // populated here so the test stays truthful regardless of which
-        // source the dispatch signal chooses.
+        // Real session row paired with a task_run row. The coordinator reads
+        // the workspace path from `task_runs.workspace_path` (migration 5);
+        // migration 6 dropped the legacy `sessions.worktree_path` column.
         let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let task_run_repo =
             djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
@@ -611,7 +608,6 @@ mod tests {
                 task_id: Some(&task.id),
                 model: "test-model",
                 agent_type: "architect",
-                worktree_path: Some(worktree_path.to_str().unwrap()),
                 metadata_json: None,
             task_run_id: None,
             })

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE task_runs\n                 SET `status` = ?,\n                     ended_at = NULL\n                 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3c18768d91c3825191ab63805e1cd4cbc3e0f3b130439b9db2d8e331d1d45e45"
+}

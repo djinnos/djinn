@@ -510,7 +510,6 @@ mod tests {
                 task_id: None,
                 model: "test-model",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -682,7 +681,6 @@ mod tests {
                 task_id: None,
                 model: "test-model",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -694,7 +692,6 @@ mod tests {
                 task_id: None,
                 model: "test-model",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -706,7 +703,6 @@ mod tests {
                 task_id: None,
                 model: "test-model",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -871,7 +867,6 @@ mod tests {
                 task_id: None,
                 model: "test-model",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -883,7 +878,6 @@ mod tests {
                 task_id: None,
                 model: "test-model",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })

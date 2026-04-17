@@ -174,7 +174,6 @@ pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str)
         task_id: Some(task_id),
         model: "test-model",
         agent_type: "worker",
-        worktree_path: Some("/tmp/djinn-test-worktree"),
         metadata_json: None,
     task_run_id: None,
     })

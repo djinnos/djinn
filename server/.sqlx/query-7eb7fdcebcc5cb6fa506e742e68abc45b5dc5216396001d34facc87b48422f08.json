@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO task_runs\n                (id, project_id, task_id, trigger_type, `status`, workspace_path, mirror_ref)\n             VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "7eb7fdcebcc5cb6fa506e742e68abc45b5dc5216396001d34facc87b48422f08"
+}

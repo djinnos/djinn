@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, worktree_path\n             FROM sessions WHERE project_id = ? AND id = ?",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, task_run_id\n             FROM sessions\n             WHERE task_id = ? AND `status` = 'paused' ORDER BY started_at DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -95,16 +95,16 @@
       },
       {
         "ordinal": 10,
-        "name": "worktree_path",
+        "name": "task_run_id",
         "type_info": {
           "type": "VarString",
           "flags": "",
-          "max_size": 4096
+          "max_size": 144
         }
       }
     ],
     "parameters": {
-      "Right": 2
+      "Right": 1
     },
     "nullable": [
       false,
@@ -120,5 +120,5 @@
       true
     ]
   },
-  "hash": "3164fe8a3d979cf1b67f07d91c3155f9d9c7a813b0626c950a2d7a3c50decdf7"
+  "hash": "82bc8e0cfbfc6dc1ce4c729202a543135a13e60fc3b87e788c2c771e637782a2"
 }

@@ -71,19 +71,17 @@ pub struct SessionToolSession {
     pub status: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
-    /// Authoritative workspace path for the session. Sourced from the
-    /// attached `task_run` (via `sessions.task_run_id`) when present; falls
-    /// back to the legacy `sessions.worktree_path` column during the
-    /// migration window (migration 6 drops it).
+    /// Authoritative workspace path for the session, sourced from the
+    /// attached `task_run` (via `sessions.task_run_id`). `None` when the
+    /// session is not attached to a task run or the run has no recorded
+    /// workspace.
     pub workspace_path: Option<String>,
 }
 
 impl From<SessionRecord> for SessionToolSession {
     fn from(value: SessionRecord) -> Self {
-        // Prefer the legacy column at the From boundary (synchronous);
-        // callers with DB access should overwrite `workspace_path` after
-        // looking up `task_runs.workspace_path` via `task_run_id`.
-        let workspace_path = value.worktree_path.clone();
+        // Synchronous boundary: no DB access, so `workspace_path` is left
+        // unset. Callers that need it should use `from_session_with_run`.
         Self {
             id: value.id,
             project_id: value.project_id,
@@ -95,20 +93,19 @@ impl From<SessionRecord> for SessionToolSession {
             status: value.status,
             tokens_in: value.tokens_in,
             tokens_out: value.tokens_out,
-            workspace_path,
+            workspace_path: None,
         }
     }
 }
 
 impl SessionToolSession {
     /// Build a `SessionToolSession` by resolving `workspace_path` from
-    /// `task_runs` when the session has a `task_run_id`, falling back to the
-    /// legacy `sessions.worktree_path` column when no run is attached yet.
+    /// `task_runs` via `task_run_id`. `None` when the session has no run.
     pub async fn from_session_with_run(
         value: SessionRecord,
         task_run_repo: &djinn_db::repositories::task_run::TaskRunRepository,
     ) -> Self {
-        let run_workspace = match value.task_run_id.as_deref() {
+        let workspace_path = match value.task_run_id.as_deref() {
             Some(run_id) => task_run_repo
                 .get(run_id)
                 .await
@@ -117,7 +114,6 @@ impl SessionToolSession {
                 .and_then(|run| run.workspace_path),
             None => None,
         };
-        let workspace_path = run_workspace.or_else(|| value.worktree_path.clone());
         Self {
             id: value.id,
             project_id: value.project_id,

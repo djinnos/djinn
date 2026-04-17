@@ -125,7 +125,6 @@ async fn make_fixture() -> TestFixture {
             task_id: Some(&task.id),
             model: "test-model",
             agent_type: "worker",
-            worktree_path: None,
             metadata_json: None,
         task_run_id: None,
         })

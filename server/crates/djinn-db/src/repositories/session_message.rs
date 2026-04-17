@@ -239,9 +239,8 @@ mod tests {
                 task_id: Some(&task_id),
                 model: "test-model",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();

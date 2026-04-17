@@ -19,7 +19,6 @@ pub struct CreateSessionParams<'a> {
     pub task_id: Option<&'a str>,
     pub model: &'a str,
     pub agent_type: &'a str,
-    pub worktree_path: Option<&'a str>,
     pub metadata_json: Option<&'a str>,
     /// Link this session to a task-run row (Phase 1 supervisor path). `None`
     /// preserves the pre-supervisor behaviour where sessions are standalone.
@@ -44,15 +43,14 @@ impl SessionRepository {
         let created_by_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO sessions
-                (id, project_id, task_id, model_id, agent_type, `status`, worktree_path,
+                (id, project_id, task_id, model_id, agent_type, `status`,
                  created_by_user_id, task_run_id)
-             VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, 'running', ?, ?)",
             id,
             params.project_id,
             params.task_id,
             params.model,
             params.agent_type,
-            params.worktree_path,
             created_by_user_id,
             params.task_run_id
         )
@@ -62,7 +60,7 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -91,7 +89,7 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -151,7 +149,7 @@ impl SessionRepository {
         let running_sessions = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions WHERE `status` = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -185,7 +183,7 @@ impl SessionRepository {
         let orphans = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions WHERE task_id = ? AND `status` = 'running'"#,
             task_id
         )
@@ -218,7 +216,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -235,7 +233,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions WHERE project_id = ? AND id = ?"#,
             project_id,
             id
@@ -249,7 +247,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions WHERE task_id = ? ORDER BY started_at DESC"#,
             task_id
         )
@@ -266,7 +264,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions
              WHERE project_id = ? AND task_id = ? ORDER BY started_at DESC"#,
             project_id,
@@ -281,7 +279,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions
              WHERE `status` = 'running' ORDER BY started_at DESC"#
         )
@@ -294,7 +292,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions
              WHERE project_id = ? AND `status` = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -313,7 +311,7 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
                     s.started_at, s.ended_at,
-                    s.`status` AS "status!", s.tokens_in, s.tokens_out, s.worktree_path,
+                    s.`status` AS "status!", s.tokens_in, s.tokens_out,
                     s.task_run_id
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
@@ -330,7 +328,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions
              WHERE task_id = ? AND `status` = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -405,7 +403,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions
              WHERE task_id = ? AND `status` = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -462,7 +460,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, worktree_path, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id
              FROM sessions
              WHERE task_id = ? AND `status` = 'paused' AND agent_type = ?
              ORDER BY started_at DESC LIMIT 1"#,
@@ -536,9 +534,8 @@ mod tests {
                 task_id: Some(&task_id),
                 model: "openai/gpt-5",
                 agent_type: "worker",
-                worktree_path: Some("/tmp/djinn-worktree-task"),
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -576,7 +573,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pause_and_resume_preserve_session_identity_and_worktree() {
+    async fn pause_and_resume_preserve_session_identity() {
         let db = test_db();
         let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
         let repo = SessionRepository::new(db.clone(), EventBus::noop());
@@ -587,18 +584,13 @@ mod tests {
                 task_id: Some(&task_id),
                 model: "openai/gpt-5",
                 agent_type: "worker",
-                worktree_path: Some("/tmp/djinn-worktree-resume"),
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
 
         assert_eq!(created.status, SessionStatus::Running.as_str());
-        assert_eq!(
-            created.worktree_path.as_deref(),
-            Some("/tmp/djinn-worktree-resume")
-        );
         assert!(
             created.ended_at.is_none(),
             "new sessions should start without ended_at"
@@ -610,7 +602,6 @@ mod tests {
         assert_eq!(paused.tokens_in, 12);
         assert_eq!(paused.tokens_out, 34);
         assert!(paused.ended_at.is_none(), "paused sessions stay resumable");
-        assert_eq!(paused.worktree_path, created.worktree_path);
 
         let paused_lookup = repo.paused_for_task(&task_id).await.unwrap().unwrap();
         assert_eq!(paused_lookup.id, created.id);
@@ -623,7 +614,6 @@ mod tests {
             resumed.ended_at.is_none(),
             "resumed session should remain open"
         );
-        assert_eq!(resumed.worktree_path, created.worktree_path);
 
         let active = repo.active_for_task(&task_id).await.unwrap().unwrap();
         assert_eq!(active.id, created.id);
@@ -651,7 +641,6 @@ mod tests {
                 task_id: Some(&task_id),
                 model: "openai/gpt-5",
                 agent_type: "worker",
-                worktree_path: Some("/tmp/target-running"),
                 metadata_json: None,
             task_run_id: None,
             })
@@ -664,7 +653,6 @@ mod tests {
                 task_id: Some(&task_id),
                 model: "openai/gpt-5-pause",
                 agent_type: "worker",
-                worktree_path: Some("/tmp/target-paused"),
                 metadata_json: None,
             task_run_id: None,
             })
@@ -678,7 +666,6 @@ mod tests {
                 task_id: Some(&task_id),
                 model: "openai/gpt-5-mini",
                 agent_type: "worker",
-                worktree_path: Some("/tmp/target-running-2"),
                 metadata_json: None,
             task_run_id: None,
             })
@@ -691,7 +678,6 @@ mod tests {
                 task_id: Some(&other_task_id),
                 model: "openai/gpt-5",
                 agent_type: "worker",
-                worktree_path: Some("/tmp/other-running"),
                 metadata_json: None,
             task_run_id: None,
             })
@@ -773,7 +759,6 @@ mod tests {
                 task_id: Some(&task_a1),
                 model: "openai/gpt-5",
                 agent_type: "planner",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -787,7 +772,6 @@ mod tests {
                 task_id: Some(&task_b1),
                 model: "openai/gpt-5",
                 agent_type: "planner",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -801,7 +785,6 @@ mod tests {
                 task_id: Some(&task_a2),
                 model: "openai/gpt-5",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })
@@ -815,7 +798,6 @@ mod tests {
                 task_id: Some(&task_a2),
                 model: "openai/gpt-5",
                 agent_type: "planner",
-                worktree_path: None,
                 metadata_json: None,
             task_run_id: None,
             })

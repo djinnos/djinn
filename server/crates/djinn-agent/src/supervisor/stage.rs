@@ -296,7 +296,6 @@ pub(crate) async fn execute_stage(
             task_id: Some(&task.id),
             model: &model_id,
             agent_type: role_name,
-            worktree_path: worktree_path.to_str(),
             metadata_json: None,
             task_run_id: Some(task_run_id),
         })

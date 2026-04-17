@@ -230,24 +230,38 @@ impl DjinnMcpServer {
         match task_result {
             Ok(Some(t)) => {
                 let session_count = session_repo.count_for_task(&t.id).await.unwrap_or(0);
-                let active_session = session_repo
-                    .active_for_task(&t.id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|s| SessionRecordResponse {
-                        id: s.id,
-                        project_id: s.project_id,
-                        task_id: s.task_id.unwrap_or_default(),
-                        model_id: s.model_id,
-                        agent_type: s.agent_type,
-                        started_at: s.started_at,
-                        ended_at: s.ended_at,
-                        status: s.status,
-                        tokens_in: s.tokens_in,
-                        tokens_out: s.tokens_out,
-                        worktree_path: s.worktree_path,
-                    });
+                let task_run_repo = djinn_db::repositories::task_run::TaskRunRepository::new(
+                    self.state.db().clone(),
+                );
+                let active_session_record =
+                    session_repo.active_for_task(&t.id).await.ok().flatten();
+                let active_session = match active_session_record {
+                    Some(s) => {
+                        let workspace_path = match s.task_run_id.as_deref() {
+                            Some(run_id) => task_run_repo
+                                .get(run_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|run| run.workspace_path),
+                            None => None,
+                        };
+                        Some(SessionRecordResponse {
+                            id: s.id,
+                            project_id: s.project_id,
+                            task_id: s.task_id.unwrap_or_default(),
+                            model_id: s.model_id,
+                            agent_type: s.agent_type,
+                            started_at: s.started_at,
+                            ended_at: s.ended_at,
+                            status: s.status,
+                            tokens_in: s.tokens_in,
+                            tokens_out: s.tokens_out,
+                            workspace_path,
+                        })
+                    }
+                    None => None,
+                };
                 Json(ErrorOr::Ok(TaskShowResponse {
                     task: task_to_response(&t),
                     session_count,

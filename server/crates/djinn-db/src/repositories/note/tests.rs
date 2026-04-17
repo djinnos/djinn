@@ -100,8 +100,7 @@ async fn make_session(
             started_at,
             status,
             tokens_in,
-            tokens_out,
-            worktree_path
+            tokens_out
         )
         VALUES (
             ?,
@@ -112,8 +111,7 @@ async fn make_session(
             DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
             'completed',
             0,
-            0,
-            NULL
+            0
         )",
         id,
         project_id,

@@ -1,11 +1,11 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT worktree_path FROM sessions\n             WHERE task_id = ? AND worktree_path IS NOT NULL\n             ORDER BY started_at DESC LIMIT 1",
+  "query": "SELECT workspace_path FROM task_runs\n             WHERE task_id = ? AND workspace_path IS NOT NULL\n             ORDER BY started_at DESC LIMIT 1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "worktree_path",
+        "name": "workspace_path",
         "type_info": {
           "type": "VarString",
           "flags": "",
@@ -20,5 +20,5 @@
       true
     ]
   },
-  "hash": "a392b67a00ba7d2b3ef1fc396606e551dd429c26c6e8da500f8e8efd1ddb4d66"
+  "hash": "3748721ca349a136730d79a57b74d054aade57bb2e37280afc31daa22c18d249"
 }

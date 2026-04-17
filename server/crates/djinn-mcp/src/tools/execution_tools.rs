@@ -96,7 +96,8 @@ pub struct ExecutionStatusSession {
     pub session_id: String,
     #[schemars(with = "i64")]
     pub duration_seconds: u64,
-    pub worktree_path: Option<String>,
+    /// Workspace path resolved from the session's attached `task_run`.
+    pub workspace_path: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -143,7 +144,8 @@ pub struct SessionForTaskResponse {
     pub session_id: Option<String>,
     #[schemars(with = "Option<i64>")]
     pub duration_seconds: Option<u64>,
-    pub worktree_path: Option<String>,
+    /// Workspace path resolved from the session's attached `task_run`.
+    pub workspace_path: Option<String>,
     pub session: Option<String>,
     pub error: Option<String>,
 }
@@ -532,6 +534,8 @@ impl DjinnMcpServer {
         let max_sessions: u32 = pool_status.per_model.values().map(|c| c.total).sum();
 
         let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let task_run_repo =
+            djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());
         let mut sessions = Vec::new();
         for running in pool_status.running_tasks {
             // Filter by project BEFORE hitting the session repo so pre-session
@@ -564,6 +568,15 @@ impl DjinnMcpServer {
                 continue;
             }
 
+            let workspace_path = match db_session.as_ref().and_then(|s| s.task_run_id.as_deref()) {
+                Some(run_id) => task_run_repo
+                    .get(run_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|run| run.workspace_path),
+                None => None,
+            };
             sessions.push(ExecutionStatusSession {
                 task_id: running.task_id,
                 model_id: running.model_id,
@@ -572,7 +585,7 @@ impl DjinnMcpServer {
                     .map(|s| s.id.clone())
                     .unwrap_or_else(|| format!("slot-{}", running.slot_id)),
                 duration_seconds: running.duration_seconds,
-                worktree_path: db_session.and_then(|s| s.worktree_path),
+                workspace_path,
             });
         }
 
@@ -667,7 +680,7 @@ impl DjinnMcpServer {
                     model_id: None,
                     session_id: None,
                     duration_seconds: None,
-                    worktree_path: None,
+                    workspace_path: None,
                     session: None,
                     error: Some(e),
                 });
@@ -687,7 +700,7 @@ impl DjinnMcpServer {
                 model_id: None,
                 session_id: None,
                 duration_seconds: None,
-                worktree_path: None,
+                workspace_path: None,
                 session: None,
                 error: Some(format!("task not found: {}", missing_task_id)),
             });
@@ -699,7 +712,7 @@ impl DjinnMcpServer {
                 model_id: None,
                 session_id: None,
                 duration_seconds: None,
-                worktree_path: None,
+                workspace_path: None,
                 session: None,
                 error: Some("slot pool actor not initialized".to_string()),
             });
@@ -714,7 +727,7 @@ impl DjinnMcpServer {
                     model_id: None,
                     session_id: None,
                     duration_seconds: None,
-                    worktree_path: None,
+                    workspace_path: None,
                     session: None,
                     error: Some(e.to_string()),
                 });
@@ -723,6 +736,17 @@ impl DjinnMcpServer {
 
         let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let db_session = session_repo.active_for_task(&task.id).await.ok().flatten();
+        let task_run_repo =
+            djinn_db::repositories::task_run::TaskRunRepository::new(self.state.db().clone());
+        let workspace_path = match db_session.as_ref().and_then(|s| s.task_run_id.as_deref()) {
+            Some(run_id) => task_run_repo
+                .get(run_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|run| run.workspace_path),
+            None => None,
+        };
 
         match running {
             Some(session) => Json(SessionForTaskResponse {
@@ -736,7 +760,7 @@ impl DjinnMcpServer {
                         .unwrap_or_else(|| format!("slot-{}", session.slot_id)),
                 ),
                 duration_seconds: Some(session.duration_seconds),
-                worktree_path: db_session.and_then(|s| s.worktree_path),
+                workspace_path,
                 session: None,
                 error: None,
             }),
@@ -746,7 +770,7 @@ impl DjinnMcpServer {
                 model_id: None,
                 session_id: None,
                 duration_seconds: None,
-                worktree_path: None,
+                workspace_path: None,
                 session: None,
                 error: None,
             }),

@@ -1177,9 +1177,8 @@ mod tests {
     use crate::server::AppState;
     use crate::test_helpers::{
         create_test_db, create_test_epic, create_test_project_with_dir, create_test_task,
-        test_events, workspace_tempdir,
+        test_events,
     };
-    use djinn_db::{CreateSessionParams, SessionRepository};
     use tokio_util::sync::CancellationToken;
 
     #[cfg(all(target_os = "linux", feature = "memory-mount"))]

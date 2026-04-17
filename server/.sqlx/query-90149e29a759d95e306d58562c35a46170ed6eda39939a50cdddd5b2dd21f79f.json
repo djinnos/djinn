@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE task_runs\n                 SET `status` = ?,\n                     ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n                 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "90149e29a759d95e306d58562c35a46170ed6eda39939a50cdddd5b2dd21f79f"
+}

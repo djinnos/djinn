@@ -1,0 +1,124 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, task_run_id\n             FROM sessions\n             WHERE `status` = 'running' ORDER BY started_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "model_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "agent_type",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "ended_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "status!",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "tokens_in",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "tokens_out",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL",
+          "max_size": 20
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "task_run_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 144
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "dd9eddb438eefb2cada4e4917afa1efb98d82abbada9dee34e269c2444890ead"
+}

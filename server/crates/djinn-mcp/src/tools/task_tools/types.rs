@@ -414,7 +414,9 @@ pub struct SessionRecordResponse {
     pub status: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
-    pub worktree_path: Option<String>,
+    /// Workspace path resolved from the session's attached `task_run`. `None`
+    /// when no run is attached or the run has no recorded workspace.
+    pub workspace_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]

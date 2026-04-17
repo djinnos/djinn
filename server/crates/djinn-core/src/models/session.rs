@@ -36,11 +36,9 @@ pub struct SessionRecord {
     pub status: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
-    /// Legacy per-session worktree path. Migration 6 will drop this column;
-    /// consumers needing the on-disk workspace must read
-    /// `task_runs.workspace_path` via `task_run_id` instead.
-    pub worktree_path: Option<String>,
-    /// FK into `task_runs`; NULL until the supervisor populates it. When
-    /// present, the authoritative workspace path lives on the task_run row.
+    /// FK into `task_runs`; populated by the supervisor. The authoritative
+    /// workspace path lives on the task_run row. Before migration 6 this
+    /// struct also carried a `worktree_path: Option<String>` field mirroring
+    /// the now-dropped `sessions.worktree_path` column.
     pub task_run_id: Option<String>,
 }

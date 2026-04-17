@@ -854,9 +854,8 @@ mod tests {
                 task_id: Some(&task.id),
                 model: "test/mock-model",
                 agent_type: "worker",
-                worktree_path: None,
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .expect("create session");

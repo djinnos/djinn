@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, worktree_path\n             FROM sessions\n             WHERE `status` = 'running' ORDER BY started_at DESC",
+  "query": "SELECT id, project_id, task_id, trigger_type,\n                `status` AS \"status!\", started_at, ended_at,\n                workspace_path, mirror_ref\n             FROM task_runs WHERE task_id = ? ORDER BY started_at DESC",
   "describe": {
     "columns": [
       {
@@ -26,22 +26,22 @@
         "name": "task_id",
         "type_info": {
           "type": "VarString",
-          "flags": "",
+          "flags": "NOT_NULL",
           "max_size": 144
         }
       },
       {
         "ordinal": 3,
-        "name": "model_id",
+        "name": "trigger_type",
         "type_info": {
           "type": "VarString",
           "flags": "NOT_NULL",
-          "max_size": 1020
+          "max_size": 256
         }
       },
       {
         "ordinal": 4,
-        "name": "agent_type",
+        "name": "status!",
         "type_info": {
           "type": "VarString",
           "flags": "NOT_NULL",
@@ -68,57 +68,37 @@
       },
       {
         "ordinal": 7,
-        "name": "status!",
-        "type_info": {
-          "type": "VarString",
-          "flags": "NOT_NULL",
-          "max_size": 256
-        }
-      },
-      {
-        "ordinal": 8,
-        "name": "tokens_in",
-        "type_info": {
-          "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
-        }
-      },
-      {
-        "ordinal": 9,
-        "name": "tokens_out",
-        "type_info": {
-          "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
-        }
-      },
-      {
-        "ordinal": 10,
-        "name": "worktree_path",
+        "name": "workspace_path",
         "type_info": {
           "type": "VarString",
           "flags": "",
           "max_size": 4096
         }
+      },
+      {
+        "ordinal": 8,
+        "name": "mirror_ref",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false,
       false,
+      false,
+      false,
+      false,
+      false,
       true,
-      false,
-      false,
-      false,
       true,
-      false,
-      false,
-      false,
       true
     ]
   },
-  "hash": "bd0e9a50fb56278f232c133d836cf28b3f1ce541e1af8ccb4b3e0cfb1f2e5fa6"
+  "hash": "3f1735216e7be884490a965650b5b4d17a159ed8b9de62b8e94bf30b12bbe873"
 }
