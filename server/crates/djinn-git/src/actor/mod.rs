@@ -43,14 +43,6 @@ pub(super) enum GitMessage {
         target_branch: String,
         respond_to: Reply<()>,
     },
-    /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
-    /// Returns `Err(CommitRejected)` when `git commit` fails.
-    SquashMerge {
-        branch: String,
-        target_branch: String,
-        message: String,
-        respond_to: Reply<MergeResult>,
-    },
     /// Force-delete `branch` locally and from origin (post-merge cleanup).
     DeleteBranch {
         branch: String,

@@ -1280,6 +1280,7 @@ impl CoordinatorActor {
             working_root: None,
             canonical_graph_warmer: None,
             repo_graph_ops: None,
+            mirror: self.mirror.clone(),
         };
 
         // Use Reopen as a sentinel for "leave in approved / retry next tick".

@@ -635,6 +635,7 @@ impl AppState {
             repo_graph_ops: Some(Arc::new(crate::mcp_bridge::RepoGraphBridge::new(
                 self.clone(),
             ))),
+            mirror: Some(self.inner.mirror.clone()),
         }
     }
 
@@ -700,7 +701,8 @@ impl AppState {
             .with_canonical_graph_warmer(Arc::new(AppStateCanonicalGraphWarmer {
                 state: self.clone(),
             })
-                as Arc<dyn djinn_agent::context::CanonicalGraphWarmer>),
+                as Arc<dyn djinn_agent::context::CanonicalGraphWarmer>)
+            .with_mirror(self.inner.mirror.clone()),
         );
 
         *self.inner.pool.lock().await = Some(pool.clone());

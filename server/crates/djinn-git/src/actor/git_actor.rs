@@ -65,16 +65,6 @@ impl GitActor {
                 let result = crate::create_branch(path, short_id, target_branch).await;
                 let _ = respond_to.send(result);
             }
-            GitMessage::SquashMerge {
-                branch,
-                target_branch,
-                message,
-                respond_to,
-            } => {
-                let path = self.path.clone();
-                let result = crate::squash_merge(path, branch, target_branch, message).await;
-                let _ = respond_to.send(result);
-            }
             GitMessage::DeleteBranch { branch, respond_to } => {
                 let path = self.path.clone();
                 let result = crate::delete_branch(path, branch).await;

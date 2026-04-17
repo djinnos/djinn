@@ -94,24 +94,6 @@ impl GitActorHandle {
         .await
     }
 
-    /// Squash-merge `branch` into `target_branch` with `message` (GIT-03).
-    ///
-    /// Returns `Err(GitError::CommitRejected)` if `git commit` fails (GIT-07).
-    pub async fn squash_merge(
-        &self,
-        branch: &str,
-        target_branch: &str,
-        message: &str,
-    ) -> Result<MergeResult, GitError> {
-        self.request(|tx| GitMessage::SquashMerge {
-            branch: branch.into(),
-            target_branch: target_branch.into(),
-            message: message.into(),
-            respond_to: tx,
-        })
-        .await
-    }
-
     /// Force-delete `branch` locally and from origin (GIT-03 post-merge cleanup).
     pub async fn delete_branch(&self, branch: &str) -> Result<(), GitError> {
         self.request(|tx| GitMessage::DeleteBranch {

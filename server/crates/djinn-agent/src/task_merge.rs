@@ -8,11 +8,12 @@ use crate::knowledge_promotion::{
 };
 use djinn_core::models::{SessionStatus, TransitionAction};
 use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
-use djinn_git::GitError;
+use djinn_git::{GitError, MergeResult};
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
 use djinn_provider::github_app::{
     app_id as github_app_id, get_installation_token, installations::invalidate_cache,
 };
+use djinn_workspace::MirrorManager;
 
 /// Build the HTTPS push URL for a GitHub repo authenticated by a GitHub App
 /// **installation** access token.
@@ -483,15 +484,6 @@ pub(crate) async fn merge_and_transition(
     };
 
     let project_dir = project_path_for_id(&task.project_id, app_state).await;
-    let git = match app_state.git_actor(&project_dir).await {
-        Ok(git) => git,
-        Err(e) => {
-            return Some((
-                actions.release.clone(),
-                Some(format!("failed to open git actor for merge: {e}")),
-            ));
-        }
-    };
 
     let project_path_str = project_dir.to_string_lossy().to_string();
     let verification_result = match verification_gate {
@@ -661,9 +653,29 @@ pub(crate) async fn merge_and_transition(
     };
     let message = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
-    match git
-        .squash_merge(&base_branch, &merge_target, &message)
-        .await
+    let mirror = match app_state.mirror.as_ref() {
+        Some(m) => m.clone(),
+        None => {
+            return Some((
+                actions.release.clone(),
+                Some(
+                    "direct-push merge requires MirrorManager but AgentContext has none — \
+                     configure the GitHub App or run on an AppState-backed context"
+                        .to_string(),
+                ),
+            ));
+        }
+    };
+
+    match squash_merge_via_mirror(
+        mirror.as_ref(),
+        &task.project_id,
+        &base_branch,
+        &merge_target,
+        &message,
+        None, // no installation token; push uses the mirror's origin URL
+    )
+    .await
     {
         Ok(result) => {
             tracing::info!(
@@ -883,6 +895,217 @@ async fn project_path_for_id(project_id: &str, app_state: &AgentContext) -> Path
         .await
         .unwrap_or_else(|| ".".to_string());
     PathBuf::from(project_path)
+}
+
+/// Mirror-native squash-merge of `branch` into `target_branch`.
+///
+/// Replaces the legacy `.djinn/worktrees/.rebase-*` + `.djinn/worktrees/.merge-*`
+/// tempo worktrees under the user's project clone. Steps:
+///
+/// 1. `MirrorManager::clone_ephemeral(project_id, target_branch)` produces a
+///    hardlinked, tempdir-backed `Workspace` with `origin` pointed at the
+///    bare mirror.
+/// 2. `git fetch origin {branch}` brings the task branch into the workspace
+///    as `origin/{branch}`.
+/// 3. The task branch is checked out, rebased onto `origin/{target_branch}`,
+///    and merged back into the target with `git merge --squash`.
+/// 4. The squashed commit is pushed back to the real remote. If
+///    `installation_push_url` is supplied, it is used verbatim (production
+///    GitHub App flow); otherwise the workspace pushes to its `origin`
+///    (the mirror), which is the fallback for deployments without the App.
+///
+/// The workspace is dropped at the end of the call — `TempDir` cleans up the
+/// local copy, and the object db was hardlinked from the mirror so nothing
+/// is left behind.
+pub(crate) async fn squash_merge_via_mirror(
+    mirror: &MirrorManager,
+    project_id: &str,
+    branch: &str,
+    target_branch: &str,
+    message: &str,
+    installation_push_url: Option<&str>,
+) -> Result<MergeResult, GitError> {
+    // 1. Clone ephemeral workspace on the target branch.
+    let workspace = mirror
+        .clone_ephemeral(project_id, target_branch)
+        .await
+        .map_err(|e| GitError::Other(anyhow::anyhow!("clone_ephemeral: {e}")))?;
+    let wt = workspace.path_buf();
+
+    // Apply the bot identity locally so any commit we create is attributed to
+    // the App (mirrors the worktree-era `user.name`/`user.email` seed).
+    let (bot_name, bot_email) = bot_identity();
+    let _ = djinn_git::run_git_command(
+        wt.clone(),
+        vec![
+            "config".into(),
+            "user.name".into(),
+            bot_name.clone(),
+        ],
+    )
+    .await;
+    let _ = djinn_git::run_git_command(
+        wt.clone(),
+        vec![
+            "config".into(),
+            "user.email".into(),
+            bot_email.clone(),
+        ],
+    )
+    .await;
+
+    // 2. Fetch the task branch from the mirror so we can reference it.
+    djinn_git::run_git_command(
+        wt.clone(),
+        vec![
+            "fetch".into(),
+            "origin".into(),
+            format!("{branch}:refs/remotes/origin/{branch}"),
+        ],
+    )
+    .await?;
+
+    // 3a. Check out the task branch, rebase onto origin/{target_branch}.
+    djinn_git::run_git_command(
+        wt.clone(),
+        vec![
+            "checkout".into(),
+            "-B".into(),
+            branch.to_string(),
+            format!("origin/{branch}"),
+        ],
+    )
+    .await?;
+
+    let origin_target = format!("origin/{target_branch}");
+    let rebase_ok = djinn_git::run_git_command(
+        wt.clone(),
+        vec!["rebase".into(), origin_target.clone()],
+    )
+    .await
+    .is_ok();
+    if !rebase_ok {
+        let _ =
+            djinn_git::run_git_command(wt.clone(), vec!["rebase".into(), "--abort".into()]).await;
+    }
+
+    // 3b. Switch to a detached copy of origin/{target_branch} and squash-merge.
+    djinn_git::run_git_command(
+        wt.clone(),
+        vec![
+            "checkout".into(),
+            "--detach".into(),
+            origin_target.clone(),
+        ],
+    )
+    .await?;
+
+    if let Err(err) = djinn_git::run_git_command(
+        wt.clone(),
+        vec!["merge".into(), "--squash".into(), branch.to_string()],
+    )
+    .await
+    {
+        if matches!(err, GitError::CommandFailed { .. }) {
+            let files = djinn_git::unmerged_files(wt.clone()).await.unwrap_or_default();
+            let _ =
+                djinn_git::run_git_command(wt.clone(), vec!["merge".into(), "--abort".into()])
+                    .await;
+            if !files.is_empty() {
+                return Err(GitError::MergeConflict {
+                    target_branch: target_branch.to_string(),
+                    files,
+                });
+            }
+        }
+        return Err(err);
+    }
+
+    let staged = djinn_git::run_git_command(
+        wt.clone(),
+        vec!["diff".into(), "--cached".into(), "--name-only".into()],
+    )
+    .await?;
+    if staged.stdout.trim().is_empty() {
+        // Nothing new to commit — the task branch was already absorbed into
+        // the target. Return the target's HEAD as the "merge" commit.
+        let out = djinn_git::run_git_command(
+            wt.clone(),
+            vec!["rev-parse".into(), "HEAD".into()],
+        )
+        .await?;
+        return Ok(MergeResult {
+            commit_sha: out.stdout.trim().to_string(),
+        });
+    }
+
+    match djinn_git::run_git_command(
+        wt.clone(),
+        vec!["commit".into(), "-m".into(), message.to_string()],
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(GitError::CommandFailed {
+            code,
+            command,
+            cwd,
+            stdout,
+            stderr,
+        }) => {
+            return Err(GitError::CommitRejected {
+                code,
+                command,
+                cwd,
+                stdout,
+                stderr,
+            });
+        }
+        Err(e) => return Err(e),
+    }
+
+    let out = djinn_git::run_git_command(
+        wt.clone(),
+        vec!["rev-parse".into(), "HEAD".into()],
+    )
+    .await?;
+    let commit_sha = out.stdout.trim().to_string();
+
+    // 4. Push the squashed commit to the real remote. The workspace's `origin`
+    //    points at the mirror, not GitHub — when an installation token is
+    //    supplied we override the push URL to GitHub directly; otherwise we
+    //    fall back to pushing to the mirror (which is the only sensible target
+    //    in no-App deployments).
+    let push_refspec = format!("{commit_sha}:refs/heads/{target_branch}");
+    let mut push_args: Vec<String> = vec!["push".into()];
+    match installation_push_url {
+        Some(url) => push_args.push(url.to_string()),
+        None => push_args.push("origin".into()),
+    };
+    push_args.push(push_refspec);
+
+    let mut last_push_error: Option<GitError> = None;
+    for attempt in 1..=djinn_git::PUSH_MAX_ATTEMPTS {
+        match djinn_git::run_git_command(wt.clone(), push_args.clone()).await {
+            Ok(_) => {
+                last_push_error = None;
+                break;
+            }
+            Err(e)
+                if attempt < djinn_git::PUSH_MAX_ATTEMPTS
+                    && djinn_git::is_retryable_git_command_error(&e) =>
+            {
+                last_push_error = Some(e);
+                tokio::time::sleep(djinn_git::retry_delay(attempt)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if let Some(e) = last_push_error {
+        return Err(e);
+    }
+
+    Ok(MergeResult { commit_sha })
 }
 
 #[cfg(test)]

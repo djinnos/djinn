@@ -10,6 +10,7 @@ use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::Database;
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
+use djinn_workspace::MirrorManager;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +36,11 @@ pub struct CoordinatorDeps {
     /// this `None`, which makes the proactive refresh tick branch a no-op.
     pub canonical_graph_warmer: Option<Arc<dyn CanonicalGraphWarmer>>,
     pub(super) consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
+    /// Shared bare-mirror manager. Threaded into the synthesized `AgentContext`
+    /// built inside `process_approved_tasks` so the direct-push merge fallback
+    /// can clone the ephemeral workspace from the mirror. `None` in test
+    /// contexts — the direct-push path bails cleanly in that case.
+    pub mirror: Option<Arc<MirrorManager>>,
 }
 
 impl CoordinatorDeps {
@@ -62,6 +68,7 @@ impl CoordinatorDeps {
             lsp,
             canonical_graph_warmer: None,
             consolidation_runner: None,
+            mirror: None,
         }
     }
 
@@ -70,6 +77,14 @@ impl CoordinatorDeps {
     /// off-server contexts that omit this leave the tick as a no-op.
     pub fn with_canonical_graph_warmer(mut self, warmer: Arc<dyn CanonicalGraphWarmer>) -> Self {
         self.canonical_graph_warmer = Some(warmer);
+        self
+    }
+
+    /// Inject the production `MirrorManager`, enabling the mirror-native
+    /// direct-push merge fallback. Off-server tests skip this and the fallback
+    /// returns a descriptive error instead of crashing.
+    pub fn with_mirror(mut self, mirror: Arc<MirrorManager>) -> Self {
+        self.mirror = Some(mirror);
         self
     }
 }

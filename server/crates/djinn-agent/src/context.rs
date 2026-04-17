@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
+use djinn_workspace::MirrorManager;
 use djinn_mcp::{
     McpState, bridge,
     bridge::{
@@ -119,6 +120,14 @@ pub struct AgentContext {
     /// `djinn-agent` cannot depend on the server crate (per ADR-047), so the
     /// concrete `RepoGraphBridge` is wired in `server::AppState::agent_context()`.
     pub repo_graph_ops: Option<Arc<dyn RepoGraphOps>>,
+    /// Shared bare-mirror manager. Used by the mirror-native merge path in
+    /// `task_merge` to run squash-merges against an ephemeral hardlinked
+    /// clone instead of a worktree under `.djinn/worktrees/.merge-*`.
+    ///
+    /// `None` in test contexts that do not exercise the merge path — those
+    /// contexts never hit `squash_merge_via_mirror`, which bails out with a
+    /// clear error when the field is absent.
+    pub mirror: Option<Arc<MirrorManager>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,25 +165,28 @@ impl AgentContext {
 
     /// Resolve the knowledge-write target for a session.
     ///
-    /// Task sessions with a preserved worktree route note writes into that
+    /// Task runs with a preserved workspace route note writes into that
     /// task-scoped tree so extracted notes participate in the same promotion /
-    /// discard lifecycle as agent-authored memory mutations. Sessions without a
-    /// usable worktree fall back to canonical-main writes, preserving the
+    /// discard lifecycle as agent-authored memory mutations. Runs without a
+    /// usable workspace fall back to canonical-main writes, preserving the
     /// default SQLite-backed behavior for contexts that do not opt into
     /// task-branch routing.
+    ///
+    /// The `workspace_path` is now sourced from `task_runs.workspace_path`
+    /// (via `sessions.task_run_id`) rather than `sessions.worktree_path`.
     pub fn knowledge_branch_target_for(
         &self,
         project_root: &Path,
-        session_worktree_path: Option<&str>,
+        workspace_path: Option<&str>,
     ) -> KnowledgeBranchTarget {
-        let Some(worktree_path) = session_worktree_path
+        let Some(workspace_path) = workspace_path
             .map(str::trim)
             .filter(|path| !path.is_empty())
         else {
             return KnowledgeBranchTarget::Main;
         };
 
-        let worktree_root = PathBuf::from(worktree_path);
+        let worktree_root = PathBuf::from(workspace_path);
         if worktree_root == project_root {
             KnowledgeBranchTarget::Main
         } else {
@@ -185,9 +197,9 @@ impl AgentContext {
     pub fn knowledge_worktree_root_for(
         &self,
         project_root: &Path,
-        session_worktree_path: Option<&str>,
+        workspace_path: Option<&str>,
     ) -> Option<PathBuf> {
-        self.knowledge_branch_target_for(project_root, session_worktree_path)
+        self.knowledge_branch_target_for(project_root, workspace_path)
             .worktree_root()
             .map(Path::to_path_buf)
     }

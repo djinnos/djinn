@@ -287,6 +287,7 @@ mod tests {
             last_auto_dispatch_sweep: StdInstant::now(),
             last_graph_refresh: StdInstant::now(),
             canonical_graph_warmer: None,
+            mirror: None,
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
             next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,

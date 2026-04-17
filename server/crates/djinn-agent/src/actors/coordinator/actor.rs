@@ -76,6 +76,10 @@ pub(super) struct CoordinatorActor {
     /// dispatch-enabled project on a 10-minute cadence.  Tests leave this
     /// `None`, which makes the proactive refresh tick branch a no-op.
     pub(super) canonical_graph_warmer: Option<Arc<dyn crate::context::CanonicalGraphWarmer>>,
+    /// Shared bare-mirror manager used by `process_approved_tasks` to build
+    /// an `AgentContext` whose direct-push fallback can clone ephemeral
+    /// workspaces. `None` in tests.
+    pub(super) mirror: Option<Arc<djinn_workspace::MirrorManager>>,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     pub(super) prune_tick_counter: u32,
     /// Timestamp of the last patrol completion (or actor start as initial baseline).
@@ -147,6 +151,7 @@ impl CoordinatorActor {
             lsp,
             canonical_graph_warmer,
             consolidation_runner,
+            mirror,
         } = deps;
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
@@ -179,6 +184,7 @@ impl CoordinatorActor {
             last_auto_dispatch_sweep: StdInstant::now(),
             last_graph_refresh: StdInstant::now(),
             canonical_graph_warmer,
+            mirror,
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
             next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
@@ -305,6 +311,7 @@ impl CoordinatorActor {
                             working_root: None,
                             canonical_graph_warmer: None,
                             repo_graph_ops: None,
+                            mirror: self.mirror.clone(),
                         };
                         health::sweep_stale_resources(&self.db, &app_state).await;
                         self.last_stale_sweep = StdInstant::now();
