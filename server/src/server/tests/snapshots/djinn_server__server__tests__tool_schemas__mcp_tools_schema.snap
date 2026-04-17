@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 175
 expression: signatures
 ---
 [
@@ -2210,7 +2211,8 @@ expression: signatures
             "task_id": {
               "type": "string"
             },
-            "worktree_path": {
+            "workspace_path": {
+              "description": "Workspace path resolved from the session's attached `task_run`.",
               "nullable": true,
               "type": "string"
             }
@@ -6048,7 +6050,7 @@ expression: signatures
               "type": "integer"
             },
             "workspace_path": {
-              "description": "Authoritative workspace path for the session. Sourced from the\nattached `task_run` (via `sessions.task_run_id`) when present; falls\nback to the legacy `sessions.worktree_path` column during the\nmigration window (migration 6 drops it).",
+              "description": "Authoritative workspace path for the session, sourced from the\nattached `task_run` (via `sessions.task_run_id`). `None` when the\nsession is not attached to a task run or the run has no recorded\nworkspace.",
               "nullable": true,
               "type": "string"
             }
@@ -6146,7 +6148,8 @@ expression: signatures
         "task_id": {
           "type": "string"
         },
-        "worktree_path": {
+        "workspace_path": {
+          "description": "Workspace path resolved from the session's attached `task_run`.",
           "nullable": true,
           "type": "string"
         }
@@ -6219,7 +6222,7 @@ expression: signatures
               "type": "integer"
             },
             "workspace_path": {
-              "description": "Authoritative workspace path for the session. Sourced from the\nattached `task_run` (via `sessions.task_run_id`) when present; falls\nback to the legacy `sessions.worktree_path` column during the\nmigration window (migration 6 drops it).",
+              "description": "Authoritative workspace path for the session, sourced from the\nattached `task_run` (via `sessions.task_run_id`). `None` when the\nsession is not attached to a task run or the run has no recorded\nworkspace.",
               "nullable": true,
               "type": "string"
             }
@@ -6395,7 +6398,7 @@ expression: signatures
           "type": "integer"
         },
         "workspace_path": {
-          "description": "Authoritative workspace path for the session. Sourced from the\nattached `task_run` (via `sessions.task_run_id`) when present; falls\nback to the legacy `sessions.worktree_path` column during the\nmigration window (migration 6 drops it).",
+          "description": "Authoritative workspace path for the session, sourced from the\nattached `task_run` (via `sessions.task_run_id`). `None` when the\nsession is not attached to a task run or the run has no recorded\nworkspace.",
           "nullable": true,
           "type": "string"
         }
@@ -7799,7 +7802,7 @@ expression: signatures
               "type": "integer"
             },
             "workspace_path": {
-              "description": "Authoritative workspace path for the session. Sourced from the\nattached `task_run` (via `sessions.task_run_id`) when present; falls\nback to the legacy `sessions.worktree_path` column during the\nmigration window (migration 6 drops it).",
+              "description": "Authoritative workspace path for the session, sourced from the\nattached `task_run` (via `sessions.task_run_id`). `None` when the\nsession is not attached to a task run or the run has no recorded\nworkspace.",
               "nullable": true,
               "type": "string"
             }
