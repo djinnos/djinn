@@ -53,6 +53,21 @@ spec:
             - configMapRef:
                 name: {{ include "djinn.fullname" . }}-server
           env:
+            # HTTP bind port — must match `service.apiPort`. The binary's
+            # CLI default is 8372 (legacy local-dev), so we have to pin it
+            # here or the readiness probe would never pass.
+            - name: DJINN_PORT
+              value: {{ .Values.service.apiPort | quote }}
+            # Pin the worker reverse-RPC bind addr explicitly; the code
+            # defaults to 0.0.0.0:8443 already but surfacing it here makes
+            # the chart self-documenting.
+            - name: DJINN_RPC_ADDR
+              value: {{ printf "0.0.0.0:%d" (.Values.service.rpcPort | int) | quote }}
+            # Force the k8s runtime path even though it's the default — we
+            # never want a chart-managed Deployment accidentally running as
+            # the in-process TestRuntime.
+            - name: DJINN_RUNTIME
+              value: "kubernetes"
             - name: DJINN_VAULT_KEY_PATH
               value: /var/run/secrets/djinn/vault.key
             - name: GITHUB_APP_PRIVATE_KEY_PATH
