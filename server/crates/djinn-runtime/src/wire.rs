@@ -17,8 +17,10 @@
 //!   `/workspace`; the worker rehydrates it into a real
 //!   `djinn_workspace::Workspace` via `Workspace::attach_existing`.
 //! - [`ControlMsg`] — downstream control signals (cancel / shutdown).
-//! - [`WorkerEvent`] — placeholder upstream event enum; no producers in this
-//!   PR, it pins the wire shape so later PRs don't have to renumber variants.
+//! - [`WorkerEvent`] — upstream event enum carrying out-of-band signals the
+//!   worker emits on the shared frame channel (currently the terminal
+//!   [`TaskRunReport`]; future variants cover assistant deltas, tool calls,
+//!   stage outcomes, heartbeats).
 //! - length-prefixed frame helpers ([`read_frame`], [`write_frame`],
 //!   [`MAX_FRAME_BYTES`]).
 
@@ -28,6 +30,11 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+// Re-export `TaskRunReport` at the `wire` module root so transport code can
+// spell it as `djinn_runtime::wire::TaskRunReport` alongside the other wire
+// primitives.  The canonical definition stays in `crate::spec`.
+pub use crate::spec::TaskRunReport;
 
 /// Maximum frame body size the wire will accept.
 ///
@@ -69,14 +76,25 @@ pub enum ControlMsg {
 
 /// Upstream event produced by the worker.
 ///
-/// Placeholder in PR 5 — no producers exist yet.  The enum is present so
-/// the wire envelope has a stable variant layout before PR 6/7 starts
-/// emitting real events.
+/// Carried as a [`FramePayload::Event`] on the shared bincode frame channel
+/// (see `djinn-supervisor::services::wire`).  Variants are intentionally
+/// additive: the [`WorkerEvent::Placeholder`] slot pins the enum's on-wire
+/// layout against the pre-Phase-2.1 snapshots, and [`WorkerEvent::TerminalReport`]
+/// is the real payload the worker emits on run completion.  Subsequent PRs
+/// add assistant deltas, tool calls, stage outcomes, and heartbeats.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WorkerEvent {
-    /// Reserved — swapped for real variants (assistant deltas, tool calls,
-    /// stage outcomes, progress heartbeats) in later PRs.
+    /// Reserved — preserves the pre-Phase-2.1 enum layout.  Never emitted
+    /// by the worker in normal operation; retained so the wire shape stays
+    /// back-compatible against anything that persisted a serialized
+    /// [`WorkerEvent`] during Phase 2 PR 5.
     Placeholder,
+    /// Terminal [`TaskRunReport`] the worker emits when `drive_placeholder`
+    /// (and, in later PRs, the real `TaskRunSupervisor::run`) finishes.
+    /// The launcher's [`KubernetesRuntime::teardown`] drains the pending
+    /// connection's event stream looking for this variant to extract the
+    /// real terminal report instead of synthesising one from Job status.
+    TerminalReport(TaskRunReport),
 }
 
 /// Write `payload` as a length-prefixed bincode frame.
@@ -173,5 +191,55 @@ mod tests {
         a.write_all(&oversize.to_be_bytes()).await.unwrap();
         let err: Result<Vec<u8>> = read_frame(&mut b).await;
         assert!(err.is_err(), "oversized frame should error");
+    }
+
+    /// The `WorkerEvent::TerminalReport(TaskRunReport)` variant survives a
+    /// bincode round-trip — proves the new wire variant is encode/decode
+    /// parity and the re-exported `TaskRunReport` is compatible with the
+    /// serde derives on `spec.rs`.
+    #[tokio::test]
+    async fn terminal_report_event_bincode_roundtrip() {
+        use crate::spec::{RoleKind, TaskRunOutcome};
+
+        let report = TaskRunReport {
+            task_run_id: "run-terminal-1".into(),
+            outcome: TaskRunOutcome::PrOpened {
+                url: "https://github.com/o/r/pull/7".into(),
+                sha: "cafebabe".into(),
+            },
+            stages_completed: vec![RoleKind::Planner, RoleKind::Worker, RoleKind::Reviewer],
+        };
+        let event = WorkerEvent::TerminalReport(report);
+
+        let bytes = bincode::serialize(&event).expect("serialize TerminalReport");
+        let back: WorkerEvent = bincode::deserialize(&bytes).expect("deserialize TerminalReport");
+
+        match back {
+            WorkerEvent::TerminalReport(r) => {
+                assert_eq!(r.task_run_id, "run-terminal-1");
+                assert_eq!(
+                    r.stages_completed,
+                    vec![RoleKind::Planner, RoleKind::Worker, RoleKind::Reviewer]
+                );
+                match r.outcome {
+                    TaskRunOutcome::PrOpened { url, sha } => {
+                        assert_eq!(url, "https://github.com/o/r/pull/7");
+                        assert_eq!(sha, "cafebabe");
+                    }
+                    other => panic!("unexpected outcome: {other:?}"),
+                }
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// The legacy `Placeholder` variant still round-trips — guards against
+    /// accidentally reshuffling the enum's variant indices in a way that
+    /// would break any persisted frames from Phase 2 PR 5.
+    #[tokio::test]
+    async fn placeholder_event_bincode_roundtrip() {
+        let bytes = bincode::serialize(&WorkerEvent::Placeholder).expect("serialize Placeholder");
+        let back: WorkerEvent = bincode::deserialize(&bytes).expect("deserialize Placeholder");
+        assert!(matches!(back, WorkerEvent::Placeholder));
     }
 }
