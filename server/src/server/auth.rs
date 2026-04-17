@@ -57,9 +57,18 @@ use std::sync::Arc;
 const SESSION_COOKIE: &str = "djinn_session";
 const OAUTH_STATE_COOKIE: &str = "djinn_oauth_state";
 const MANIFEST_STATE_COOKIE: &str = "djinn_app_manifest_state";
+/// Short-lived hint from the manifest callback — encodes the owner's
+/// GitHub numeric id + login as `"<id>|<login>"`. Read by
+/// `app_setup_callback` to cross-check GitHub's post-install redirect
+/// against the org that actually provisioned the App.
+const PENDING_OWNER_COOKIE: &str = "djinn_app_pending_owner";
 const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
+/// How long the owner-hint cookie from the manifest callback remains
+/// valid. Long enough for the user to click through the install step,
+/// short enough that a stale cookie can't silently bind the wrong org.
+const PENDING_OWNER_TTL_SECS: i64 = 60 * 30; // 30 minutes
 
 /// Read a GitHub App OAuth client id/secret from the environment.
 ///
@@ -80,6 +89,10 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/auth/github/app-manifest-callback",
             get(app_manifest_callback),
+        )
+        .route(
+            "/auth/github/app-setup-callback",
+            get(app_setup_callback),
         )
         .route("/auth/logout", post(logout))
         .route("/setup/status", get(setup_status))
@@ -849,17 +862,19 @@ pub(crate) fn build_manifest_json(public_url: &str) -> serde_json::Value {
         "actions": "read",
         "checks": "read",
     });
-    let web = web_url();
-    let web = web.trim_end_matches('/');
     serde_json::json!({
         "name": format!("Djinn ({host})"),
         "url": public_url,
         "redirect_url": format!("{public_url}/auth/github/app-manifest-callback"),
         "callback_urls": [format!("{public_url}/auth/github/callback")],
-        // Where GitHub sends the user after they install the App on an
-        // account/org. Points at the web client so the user lands back in
-        // the app after install.
-        "setup_url": format!("{web}/"),
+        // Where GitHub sends the user after they install the App. Points at
+        // a server endpoint (not the web client root) so the server can
+        // capture `installation_id`, bind the org via `OrgConfigRepository`,
+        // and *then* redirect the browser to the web client. The manifest
+        // flow only creates the App — installation (and therefore the
+        // installation_id) only materialises on this callback, so the
+        // org_config write has to live here, not in the manifest callback.
+        "setup_url": format!("{public_url}/auth/github/app-setup-callback"),
         "setup_on_update": false,
         "request_oauth_on_install": true,
         "public": false,
@@ -1071,85 +1086,219 @@ async fn app_manifest_callback(
         tracing::error!(error = %e, "manifest callback: failed to persist App config");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    // Mirror creds into env + hot-swap so the JWT minter sees them for the
-    // installation lookup immediately below. This also publishes the creds
-    // to the rest of the process.
+    // Mirror creds into env + hot-swap so downstream consumers (JWT minter,
+    // install URL helper) see them immediately.
     cfg.export_to_env();
     state.set_app_config(Some(Arc::new(cfg.clone()))).await;
 
-    // Fetch the installation id for this org. At manifest-conversion time,
-    // GitHub has just installed the App on the owning org (via the manifest
-    // install-step dance), so this endpoint is expected to 200. If it 404s
-    // the operator can install and retry, but the deployment is still
-    // half-configured — so we bail loudly instead of writing a sentinel.
-    let installation_id = match fetch_org_installation_id(&owner.login).await {
-        Ok(id) => id,
+    // The manifest flow only *creates* the App on GitHub — it does not
+    // install it anywhere. The installation_id (and therefore the
+    // `org_config` binding) only materialises after the user completes the
+    // install step, at which point GitHub redirects to our `setup_url` —
+    // the `app_setup_callback` handler below writes `org_config`.
+    //
+    // Bounce through `/auth/github/start?install=1` so the user OAuths into
+    // djinn, then lands on the App's install page (pre-targeted at the
+    // owning org via the GitHub UI). Persist the owner info briefly in a
+    // short-lived cookie so `app_setup_callback` can cross-check what
+    // GitHub reports on the installation against the org that provisioned
+    // the App.
+    let owner_hint = format!("{}|{}", owner.id, owner.login);
+    let mut resp_headers = HeaderMap::new();
+    clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
+    set_cookie(
+        &mut resp_headers,
+        PENDING_OWNER_COOKIE,
+        &owner_hint,
+        PENDING_OWNER_TTL_SECS,
+    );
+    resp_headers.insert(
+        header::LOCATION,
+        HeaderValue::from_static("/auth/github/start?install=1"),
+    );
+    (StatusCode::FOUND, resp_headers).into_response()
+}
+
+/// Query parameters for `GET /auth/github/app-setup-callback` — GitHub
+/// appends `?installation_id=<N>&setup_action=install` after the user
+/// completes (or requests) an installation via the App's install page.
+#[derive(Deserialize)]
+struct AppSetupQuery {
+    installation_id: Option<String>,
+    #[serde(default)]
+    setup_action: Option<String>,
+}
+
+/// `GET /auth/github/app-setup-callback` — the second half of the
+/// manifest → install two-redirect flow. GitHub invokes this after the
+/// user installs the App on an org; we fetch the installation's authoritative
+/// account info with the App JWT and write the singleton `org_config` row
+/// that binds this deployment to that org.
+///
+/// Security note: the `installation_id` in the query is user-controllable,
+/// so we do not trust query-derived org metadata. The binding is based on
+/// the `account` returned by GitHub's `GET /app/installations/{id}` endpoint
+/// authenticated with our App's JWT — which only succeeds for installations
+/// of *this* App, and returns data GitHub computes from its own records.
+async fn app_setup_callback(
+    State(state): State<AppState>,
+    Query(q): Query<AppSetupQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let installation_id: u64 = match q.installation_id.as_deref().and_then(|s| s.parse().ok()) {
+        Some(id) if id > 0 => id,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing or invalid installation_id",
+            )
+                .into_response();
+        }
+    };
+    // `setup_action` is usually "install" or "update". We don't gate on it —
+    // any post-install hit with a valid installation_id should complete the
+    // binding — but we log it for auditability.
+    let action = q.setup_action.as_deref().unwrap_or("");
+
+    let cfg = match state.app_config().await {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                "GitHub App credentials are not configured; complete the \
+                 manifest flow first.",
+            )
+                .into_response();
+        }
+    };
+
+    // Resolve the installation authoritatively via the App JWT. This call
+    // returns the target org's numeric id + login, which we need for the
+    // org_config row. Using GitHub's own response avoids trusting the
+    // user-supplied `owner_hint` cookie for the binding itself — the
+    // cookie is treated as a cross-check, not a source of truth.
+    let installation = match fetch_installation_for_setup(installation_id).await {
+        Ok(i) => i,
         Err(e) => {
             tracing::error!(
-                org = %owner.login,
+                installation_id,
                 error = %e,
-                "manifest callback: failed to fetch org installation id",
+                "app_setup_callback: fetch installation failed",
             );
             return (
                 StatusCode::BAD_GATEWAY,
                 format!(
-                    "App credentials were saved, but fetching the installation \
-                     id for org '{}' failed: {}. Install the App on the org \
-                     and retry the manifest flow.",
-                    owner.login, e,
+                    "Failed to fetch installation {installation_id} from GitHub: {e}"
                 ),
             )
                 .into_response();
         }
     };
 
-    // Bind the deployment to this org. `set_once` loudly fails a second call.
+    if !installation.account.account_type.eq_ignore_ascii_case("Organization") {
+        tracing::warn!(
+            installation_id,
+            account_type = %installation.account.account_type,
+            account_login = %installation.account.login,
+            "app_setup_callback: rejecting non-org installation",
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "This deployment requires a GitHub *organization* installation, \
+                 but installation {installation_id} is bound to account '{}' (type={}). \
+                 Reinstall the App on an organization.",
+                installation.account.login, installation.account.account_type,
+            ),
+        )
+            .into_response();
+    }
+
+    // Soft cross-check against the owner hint from the manifest callback.
+    // If present and mismatched, log — but don't block, since the user may
+    // legitimately install on a different org than the App's owner.
+    if let Some(hint) = extract_cookie(&headers, PENDING_OWNER_COOKIE)
+        && let Some((hint_id_str, hint_login)) = hint.split_once('|')
+        && let Ok(hint_id) = hint_id_str.parse::<u64>()
+        && (hint_id != installation.account.id || hint_login != installation.account.login)
+    {
+        tracing::info!(
+            hint_id,
+            hint_login,
+            actual_id = installation.account.id,
+            actual_login = %installation.account.login,
+            "app_setup_callback: installed org differs from App owner",
+        );
+    }
+
     let org_repo = OrgConfigRepository::new(state.db().clone());
+    // Idempotency: if org_config already points at this installation, the
+    // user probably double-clicked or reloaded — don't surface a confusing
+    // 409, just redirect them home.
+    if let Ok(Some(existing)) = org_repo.get().await
+        && existing.installation_id as u64 == installation_id
+        && existing.github_org_id as u64 == installation.account.id
+    {
+        tracing::info!(
+            installation_id,
+            action,
+            "app_setup_callback: re-entry for already-bound org, redirecting home",
+        );
+        return redirect_to_web(&headers);
+    }
+
     if let Err(e) = org_repo
         .set_once(NewOrgConfig {
-            github_org_id: owner.id,
-            github_org_login: &owner.login,
+            github_org_id: installation.account.id as i64,
+            github_org_login: &installation.account.login,
             app_id: cfg.app_id as i64,
             installation_id: installation_id as i64,
         })
         .await
     {
-        // InvalidTransition = already bound to a (possibly different) org.
         tracing::error!(
             error = %e,
-            owner = %owner.login,
-            "manifest callback: org_config already set; refusing to rebind",
+            installation_id,
+            account = %installation.account.login,
+            "app_setup_callback: org_config set_once failed",
         );
         return (
             StatusCode::CONFLICT,
-            "This deployment is already bound to a GitHub org. To rebind, \
-             redeploy with a fresh database or remove the row from the \
-             `org_config` table manually and retry.",
+            "This deployment is already bound to a different GitHub org. \
+             To rebind, remove the row from the `org_config` table manually \
+             and retry installation.",
         )
             .into_response();
     }
 
+    tracing::info!(
+        installation_id,
+        account = %installation.account.login,
+        action,
+        "app_setup_callback: org_config bound",
+    );
+    redirect_to_web(&headers)
+}
+
+/// Common post-success redirect — clear the short-lived owner-hint cookie
+/// and send the browser to the web client root.
+fn redirect_to_web(_headers: &HeaderMap) -> Response {
     let mut resp_headers = HeaderMap::new();
-    clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
-    let location = "/auth/github/start?install=1";
-    resp_headers.insert(header::LOCATION, HeaderValue::from_static(location));
+    clear_cookie(&mut resp_headers, PENDING_OWNER_COOKIE);
+    let target = format!("{}/", web_url().trim_end_matches('/'));
+    resp_headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&target).unwrap_or_else(|_| HeaderValue::from_static("/")),
+    );
     (StatusCode::FOUND, resp_headers).into_response()
 }
 
-/// Look up `GET /orgs/{org}/installation` with a fresh App JWT to discover
-/// this deployment's installation id. Called right after the manifest
-/// conversion so the just-created App's credentials are already in env.
-async fn fetch_org_installation_id(org_login: &str) -> Result<u64, String> {
-    #[derive(Deserialize)]
-    struct InstallationResp {
-        id: u64,
-    }
-
+/// Fetch an installation's account info via the App JWT. Returns only the
+/// fields `app_setup_callback` needs for the `org_config` binding (numeric
+/// account id, login, and account type).
+async fn fetch_installation_for_setup(installation_id: u64) -> Result<InstallationDetail, String> {
     let jwt = mint_app_jwt_anyhow().map_err(|e| e.to_string())?;
-    let url = format!(
-        "https://api.github.com/orgs/{}/installation",
-        urlencode(org_login),
-    );
+    let url = format!("https://api.github.com/app/installations/{installation_id}");
     let client = Client::new();
     let resp = client
         .get(&url)
@@ -1165,11 +1314,25 @@ async fn fetch_org_installation_id(org_login: &str) -> Result<u64, String> {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("{status}: {body}"));
     }
-    let parsed: InstallationResp = resp
-        .json()
+    resp.json::<InstallationDetail>()
         .await
-        .map_err(|e| format!("decode /orgs/{org_login}/installation: {e}"))?;
-    Ok(parsed.id)
+        .map_err(|e| format!("decode /app/installations/{installation_id}: {e}"))
+}
+
+#[derive(Deserialize)]
+struct InstallationDetail {
+    #[allow(dead_code)]
+    id: u64,
+    account: InstallationAccount,
+}
+
+#[derive(Deserialize)]
+struct InstallationAccount {
+    id: u64,
+    #[serde(default)]
+    login: String,
+    #[serde(rename = "type", default)]
+    account_type: String,
 }
 
 async fn exchange_manifest_code(code: &str) -> Result<ManifestConversion, String> {
@@ -1318,6 +1481,12 @@ mod tests {
         assert_eq!(
             manifest["callback_urls"][0],
             "https://djinn.example.com/auth/github/callback"
+        );
+        assert_eq!(
+            manifest["setup_url"],
+            "https://djinn.example.com/auth/github/app-setup-callback",
+            "setup_url must point at the server (not the web client) so the \
+             post-install redirect can capture installation_id and bind org_config"
         );
         assert!(
             manifest.get("hook_attributes").is_none(),
