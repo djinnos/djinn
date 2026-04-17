@@ -165,9 +165,13 @@ pub(super) async fn board_reconcile_impl(
                         .map(|e| e.path())
                         .collect();
 
-                    if !batch_dirs.is_empty()
-                        && let Ok(git) = server.state.git_actor(&project_path).await
-                    {
+                    if !batch_dirs.is_empty() {
+                        // Phase 1 follow-up: the supervisor never creates
+                        // batch-* worktrees anymore — remaining directories
+                        // under `.djinn/worktrees/` are legacy debris.
+                        // Remove them via direct filesystem ops, then run a
+                        // single `git worktree prune` to clear any stale
+                        // administrative refs in the repo.
                         for batch_dir in batch_dirs {
                             let batch_str = batch_dir.display().to_string();
                             if active_worktree_paths.contains(&batch_str) {
@@ -178,7 +182,7 @@ pub(super) async fn board_reconcile_impl(
                                 worktree = %batch_dir.display(),
                                 "board_reconcile: removing stale batch-* worktree"
                             );
-                            if let Err(e) = git.remove_worktree(&batch_dir).await {
+                            if let Err(e) = tokio::fs::remove_dir_all(&batch_dir).await {
                                 tracing::warn!(
                                     project_id = %project_id,
                                     worktree = %batch_dir.display(),
@@ -195,10 +199,17 @@ pub(super) async fn board_reconcile_impl(
                                 );
                             }
                         }
-                        if !stale_batch_worktrees.is_empty() {
-                            let _ = git
+                        if !stale_batch_worktrees.is_empty()
+                            && let Ok(git) = server.state.git_actor(&project_path).await
+                            && let Err(e) = git
                                 .run_command(vec!["worktree".into(), "prune".into()])
-                                .await;
+                                .await
+                        {
+                            tracing::warn!(
+                                project_id = %project_id,
+                                error = %e,
+                                "board_reconcile: `git worktree prune` failed; continuing"
+                            );
                         }
                     }
                 }
