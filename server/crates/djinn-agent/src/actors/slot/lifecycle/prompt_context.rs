@@ -14,13 +14,11 @@
 //! strings themselves). This mirrors the byte-for-byte behaviour of the
 //! former inline block between lines ~671 and ~844 of `lifecycle.rs`.
 //!
-//! Worker-resume context is intentionally **not** handled here — that block
-//! hangs off a paused session record + saved conversation that the supervisor
-//! path does not currently materialize.  See the crate-level note in
-//! `supervisor_impl::stage::execute_stage` for the remaining blockers
-//! (`find_paused_session_record`, `resume_context_for_task`,
-//! `CompactionContext::PreResume` were all deleted as dead code in commit
-//! 6bf5d5931 — resurrecting cross-run session resume is a separate effort).
+//! Worker-resume context is intentionally **not** handled here: the
+//! supervisor flow has no paused-session record to resume from. See the
+//! `## Deferred: worker-resume` block in
+//! [`crate::supervisor_impl::stage`] for the list of deleted helpers + the
+//! cross-crate plumbing a reintroduction would need.
 
 use std::path::Path;
 
@@ -85,13 +83,12 @@ pub(crate) struct PromptContext {
 
 /// Inputs for [`build_prompt_context`].
 ///
-/// The supervisor path populates `conflict_ctx` from
-/// `conflict_context_for_dispatch` and fills
-/// `system_prompt_extensions` / `learned_prompt` from the resolved role
-/// overrides (`lifecycle::role_overrides::resolve_role_overrides`). The
-/// sibling `merge_validation_ctx` slot stays `None` because the legacy
-/// merge-validation prompt helper was deleted as dead code in commit
-/// 6bf5d5931 — resurrecting that path is a separate, scoped follow-up.
+/// The supervisor path fills `conflict_ctx`,
+/// `system_prompt_extensions`, and `learned_prompt` from
+/// `conflict_context_for_dispatch` +
+/// [`lifecycle::role_overrides::resolve_role_overrides`].  `merge_validation_ctx`
+/// stays `None` — the legacy merge-validation prompt helper was deleted as
+/// dead code in commit 6bf5d5931.
 #[allow(clippy::too_many_arguments)]
 pub(crate) struct PromptContextInputs<'a> {
     pub task: &'a Task,
