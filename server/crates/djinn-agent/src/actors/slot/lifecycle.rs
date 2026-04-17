@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::run_commands;
 use crate::context::AgentContext;
 use crate::message::{Conversation, Message};
 use crate::prompts::TaskContext;
@@ -25,8 +24,10 @@ use super::*;
 use crate::AgentType;
 
 mod retry;
+mod setup;
 mod teardown;
 
+use setup::{SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context};
 use teardown::{PostSessionParams, apply_transition_and_dispatch, spawn_post_session_work};
 
 /// Sort tool schemas deterministically for prompt-cache stability (ADR-048
@@ -735,171 +736,44 @@ pub(crate) async fn run_task_lifecycle(params: TaskLifecycleParams) -> anyhow::R
         Vec::new()
     };
 
-    let (prompt_setup_commands, prompt_verification_commands, prompt_verification_rules) = {
-        let setup_specs = settings.setup;
-        let verification_rules = settings.verification_rules;
-        let prompt_setup_commands = format_command_details(&setup_specs);
-        // Role-level verification_command overrides .djinn/settings.json when set.
-        let prompt_verification_commands = if let Some(ref cmd) = role_verification_command {
-            if !cmd.trim().is_empty() {
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    command = %cmd,
-                    "Lifecycle: using role-level verification_command override"
-                );
-                Some(cmd.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if !setup_specs.is_empty() {
-            let setup_start = std::time::Instant::now();
-            tracing::info!(
-                task_id = %task.short_id,
-                command_count = setup_specs.len(),
-                "Lifecycle: running setup commands"
-            );
-            let mut setup_results = Vec::new();
-            let mut setup_error: Option<anyhow::Error> = None;
-            for spec in &setup_specs {
-                emit_step(
+    let SetupAndVerificationContext {
+        prompt_setup_commands,
+        prompt_verification_commands,
+        prompt_verification_rules,
+    } = match resolve_setup_and_verification_context(
+        settings,
+        role_verification_command.as_deref(),
+        &worktree_path,
+        &task.id,
+        &task.short_id,
+        &app_state,
+    )
+    .await
+    {
+        Ok(ctx) => ctx,
+        Err(SetupError { reason }) => {
+            let task_repo =
+                TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            let _ = task_repo
+                .transition(
                     &task.id,
-                    "setup_command_started",
-                    serde_json::json!({"name": spec.name, "command": spec.command}),
-                );
-                match run_commands(std::slice::from_ref(spec), &worktree_path).await {
-                    Ok(mut results) => {
-                        if let Some(result) = results.pop() {
-                            let status = if result.exit_code == 0 { "ok" } else { "error" };
-                            emit_step(
-                                &task.id,
-                                "setup_command_finished",
-                                serde_json::json!({"name": result.name, "status": status, "exit_code": result.exit_code}),
-                            );
-                            setup_results.push(result);
-                            if status == "error" {
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        emit_step(
-                            &task.id,
-                            "setup_command_finished",
-                            serde_json::json!({"name": spec.name, "status": "error", "error": e.to_string()}),
-                        );
-                        setup_error = Some(e);
-                        break;
-                    }
-                }
-            }
-
-            match setup_error {
-                Some(e) => {
-                    let reason = format!("Setup commands error: {e}");
-                    tracing::warn!(task_id = %task.short_id, error = %e, "Lifecycle: setup command error");
-                    let task_repo =
-                        TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                    let _ = task_repo
-                        .transition(
-                            &task.id,
-                            (runtime_role.config().release_action)(),
-                            "agent-supervisor",
-                            "system",
-                            Some(&reason),
-                            None,
-                        )
-                        .await;
-                    teardown_worktree(
-                        &task.short_id,
-                        &worktree_path,
-                        &project_dir,
-                        &app_state,
-                        false,
-                    )
-                    .await;
-                    return_free!();
-                }
-                None => {
-                    crate::actors::slot::commands::log_commands_run_event(
-                        &task.id,
-                        "setup",
-                        &setup_specs,
-                        &setup_results,
-                        &app_state,
-                    )
-                    .await;
-                    let failed = setup_results.iter().find(|r| r.exit_code != 0);
-                    if let Some(failure) = failed {
-                        let reason = format!(
-                            "Setup command '{}' failed (exit {})\nstdout: {}\nstderr: {}",
-                            failure.name,
-                            failure.exit_code,
-                            failure.stdout.trim(),
-                            failure.stderr.trim(),
-                        );
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            command = %failure.name,
-                            "Lifecycle: setup command failed; releasing task"
-                        );
-                        let task_repo =
-                            TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                        let _ = task_repo
-                            .transition(
-                                &task.id,
-                                (runtime_role.config().release_action)(),
-                                "agent-supervisor",
-                                "system",
-                                Some(&reason),
-                                None,
-                            )
-                            .await;
-                        teardown_worktree(
-                            &task.short_id,
-                            &worktree_path,
-                            &project_dir,
-                            &app_state,
-                            false,
-                        )
-                        .await;
-                        return_free!();
-                    }
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        duration_ms = setup_start.elapsed().as_millis(),
-                        "Lifecycle: setup commands completed"
-                    );
-                }
-            }
+                    (runtime_role.config().release_action)(),
+                    "agent-supervisor",
+                    "system",
+                    Some(&reason),
+                    None,
+                )
+                .await;
+            teardown_worktree(
+                &task.short_id,
+                &worktree_path,
+                &project_dir,
+                &app_state,
+                false,
+            )
+            .await;
+            return_free!();
         }
-        // Format verification_rules as a markdown list for the prompt.
-        // Each rule becomes: "- `<pattern>`: `cmd1`, `cmd2`"
-        let prompt_verification_rules = if verification_rules.is_empty() {
-            None
-        } else {
-            let formatted = verification_rules
-                .iter()
-                .map(|r| {
-                    let cmds = r
-                        .commands
-                        .iter()
-                        .map(|c| format!("`{c}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("- `{}`: {}", r.pattern, cmds)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Some(formatted)
-        };
-        (
-            prompt_setup_commands,
-            prompt_verification_commands,
-            prompt_verification_rules,
-        )
     };
 
     let conflict_files = conflict_ctx.as_ref().map(|m| {
