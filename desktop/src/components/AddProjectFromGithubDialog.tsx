@@ -72,9 +72,11 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return repos;
+    // Match names only — we no longer render descriptions, so folding
+    // them into the filter would produce "phantom" matches (a row shows
+    // up even though nothing on screen contains the query).
     return repos.filter((r) =>
-      `${r.owner}/${r.repo}`.toLowerCase().includes(q) ||
-      (r.description?.toLowerCase().includes(q) ?? false),
+      `${r.owner}/${r.repo}`.toLowerCase().includes(q),
     );
   }, [repos, query]);
 
