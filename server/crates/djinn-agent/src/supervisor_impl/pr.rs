@@ -21,7 +21,6 @@ use djinn_db::{ProjectRepository, TaskRepository};
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
 use djinn_provider::github_app::{app_id as github_app_id, installations::get_installation_token};
 use djinn_runtime::spec::{TaskRunOutcome, TaskRunSpec};
-use djinn_supervisor::SupervisorServices;
 
 use super::SupervisorCallbackContext;
 use crate::actors::slot::helpers::default_target_branch;
@@ -36,7 +35,6 @@ pub(crate) async fn supervisor_pr_open(
     spec: &TaskRunSpec,
     task: &djinn_core::models::Task,
     callbacks: &SupervisorCallbackContext,
-    _services: &SupervisorServices,
 ) -> TaskRunOutcome {
     if github_app_id().is_err() {
         return TaskRunOutcome::Failed {

@@ -32,7 +32,7 @@ use djinn_core::models::{SessionStatus, Task};
 use djinn_db::SessionRepository;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
-use djinn_supervisor::{StageError, StageOutcome, SupervisorServices};
+use djinn_supervisor::{StageError, StageOutcome};
 use djinn_workspace::Workspace;
 
 use crate::AgentType;
@@ -74,7 +74,6 @@ pub(crate) async fn execute_stage(
     task_run_id: &str,
     spec: &TaskRunSpec,
     callbacks: &SupervisorCallbackContext,
-    _services: &SupervisorServices,
 ) -> Result<StageOutcome, StageError> {
     let role = role_arc_for(role_kind);
     let role_name = role.config().name;

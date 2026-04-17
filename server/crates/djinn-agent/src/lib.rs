@@ -28,6 +28,7 @@ pub mod mcp_client;
 pub mod roles;
 pub mod sandbox;
 pub mod skills;
+pub mod direct_services;
 pub mod supervisor;
 pub(crate) mod supervisor_impl;
 pub(crate) mod truncate;
