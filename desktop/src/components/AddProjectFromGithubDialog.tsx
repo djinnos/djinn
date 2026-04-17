@@ -111,7 +111,9 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      {/* Use the `sm:` variant so tailwind-merge overrides the base
+          DialogContent's `sm:max-w-sm` (same variant → later wins). */}
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Add project from GitHub</DialogTitle>
           <DialogDescription>
