@@ -1,6 +1,9 @@
-//! Bincode-over-unix-socket wire envelope for [`SupervisorServices`].
+//! Bincode wire envelope for [`SupervisorServices`].
 //!
-//! Phase 2 PR 5 of `/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md`.
+//! Phase 2 K8s PR 2 of `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`.
+//! The production transport is TCP (worker Pods dialling the djinn-server
+//! ClusterIP Service); the original unix-socket transport still exists on
+//! the launcher side for in-process tests.
 //!
 //! This module lives inside `djinn-supervisor` (rather than upstream in
 //! `djinn-runtime`) because the request/response variants reference
@@ -64,8 +67,8 @@ pub enum FramePayload {
     /// connection (Phase 2 K8s PR 2).  The launcher validates the bearer
     /// token via an injected [`crate::services::server::TokenValidator`]
     /// before accepting any subsequent [`FramePayload::Rpc`].  Not used on
-    /// the legacy unix-socket path (that path trusts the filesystem
-    /// permissions on the socket).
+    /// the in-process unix-socket test path (that path trusts the
+    /// filesystem permissions on the socket).
     AuthHello(AuthHelloMsg),
     /// Launcher → worker auth result, delivered in response to an
     /// [`FramePayload::AuthHello`] on the TCP path.  On rejection the

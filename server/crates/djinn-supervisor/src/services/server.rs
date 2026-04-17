@@ -2,17 +2,17 @@
 //!
 //! Phase 2 K8s PR 2 of `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`.
 //!
-//! The original [`serve_on_unix_socket`] (Phase 2 PR 5 of the retired
-//! `phase2-localdocker-scaffolding.md`) lives on for tests and the in-process
-//! supervisor path.  Alongside it, PR 2 lands [`serve_on_tcp`] — the same
-//! dispatch loop over a TCP listener guarded by an [`AuthHello`] handshake
-//! validated through an injected [`TokenValidator`].
+//! [`serve_on_tcp`] is the production transport — worker Pods dial the
+//! djinn-server ClusterIP Service and present an [`AuthHello`] handshake
+//! validated through an injected [`TokenValidator`].  The older
+//! [`serve_on_unix_socket`] stays alongside it for in-process tests that
+//! exercise the shared dispatch loop without the auth round-trip.
 //!
 //! ## Transports
 //!
 //! | Transport | Handshake | Intended caller |
 //! |---|---|---|
-//! | `serve_on_unix_socket` | none — filesystem perms | in-process tests + legacy path |
+//! | `serve_on_unix_socket` | none — filesystem perms | in-process tests |
 //! | `serve_on_tcp` | `FramePayload::AuthHello { task_run_id, token }` | K8s Pod workers hitting the ClusterIP Service |
 //!
 //! ## Dispatch loop
@@ -71,9 +71,11 @@ pub struct TokenValidation {
 ///
 /// Impls live outside this crate:
 ///
-/// - `djinn-k8s::KubernetesTokenValidator` (follow-up PR) — posts a
-///   `TokenReview` against the in-cluster apiserver and verifies the SA
-///   identity encodes the expected task-run id.
+/// - `djinn_agent::runtime_bridge::K8sTokenReviewValidator` — posts a
+///   `TokenReview` against the in-cluster apiserver via
+///   `djinn_k8s::token_review::review_token` and returns the authenticated
+///   SA identity.  Wired into djinn-server boot in
+///   `server::state::AppState::start_rpc_listener_if_needed`.
 /// - [`AllowAllValidator`] / [`DenyAllValidator`] / [`ExpectedTokenValidator`]
 ///   — test stubs in this crate.
 #[async_trait]
@@ -209,14 +211,14 @@ impl ServeHandle {
     }
 }
 
-// ── serve_on_unix_socket (legacy path, kept for tests) ───────────────────────
+// ── serve_on_unix_socket (in-process test path) ──────────────────────────────
 
 /// Bind a Unix-domain socket at `path` and spawn the accept loop.
 ///
-/// Intended for in-process tests and the legacy launcher path.  The TCP
-/// path ([`serve_on_tcp`]) is the production transport after Phase 2 K8s
-/// PR 2; this entry point stays functional so `rpc_roundtrip.rs` keeps
-/// exercising the dispatch without extra auth machinery.
+/// Intended for in-process tests only.  The TCP path ([`serve_on_tcp`]) is
+/// the production transport after Phase 2 K8s PR 2; this entry point stays
+/// functional so `rpc_roundtrip.rs` keeps exercising the dispatch without
+/// extra auth machinery.
 pub async fn serve_on_unix_socket<P: AsRef<Path>>(
     path: P,
     services: Arc<dyn SupervisorServices>,
@@ -268,10 +270,11 @@ pub async fn serve_on_unix_socket<P: AsRef<Path>>(
 /// Per-task-run connection state stored on the listener.
 ///
 /// Single entry per `task_run_id`; the listener rejects a second AuthHello
-/// bearing an already-bound task_run_id.  In PR 2 the value is minimal —
-/// PR 4 extends it with a reference to the outbound control channel so the
-/// host-side dispatcher can push `Cancel` / `Shutdown` frames to the right
-/// connection.
+/// bearing an already-bound task_run_id.  The value is intentionally
+/// minimal today.
+// TODO(phase 2.1): carry an `mpsc::Sender<Frame>` back into the
+// per-connection writer so the host-side dispatcher can push `Cancel` /
+// `Shutdown` control frames at a specific task-run.
 #[derive(Debug)]
 struct ConnState {
     /// Username the validator returned — useful for audit logs.
