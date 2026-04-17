@@ -21,10 +21,37 @@
 //! ## Scope
 //!
 //! Wires the extracted lifecycle helpers ([`model_resolution`], [`setup`],
-//! [`mcp_resolve`], [`prompt_context`]) into the reply loop so a single role
-//! stage can run end-to-end against a mirror-born ephemeral workspace, then
-//! maps the reply-loop outcome onto [`StageOutcome`] (re-exported from
-//! `djinn-supervisor`).
+//! [`mcp_resolve`], [`prompt_context`], [`role_overrides`]) into the reply
+//! loop so a single role stage can run end-to-end against a mirror-born
+//! ephemeral workspace, then maps the reply-loop outcome onto
+//! [`StageOutcome`] (re-exported from `djinn-supervisor`).
+//!
+//! ## Deferred: worker-resume
+//!
+//! The legacy `run_task_lifecycle` re-attached a paused session's
+//! conversation and carried forward the prior reply-loop state when a
+//! worker slot resumed a previously-paused task.  The supervisor path does
+//! **not** implement that yet — every stage starts a fresh session record
+//! with a freshly-built conversation.  Plumbing this through would require
+//! reviving three dead-code deletions from commit 6bf5d5931:
+//!
+//! - `slot::helpers::find_paused_session_record` — scans
+//!   `SessionStatus::Paused` rows for `(task_id, role, model_id)` matches.
+//! - `slot::helpers::resume_context_for_task` — builds the resume-prompt
+//!   preamble (activity log, rejection reasons, conflict context) the
+//!   resuming worker sees instead of a fresh `initial_user_message`.
+//! - `compaction::CompactionContext::PreResume` — compacts the restored
+//!   conversation before the resumed session enters the reply loop.
+//!
+//! And even past those, the supervisor flow has no place to *write* a
+//! paused-session row today: stages end as `Completed` or `Failed` and
+//! tear down at once.  A mid-stage pause seam plus its cross-run
+//! conversation serialisation (the `conversation_store.rs` file deleted in
+//! commit 110385b07) is a cross-crate change — `djinn-db` would need a
+//! stable serialized conversation column, and the supervisor/runtime
+//! contract would need to surface a "pause this run and let the next
+//! dispatch resume it" signal.  Out of scope for the Phase 1 holdover
+//! cleanup.
 
 use std::sync::Arc;
 
