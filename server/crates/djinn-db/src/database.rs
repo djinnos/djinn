@@ -109,7 +109,20 @@ pub struct Database {
     bootstrap: DatabaseBootstrapInfo,
     capabilities: DatabaseBackendCapabilities,
     initialized: Arc<OnceCell<()>>,
+    test_branch: Option<TestBranchInit>,
 }
+
+#[derive(Clone, Debug)]
+struct TestBranchInit {
+    server_prefix: String,
+    shared_db: String,
+    branch: String,
+}
+
+/// Process-wide guard: the shared `djinn_test` database is created and
+/// migrated exactly once per test process, regardless of how many
+/// `open_in_memory()` callers fan out. Branch creation is per-instance.
+static SHARED_TEST_DB_INIT: OnceCell<()> = OnceCell::const_new();
 
 impl Database {
     /// Open a database using an explicit backend selection seam.
@@ -119,58 +132,53 @@ impl Database {
         }
     }
 
-    /// Open a fresh MySQL/Dolt database for tests.
+    /// Open an isolated Dolt branch for a single test.
     ///
-    /// Generates a unique database name (`djinn_test_{uuid_simple}`) under the
-    /// MySQL server pointed to by `DJINN_TEST_MYSQL_URL` (defaults to
-    /// `mysql://root@127.0.0.1:3307` — the isolated test Dolt from
-    /// `docker compose --profile tests up dolt-test`). The default is
-    /// deliberately NOT the dev Dolt on :3306 — tests pollute the server
-    /// with thousands of `djinn_test_*` databases that balloon its RAM
-    /// footprint. Overriding to :3306 requires an explicit env var.
-    /// Returns a `Database` configured against that fresh DB;
-    /// `ensure_initialized()` will `CREATE DATABASE` and run the full
-    /// MySQL migration chain on first use.
+    /// Uses one shared `djinn_test` database and creates a fresh branch per
+    /// caller (`t_{uuid_simple}`). A Dolt branch is an O(1) ref pointer, so
+    /// 500 concurrent tests cost ~1x the per-database RAM overhead (commit
+    /// graph + table file index) instead of 500x. The prior design created
+    /// a full DB per test and pushed the test-Dolt container past its 8 GiB
+    /// cap once branches accumulated.
+    ///
+    /// Connects against `DJINN_TEST_MYSQL_URL` (default
+    /// `mysql://root@127.0.0.1:3307`, the isolated test Dolt on port 3307
+    /// from `docker compose`). The returned `Database` has a lazy pool: the
+    /// branch is not created until the first `ensure_initialized()` call.
+    ///
+    /// ## Isolation
+    ///
+    /// Each new connection from the pool runs `USE djinn_test/<branch>` in
+    /// `after_connect`, so every query is pinned to this test's branch.
+    /// Writes on one branch are invisible to other branches.
     ///
     /// ## Cleanup
     ///
-    /// Test databases are **leaked** — they persist on the Dolt server after
-    /// the test process exits. Run `make test-db-clean` (server/Makefile) to
-    /// drop all `djinn_test_*` databases between runs.
-    ///
-    /// Rationale: `Database` is `Clone`, so a `Drop` impl would fire on every
-    /// clone going out of scope — either prematurely dropping the live DB or
-    /// requiring refcounted guard wrapping that every one of ~230 call sites
-    /// would have to opt into. Leak-plus-cleanup is simpler and matches how
-    /// most MySQL integration suites handle ephemeral DBs.
+    /// Branches are leaked — they persist until `make test-db-clean` drops
+    /// all `t_*` branches, or `make test-db-reset` wipes the container. See
+    /// the note on `open_mysql` regarding why a `Drop` impl isn't viable
+    /// given `Database: Clone`.
     pub fn open_in_memory() -> DbResult<Self> {
         let base_url = std::env::var("DJINN_TEST_MYSQL_URL")
             .unwrap_or_else(|_| "mysql://root@127.0.0.1:3307".to_owned());
-        let db_name = format!("djinn_test_{}", uuid::Uuid::now_v7().simple());
-        // Strip any trailing database path from the base URL before appending
-        // the fresh test DB name.
-        let trimmed = base_url.trim_end_matches('/');
-        let (server_prefix, _existing_db) = match trimmed.strip_prefix("mysql://") {
-            Some(after_scheme) => {
-                if let Some(slash) = after_scheme.find('/') {
-                    (
-                        format!("mysql://{}", &after_scheme[..slash]),
-                        Some(&after_scheme[slash + 1..]),
-                    )
-                } else {
-                    (format!("mysql://{after_scheme}"), None)
-                }
-            }
-            None => (trimmed.to_owned(), None),
-        };
-        let url = format!("{server_prefix}/{db_name}");
+        let server_prefix = strip_server_prefix(&base_url);
+        let shared_db = "djinn_test".to_owned();
+        let branch = format!("t_{}", uuid::Uuid::now_v7().simple());
+        // Pool connects to the shared DB; after_connect pins each conn to
+        // the branch via `USE djinn_test/<branch>`.
+        let url = format!("{server_prefix}/{shared_db}");
 
-        Self::open_mysql(
+        Self::open_mysql_inner(
             &MysqlDatabaseConfig {
                 url,
                 flavor: MysqlBackendFlavor::Dolt,
             },
             4,
+            Some(TestBranchInit {
+                server_prefix,
+                shared_db,
+                branch,
+            }),
         )
     }
 
@@ -195,14 +203,33 @@ impl Database {
     }
 
     fn open_mysql(config: &MysqlDatabaseConfig, max_connections: u32) -> DbResult<Self> {
+        Self::open_mysql_inner(config, max_connections, None)
+    }
+
+    fn open_mysql_inner(
+        config: &MysqlDatabaseConfig,
+        max_connections: u32,
+        test_branch: Option<TestBranchInit>,
+    ) -> DbResult<Self> {
         let opts = MySqlConnectOptions::from_str(&config.url)?;
+        // Precompute the `USE db/branch` statement so the after_connect
+        // closure can be shared (no per-connection allocation).
+        let use_branch_stmt = test_branch.as_ref().map(|init| {
+            // Branch names are UUIDv7 hex (ASCII alphanumerics + underscore),
+            // shared_db is a const — safe to interpolate without quoting.
+            format!("USE {}/{}", init.shared_db, init.branch)
+        });
         let pool = MySqlPoolOptions::new()
             .max_connections(max_connections)
-            .after_connect(|conn, _meta| {
+            .after_connect(move |conn, _meta| {
+                let use_branch_stmt = use_branch_stmt.clone();
                 Box::pin(async move {
                     sqlx::query("SET SESSION sql_mode = CONCAT(@@sql_mode, ',STRICT_ALL_TABLES')")
                         .execute(&mut *conn)
                         .await?;
+                    if let Some(stmt) = use_branch_stmt {
+                        sqlx::query(&stmt).execute(&mut *conn).await?;
+                    }
                     Ok(())
                 })
             })
@@ -229,6 +256,7 @@ impl Database {
                 supports_readonly_connection_mode: false,
             },
             initialized: Arc::new(OnceCell::new()),
+            test_branch,
         })
     }
 
@@ -252,20 +280,108 @@ impl Database {
 
         let pool = self.pool.clone();
         let url = self.bootstrap.target.clone();
+        let test_branch = self.test_branch.clone();
         self.initialized
             .get_or_try_init(|| async move {
-                migrations::ensure_mysql_database_exists(&url).await?;
-                sqlx::migrate!("./migrations_mysql")
-                    .run(&pool)
-                    .await
-                    .map_err(|e: sqlx::migrate::MigrateError| {
-                        DbError::InvalidData(e.to_string())
-                    })?;
+                match test_branch {
+                    Some(init) => {
+                        // Shared djinn_test DB + migrations on `main` —
+                        // once per process, regardless of test fan-out.
+                        SHARED_TEST_DB_INIT
+                            .get_or_try_init(|| {
+                                init_shared_test_db(
+                                    init.server_prefix.clone(),
+                                    init.shared_db.clone(),
+                                )
+                            })
+                            .await?;
+                        // Per-instance: create the branch this test will
+                        // write against. UUIDv7 names don't collide.
+                        create_test_branch(
+                            &init.server_prefix,
+                            &init.shared_db,
+                            &init.branch,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        migrations::ensure_mysql_database_exists(&url).await?;
+                        sqlx::migrate!("./migrations_mysql")
+                            .run(&pool)
+                            .await
+                            .map_err(|e: sqlx::migrate::MigrateError| {
+                                DbError::InvalidData(e.to_string())
+                            })?;
+                    }
+                }
                 Ok::<(), DbError>(())
             })
             .await?;
         Ok(())
     }
+}
+
+fn strip_server_prefix(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    match trimmed.strip_prefix("mysql://") {
+        Some(after_scheme) => match after_scheme.find('/') {
+            Some(slash) => format!("mysql://{}", &after_scheme[..slash]),
+            None => format!("mysql://{after_scheme}"),
+        },
+        None => trimmed.to_owned(),
+    }
+}
+
+async fn init_shared_test_db(server_prefix: String, shared_db: String) -> DbResult<()> {
+    let url = format!("{server_prefix}/{shared_db}");
+    migrations::ensure_mysql_database_exists(&url).await?;
+    let pool = MySqlPool::connect(&url)
+        .await
+        .map_err(DbError::from)?;
+    let result = async {
+        sqlx::migrate!("./migrations_mysql")
+            .run(&pool)
+            .await
+            .map_err(|e: sqlx::migrate::MigrateError| DbError::InvalidData(e.to_string()))?;
+        // Dolt branches fork from the latest *commit*, not the working
+        // root. Without this commit, `CALL DOLT_BRANCH('t_x', 'main')`
+        // would produce a branch with an empty schema because the
+        // migrations live in main's unstaged working root.
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dolt_status")
+            .fetch_one(&pool)
+            .await
+            .map_err(DbError::from)?;
+        if pending > 0 {
+            sqlx::query("CALL DOLT_ADD('-A')")
+                .execute(&pool)
+                .await
+                .map_err(DbError::from)?;
+            sqlx::query("CALL DOLT_COMMIT('-m', 'apply test migrations on main')")
+                .execute(&pool)
+                .await
+                .map_err(DbError::from)?;
+        }
+        Ok::<(), DbError>(())
+    }
+    .await;
+    pool.close().await;
+    result
+}
+
+async fn create_test_branch(
+    server_prefix: &str,
+    shared_db: &str,
+    branch: &str,
+) -> DbResult<()> {
+    use sqlx::{ConnectOptions, Connection, Executor};
+    let url = format!("{server_prefix}/{shared_db}");
+    let opts = MySqlConnectOptions::from_str(&url)
+        .map_err(|e| DbError::InvalidData(format!("invalid mysql url: {e}")))?;
+    let mut conn = opts.connect().await.map_err(DbError::from)?;
+    let stmt = format!("CALL DOLT_BRANCH('{branch}', 'main')");
+    conn.execute(stmt.as_str()).await.map_err(DbError::from)?;
+    conn.close().await.map_err(DbError::from)?;
+    Ok(())
 }
 
 /// Workspace-local tempdir helper retained for tests that still stage
@@ -368,11 +484,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn open_in_memory_generates_unique_db_names() {
+    async fn open_in_memory_generates_unique_branches() {
         let a = Database::open_in_memory().unwrap();
         let b = Database::open_in_memory().unwrap();
-        assert_ne!(a.bootstrap_info().target, b.bootstrap_info().target);
-        assert!(a.bootstrap_info().target.contains("djinn_test_"));
+        // Every test shares the same underlying database but gets its own
+        // branch. Distinctness is at the branch level, not the URL.
+        let a_branch = a
+            .test_branch
+            .as_ref()
+            .expect("open_in_memory sets test_branch");
+        let b_branch = b
+            .test_branch
+            .as_ref()
+            .expect("open_in_memory sets test_branch");
+        assert_ne!(a_branch.branch, b_branch.branch);
+        assert!(a_branch.branch.starts_with("t_"));
+        assert_eq!(a_branch.shared_db, "djinn_test");
+        assert_eq!(a.bootstrap_info().target, b.bootstrap_info().target);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
