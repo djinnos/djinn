@@ -26,8 +26,16 @@ data:
   DJINN_TASKRUN_NAMESPACE: {{ include "djinn.namespace" . | quote }}
   DJINN_TASKRUN_SERVICE_ACCOUNT: {{ include "djinn.serviceAccountName.taskrun" . | quote }}
   DJINN_SERVER_RPC_ADDR: {{ printf "%s.%s.svc.cluster.local:%d" (include "djinn.serviceName.server" .) (include "djinn.namespace" .) (.Values.service.rpcPort | int) | quote }}
-  {{- with .Values.env.publicUrl }}
-  DJINN_PUBLIC_URL: {{ . | quote }}
+  # OAuth callbacks + browser redirects mint URLs against DJINN_PUBLIC_URL.
+  # Precedence: explicit env.publicUrl override → Ingress host (when the
+  # Ingress is enabled) → in-cluster Service DNS. We always render a value
+  # so the binary never falls back to its 127.0.0.1 CLI default in-cluster.
+  {{- if .Values.env.publicUrl }}
+  DJINN_PUBLIC_URL: {{ .Values.env.publicUrl | quote }}
+  {{- else if and .Values.ingress.enabled .Values.ingress.host }}
+  DJINN_PUBLIC_URL: {{ printf "%s://%s" (ternary "https" "http" .Values.ingress.tls.enabled) .Values.ingress.host | quote }}
+  {{- else }}
+  DJINN_PUBLIC_URL: {{ printf "http://%s.%s.svc.cluster.local:%d" (include "djinn.serviceName.server" .) (include "djinn.namespace" .) (.Values.service.apiPort | int) | quote }}
   {{- end }}
   {{- with .Values.env.webUrl }}
   DJINN_WEB_URL: {{ . | quote }}
