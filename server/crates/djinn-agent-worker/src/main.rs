@@ -30,10 +30,12 @@
 //!    placeholder driver for the full `TaskRunSupervisor::new(...).run(spec)`
 //!    (the supervisor needs a real `TaskRunRepository` + `MirrorManager`
 //!    which we won't plumb into the worker until PR 6/7).
-//! 7. Emits the terminal [`TaskRunReport`] as a length-prefixed bincode
-//!    frame on stdout so the launcher / test harness can observe the
-//!    terminal outcome without stripping the tracing log lines that land on
-//!    stderr.
+//! 7. Emits the terminal [`TaskRunReport`] as a
+//!    [`djinn_runtime::WorkerEvent::TerminalReport`] frame on the same RPC
+//!    connection (correlation id `0`) so the launcher's per-task-run
+//!    dispatch can pair it with the `KubernetesRuntime::teardown` path.
+//!    The legacy stdout-frame fallback was retired with Phase 2.1 — worker
+//!    and server images ship together, so there is no staged rollout.
 //!
 //! ## What this binary deliberately does NOT do
 //!
@@ -63,15 +65,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use djinn_runtime::{RoleKind, TaskRunOutcome, TaskRunReport, TaskRunSpec};
+use djinn_runtime::{RoleKind, TaskRunOutcome, TaskRunReport, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices};
 use djinn_workspace::Workspace;
-use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
-
-mod ipc;
 
 /// Command-line arguments for the worker binary.
 ///
@@ -204,20 +203,44 @@ async fn run() -> Result<()> {
         .await
         .context("placeholder supervisor drive")?;
 
-    // 7. Emit the terminal report as a bincode frame on stdout.  Tracing
-    //    logs stay on stderr so test harnesses can decode the report byte
-    //    stream without stripping log lines first.  A later PR may move the
-    //    report onto the RPC connection entirely.
-    let mut stdout = tokio::io::stdout();
-    ipc::write_frame(&mut stdout, &report)
+    // 7. Ship the terminal report back to the launcher as a `WorkerEvent::
+    //    TerminalReport` on the same RPC connection (Phase 2.1).  The
+    //    launcher's `KubernetesRuntime::teardown` drains the pending
+    //    connection's event channel looking for this frame and uses it as
+    //    the authoritative terminal report, falling back to Job-status
+    //    polling only if the stream closes without emitting one.  Best-effort:
+    //    if the writer task already exited (e.g. the launcher tore the
+    //    connection down first) we log the drop but still exit zero — the
+    //    Job-status fallback on the launcher side covers that case.
+    if let Err(e) = rpc
+        .emit_event(WorkerEvent::TerminalReport(report))
         .await
-        .context("emit TaskRunReport frame on stdout")?;
-    stdout.flush().await.ok();
+    {
+        warn!(
+            error = %e,
+            "failed to emit TerminalReport over RPC; launcher will fall back to Job-status polling"
+        );
+    }
 
     // 8. Shut down the RPC background tasks cleanly.
+    //
+    //    Order matters: drop every `Arc<RpcServices>` handle (which owns
+    //    the outbound `mpsc::Sender<Frame>`) *before* signalling the
+    //    supervisor-wide cancel.  Dropping the last sender makes the writer
+    //    loop's `rx.recv().await` return `None`, so it drains any remaining
+    //    frames (including the TerminalReport we just queued) before
+    //    shutting down the write half.  If we fired `cancel.cancel()`
+    //    first, the writer's `tokio::select!` would take its `biased`
+    //    cancel branch and tear the connection down before the event left
+    //    the process — the launcher would then fall back to Job-status
+    //    polling even on the happy path.
+    drop(services);
+    drop(rpc);
+    let _ = background.writer.await;
+    // Reader still needs an explicit cancel — it's parked on a read that
+    // won't wake up on its own now that we've closed our side of the write.
     cancel.cancel();
     let _ = background.reader.await;
-    let _ = background.writer.await;
 
     drop(workspace);
     Ok(())

@@ -243,6 +243,31 @@ impl RpcServices {
         Ok(Self::from_split(read_half, write_half, cancel))
     }
 
+    /// Push an out-of-band [`WorkerEvent`] onto the outbound mpsc channel so
+    /// the writer task frames it as a [`FramePayload::Event`] on the shared
+    /// RPC socket.
+    ///
+    /// Phase 2.1 follow-up: the worker uses this to ship its terminal
+    /// [`djinn_runtime::TaskRunReport`] back to the launcher via
+    /// [`WorkerEvent::TerminalReport`] instead of the legacy stdout frame.
+    /// Events carry `correlation_id = 0` — they travel out-of-band of any
+    /// request/reply round-trip — matching the convention already used by
+    /// `FramePayload::Control`.
+    ///
+    /// Returns an error only if the outbound channel has been closed (writer
+    /// task exited).  Callers should treat that as "connection lost" and
+    /// give up on further emits.
+    pub async fn emit_event(&self, event: djinn_runtime::WorkerEvent) -> Result<(), String> {
+        let frame = Frame {
+            correlation_id: 0,
+            payload: FramePayload::Event(event),
+        };
+        self.tx
+            .send(frame)
+            .await
+            .map_err(|_| "rpc writer task dropped — cannot emit event".to_string())
+    }
+
     /// Allocate a fresh correlation id, send the request, and await the
     /// matching reply.  Returns a transport-level error if the socket closed
     /// before a reply arrived or the response variant did not match the
