@@ -106,29 +106,30 @@ impl GitHubAppClient {
             .map_err(|e| anyhow!("github-app retry failed: {e}"))
     }
 
-    /// List repositories available to this installation.
+    /// List every repository available to this installation.
     ///
-    /// `GET /installation/repositories` (paginated). For the typical UI
-    /// picker use case we fetch up to `per_page` (max 100) items from the
-    /// first page.
+    /// `GET /installation/repositories` is page-indexed at 1 and caps at
+    /// 100 items per page. GitHub returns `total_count` on page 1, so we
+    /// compute the remaining page count up front and fetch them in order.
+    /// Orgs with hundreds of repos therefore get fully listed instead of
+    /// silently truncated at 100. `per_page` tunes the page size (and
+    /// therefore request count); the returned list is always the full set.
+    ///
+    /// To keep a pathological org from hammering us, we bail at
+    /// [`MAX_PAGES`] and log a warning — callers needing true unlimited
+    /// pagination can extend from there.
     pub async fn list_repositories(
         &self,
         per_page: Option<usize>,
     ) -> Result<Vec<InstallationRepo>> {
+        const MAX_PAGES: u32 = 50; // 50 * 100 = 5000 repos — more than any real org we care about.
+
         let per_page = per_page.unwrap_or(100).clamp(1, 100);
-        let resp = self
-            .get(&format!("/installation/repositories?per_page={per_page}"))
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "/installation/repositories failed ({status}): {body}"
-            ));
-        }
 
         #[derive(Deserialize)]
         struct RepoPage {
+            #[serde(default)]
+            total_count: u32,
             repositories: Vec<RawRepo>,
         }
         #[derive(Deserialize)]
@@ -148,23 +149,61 @@ impl GitHubAppClient {
             login: String,
         }
 
-        let page: RepoPage = resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("failed to decode repo page: {e}"))?;
+        let fetch_page = |page: u32| async move {
+            let resp = self
+                .get(&format!(
+                    "/installation/repositories?per_page={per_page}&page={page}"
+                ))
+                .await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow!(
+                    "/installation/repositories failed ({status}): {body}"
+                ));
+            }
+            resp.json::<RepoPage>()
+                .await
+                .map_err(|e| anyhow!("failed to decode repo page: {e}"))
+        };
 
-        Ok(page
-            .repositories
-            .into_iter()
-            .map(|r| InstallationRepo {
+        let first = fetch_page(1).await?;
+        let total = first.total_count as usize;
+        let per_page_u = per_page as usize;
+        let total_pages = total.div_ceil(per_page_u).max(1) as u32;
+
+        let mut out: Vec<InstallationRepo> = Vec::with_capacity(total);
+        out.extend(first.repositories.into_iter().map(raw_to_installation));
+
+        if total_pages > 1 {
+            let fetch_upto = total_pages.min(MAX_PAGES);
+            if total_pages > MAX_PAGES {
+                tracing::warn!(
+                    installation_id = self.installation_id,
+                    total_repos = total,
+                    total_pages,
+                    max_pages = MAX_PAGES,
+                    "list_repositories: truncating — installation has more repos than MAX_PAGES can cover",
+                );
+            }
+            for page in 2..=fetch_upto {
+                let p = fetch_page(page).await?;
+                out.extend(p.repositories.into_iter().map(raw_to_installation));
+            }
+        }
+
+        return Ok(out);
+
+        fn raw_to_installation(r: RawRepo) -> InstallationRepo {
+            InstallationRepo {
                 owner: r.owner.login,
                 repo: r.name,
                 full_name: r.full_name,
                 default_branch: r.default_branch.unwrap_or_else(|| "main".into()),
                 private: r.private,
                 description: r.description,
-            })
-            .collect())
+            }
+        }
     }
 }
 

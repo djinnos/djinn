@@ -173,7 +173,10 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
               autoFocus
             />
 
-            <ScrollArea className="h-80 rounded-md border">
+            {/* Fluid height — cap at 60vh so the dialog doesn't exceed the
+                viewport on short screens, otherwise let the list grow. The
+                dialog centres on the page and shrink-wraps its content. */}
+            <ScrollArea className="max-h-[60vh] rounded-md border">
               <ul className="divide-y">
                 {filtered.length === 0 ? (
                   <li className="px-3 py-4 text-sm text-muted-foreground">
