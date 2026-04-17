@@ -193,6 +193,84 @@ mod tests {
         (task, note)
     }
 
+    /// Poll the activity log until a coordinator-recorded outcome marker with
+    /// `kind` and `reopen_count` exists for `task_id`, or panic on timeout.
+    ///
+    /// The coordinator applies outcome-confidence penalties asynchronously:
+    /// `set_status*` logs a `status_changed` activity (which broadcasts an
+    /// event), and the coordinator actor later fetches the task, applies the
+    /// Bayesian penalty, and records the marker.  Tests that used a fixed
+    /// `sleep` to wait for that side-effect flaked under load because 50-
+    /// 150ms is not a hard upper bound on scheduler + DB latency.  Polling
+    /// for the marker directly observes the coordinator's completed work.
+    async fn wait_for_outcome_marker(
+        repo: &TaskRepository,
+        task_id: &str,
+        kind: &str,
+        reopen_count: i64,
+    ) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let markers = repo
+                .query_activity(ActivityQuery {
+                    task_id: Some(task_id.to_owned()),
+                    event_type: Some(TASK_OUTCOME_CONFIDENCE_ACTIVITY.to_string()),
+                    actor_role: Some("system".to_string()),
+                    project_id: None,
+                    from_time: None,
+                    to_time: None,
+                    limit: 100,
+                    offset: 0,
+                })
+                .await
+                .unwrap();
+            let found = markers.iter().any(|entry| {
+                serde_json::from_str::<serde_json::Value>(&entry.payload)
+                    .ok()
+                    .map(|payload| {
+                        payload.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
+                            && payload
+                                .get("reopen_count")
+                                .and_then(serde_json::Value::as_i64)
+                                == Some(reopen_count)
+                    })
+                    .unwrap_or(false)
+            });
+            if found {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for outcome marker kind={kind} reopen_count={reopen_count} on task {task_id}"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Count coordinator-recorded outcome-confidence markers for `task_id`.
+    ///
+    /// Used to assert idempotency as an integer invariant (marker count
+    /// unchanged across a duplicate no-op event) rather than as a float-
+    /// equality check on the derived `confidence` — the latter flakes under
+    /// timing jitter because it conflates "penalty not applied" with
+    /// "penalty not YET applied".
+    async fn outcome_marker_count(repo: &TaskRepository, task_id: &str) -> usize {
+        repo.query_activity(ActivityQuery {
+            task_id: Some(task_id.to_owned()),
+            event_type: Some(TASK_OUTCOME_CONFIDENCE_ACTIVITY.to_string()),
+            actor_role: Some("system".to_string()),
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+        .len()
+    }
+
     #[tokio::test]
     async fn dolt_history_maintenance_defaults_to_safe_planning_only_cutover() {
         let service_db = Database::open_in_memory().unwrap();
@@ -952,7 +1030,11 @@ mod tests {
         repo.set_status_with_reason(&task.id, "closed", Some("failed"))
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Deterministic sync: wait for the coordinator to record the
+        // FAILED_CLOSE marker instead of a fixed sleep (which flaked under
+        // load — the coordinator actor processes the status_changed event
+        // asynchronously and 100ms is not a hard upper bound on latency).
+        wait_for_outcome_marker(&repo, &task.id, TASK_OUTCOME_FAILED_CLOSE, 0).await;
 
         let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let note_after = note_repo.get(&note.id).await.unwrap().unwrap();
@@ -989,31 +1071,56 @@ mod tests {
         repo.set_status_with_reason(&task.id, "closed", Some("failed"))
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Deterministic sync on each coordinator-observed side-effect
+        // instead of fixed sleeps.  Fixed-duration sleeps flaked because the
+        // coordinator actor processes status_changed events asynchronously
+        // and 50-150ms is not a hard upper bound on scheduler + DB latency
+        // under parallel-test load.
+        wait_for_outcome_marker(&repo, &task.id, TASK_OUTCOME_FAILED_CLOSE, 0).await;
         repo.set_status(&task.id, "open").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        wait_for_outcome_marker(&repo, &task.id, TASK_OUTCOME_REOPEN_COUNT, 1).await;
         let reopened_once = repo.get(&task.id).await.unwrap().unwrap();
         assert_eq!(reopened_once.reopen_count, 1);
         let after_first = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
         assert!(after_first < 0.5, "first reopen should reduce confidence");
 
+        // Duplicate open→open: the coordinator must treat this as a no-op
+        // (marker for reopen_count=1 already exists).  Assert idempotency as
+        // an integer invariant — the marker count must not grow — rather
+        // than as float-equality on the derived confidence.  Float-equality
+        // conflates "penalty not applied" with "penalty not yet applied"
+        // and is what made the original test flaky.
+        let markers_before_duplicate = outcome_marker_count(&repo, &task.id).await;
         repo.set_status(&task.id, "open").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let after_duplicate = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
-        assert!((after_duplicate - after_first).abs() < 1e-9);
-
+        // There is no positive-side-effect marker to poll for a no-op, so
+        // drive a follow-up transition that DOES produce a marker and poll
+        // for it; once that marker lands we know the duplicate event was
+        // drained from the coordinator's queue without producing a
+        // second reopen_count=1 marker.
         repo.set_status_with_reason(&task.id, "closed", Some("failed"))
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        wait_for_outcome_marker(&repo, &task.id, TASK_OUTCOME_FAILED_CLOSE, 1).await;
         repo.set_status(&task.id, "open").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        wait_for_outcome_marker(&repo, &task.id, TASK_OUTCOME_REOPEN_COUNT, 2).await;
+
         let reopened_twice = repo.get(&task.id).await.unwrap().unwrap();
         assert_eq!(reopened_twice.reopen_count, 2);
         let after_second = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
         assert!(
             after_second <= after_first,
             "second reopen should not increase confidence, got after_second={after_second}, after_first={after_first}"
+        );
+        // Exactly two new markers between the duplicate no-op and now:
+        // one FAILED_CLOSE(reopen_count=1) and one REOPEN_COUNT(reopen_count=2).
+        // If the duplicate open→open had wrongly applied a penalty, we'd
+        // see three.
+        let markers_after = outcome_marker_count(&repo, &task.id).await;
+        assert_eq!(
+            markers_after - markers_before_duplicate,
+            2,
+            "duplicate open→open must be a no-op: expected +2 markers (FAILED_CLOSE rc=1, REOPEN_COUNT rc=2), got +{}",
+            markers_after - markers_before_duplicate,
         );
 
         let markers = repo
