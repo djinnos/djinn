@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "djinn.fullname" . }}-server
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.server.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    # Leader election is not wired up; stick to Recreate so we never have two
+    # controllers racing to dispatch Jobs or write to Dolt.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "djinn.server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Rotate Pod when any of its mounted config changes — kagent pattern.
+        # `sha256sum` of the rendered template text is enough for detection.
+        checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret-github-app: {{ include (print $.Template.BasePath "/secret-github-app.yaml") . | sha256sum }}
+        checksum/secret-vault-key: {{ include (print $.Template.BasePath "/secret-vault-key.yaml") . | sha256sum }}
+      labels:
+        {{- include "djinn.server.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "djinn.serviceAccountName.controller" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: djinn-server
+          image: {{ .Values.image.server | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: rpc
+              containerPort: {{ .Values.service.rpcPort }}
+              protocol: TCP
+            - name: api
+              containerPort: {{ .Values.service.apiPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "djinn.fullname" . }}-server
+          env:
+            - name: DJINN_VAULT_KEY_PATH
+              value: /var/run/secrets/djinn/vault.key
+            - name: GITHUB_APP_PRIVATE_KEY_PATH
+              value: /var/run/secrets/djinn/github-app/private-key.pem
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.githubApp" . }}
+                  key: app-id
+                  optional: true
+            - name: GITHUB_APP_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.githubApp" . }}
+                  key: client-id
+                  optional: true
+            - name: GITHUB_APP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.githubApp" . }}
+                  key: client-secret
+                  optional: true
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: mirrors
+              mountPath: /var/lib/djinn/mirrors
+            - name: cache
+              mountPath: /var/lib/djinn/cache
+            - name: vault-key
+              mountPath: /var/run/secrets/djinn/vault.key
+              subPath: vault.key
+              readOnly: true
+            - name: github-app
+              mountPath: /var/run/secrets/djinn/github-app
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources.server | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            periodSeconds: 10
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            periodSeconds: 30
+            initialDelaySeconds: 30
+      volumes:
+        - name: mirrors
+          {{- if .Values.storage.mirrors.hostPath }}
+          hostPath:
+            path: {{ .Values.storage.mirrors.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "djinn.pvcName.mirrors" . }}
+          {{- end }}
+        - name: cache
+          {{- if .Values.storage.cache.hostPath }}
+          hostPath:
+            path: {{ .Values.storage.cache.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "djinn.pvcName.cache" . }}
+          {{- end }}
+        - name: vault-key
+          secret:
+            secretName: {{ include "djinn.secretName.vaultKey" . }}
+            items:
+              - key: vault.key
+                path: vault.key
+            defaultMode: 0400
+        - name: github-app
+          secret:
+            secretName: {{ include "djinn.secretName.githubApp" . }}
+            optional: true
+            defaultMode: 0400

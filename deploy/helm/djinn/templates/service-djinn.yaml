@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "djinn.serviceName.server" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.server.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "djinn.server.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: rpc
+      # Worker RPC: task-run Pods dial this port to open the bincode-over-TCP
+      # reverse-RPC channel. First frame on the wire is an AuthHello; the
+      # server validates the bearer token via TokenReview.
+      port: {{ .Values.service.rpcPort }}
+      targetPort: rpc
+      protocol: TCP
+    - name: api
+      # HTTP API / UI.
+      port: {{ .Values.service.apiPort }}
+      targetPort: api
+      protocol: TCP

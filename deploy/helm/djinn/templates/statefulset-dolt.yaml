@@ -1,0 +1,52 @@
+{{- if .Values.dolt.enabled -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "djinn.serviceName.dolt" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.dolt.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "djinn.serviceName.dolt" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "djinn.dolt.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "djinn.dolt.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: dolt
+          image: {{ .Values.dolt.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: DOLT_ROOT_PASSWORD
+              value: ""
+            - name: DOLT_ROOT_HOST
+              value: "%"
+            - name: DOLT_DATABASE
+              value: "djinn"
+          ports:
+            - name: mysql
+              containerPort: {{ .Values.dolt.service.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/dolt
+          resources:
+            {{- toYaml .Values.dolt.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - {{ .Values.dolt.storage.accessMode }}
+        resources:
+          requests:
+            storage: {{ .Values.dolt.storage.size }}
+        {{- with .Values.dolt.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+{{- end -}}

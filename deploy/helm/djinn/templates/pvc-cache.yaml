@@ -1,0 +1,19 @@
+{{- if and (not .Values.storage.cache.existingClaim) (not .Values.storage.cache.hostPath) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "djinn.pvcName.cache" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  accessModes:
+    - {{ .Values.storage.cache.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.cache.size }}
+  {{- with .Values.storage.cache.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end -}}

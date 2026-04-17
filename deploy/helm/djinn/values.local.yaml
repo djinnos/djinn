@@ -1,0 +1,73 @@
+# Overrides for kind / single-node local-dev clusters.
+#
+# Usage:
+#   helm install djinn deploy/helm/djinn \
+#     --values deploy/helm/djinn/values.local.yaml \
+#     --namespace djinn --create-namespace
+#
+# Assumptions: images have been pre-loaded into the kind node via `make image`
+# and pushed to the local registry at localhost:5001 via `make
+# image-push-local`, so imagePullPolicy can be `Never` (no network pulls).
+
+image:
+  server: djinn-server:dev
+  runtime: djinn-agent-runtime:dev
+  pullPolicy: Never
+
+# Kind is single-node so RWX is irrelevant — hostPath volumes are the most
+# predictable thing to use here. Templates fall back to hostPath when .hostPath
+# is non-empty on either storage.mirrors or storage.cache.
+storage:
+  mirrors:
+    hostPath: /var/lib/djinn/mirrors
+    accessMode: ReadWriteOnce
+  cache:
+    hostPath: /var/lib/djinn/cache
+    accessMode: ReadWriteOnce
+
+ingress:
+  enabled: false
+
+# Tighter resource defaults so the whole stack fits on a laptop.
+resources:
+  server:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  taskrun:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
+dolt:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+  storage:
+    size: 5Gi
+    accessMode: ReadWriteOnce
+
+qdrant:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  storage:
+    size: 2Gi
+    accessMode: ReadWriteOnce
+
+env:
+  rustLog: "info,djinn=debug"

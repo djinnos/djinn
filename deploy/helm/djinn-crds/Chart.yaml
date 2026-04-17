@@ -1,0 +1,14 @@
+apiVersion: v2
+name: djinn-crds
+description: |
+  CRD-only chart for Djinn. Installed separately from the main `djinn` chart so
+  that CustomResourceDefinitions have a lifecycle independent of the workload
+  (Helm's built-in CRD handling has long-standing upgrade/uninstall pitfalls).
+  Follows the split-chart pattern used by upstream kagent.
+
+  The chart is intentionally empty in Phase 2 PR 4 — Djinn's Phase 2 runtime
+  uses core `batch/v1 Job` + `v1 Secret` only. A `DjinnTaskRun` CRD may be
+  added here in a later PR if/when we want kubectl-native observability.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

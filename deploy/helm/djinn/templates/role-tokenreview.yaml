@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "djinn.fullname" . }}-tokenreview
+  labels:
+    {{- include "djinn.server.labels" . | nindent 4 }}
+# Cluster-scoped because TokenReview is not a namespaced resource. This is
+# the only cluster-wide permission djinn-server needs — everything else is
+# namespaced. Keep the verb list to `create` only.
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]

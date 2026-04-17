@@ -1,0 +1,19 @@
+{{- if and (not .Values.storage.mirrors.existingClaim) (not .Values.storage.mirrors.hostPath) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "djinn.pvcName.mirrors" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mirrors
+spec:
+  accessModes:
+    - {{ .Values.storage.mirrors.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.mirrors.size }}
+  {{- with .Values.storage.mirrors.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end -}}

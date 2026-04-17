@@ -1,0 +1,20 @@
+{{- if .Values.dolt.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "djinn.serviceName.dolt" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.dolt.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  # Headless Service so the StatefulSet Pod gets a stable DNS name.
+  clusterIP: None
+  selector:
+    {{- include "djinn.dolt.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: mysql
+      port: {{ .Values.dolt.service.port }}
+      targetPort: mysql
+      protocol: TCP
+{{- end -}}

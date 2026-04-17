@@ -1,0 +1,200 @@
+# Default values for the djinn chart.
+#
+# One-org-per-deployment. No multi-tenant knobs — all resources land in a
+# single namespace and the controller reconciles only that namespace.
+
+# -----------------------------------------------------------------------------
+# Images
+# -----------------------------------------------------------------------------
+image:
+  # djinn-server controller image (the long-lived Deployment).
+  server: djinn-server:dev
+  # djinn-agent-runtime image used by task-run Jobs the controller dispatches.
+  # Not referenced by any template in this chart directly — the controller
+  # reads it from env and plugs it into the Job PodSpec at dispatch time.
+  runtime: djinn-agent-runtime:dev
+  pullPolicy: IfNotPresent
+  # pullSecrets: []
+
+# -----------------------------------------------------------------------------
+# Namespace
+# -----------------------------------------------------------------------------
+namespace:
+  # When true the chart renders a Namespace object. Turn off if you manage the
+  # namespace externally (GitOps, Terraform, `kubectl create ns`).
+  create: true
+  # Namespace the chart's resources land in. Defaults to the Release namespace
+  # when empty.
+  name: djinn
+
+# -----------------------------------------------------------------------------
+# ServiceAccounts
+# -----------------------------------------------------------------------------
+serviceAccount:
+  # SA the djinn-server controller Deployment runs under. Has namespaced RBAC
+  # to create + delete Jobs/Pods/Secrets (for task-run dispatch) plus a
+  # cluster-scoped binding for TokenReview (for validating worker tokens).
+  controller: djinn-controller
+  # SA mounted into task-run Job Pods. Has no RBAC — the projected token
+  # (audience `djinn`) is presented to djinn-server, which resolves identity
+  # via the cluster TokenReview API.
+  taskrun: djinn-taskrun
+
+# -----------------------------------------------------------------------------
+# Service (for djinn-server)
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  # Worker RPC port — task-run pods dial this to establish the bincode-over-TCP
+  # reverse-RPC channel back to djinn-server.
+  rpcPort: 8443
+  # HTTP API / UI port.
+  apiPort: 3000
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+resources:
+  server:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  # Defaults the controller will apply to Job PodSpecs when dispatching
+  # task-run workloads. Surfaced here so operators can tune without editing
+  # controller env directly. djinn-server reads these via env.
+  taskrun:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+
+# -----------------------------------------------------------------------------
+# Storage
+# -----------------------------------------------------------------------------
+# RWX is required for the mirrors PVC on multi-node clusters — the controller
+# writes mirror clones and task-run Job Pods read from them. The cache PVC is
+# similarly RWX so cargo/pnpm/pip caches survive across task runs.
+storage:
+  mirrors:
+    size: 50Gi
+    storageClassName: ""   # "" → use cluster default. Must satisfy RWX.
+    accessMode: ReadWriteMany
+    # Set to reuse a pre-existing PVC instead of rendering one from this chart.
+    existingClaim: ""
+    # Set to mount a hostPath from the node instead of a PVC. Only safe on
+    # single-node clusters (kind). When non-empty, pvc-mirror.yaml is skipped.
+    hostPath: ""
+  cache:
+    size: 20Gi
+    storageClassName: ""
+    accessMode: ReadWriteMany
+    existingClaim: ""
+    hostPath: ""
+
+# -----------------------------------------------------------------------------
+# Secrets
+# -----------------------------------------------------------------------------
+secrets:
+  githubApp:
+    # If non-empty, the Deployment mounts the named Secret instead of a
+    # chart-rendered one. The Secret must expose the same keys listed below.
+    existingSecret: ""
+    # Literal values — rendered into a chart-managed Secret when
+    # existingSecret is empty. Leave blank in VCS; set via `--set` or
+    # a local -f overrides file.
+    appId: ""
+    privateKey: ""
+    clientId: ""
+    clientSecret: ""
+  vaultKey:
+    existingSecret: ""
+    # Base64-encoded 32-byte AES key used by djinn-db's credential vault.
+    # When empty, a placeholder secret is still rendered so the volume mount
+    # is always valid — djinn-server will refuse to start without a real key.
+    key: ""
+
+# -----------------------------------------------------------------------------
+# Ingress (opt-in)
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  # Extra annotations (e.g. cert-manager issuer).
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+
+# -----------------------------------------------------------------------------
+# Dolt (bundled SQL state)
+# -----------------------------------------------------------------------------
+dolt:
+  enabled: true
+  image: dolthub/dolt-sql-server:latest
+  # Service name + port exposed inside the cluster. Consumed by djinn-server
+  # via the DJINN_MYSQL_URL env computed in configmap.yaml.
+  service:
+    port: 3306
+  storage:
+    size: 20Gi
+    storageClassName: ""
+    accessMode: ReadWriteOnce
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "8Gi"
+
+# -----------------------------------------------------------------------------
+# Qdrant (bundled vector store)
+# -----------------------------------------------------------------------------
+qdrant:
+  enabled: true
+  image: qdrant/qdrant:latest
+  service:
+    httpPort: 6333
+    grpcPort: 6334
+  storage:
+    size: 10Gi
+    storageClassName: ""
+    accessMode: ReadWriteOnce
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
+# -----------------------------------------------------------------------------
+# Server env
+# -----------------------------------------------------------------------------
+env:
+  rustLog: "info,djinn=debug"
+  # Public base URL (used for GitHub App callback + browser redirects). When
+  # empty the Deployment omits the env var and djinn-server falls back to its
+  # own default (`http://127.0.0.1:3000`, appropriate only for local dev).
+  publicUrl: ""
+  webUrl: ""
+
+# Arbitrary extra env injected into the server container. Useful for ad-hoc
+# tuning knobs without re-templating.
+extraEnv: []
+# - name: FOO
+#   value: bar
+
+# Node placement (applied to djinn-server Deployment).
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Labels merged onto every chart-managed resource.
+labels: {}

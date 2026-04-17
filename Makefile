@@ -1,7 +1,8 @@
 DESKTOP_DIR := $(CURDIR)/desktop
 SERVER_DIR := $(CURDIR)/server
 
-.PHONY: help up up-no-build down logs dev watch test test-all test-vault
+.PHONY: help up up-no-build down logs dev watch test test-all test-vault \
+	kind-up kind-down image image-push-local helm-install-local helm-uninstall
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -79,3 +80,37 @@ test-all: ## Run every workspace crate's tests sequentially (avoids test-Dolt OO
 	cd $(SERVER_DIR) && cargo test -p djinn-agent
 	@$(MAKE) --no-print-directory test-db-reset
 	cd $(SERVER_DIR) && cargo test -p djinn-server
+
+# ----------------------------------------------------------------------------
+# Kubernetes / Helm local-dev inner loop (Phase 2 PR 4).
+# ----------------------------------------------------------------------------
+
+KIND_CLUSTER_NAME ?= djinn
+LOCAL_REGISTRY    ?= localhost:5001
+DJINN_IMAGE_TAG   ?= dev
+
+kind-up: ## Create the local kind cluster + registry (idempotent)
+	CLUSTER_NAME=$(KIND_CLUSTER_NAME) bash scripts/kind/setup-kind.sh
+
+kind-down: ## Delete the local kind cluster (registry container survives)
+	kind delete cluster --name $(KIND_CLUSTER_NAME)
+
+image: ## Build djinn-server + djinn-agent-runtime container images
+	docker build -f Dockerfile -t djinn-server:$(DJINN_IMAGE_TAG) .
+	docker build -f server/docker/djinn-agent-runtime.Dockerfile -t djinn-agent-runtime:$(DJINN_IMAGE_TAG) .
+
+image-push-local: image ## Retag images for the local kind registry and push
+	docker tag djinn-server:$(DJINN_IMAGE_TAG)         $(LOCAL_REGISTRY)/djinn-server:$(DJINN_IMAGE_TAG)
+	docker tag djinn-agent-runtime:$(DJINN_IMAGE_TAG)  $(LOCAL_REGISTRY)/djinn-agent-runtime:$(DJINN_IMAGE_TAG)
+	docker push $(LOCAL_REGISTRY)/djinn-server:$(DJINN_IMAGE_TAG)
+	docker push $(LOCAL_REGISTRY)/djinn-agent-runtime:$(DJINN_IMAGE_TAG)
+
+helm-install-local: ## Install djinn-crds + djinn into the local kind cluster
+	helm upgrade --install djinn-crds deploy/helm/djinn-crds
+	helm upgrade --install djinn deploy/helm/djinn \
+		--values deploy/helm/djinn/values.local.yaml \
+		--namespace djinn --create-namespace
+
+helm-uninstall: ## Remove djinn + djinn-crds releases
+	-helm uninstall djinn --namespace djinn
+	-helm uninstall djinn-crds

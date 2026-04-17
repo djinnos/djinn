@@ -1,0 +1,5 @@
+# The djinn-crds chart is intentionally empty in Phase 2 PR 4. It exists so
+# operators can `helm install djinn-crds` independently of the main `djinn`
+# chart today, and so a future `DjinnTaskRun` CRD (or similar) can be shipped
+# without re-splitting the chart layout later. Leave this file empty until
+# real CRDs land.

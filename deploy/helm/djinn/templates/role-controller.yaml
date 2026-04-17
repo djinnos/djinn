@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "djinn.fullname" . }}-controller
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.server.labels" . | nindent 4 }}
+rules:
+  # Task-run dispatch: djinn-server creates a Job + backing Secret per run,
+  # watches the Pod, reads logs if needed, and deletes everything on teardown.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  # Read-only on events, useful for surfacing scheduler errors back to the UI.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]

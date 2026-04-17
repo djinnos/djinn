@@ -1,0 +1,12 @@
+apiVersion: v2
+name: djinn
+description: |
+  Djinn — multi-user agent control plane. Installs djinn-server (controller),
+  dolt (SQL state), qdrant (vector store), per-task-run RBAC, and the
+  secrets/PVCs the controller needs to dispatch task-run Jobs.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+# Prefer installing djinn-crds as a separate release (`helm install djinn-crds
+# deploy/helm/djinn-crds`). We deliberately do NOT list djinn-crds as a
+# dependency here so CRD lifecycle stays decoupled from workload lifecycle.

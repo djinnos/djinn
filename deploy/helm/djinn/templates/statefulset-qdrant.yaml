@@ -1,0 +1,48 @@
+{{- if .Values.qdrant.enabled -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "djinn.serviceName.qdrant" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.qdrant.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "djinn.serviceName.qdrant" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "djinn.qdrant.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "djinn.qdrant.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: qdrant
+          image: {{ .Values.qdrant.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.qdrant.service.httpPort }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.qdrant.service.grpcPort }}
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /qdrant/storage
+          resources:
+            {{- toYaml .Values.qdrant.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - {{ .Values.qdrant.storage.accessMode }}
+        resources:
+          requests:
+            storage: {{ .Values.qdrant.storage.size }}
+        {{- with .Values.qdrant.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+{{- end -}}
