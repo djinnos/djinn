@@ -8,11 +8,13 @@
 # -----------------------------------------------------------------------------
 image:
   # djinn-server controller image (the long-lived Deployment).
-  server: djinn-server:dev
+  # Override per-release; `:latest` is only a safe default for demos. Use a
+  # pinned tag (e.g. `ghcr.io/djinnos/djinn-server:0.1.0`) for production.
+  server: djinn-server:latest
   # djinn-agent-runtime image used by task-run Jobs the controller dispatches.
   # Not referenced by any template in this chart directly — the controller
   # reads it from env and plugs it into the Job PodSpec at dispatch time.
-  runtime: djinn-agent-runtime:dev
+  runtime: djinn-agent-runtime:latest
   pullPolicy: IfNotPresent
   # pullSecrets: []
 

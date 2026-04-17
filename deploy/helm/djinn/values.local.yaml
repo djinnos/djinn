@@ -5,14 +5,16 @@
 #     --values deploy/helm/djinn/values.local.yaml \
 #     --namespace djinn --create-namespace
 #
-# Assumptions: images have been pre-loaded into the kind node via `make image`
-# and pushed to the local registry at localhost:5001 via `make
-# image-push-local`, so imagePullPolicy can be `Never` (no network pulls).
+# Assumptions: images have been built locally and pushed to the in-cluster
+# registry at localhost:5001 via `make image-push-local`. The kind node's
+# containerd is wired (via scripts/kind/setup-kind.sh) to resolve
+# `localhost:5001/...` through the registry container, so IfNotPresent is
+# safe — the node pulls once and keeps the layer cached.
 
 image:
-  server: djinn-server:dev
-  runtime: djinn-agent-runtime:dev
-  pullPolicy: Never
+  server: localhost:5001/djinn-server:dev
+  runtime: localhost:5001/djinn-agent-runtime:dev
+  pullPolicy: IfNotPresent
 
 # Kind is single-node so RWX is irrelevant — hostPath volumes are the most
 # predictable thing to use here. Templates fall back to hostPath when .hostPath
