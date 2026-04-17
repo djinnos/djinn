@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use djinn_core::models::TaskRunTrigger;
 use djinn_db::{TaskRepository, task_branch_name};
 
+use crate::actors::slot::lifecycle::model_resolution::resolve_role_model_preference;
 use crate::context::AgentContext;
 use crate::supervisor::{
     RoleKind, SupervisorFlow, TaskRunSpec, TaskRunSupervisor, services_for_agent_context,
@@ -101,21 +102,28 @@ pub(crate) async fn run_supervisor_dispatch(
     let base_branch = default_target_branch(&task.project_id, &app_state).await;
     let task_branch = task_branch_name(&task.short_id);
 
-    // ── Map dispatch model to every stage in the flow ─────────────────────
+    // ── Resolve per-role model ids ────────────────────────────────────────
     //
-    // Minimum-viable model selection for task #7 (matches the spec note):
-    // the coordinator dispatches one slot with one model, chosen for the
-    // role resolved by `role_for_task_dispatch`.  The supervisor then runs
-    // the whole flow in that slot.  We seed `model_id_per_role` with the
-    // dispatched `model_id` for every `RoleKind` in the flow's sequence so
-    // every stage has a resolved model without a second coordinator
-    // round-trip.  Per-role model priorities (the richer routing the
-    // coordinator currently owns via `resolve_role_model_preference`) can
-    // be threaded in as a follow-up when stage-level model diversity
-    // becomes necessary.
+    // For each `RoleKind` in the flow's sequence, independently resolve a
+    // model id from the project's per-role preference (the default
+    // `agents` row's `model_preference`, normalized against connected
+    // providers — same resolution the coordinator uses at dispatch time via
+    // `resolve_role_model_preference`).  Roles without an explicit
+    // preference fall back to the dispatch-resolved `model_id` — which is
+    // the model the coordinator picked for the single role that won
+    // `role_for_task_dispatch`.  This keeps every stage driveable end-to-end
+    // while letting operators route, e.g., reviewer to a cheaper model than
+    // worker from the project settings UI.
     let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
     for role in flow.role_sequence() {
-        model_id_per_role.insert(*role, model_id.clone());
+        let resolved = resolve_role_model_preference(
+            &task.project_id,
+            role.as_str(),
+            &app_state,
+        )
+        .await
+        .unwrap_or_else(|| model_id.clone());
+        model_id_per_role.insert(*role, resolved);
     }
 
     // ── Build the spec ────────────────────────────────────────────────────

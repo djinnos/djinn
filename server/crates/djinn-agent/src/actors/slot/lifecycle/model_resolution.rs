@@ -10,6 +10,7 @@ use crate::actors::slot::helpers::{
     ProviderCredential, load_provider_credential, parse_model_id,
 };
 use crate::context::AgentContext;
+use djinn_db::AgentRepository;
 
 /// Resolved catalog/provider identity + credential ready to drive an LLM
 /// provider for the upcoming session.
@@ -93,4 +94,89 @@ pub(crate) async fn resolve_model_and_credential(
         model_name: mname,
         provider_credential: Some(cred),
     })
+}
+
+/// Resolve a per-role project preference into a concrete `provider/model` id.
+///
+/// Reads the default `agents` row for `(project_id, base_role)` (the same
+/// shape the coordinator's `resolve_role_model_preference` uses at dispatch
+/// time), normalizes the stored `model_preference` string against connected
+/// providers' catalogs, and returns the first `provider/model` match.
+///
+/// Returns `None` when:
+///   - no default role is configured for this `(project, base_role)`,
+///   - `model_preference` is unset / whitespace,
+///   - the preference string cannot be matched to any connected model,
+///   - any repository/catalog lookup errors (logged at `warn`).
+///
+/// Used by `supervisor_runner` to populate `TaskRunSpec::model_id_per_role`
+/// per-stage; the caller falls back to the dispatch-resolved default when
+/// this returns `None`.
+pub(crate) async fn resolve_role_model_preference(
+    project_id: &str,
+    base_role: &str,
+    app_state: &AgentContext,
+) -> Option<String> {
+    let role_repo = AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let db_role = match role_repo
+        .get_default_for_base_role(project_id, base_role)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(
+                project_id,
+                base_role,
+                error = %e,
+                "supervisor_runner: failed to load default role for model_preference"
+            );
+            return None;
+        }
+    };
+
+    let preference = match db_role.model_preference.as_deref() {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => return None,
+    };
+
+    // Match `preference` (a bare suffix like "claude-opus-4-6", a display
+    // name, the full `provider/model` id, or the catalog id) against every
+    // connected provider — identical resolution to dispatch's priority path.
+    let cred_repo = djinn_provider::repos::CredentialRepository::new(
+        app_state.db.clone(),
+        app_state.event_bus.clone(),
+    );
+    let credentials = match cred_repo.list().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                project_id,
+                base_role,
+                error = %e,
+                "supervisor_runner: failed to list credentials for model_preference"
+            );
+            return None;
+        }
+    };
+    let credential_provider_ids = app_state.catalog.connected_provider_ids(&credentials);
+    if credential_provider_ids.is_empty() {
+        return None;
+    }
+
+    for provider_id in &credential_provider_ids {
+        for model in app_state.catalog.list_models(provider_id) {
+            let bare = model.id.rsplit('/').next().unwrap_or(&model.id);
+            let full_id = format!("{provider_id}/{}", model.id);
+            if model.id == preference
+                || model.name == preference
+                || bare == preference
+                || full_id == preference
+            {
+                return Some(full_id);
+            }
+        }
+    }
+
+    None
 }
