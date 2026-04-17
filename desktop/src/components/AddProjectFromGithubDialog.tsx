@@ -111,10 +111,11 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* sm:max-w-2xl overrides the base DialogContent's sm:max-w-sm —
-          same variant, later-wins in tailwind-merge. max-w-[calc(100%-2rem)]
-          keeps us inside the viewport on small screens. */}
-      <DialogContent className="w-full max-w-[calc(100%-2rem)] sm:max-w-2xl">
+      {/* Arbitrary width value dodges any tailwind-merge grouping quirks with
+          the base DialogContent's `sm:max-w-sm`. `overflow-hidden` belts the
+          width — any flex child with `min-w-0` + `truncate` will obey it
+          rather than blowing past the modal edge. */}
+      <DialogContent className="w-full max-w-[min(calc(100vw-2rem),42rem)] overflow-hidden">
         <DialogHeader>
           <DialogTitle>Add project from GitHub</DialogTitle>
           <DialogDescription>
@@ -173,11 +174,12 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
               autoFocus
             />
 
-            {/* Fluid height — cap at 60vh so the dialog doesn't exceed the
-                viewport on short screens, otherwise let the list grow. The
-                dialog centres on the page and shrink-wraps its content. */}
-            <ScrollArea className="max-h-[60vh] rounded-md border">
-              <ul className="divide-y">
+            {/* `w-full` forces the ScrollArea root (base-ui defaults to
+                shrink-to-fit) to match the dialog column. `max-h-[60vh]`
+                bounds height. `min-w-0` on the <ul> lets the flex-children
+                truncation inside <li> actually engage. */}
+            <ScrollArea className="w-full max-h-[60vh] rounded-md border">
+              <ul className="w-full min-w-0 divide-y">
                 {filtered.length === 0 ? (
                   <li className="px-3 py-4 text-sm text-muted-foreground">
                     No repositories match.
@@ -188,7 +190,7 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
                     return (
                       <li
                         key={`${r.installation_id}:${key}`}
-                        className="flex items-center gap-3 px-3 py-2 hover:bg-accent/40"
+                        className="flex w-full min-w-0 items-center gap-3 px-3 py-2 hover:bg-accent/40"
                       >
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium">{key}</div>
@@ -203,6 +205,7 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
                           variant="secondary"
                           disabled={addingKey !== null}
                           onClick={() => void handleAdd(r)}
+                          className="shrink-0"
                         >
                           {addingKey === key ? <Spinner className="h-3 w-3" /> : 'Add'}
                         </Button>
