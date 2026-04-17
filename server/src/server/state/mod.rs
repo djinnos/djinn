@@ -933,8 +933,12 @@ impl AppState {
         }
     }
 
-    /// Cancel and join the RPC TCP listener if it was spawned.  Called as
-    /// part of the process-wide shutdown path.
+    /// Cancel and join the RPC TCP listener if it was spawned.
+    ///
+    // TODO(phase 2.1): wire this into the process-wide graceful-shutdown
+    // path (see `server::run` / `server::embedded`). Today the listener is
+    // aborted implicitly when the tokio runtime shuts down — that's fine
+    // for SIGTERM but doesn't drain in-flight RPC calls cleanly.
     pub async fn shutdown_rpc_listener(&self) {
         let handle = self.inner.rpc_server.lock().await.take();
         if let Some(handle) = handle {
