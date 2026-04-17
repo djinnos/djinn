@@ -166,16 +166,6 @@ impl RpcServices {
         Self::from_split(read_half, write_half, cancel)
     }
 
-    /// Historical alias.  Delegates to [`RpcServices::from_unix_stream`];
-    /// preserved so existing call sites that pre-dated the TCP path compile
-    /// without change.
-    pub fn spawn(
-        stream: UnixStream,
-        cancel: CancellationToken,
-    ) -> (Arc<Self>, RpcBackgroundTasks) {
-        Self::from_unix_stream(stream, cancel)
-    }
-
     /// Convenience wrapper: dial `path` via `UnixStream`, then delegate to
     /// [`RpcServices::from_unix_stream`].
     pub async fn connect_unix(
@@ -184,14 +174,6 @@ impl RpcServices {
     ) -> std::io::Result<(Arc<Self>, RpcBackgroundTasks)> {
         let stream = UnixStream::connect(path.as_ref()).await?;
         Ok(Self::from_unix_stream(stream, cancel))
-    }
-
-    /// Historical alias of [`RpcServices::connect_unix`].
-    pub async fn connect(
-        path: impl AsRef<Path>,
-        cancel: CancellationToken,
-    ) -> std::io::Result<(Arc<Self>, RpcBackgroundTasks)> {
-        Self::connect_unix(path, cancel).await
     }
 
     /// Dial `addr`, perform the [`FramePayload::AuthHello`] handshake, and —
