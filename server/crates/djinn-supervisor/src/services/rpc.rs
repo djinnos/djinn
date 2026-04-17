@@ -247,12 +247,11 @@ impl RpcServices {
     /// the writer task frames it as a [`FramePayload::Event`] on the shared
     /// RPC socket.
     ///
-    /// Phase 2.1 follow-up: the worker uses this to ship its terminal
+    /// The worker uses this to ship its terminal
     /// [`djinn_runtime::TaskRunReport`] back to the launcher via
-    /// [`WorkerEvent::TerminalReport`] instead of the legacy stdout frame.
-    /// Events carry `correlation_id = 0` — they travel out-of-band of any
-    /// request/reply round-trip — matching the convention already used by
-    /// `FramePayload::Control`.
+    /// [`WorkerEvent::TerminalReport`]. Events carry `correlation_id = 0` —
+    /// they travel out-of-band of any request/reply round-trip — matching
+    /// the convention already used by `FramePayload::Control`.
     ///
     /// Returns an error only if the outbound channel has been closed (writer
     /// task exited).  Callers should treat that as "connection lost" and
