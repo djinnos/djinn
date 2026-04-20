@@ -1,0 +1,39 @@
+{{- if .Values.imagePipeline.enabled -}}
+# Zot registry configuration. Single rendered config.json mounted into the
+# StatefulSet at /etc/zot/config.json. Live GC (gcInterval, gcDelay) keeps
+# storage bounded without a restart; dedupe dedupes identical blobs across
+# repos which matters heavily for per-project devcontainer builds that share
+# the djinn-agent-worker Feature base layers.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-zot-config" (include "djinn.fullname" .) }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zot
+data:
+  config.json: |
+    {
+      "distSpecVersion": "1.1.0",
+      "storage": {
+        "rootDirectory": "/var/lib/registry",
+        "dedupe": true,
+        "gc": true,
+        "gcDelay": "1h",
+        "gcInterval": "24h"
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "{{ .Values.imagePipeline.zot.port }}",
+        "auth": {
+          "htpasswd": {
+            "path": "/secret/htpasswd"
+          }
+        }
+      },
+      "log": {
+        "level": "info"
+      }
+    }
+{{- end -}}

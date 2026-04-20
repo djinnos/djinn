@@ -1,0 +1,22 @@
+{{- if and .Values.imagePipeline.enabled (not .Values.imagePipeline.zot.storage.existingClaim) -}}
+# Standalone PVC backing the Zot StatefulSet. We don't use
+# volumeClaimTemplates here so the claim lifecycle is visible + chartable
+# (deleting the release deletes the claim, no orphan PV hunts).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-zot" (include "djinn.fullname" .) }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zot
+spec:
+  accessModes:
+    - {{ .Values.imagePipeline.zot.storage.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.imagePipeline.zot.storage.size }}
+  {{- with .Values.imagePipeline.zot.storage.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end -}}

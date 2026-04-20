@@ -89,6 +89,15 @@ langfuse:
   publicKey: "pk-lf-djinn-local-dev"
   secretKey: "sk-lf-djinn-local-dev-secret"
 
+# Kind's default CSI driver is `standard` (rancher.io/local-path). Pin the
+# Zot PVC to it so `kind` clusters bind without hunting for the cluster
+# default, and drop the size way down so the whole stack fits on a laptop.
+imagePipeline:
+  zot:
+    storage:
+      storageClassName: standard
+      size: 5Gi
+
 env:
   rustLog: "info,djinn=debug"
   # Browser-side OAuth callback URL. For kind + `kubectl port-forward`, the

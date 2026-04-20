@@ -1,0 +1,20 @@
+{{- if .Values.imagePipeline.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "djinn.fullname" . }}-zot
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zot
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "djinn.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: zot
+  ports:
+    - name: http
+      port: {{ .Values.imagePipeline.zot.port }}
+      targetPort: http
+      protocol: TCP
+{{- end -}}

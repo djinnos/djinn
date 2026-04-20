@@ -251,3 +251,79 @@ affinity: {}
 
 # Labels merged onto every chart-managed resource.
 labels: {}
+
+# -----------------------------------------------------------------------------
+# Image pipeline (Phase 3): BuildKit daemon + Zot registry + image controller
+# -----------------------------------------------------------------------------
+# Per-project devcontainer images are built by a reconciling image-controller
+# that drives `devcontainer build` in a Job against a shared rootless BuildKit
+# daemon and pushes the result to an in-cluster Zot registry. Kubernetes Jobs
+# for task runs pull from Zot at dispatch time.
+#
+# Node prerequisites for rootless BuildKit (see README.md):
+#   sysctl kernel.unprivileged_userns_clone=1
+#   sysctl user.max_user_namespaces=28633   # or higher
+imagePipeline:
+  enabled: true
+  # Fully-qualified cluster-local hostname workers + controller use to pull
+  # per-project images. Must resolve to the Zot Service.
+  registryHost: "zot.djinn.svc.cluster.local:5000"
+  # Pinned reference to the djinn-agent-worker devcontainer Feature. Consumed
+  # by generated `.devcontainer/devcontainer.json` starter files (PR 6) and
+  # by PR 5's build Job env.
+  featureRef: "ghcr.io/djinnos/djinn-agent-worker:1"
+  buildkitd:
+    image: moby/buildkit:v0.15.2-rootless
+    # gRPC port exposed on the buildkitd Service. Consumed by the build Job
+    # via DOCKER_HOST=tcp://<svc>:<port>.
+    port: 1234
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "8Gi"
+  zot:
+    image: ghcr.io/project-zot/zot-linux-amd64:v2.1.0
+    # HTTP port exposed on the Zot Service. v1 OCI distribution spec.
+    port: 5000
+    storage:
+      size: 100Gi
+      storageClassName: ""   # "" → cluster default
+      accessMode: ReadWriteOnce
+      existingClaim: ""
+    auth:
+      # When non-empty, the chart mounts this pre-existing Secret instead of
+      # rendering one from the inline values. Secret must carry both
+      # `htpasswd` (bcrypt'd user:pass) and `config.json` (docker auth config).
+      existingSecret: ""
+      # Default credentials used by buildkitd + image-controller to push/pull.
+      # Overridden via --set or a secrets-only values file at install time.
+      username: "djinn"
+      password: "djinn"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+  controller:
+    # PR 5 replaces this with the real image-controller binary. Until then the
+    # Deployment renders as a busybox sleep stub so the rest of the chart can
+    # be installed + iterated on.
+    image: "busybox:1.36"
+    maxConcurrentBuilds: 3
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+  # Builder image (Node + docker CLI + buildx + @devcontainers/cli) baked by
+  # server/docker/djinn-image-builder.Dockerfile. Pinned here for PR 5 build
+  # Jobs; no template in this chart references it directly — the controller
+  # reads it from env and plugs it into the Job PodSpec at dispatch time.
+  builderImage: "ghcr.io/djinnos/djinn-image-builder:latest"

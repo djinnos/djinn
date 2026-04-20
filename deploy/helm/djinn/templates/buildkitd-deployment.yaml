@@ -1,0 +1,117 @@
+{{- if .Values.imagePipeline.enabled -}}
+# Rootless BuildKit daemon. Single shared Deployment — build Jobs dispatched
+# by the image controller (PR 5) dial this via DOCKER_HOST/gRPC and drive
+# `docker buildx` + `devcontainer build` remotely.
+#
+# Upstream example we track: moby/buildkit → examples/kubernetes/pod.rootless.yaml.
+# Node prerequisites live in deploy/helm/djinn/README.md — kernel.unprivileged_
+# userns_clone=1 + user.max_user_namespaces>=28633.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "djinn.fullname" . }}-buildkitd
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkitd
+spec:
+  replicas: 1
+  strategy:
+    # buildkitd holds an exclusive lock on /home/user/.local/share/buildkit;
+    # two rolling replicas would fight over it. Recreate keeps it simple.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "djinn.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: buildkitd
+  template:
+    metadata:
+      labels:
+        {{- include "djinn.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: buildkitd
+      annotations:
+        # AppArmor unconfined is required for rootless + user-namespace
+        # orchestration. Seccomp Unconfined is the same story — BuildKit's
+        # rootless OCI worker uses syscalls blocked by the default profile.
+        container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: buildkitd
+          image: {{ .Values.imagePipeline.buildkitd.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            # Exposing gRPC on :1234 matches the Service port. --addr is the
+            # bind address the daemon listens on; build Jobs connect over TCP.
+            - --addr
+            - unix:///run/user/1000/buildkit/buildkitd.sock
+            - --addr
+            - {{ printf "tcp://0.0.0.0:%d" (.Values.imagePipeline.buildkitd.port | int) | quote }}
+            # Rootless: no nested process-sandbox. Upstream-documented flag
+            # for this exact K8s rootless mode.
+            - --oci-worker-no-process-sandbox
+          securityContext:
+            # Minimum privileges for rootless BuildKit in K8s: unconfined
+            # seccomp + AppArmor, runAsUser 1000 (the `user` account baked
+            # into the rootless image). NOT runAsNonRoot=false — this IS
+            # non-root, just unconfined.
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: Unconfined
+            appArmorProfile:
+              type: Unconfined
+          readinessProbe:
+            exec:
+              command: ["buildctl", "debug", "workers"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          livenessProbe:
+            exec:
+              command: ["buildctl", "debug", "workers"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.imagePipeline.buildkitd.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.imagePipeline.buildkitd.resources | nindent 12 }}
+          volumeMounts:
+            # Rootless buildkit writes its OCI worker state under $HOME; since
+            # the image uses /home/user, mount an emptyDir there. Build-cache
+            # durability lives in Zot (--cache-to=type=registry), not here.
+            - name: buildkitd-data
+              mountPath: /home/user/.local/share/buildkit
+            # Docker auth — credentials for pushing to Zot. Matches the
+            # registry-auth-secret.yaml shape (config.json key → ~/.docker/).
+            - name: registry-auth
+              mountPath: /home/user/.docker/config.json
+              subPath: config.json
+              readOnly: true
+      volumes:
+        - name: buildkitd-data
+          emptyDir: {}
+        - name: registry-auth
+          secret:
+            {{- if .Values.imagePipeline.zot.auth.existingSecret }}
+            secretName: {{ .Values.imagePipeline.zot.auth.existingSecret | quote }}
+            {{- else }}
+            secretName: {{ printf "%s-zot-auth" (include "djinn.fullname" .) | quote }}
+            {{- end }}
+            items:
+              - key: config.json
+                path: config.json
+            defaultMode: 0444
+{{- end -}}

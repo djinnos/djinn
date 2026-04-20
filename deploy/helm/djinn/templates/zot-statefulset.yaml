@@ -1,0 +1,110 @@
+{{- if .Values.imagePipeline.enabled -}}
+# Zot — CNCF OCI registry. Single-replica StatefulSet; RollingUpdate is
+# unsafe upstream because of a file-lock bug on shared storage, so we pin
+# to podManagementPolicy=OrderedReady + strategy-equivalent Recreate
+# semantics by manually setting updateStrategy.type=OnDelete and never
+# rolling unattended.
+#
+# Storage is a single RWO PVC mounted at /var/lib/registry. dedupe + gc
+# run live (see zot-configmap.yaml). Auth is htpasswd from registry-auth
+# Secret mounted at /secret/htpasswd.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "djinn.fullname" . }}-zot
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: zot
+spec:
+  serviceName: {{ include "djinn.fullname" . }}-zot
+  replicas: 1
+  # Zot's rootDirectory can't safely be served by two rolling replicas —
+  # v2 file locking deadlocks on shared storage. Use OnDelete + manual
+  # rollout so upgrades are explicit.
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      {{- include "djinn.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: zot
+  template:
+    metadata:
+      labels:
+        {{- include "djinn.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: zot
+      annotations:
+        # Rotate the pod whenever config or auth changes so live settings
+        # take effect without a manual `kubectl delete pod`.
+        checksum/configmap: {{ include (print $.Template.BasePath "/zot-configmap.yaml") . | sha256sum }}
+        checksum/registry-auth: {{ include (print $.Template.BasePath "/registry-auth-secret.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: zot
+          image: {{ .Values.imagePipeline.zot.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - /etc/zot/config.json
+          ports:
+            - name: http
+              containerPort: {{ .Values.imagePipeline.zot.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.imagePipeline.zot.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/zot
+              readOnly: true
+            - name: htpasswd
+              mountPath: /secret
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/registry
+      volumes:
+        - name: config
+          configMap:
+            name: {{ printf "%s-zot-config" (include "djinn.fullname" .) }}
+        - name: htpasswd
+          secret:
+            {{- if .Values.imagePipeline.zot.auth.existingSecret }}
+            secretName: {{ .Values.imagePipeline.zot.auth.existingSecret | quote }}
+            {{- else }}
+            secretName: {{ printf "%s-zot-auth" (include "djinn.fullname" .) | quote }}
+            {{- end }}
+            items:
+              - key: htpasswd
+                path: htpasswd
+            defaultMode: 0444
+        - name: data
+          persistentVolumeClaim:
+            {{- if .Values.imagePipeline.zot.storage.existingClaim }}
+            claimName: {{ .Values.imagePipeline.zot.storage.existingClaim | quote }}
+            {{- else }}
+            claimName: {{ printf "%s-zot" (include "djinn.fullname" .) | quote }}
+            {{- end }}
+{{- end -}}
