@@ -22,7 +22,7 @@ use djinn_db::{
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
-use djinn_provider::github_app::AppConfig as GitHubAppConfig;
+use djinn_provider::github_app::{AppConfig as GitHubAppConfig, OrgBinding};
 use djinn_workspace::MirrorManager;
 
 mod canonical_graph_refresh_planner;
@@ -149,6 +149,13 @@ struct Inner {
     /// callback so subsequent requests pick up new credentials without a
     /// process restart.
     pub app_config: tokio::sync::RwLock<Option<Arc<GitHubAppConfig>>>,
+    /// Active GitHub-org binding loaded from env (`GITHUB_ORG_LOGIN` +
+    /// `GITHUB_INSTALLATION_ID` [+ optional `GITHUB_ORG_ID`]). Provisioned
+    /// the same way as `app_config`: from the `djinn-github-app` Kubernetes
+    /// Secret. `None` until `init_org_binding` runs (or always, if the
+    /// operator hasn't populated the keys — callers fall back to the legacy
+    /// DB `org_config` row in that case).
+    pub org_binding: tokio::sync::RwLock<Option<Arc<OrgBinding>>>,
     /// Per-project bare git mirrors on disk. Single shared instance so
     /// fetches serialize correctly and clones hit the same hardlink pool.
     /// Path resolution mirrors the vault key: `$DJINN_HOME/mirrors` or
@@ -217,6 +224,7 @@ impl AppState {
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 memory_mount: Mutex::new(None),
                 app_config: tokio::sync::RwLock::new(None),
+                org_binding: tokio::sync::RwLock::new(None),
                 mirror: Arc::new(MirrorManager::new(mirrors_root())),
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
@@ -264,6 +272,42 @@ impl AppState {
             );
         }
         *self.inner.app_config.write().await = cfg.map(Arc::new);
+    }
+
+    /// Read-only snapshot of the active GitHub-org binding, if any. When
+    /// `None`, callers should fall back to the legacy `org_config` DB row
+    /// for back-compat with deployments still mid-migration.
+    pub async fn org_binding(&self) -> Option<Arc<OrgBinding>> {
+        self.inner.org_binding.read().await.clone()
+    }
+
+    /// Hot-swap the in-memory org binding. Production never hot-swaps (env
+    /// requires a Pod restart) — this is for tests that seed an in-memory
+    /// state with a known binding.
+    pub async fn set_org_binding(&self, binding: Option<Arc<OrgBinding>>) {
+        *self.inner.org_binding.write().await = binding;
+    }
+
+    /// Initialise the in-memory org binding from environment variables on
+    /// startup. Called during server bootstrap alongside
+    /// [`Self::init_app_config`]. When the binding env vars are absent, the
+    /// deployment is treated as un-bound and `setup_status` reports
+    /// `needs_app_install: true`.
+    pub async fn init_org_binding(&self) {
+        let binding = OrgBinding::load_from_env();
+        match &binding {
+            Some(b) => tracing::info!(
+                login = %b.org_login,
+                installation_id = b.installation_id,
+                "github_app: loaded env org binding"
+            ),
+            None => tracing::debug!(
+                "github_app: no env org binding on startup — \
+                 set GITHUB_ORG_LOGIN + GITHUB_INSTALLATION_ID in the \
+                 djinn-github-app Secret to bind this deployment to a GitHub org"
+            ),
+        }
+        *self.inner.org_binding.write().await = binding.map(Arc::new);
     }
 
     /// Server-wide single-flight gate for SCIP indexer subprocess
