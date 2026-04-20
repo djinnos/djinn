@@ -234,8 +234,9 @@ export async function getGithubInstallUrl(): Promise<string> {
 
 /**
  * Ask the server to clone a GitHub repo and register it as a project.
- * The server clones into `/root/.djinn/projects/{owner}/{repo}` (persisted
- * on the host via the `~/.djinn` bind mount) and returns the project record.
+ * The server clones into `$DJINN_HOME/projects/{owner}/{repo}` (mounted at
+ * `/var/lib/djinn/projects` under the Helm chart, bind-mounted to
+ * `~/.djinn/projects` under docker-compose) and returns the project record.
  */
 export async function addProjectFromGithub(args: {
   owner: string;

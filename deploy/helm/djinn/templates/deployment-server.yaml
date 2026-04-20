@@ -38,6 +38,34 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # hostPath / PVC volumes land owned by root:root, but djinn-server runs
+      # as uid 10001. fsGroup only helps for CSI-backed PVCs, not hostPath, so
+      # we chown the three writable mounts up-front in a root initContainer.
+      # Idempotent — re-runs every pod start with negligible cost.
+      initContainers:
+        - name: fix-volume-perms
+          image: {{ .Values.image.server | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              for d in /var/lib/djinn/mirrors /var/lib/djinn/cache /var/lib/djinn/projects; do
+                mkdir -p "$d"
+                chown 10001:10001 "$d"
+                chmod 0775 "$d"
+              done
+          volumeMounts:
+            - name: mirrors
+              mountPath: /var/lib/djinn/mirrors
+            - name: cache
+              mountPath: /var/lib/djinn/cache
+            - name: projects
+              mountPath: /var/lib/djinn/projects
       containers:
         - name: djinn-server
           image: {{ .Values.image.server | quote }}
@@ -145,6 +173,8 @@ spec:
               mountPath: /var/lib/djinn/mirrors
             - name: cache
               mountPath: /var/lib/djinn/cache
+            - name: projects
+              mountPath: /var/lib/djinn/projects
             - name: vault-key
               mountPath: /var/run/secrets/djinn/vault.key
               subPath: vault.key
@@ -184,6 +214,15 @@ spec:
           {{- else }}
           persistentVolumeClaim:
             claimName: {{ include "djinn.pvcName.cache" . }}
+          {{- end }}
+        - name: projects
+          {{- if .Values.storage.projects.hostPath }}
+          hostPath:
+            path: {{ .Values.storage.projects.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "djinn.pvcName.projects" . }}
           {{- end }}
         - name: vault-key
           secret:

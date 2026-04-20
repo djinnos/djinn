@@ -35,7 +35,8 @@ export const REPOS_QUERY_KEY = ['github', 'repos'] as const;
  *
  * Lists GitHub repos the Djinn App can access and, on selection, calls
  * `project_add_from_github` so the server clones the repo into its managed
- * volume (`/root/.djinn/projects/{owner}/{repo}`).
+ * volume (`$DJINN_HOME/projects/{owner}/{repo}`, i.e.
+ * `/var/lib/djinn/projects/...` under the Helm chart).
  *
  * Phase 2 invariant: this deployment is pinned to exactly one GitHub org
  * (the `org_config` singleton), and the App can only be installed on that

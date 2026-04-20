@@ -2,7 +2,6 @@ import { useSidebarStore } from '@/stores/sidebarStore';
 import { useAuthUser } from '@/components/AuthGate';
 import { logout } from '@/api/auth';
 import { Button } from '@/components/ui/button';
-import { Kbd } from '@/components/ui/kbd';
 import { cn } from '@/lib/utils';
 
 import {
@@ -55,13 +54,12 @@ import {
 interface NavItemProps {
   icon: React.ReactNode;
   label: string;
-  hotkey?: string;
   badgeCount?: number;
   isActive: boolean;
   onClick: () => void;
 }
 
-function NavItem({ icon, label, hotkey, badgeCount, isActive, onClick }: NavItemProps) {
+function NavItem({ icon, label, badgeCount, isActive, onClick }: NavItemProps) {
   const pendingProposalLabel =
     typeof badgeCount === 'number' && badgeCount > 0
       ? `${label} has ${badgeCount} pending proposals`
@@ -88,9 +86,6 @@ function NavItem({ icon, label, hotkey, badgeCount, isActive, onClick }: NavItem
           {badgeCount}
         </span>
       ) : null}
-      {hotkey && (
-        <Kbd>{hotkey.toUpperCase()}</Kbd>
-      )}
     </Button>
   );
 }
@@ -222,7 +217,6 @@ function ProjectListItem({
   healthRun,
   onClick,
   toggleSlot,
-  hotkey,
 }: {
   name: string;
   icon?: React.ReactNode;
@@ -231,7 +225,6 @@ function ProjectListItem({
   healthRun: VerificationRun | null;
   onClick: () => void;
   toggleSlot?: React.ReactNode;
-  hotkey?: string;
 }) {
   const isActive = execState === "active";
   const [healthPanelOpen, setHealthPanelOpen] = useState(false);
@@ -290,9 +283,6 @@ function ProjectListItem({
           {toggleSlot && (
             <span className="shrink-0">{toggleSlot}</span>
           )}
-          {hotkey && (
-            <Kbd className="shrink-0">{hotkey}</Kbd>
-          )}
         </div>
       </div>
       <HealthCheckPanel
@@ -312,14 +302,12 @@ function ProjectRow({
   icon,
   isSelected,
   onClick,
-  hotkey,
 }: {
   projectPath: string | null;
   label: string;
   icon?: React.ReactNode;
   isSelected: boolean;
   onClick: () => void;
-  hotkey?: string;
 }) {
   const { state, refresh } = useExecutionStatus(projectPath);
   const { start, pause, resume } = useExecutionControl(refresh);
@@ -355,7 +343,6 @@ function ProjectRow({
       execState={execState}
       healthRun={healthRun}
       onClick={onClick}
-      hotkey={hotkey}
       toggleSlot={
         <ProjectExecToggle
           label={label}
@@ -438,60 +425,6 @@ export function Sidebar() {
     }
   }, [location.pathname, setActiveSection]);
 
-  const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    const tag = (e.target as HTMLElement).tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target as HTMLElement).isContentEditable) return;
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-
-    // Number keys: 0 = All Projects, 1-9 = project by position
-    if (e.key >= '0' && e.key <= '9') {
-      e.preventDefault();
-      const idx = Number(e.key);
-      if (idx === 0) {
-        navigateToProject(ALL_PROJECTS);
-      } else if (idx <= projects.length) {
-        navigateToProject(projects[idx - 1].id);
-      }
-      return;
-    }
-
-    switch (e.key.toLowerCase()) {
-      case 'c':
-        e.preventDefault();
-        navigateToView('chat');
-        break;
-      case 'k':
-        e.preventDefault();
-        navigateToView('kanban');
-        break;
-      case 'r':
-        e.preventDefault();
-        navigateToView('roadmap');
-        break;
-      case 'a':
-        e.preventDefault();
-        navigateToView('agents');
-        break;
-      case 'm':
-        e.preventDefault();
-        navigateToView('memory');
-        break;
-      case 'p':
-        e.preventDefault();
-        navigateToView('pulse');
-        break;
-      case 's':
-        e.preventDefault();
-        navigate('/settings');
-        break;
-    }
-  }, [navigate, navigateToView, navigateToProject, projects]);
-
-  useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleKeyDown]);
-
   useEffect(() => {
     for (const proposal of pulseProposalsQuery.data ?? []) {
       if (!shouldNotifyForProposalDraft(proposal, user)) continue;
@@ -546,28 +479,24 @@ export function Sidebar() {
         <NavItem
           icon={<HugeiconsIcon icon={ChatIcon} className="h-4 w-4" />}
           label="Chat"
-          hotkey="C"
           isActive={activeSection === 'chat'}
           onClick={() => navigateToView('chat')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={KanbanIcon} className="h-4 w-4" />}
           label="Kanban"
-          hotkey="K"
           isActive={activeSection === 'kanban'}
           onClick={() => navigateToView('kanban')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={WorkflowSquare06Icon} className="h-4 w-4" />}
           label="Roadmap"
-          hotkey="R"
           isActive={activeSection === 'roadmap'}
           onClick={() => navigateToView('roadmap')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={Pulse01Icon} className="h-4 w-4" />}
           label="Pulse"
-          hotkey="P"
           badgeCount={pulseProposalCount}
           isActive={activeSection === 'pulse'}
           onClick={() => navigateToView('pulse')}
@@ -575,14 +504,12 @@ export function Sidebar() {
         <NavItem
           icon={<HugeiconsIcon icon={Robot01Icon} className="h-4 w-4" />}
           label="Agents"
-          hotkey="A"
           isActive={activeSection === 'agents'}
           onClick={() => navigateToView('agents')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={Brain01Icon} className="h-4 w-4" />}
           label="Memory"
-          hotkey="M"
           isActive={activeSection === 'memory'}
           onClick={() => navigateToView('memory')}
         />
@@ -597,11 +524,10 @@ export function Sidebar() {
             icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
             isSelected={isAll}
             onClick={() => navigateToProject(ALL_PROJECTS)}
-            hotkey="0"
           />
 
           {/* Individual project rows */}
-          {projects.map((project, idx) => (
+          {projects.map((project) => (
             <ProjectRow
               key={project.id}
               projectPath={project.path ?? null}
@@ -609,7 +535,6 @@ export function Sidebar() {
               icon={<HugeiconsIcon icon={Folder02Icon} className="h-3.5 w-3.5" />}
               isSelected={selectedProjectId === project.id}
               onClick={() => navigateToProject(project.id)}
-              hotkey={idx < 9 ? String(idx + 1) : undefined}
             />
           ))}
 
@@ -640,7 +565,6 @@ export function Sidebar() {
         <NavItem
           icon={<HugeiconsIcon icon={Settings01Icon} size={16} />}
           label="Settings"
-          hotkey="S"
           isActive={activeSection === 'settings'}
           onClick={() => navigate('/settings')}
         />

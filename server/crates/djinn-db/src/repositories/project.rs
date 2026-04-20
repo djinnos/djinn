@@ -285,7 +285,8 @@ impl ProjectRepository {
     /// Create a project backed by a GitHub repo the server has cloned locally.
     ///
     /// `clone_path` should be the absolute path inside the server container
-    /// where the repo has been cloned (e.g. `/root/.djinn/projects/acme/widgets`).
+    /// where the repo has been cloned (e.g. `/var/lib/djinn/projects/acme/widgets`
+    /// under the Helm chart, or `~/.djinn/projects/acme/widgets` in docker-compose).
     /// `path` is set equal to `clone_path` so existing path-keyed joins and
     /// resolvers keep working without changes.
     ///

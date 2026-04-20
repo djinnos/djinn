@@ -97,6 +97,16 @@ storage:
     accessMode: ReadWriteMany
     existingClaim: ""
     hostPath: ""
+  # Reference working clones populated by `project_add_from_github`. Mounted
+  # at /var/lib/djinn/projects and referenced by project.path in Dolt, so it
+  # must survive pod restarts. Only the server Pod reads/writes it —
+  # RWO is fine on single-node and cheaper than RWX on shared storage.
+  projects:
+    size: 20Gi
+    storageClassName: ""
+    accessMode: ReadWriteOnce
+    existingClaim: ""
+    hostPath: ""
 
 # -----------------------------------------------------------------------------
 # Secrets

@@ -26,6 +26,9 @@ storage:
   cache:
     hostPath: /var/lib/djinn/cache
     accessMode: ReadWriteOnce
+  projects:
+    hostPath: /var/lib/djinn/projects
+    accessMode: ReadWriteOnce
 
 ingress:
   enabled: false

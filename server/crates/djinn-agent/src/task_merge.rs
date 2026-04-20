@@ -1130,10 +1130,10 @@ mod tests {
     #[test]
     fn parse_https_with_user_prefix() {
         let (owner, repo) = parse_github_owner_repo(
-            "https://CroosALt@github.com/getalternative/svc-accounts-payable.git",
+            "https://someuser@github.com/acme/svc-accounts-payable.git",
         )
         .unwrap();
-        assert_eq!(owner, "getalternative");
+        assert_eq!(owner, "acme");
         assert_eq!(repo, "svc-accounts-payable");
     }
 

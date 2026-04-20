@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
@@ -10,6 +10,23 @@ use djinn_core::auth_context::current_user_token;
 use djinn_db::{OrgConfigRepository, ProjectRepository, VerificationRule};
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
+
+/// Resolve the reference-clone root used by `project_add_from_github`.
+/// Mirrors `mirrors_root()` in `server/src/server/state/mod.rs`: prefer
+/// `$DJINN_HOME/projects` (set by the Helm chart to `/var/lib/djinn/projects`
+/// so the non-root `djinn` uid can write there) and fall back to
+/// `~/.djinn/projects` for local/docker-compose runs where HOME is `/root`.
+fn projects_root() -> PathBuf {
+    if let Ok(djinn_home) = std::env::var("DJINN_HOME")
+        && !djinn_home.is_empty()
+    {
+        return PathBuf::from(djinn_home).join("projects");
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".djinn")
+        .join("projects")
+}
 
 /// Run `git fetch --all --prune` inside `path`. Best-effort refresh for an
 /// existing server-managed clone.
@@ -320,7 +337,7 @@ impl DjinnMcpServer {
     /// managed storage. Supersedes `project_add` for the Docker-hosted
     /// deployment where the host filesystem is not visible to the server.
     #[tool(
-        description = "Add a project by cloning a GitHub repo the Djinn App can access. The server clones into /root/.djinn/projects/{owner}/{repo} (persisted on the host via the ~/.djinn bind mount). Idempotent: re-adding runs `git fetch` instead of cloning again."
+        description = "Add a project by cloning a GitHub repo the Djinn App can access. The server clones into $DJINN_HOME/projects/{owner}/{repo} (Helm mounts this at /var/lib/djinn/projects; docker-compose falls back to ~/.djinn/projects). Idempotent: re-adding runs `git fetch` instead of cloning again."
     )]
     pub async fn project_add_from_github(
         &self,
@@ -340,7 +357,7 @@ impl DjinnMcpServer {
                 },
             });
         }
-        let display_name = input.name.unwrap_or_else(|| format!("{owner}/{repo}"));
+        let display_name = input.name.unwrap_or_else(|| repo.clone());
 
         // 1. Must have a session user token from the task-local (set by the
         //    HTTP MCP handler after resolving the `djinn_session` cookie).
@@ -379,7 +396,11 @@ impl DjinnMcpServer {
         let default_branch = input.git_ref.clone().unwrap_or_else(|| "main".to_string());
 
         // 3. Choose clone_path under the server-managed projects root.
-        let clone_path = format!("/root/.djinn/projects/{owner}/{repo}");
+        let clone_path = projects_root()
+            .join(&owner)
+            .join(&repo)
+            .to_string_lossy()
+            .into_owned();
 
         // Idempotent: if already registered, fast-path to `git fetch`.
         if let Ok(Some(existing)) = repo_db.get_by_github(&owner, &repo).await {

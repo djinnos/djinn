@@ -168,3 +168,11 @@ the PVC template and point the Deployment volume at the caller-provided name.
 {{- printf "%s-cache" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "djinn.pvcName.projects" -}}
+{{- if .Values.storage.projects.existingClaim -}}
+{{- .Values.storage.projects.existingClaim -}}
+{{- else -}}
+{{- printf "%s-projects" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}

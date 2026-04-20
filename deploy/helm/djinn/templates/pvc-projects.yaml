@@ -1,0 +1,19 @@
+{{- if and (not .Values.storage.projects.existingClaim) (not .Values.storage.projects.hostPath) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "djinn.pvcName.projects" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: projects
+spec:
+  accessModes:
+    - {{ .Values.storage.projects.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.projects.size }}
+  {{- with .Values.storage.projects.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end -}}
