@@ -134,6 +134,14 @@ that string wins; otherwise we use the chart-local name.
 {{- end -}}
 {{- end -}}
 
+{{- define "djinn.secretName.langfuse" -}}
+{{- if .Values.langfuse.existingSecret -}}
+{{- .Values.langfuse.existingSecret -}}
+{{- else -}}
+{{- printf "%s-langfuse" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Service names (used inside DJINN_MYSQL_URL / QDRANT_URL env in configmap).
 */}}

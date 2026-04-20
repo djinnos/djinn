@@ -4,8 +4,6 @@ import { InlineError } from '@/components/InlineError';
 import { AgentConfig } from '@/components/AgentConfig';
 import { CodexSignInCard } from '@/components/CodexSignInCard';
 import { ConfirmButton } from '@/components/ConfirmButton';
-import { LangfuseConfig } from '@/components/LangfuseConfig';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useServerHealth } from '@/hooks/useServerHealth';
@@ -116,42 +114,23 @@ function EmptyConnectedMessage() {
   );
 }
 
-function GeneralTab() {
-  return (
-    <div className="flex flex-col gap-6 flex-1 min-h-0">
-      <LangfuseConfig />
-    </div>
-  );
-}
-
 export function SettingsPage() {
   const { status } = useServerHealth();
   const isConnected = status === 'connected';
 
   return (
     <div className="flex h-full flex-col overflow-hidden p-6">
-      <Tabs defaultValue="models" className="flex-1 min-h-0 flex flex-col">
-        <TabsList variant="line" className="shrink-0 w-full justify-start mb-4">
-          <TabsTrigger value="models">Models</TabsTrigger>
-          <TabsTrigger value="general">General</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="models" className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6">
-          {isConnected ? (
-            <ModelsTab />
-          ) : (
-            <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-6 text-center">
-              <p className="text-sm text-muted-foreground">
-                Connect to a server to manage providers and agents.
-              </p>
-            </div>
-          )}
-        </TabsContent>
-
-        <TabsContent value="general" className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6">
-          <GeneralTab />
-        </TabsContent>
-      </Tabs>
+      {isConnected ? (
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-6">
+          <ModelsTab />
+        </div>
+      ) : (
+        <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-6 text-center">
+          <p className="text-sm text-muted-foreground">
+            Connect to a server to manage providers and agents.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

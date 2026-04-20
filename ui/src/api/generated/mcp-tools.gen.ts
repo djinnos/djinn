@@ -2967,18 +2967,6 @@ export namespace SettingsGetOutputSchema {
    */
   dispatch_limit?: number
   /**
-   * Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).
-   */
-  langfuse_endpoint?: string
-  /**
-   * Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).
-   */
-  langfuse_public_key?: string
-  /**
-   * Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).
-   */
-  langfuse_secret_key?: string
-  /**
    * Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
    */
   max_sessions?: {
@@ -3023,18 +3011,6 @@ export namespace SettingsSetInputSchema {
    * Maximum number of tasks to dispatch per cycle. Omit to keep current value.
    */
   dispatch_limit?: number
-  /**
-   * Langfuse OTLP endpoint URL (defaults to "http://localhost:3000/api/public/otel"). Set to "" to disable. Omit to keep current value.
-   */
-  langfuse_endpoint?: string
-  /**
-   * Langfuse public key for LLM observability (e.g. "pk-lf-..."). Set to "" to disable. Omit to keep current value.
-   */
-  langfuse_public_key?: string
-  /**
-   * Langfuse secret key for LLM observability (e.g. "sk-lf-..."). Set to "" to disable. Omit to keep current value.
-   */
-  langfuse_secret_key?: string
   /**
    * Per-model concurrent session caps (e.g. {"openai/gpt-4o": 4}). Omit to keep current value.
    */
@@ -3515,148 +3491,6 @@ export namespace TaskShowOutputSchema {
 
 }
 export type TaskShowOutput = TaskShowOutputSchema.TaskShowOutput;
-export namespace TaskSyncDisableInputSchema {
-  export interface TaskSyncDisableInput {
-  /**
-   * Absolute path to the project git repository.
-   */
-  project: string
-  /**
-   * If true, delete the remote `djinn/tasks` branch (team-wide disable).
-   * If false or absent, only clear the local enabled flag (machine opt-out).
-   */
-  team_wide?: boolean
-  [k: string]: any
-  }
-
-}
-export type TaskSyncDisableInput = TaskSyncDisableInputSchema.TaskSyncDisableInput;
-export namespace TaskSyncDisableOutputSchema {
-  export interface TaskSyncDisableOutput {
-  error?: string
-  ok?: boolean
-  team_wide?: boolean
-  [k: string]: any
-  }
-
-}
-export type TaskSyncDisableOutput = TaskSyncDisableOutputSchema.TaskSyncDisableOutput;
-export namespace TaskSyncEnableInputSchema {
-  export interface TaskSyncEnableInput {
-  /**
-   * Absolute path to the project git repository.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type TaskSyncEnableInput = TaskSyncEnableInputSchema.TaskSyncEnableInput;
-export namespace TaskSyncEnableOutputSchema {
-  export interface TaskSyncEnableOutput {
-  error?: string
-  note?: string
-  ok?: boolean
-  tasks_exported?: number
-  [k: string]: any
-  }
-
-}
-export type TaskSyncEnableOutput = TaskSyncEnableOutputSchema.TaskSyncEnableOutput;
-export namespace TaskSyncExportInputSchema {
-  export interface TaskSyncExportInput {
-  /**
-   * Project path (accepted for API compatibility, currently unused).
-   */
-  project?: string
-  [k: string]: any
-  }
-
-}
-export type TaskSyncExportInput = TaskSyncExportInputSchema.TaskSyncExportInput;
-export namespace TaskSyncExportOutputSchema {
-  export interface TaskSyncExportOutput {
-  channels?: SyncChannelResult[]
-  error?: string
-  ok?: boolean
-  [k: string]: any
-  }
-  export interface SyncChannelResult {
-  channel: string
-  count?: number
-  error?: string
-  ok: boolean
-  [k: string]: any
-  }
-
-}
-export type TaskSyncExportOutput = TaskSyncExportOutputSchema.TaskSyncExportOutput;
-export namespace TaskSyncImportInputSchema {
-  export interface TaskSyncImportInput {
-  /**
-   * Project path (accepted for API compatibility, currently unused).
-   */
-  project?: string
-  [k: string]: any
-  }
-
-}
-export type TaskSyncImportInput = TaskSyncImportInputSchema.TaskSyncImportInput;
-export namespace TaskSyncImportOutputSchema {
-  export interface TaskSyncImportOutput {
-  channels?: SyncChannelResult[]
-  error?: string
-  ok?: boolean
-  [k: string]: any
-  }
-  export interface SyncChannelResult {
-  channel: string
-  count?: number
-  error?: string
-  ok: boolean
-  [k: string]: any
-  }
-
-}
-export type TaskSyncImportOutput = TaskSyncImportOutputSchema.TaskSyncImportOutput;
-export namespace TaskSyncStatusInputSchema {
-  export interface TaskSyncStatusInput {
-  /**
-   * Project path (accepted for API compatibility, currently unused).
-   */
-  project?: string
-  [k: string]: any
-  }
-
-}
-export type TaskSyncStatusInput = TaskSyncStatusInputSchema.TaskSyncStatusInput;
-export namespace TaskSyncStatusOutputSchema {
-  export interface TaskSyncStatusOutput {
-  channels?: SyncChannelStatus[]
-  error?: string
-  [k: string]: any
-  }
-  export interface SyncChannelStatus {
-  backoff_secs: number
-  branch: string
-  enabled: boolean
-  failure_count: number
-  last_error?: string
-  last_synced_at?: string
-  name: string
-  /**
-   * Whether the channel needs attention (3+ failures) (SYNC-16).
-   */
-  needs_attention: boolean
-  /**
-   * Sync-enabled project paths (SYNC-07).
-   */
-  project_paths: string[]
-  [k: string]: any
-  }
-
-}
-export type TaskSyncStatusOutput = TaskSyncStatusOutputSchema.TaskSyncStatusOutput;
 export namespace TaskTimelineInputSchema {
   export interface TaskTimelineInput {
   /**
@@ -3851,7 +3685,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3946,11 +3780,6 @@ export interface McpToolMap {
   "task_memory_refs": { input: TaskMemoryRefsInput; output: TaskMemoryRefsOutput };
   "task_ready": { input: TaskReadyInput; output: TaskReadyOutput };
   "task_show": { input: TaskShowInput; output: TaskShowOutput };
-  "task_sync_disable": { input: TaskSyncDisableInput; output: TaskSyncDisableOutput };
-  "task_sync_enable": { input: TaskSyncEnableInput; output: TaskSyncEnableOutput };
-  "task_sync_export": { input: TaskSyncExportInput; output: TaskSyncExportOutput };
-  "task_sync_import": { input: TaskSyncImportInput; output: TaskSyncImportOutput };
-  "task_sync_status": { input: TaskSyncStatusInput; output: TaskSyncStatusOutput };
   "task_timeline": { input: TaskTimelineInput; output: TaskTimelineOutput };
   "task_transition": { input: TaskTransitionInput; output: TaskTransitionOutput };
   "task_update": { input: TaskUpdateInput; output: TaskUpdateOutput };

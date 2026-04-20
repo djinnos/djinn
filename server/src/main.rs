@@ -151,6 +151,15 @@ async fn async_main() {
     let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
     djinn_server::housekeeping::spawn(state.clone());
     djinn_server::mirror_fetcher::spawn(state.clone());
+
+    // OTLP telemetry is configured at deploy time via env (set by the Helm
+    // chart from values.langfuse.*). Absent env → telemetry stays off.
+    if let Some(config) = djinn_agent::provider::telemetry::LangfuseConfig::from_env()
+        && let Err(e) = djinn_agent::provider::telemetry::init(&config)
+    {
+        tracing::warn!(error = %e, "failed to initialize Langfuse telemetry");
+    }
+
     state.init_app_config().await;
     state.initialize().await;
     state

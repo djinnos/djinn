@@ -2207,7 +2207,8 @@
               "task_id": {
                 "type": "string"
               },
-              "worktree_path": {
+              "workspace_path": {
+                "description": "Workspace path resolved from the session's attached `task_run`.",
                 "nullable": true,
                 "type": "string"
               }
@@ -2289,6 +2290,94 @@
     {
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "GithubAppInstallUrlParams",
+        "type": "object"
+      },
+      "name": "github_app_install_url",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "url": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "GithubAppInstallUrlResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "GithubAppInstallationsParams",
+        "type": "object"
+      },
+      "name": "github_app_installations",
+      "output_schema": {
+        "$defs": {
+          "InstallationEntry": {
+            "properties": {
+              "account_login": {
+                "description": "`login` of the account (user or org) the App is installed on.",
+                "type": "string"
+              },
+              "account_type": {
+                "description": "Either \"User\" or \"Organization\".",
+                "type": "string"
+              },
+              "id": {
+                "description": "Numeric installation ID (used for scoping API calls server-side).",
+                "format": "int64",
+                "type": "integer"
+              },
+              "install_url": {
+                "description": "Direct URL to review/configure this installation.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "account_login",
+              "account_type",
+              "install_url"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "install_url": {
+            "description": "URL to install the App when the user has no installations (or\nwants to add one). Always populated if `GITHUB_APP_SLUG` is set.",
+            "nullable": true,
+            "type": "string"
+          },
+          "installations": {
+            "items": {
+              "$ref": "#/$defs/InstallationEntry"
+            },
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "installations"
+        ],
+        "title": "GithubAppInstallationsResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "end_line": {
             "default": null,
@@ -2331,6 +2420,83 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrGithubFetchFileResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "per_page": {
+            "default": null,
+            "description": "Max number of repositories to return (1..=100). Defaults to 30.",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "title": "GithubListReposParams",
+        "type": "object"
+      },
+      "name": "github_list_repos",
+      "output_schema": {
+        "$defs": {
+          "GithubRepoEntry": {
+            "properties": {
+              "account_login": {
+                "description": "Login of the account (user or org) the installation is scoped to.",
+                "type": "string"
+              },
+              "default_branch": {
+                "type": "string"
+              },
+              "description": {
+                "nullable": true,
+                "type": "string"
+              },
+              "installation_id": {
+                "description": "GitHub App installation id that surfaced this repo. Pass this back\nto [`project_add_from_github`] to pin the clone to the same\ninstallation without re-scanning.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "owner": {
+                "type": "string"
+              },
+              "private": {
+                "type": "boolean"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner",
+              "repo",
+              "default_branch",
+              "private",
+              "installation_id",
+              "account_login"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "repos": {
+            "items": {
+              "$ref": "#/$defs/GithubRepoEntry"
+            },
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "repos"
+        ],
+        "title": "GithubListReposResponse",
         "type": "object"
       }
     },
@@ -4249,23 +4415,42 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "installation_id": {
+            "default": null,
+            "description": "GitHub App installation id that has access to this repo. When\nomitted, the server scans the user's installations and picks one\nthat contains `owner/repo`.",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
           "name": {
-            "description": "Human-readable project name (unique identifier).",
+            "default": null,
+            "description": "Optional project display name. Defaults to `{owner}/{repo}`.",
+            "nullable": true,
             "type": "string"
           },
-          "path": {
-            "description": "Absolute path to the project directory.",
+          "owner": {
+            "description": "GitHub owner (user or organization).",
+            "type": "string"
+          },
+          "ref": {
+            "default": null,
+            "description": "Optional branch to check out after cloning. Defaults to the repo's\ndefault branch as reported by the GitHub API.",
+            "nullable": true,
+            "type": "string"
+          },
+          "repo": {
+            "description": "GitHub repository name.",
             "type": "string"
           }
         },
         "required": [
-          "name",
-          "path"
+          "owner",
+          "repo"
         ],
-        "title": "ProjectAddParams",
+        "title": "ProjectAddFromGithubParams",
         "type": "object"
       },
-      "name": "project_add",
+      "name": "project_add_from_github",
       "output_schema": {
         "$defs": {
           "ProjectInfo": {
@@ -4302,6 +4487,47 @@
           "project"
         ],
         "title": "ProjectAddResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project_id": {
+            "description": "Project UUID to resolve the server-owned clone path for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id"
+        ],
+        "title": "ProjectBranchesParams",
+        "type": "object"
+      },
+      "name": "project_branches",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "branches": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "current": {
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "branches"
+        ],
+        "title": "ProjectBranchesResponse",
         "type": "object"
       }
     },
@@ -4968,88 +5194,6 @@
     },
     {
       "input_schema": {
-        "$defs": {
-          "SeedModelInput": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "name"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "base_url": {
-            "description": "Root URL for OpenAI-compatible API calls (e.g. https://api.my-llm.com/v1).",
-            "type": "string"
-          },
-          "env_var": {
-            "description": "Environment variable name for the API key (e.g. MY_LLM_API_KEY).",
-            "type": "string"
-          },
-          "id": {
-            "description": "Unique provider slug (e.g. 'my-llm'). Must not collide with models.dev IDs.",
-            "type": "string"
-          },
-          "name": {
-            "description": "Human-readable display name (e.g. 'My LLM').",
-            "type": "string"
-          },
-          "seed_models": {
-            "description": "Optional seed models to pre-populate the model picker.",
-            "items": {
-              "$ref": "#/$defs/SeedModelInput"
-            },
-            "nullable": true,
-            "type": "array"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "base_url",
-          "env_var"
-        ],
-        "title": "ProviderAddCustomInput",
-        "type": "object"
-      },
-      "name": "provider_add_custom",
-      "output_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "error": {
-            "nullable": true,
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "ok": {
-            "type": "boolean"
-          },
-          "success": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "ok",
-          "success",
-          "id"
-        ],
-        "title": "ProviderAddCustomResponse",
-        "type": "object"
-      }
-    },
-    {
-      "input_schema": {
         "properties": {},
         "type": "object"
       },
@@ -5607,9 +5751,21 @@
             "nullable": true,
             "type": "string"
           },
+          "expires_in": {
+            "description": "Device-code: how long, in seconds, the user has to complete sign-in.",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
           "goose_provider_id": {
             "nullable": true,
             "type": "string"
+          },
+          "interval": {
+            "description": "Device-code: recommended polling interval in seconds (informational \u2014\nthe server does the polling, not the client).",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
           },
           "oauth_supported": {
             "type": "boolean"
@@ -5618,7 +5774,7 @@
             "type": "boolean"
           },
           "pending": {
-            "description": "True when the flow is still in progress (device-code polling in background).",
+            "description": "True when the flow is still in progress \u2014 the server has spawned a\nbackground task that polls for tokens. The UI should wait for a\n`credential.updated` SSE event to confirm completion.",
             "type": "boolean"
           },
           "provider_id": {
@@ -5628,12 +5784,17 @@
             "type": "boolean"
           },
           "user_code": {
-            "description": "For device-code flows: the code the user must enter.",
+            "description": "Device-code: the short code the user must enter at `verification_uri`.",
             "nullable": true,
             "type": "string"
           },
           "verification_uri": {
-            "description": "For device-code flows: the URL where the user enters the code.",
+            "description": "Device-code: the bare URL the user opens to enter the code manually.",
+            "nullable": true,
+            "type": "string"
+          },
+          "verification_uri_complete": {
+            "description": "Device-code: convenience URL with `user_code` pre-filled as a query\nparam; the UI can surface this as a \"click to open\" link.",
             "nullable": true,
             "type": "string"
           }
@@ -5819,7 +5980,8 @@
                 "format": "int64",
                 "type": "integer"
               },
-              "worktree_path": {
+              "workspace_path": {
+                "description": "Authoritative workspace path for the session, sourced from the\nattached `task_run` (via `sessions.task_run_id`). `None` when the\nsession is not attached to a task run or the run has no recorded\nworkspace.",
                 "nullable": true,
                 "type": "string"
               }
@@ -5917,7 +6079,8 @@
           "task_id": {
             "type": "string"
           },
-          "worktree_path": {
+          "workspace_path": {
+            "description": "Workspace path resolved from the session's attached `task_run`.",
             "nullable": true,
             "type": "string"
           }
@@ -5989,7 +6152,8 @@
                 "format": "int64",
                 "type": "integer"
               },
-              "worktree_path": {
+              "workspace_path": {
+                "description": "Authoritative workspace path for the session, sourced from the\nattached `task_run` (via `sessions.task_run_id`). `None` when the\nsession is not attached to a task run or the run has no recorded\nworkspace.",
                 "nullable": true,
                 "type": "string"
               }
@@ -6164,7 +6328,8 @@
             "format": "int64",
             "type": "integer"
           },
-          "worktree_path": {
+          "workspace_path": {
+            "description": "Authoritative workspace path for the session, sourced from the\nattached `task_run` (via `sessions.task_run_id`). `None` when the\nsession is not attached to a task run or the run has no recorded\nworkspace.",
             "nullable": true,
             "type": "string"
           }
@@ -6198,21 +6363,6 @@
                 "format": "int64",
                 "nullable": true,
                 "type": "integer"
-              },
-              "langfuse_endpoint": {
-                "description": "Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).",
-                "nullable": true,
-                "type": "string"
-              },
-              "langfuse_public_key": {
-                "description": "Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).",
-                "nullable": true,
-                "type": "string"
-              },
-              "langfuse_secret_key": {
-                "description": "Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).",
-                "nullable": true,
-                "type": "string"
               },
               "max_sessions": {
                 "additionalProperties": {
@@ -6312,21 +6462,6 @@
             "format": "int64",
             "nullable": true,
             "type": "integer"
-          },
-          "langfuse_endpoint": {
-            "description": "Langfuse OTLP endpoint URL (defaults to \"http://localhost:3000/api/public/otel\"). Set to \"\" to disable. Omit to keep current value.",
-            "nullable": true,
-            "type": "string"
-          },
-          "langfuse_public_key": {
-            "description": "Langfuse public key for LLM observability (e.g. \"pk-lf-...\"). Set to \"\" to disable. Omit to keep current value.",
-            "nullable": true,
-            "type": "string"
-          },
-          "langfuse_secret_key": {
-            "description": "Langfuse secret key for LLM observability (e.g. \"sk-lf-...\"). Set to \"\" to disable. Omit to keep current value.",
-            "nullable": true,
-            "type": "string"
           },
           "max_sessions": {
             "additionalProperties": {
@@ -7274,7 +7409,8 @@
                 "format": "int64",
                 "type": "integer"
               },
-              "worktree_path": {
+              "workspace_path": {
+                "description": "Authoritative workspace path for the session, sourced from the\nattached `task_run` (via `sessions.task_run_id`). `None` when the\nsession is not attached to a task run or the run has no recorded\nworkspace.",
                 "nullable": true,
                 "type": "string"
               }

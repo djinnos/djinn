@@ -6367,21 +6367,6 @@ expression: signatures
               "nullable": true,
               "type": "integer"
             },
-            "langfuse_endpoint": {
-              "description": "Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).",
-              "nullable": true,
-              "type": "string"
-            },
-            "langfuse_public_key": {
-              "description": "Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).",
-              "nullable": true,
-              "type": "string"
-            },
-            "langfuse_secret_key": {
-              "description": "Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).",
-              "nullable": true,
-              "type": "string"
-            },
             "max_sessions": {
               "additionalProperties": {
                 "format": "int64",
@@ -6480,21 +6465,6 @@ expression: signatures
           "format": "int64",
           "nullable": true,
           "type": "integer"
-        },
-        "langfuse_endpoint": {
-          "description": "Langfuse OTLP endpoint URL (defaults to \"http://localhost:3000/api/public/otel\"). Set to \"\" to disable. Omit to keep current value.",
-          "nullable": true,
-          "type": "string"
-        },
-        "langfuse_public_key": {
-          "description": "Langfuse public key for LLM observability (e.g. \"pk-lf-...\"). Set to \"\" to disable. Omit to keep current value.",
-          "nullable": true,
-          "type": "string"
-        },
-        "langfuse_secret_key": {
-          "description": "Langfuse secret key for LLM observability (e.g. \"sk-lf-...\"). Set to \"\" to disable. Omit to keep current value.",
-          "nullable": true,
-          "type": "string"
         },
         "max_sessions": {
           "additionalProperties": {

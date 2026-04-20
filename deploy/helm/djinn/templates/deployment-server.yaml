@@ -165,6 +165,20 @@ spec:
                   name: {{ include "djinn.secretName.providers" . }}
                   key: GCP_VERTEX_PROJECT_ID
                   optional: true
+            {{- if .Values.langfuse.enabled }}
+            - name: DJINN_LANGFUSE_ENDPOINT
+              value: {{ .Values.langfuse.endpoint | quote }}
+            - name: DJINN_LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.langfuse" . }}
+                  key: DJINN_LANGFUSE_PUBLIC_KEY
+            - name: DJINN_LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.langfuse" . }}
+                  key: DJINN_LANGFUSE_SECRET_KEY
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

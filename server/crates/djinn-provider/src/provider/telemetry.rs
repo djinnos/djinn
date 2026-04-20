@@ -39,6 +39,32 @@ impl LangfuseConfig {
         let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
         format!("Basic {encoded}")
     }
+
+    /// Read Langfuse config from environment. Returns `None` if either key
+    /// is missing; endpoint falls back to `http://localhost:3000/api/public/otel`
+    /// (the Langfuse default path).
+    ///
+    /// Env vars (set by the Helm chart from `values.langfuse.*`):
+    ///   - `DJINN_LANGFUSE_PUBLIC_KEY`
+    ///   - `DJINN_LANGFUSE_SECRET_KEY`
+    ///   - `DJINN_LANGFUSE_ENDPOINT` (optional)
+    pub fn from_env() -> Option<Self> {
+        let public_key = std::env::var("DJINN_LANGFUSE_PUBLIC_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let secret_key = std::env::var("DJINN_LANGFUSE_SECRET_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let endpoint = std::env::var("DJINN_LANGFUSE_ENDPOINT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "http://localhost:3000/api/public/otel".to_string());
+        Some(Self {
+            endpoint,
+            public_key,
+            secret_key,
+        })
+    }
 }
 
 /// Global flag indicating whether telemetry is active.

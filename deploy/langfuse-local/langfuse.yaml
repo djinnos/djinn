@@ -1,0 +1,442 @@
+# Self-hosted Langfuse v3 for local development — deployed into the djinn
+# namespace alongside the djinn chart so service DNS stays simple.
+#
+# Ported from server/docker/docker-compose.langfuse.yml. Differences:
+#   - Postgres/ClickHouse/Redis/MinIO run as single-replica Deployments with
+#     emptyDir volumes. Laptop dev → disposable state.
+#   - Langfuse web seeds org/project/user/API keys on first boot via
+#     LANGFUSE_INIT_* (idempotent). Keys are pinned so `tilt up` always
+#     produces the same pk/sk, which is what the djinn chart points at.
+#   - No Ingress/port-forward here; the Tiltfile handles that.
+#
+# Port-forwards exposed by the Tiltfile:
+#   - langfuse-web  → localhost:5000 (dashboard)
+#   - minio-console → localhost:9091 (optional, inspect blob storage)
+#
+# Dev-only secrets below are clearly marked CHANGEME; production deployments
+# should use the official langfuse/langfuse-k8s Helm chart instead.
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: langfuse-shared
+  namespace: djinn
+  labels:
+    app.kubernetes.io/part-of: langfuse
+type: Opaque
+stringData:
+  NEXTAUTH_SECRET: djinn-local-dev-nextauth-secret-CHANGEME
+  SALT: djinn-local-dev-salt-CHANGEME
+  ENCRYPTION_KEY: "60f637c6ac9d2a532f9c8c8ee286617cb7090dcf92d88eebe857119e67dbc2a0"
+  DATABASE_URL: postgresql://langfuse:langfuse-dev-CHANGEME@langfuse-postgres:5432/langfuse
+  CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+  CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+  CLICKHOUSE_USER: default
+  CLICKHOUSE_PASSWORD: clickhouse-dev-CHANGEME
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: redis-dev-CHANGEME
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minio-dev-CHANGEME
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minio-dev-CHANGEME
+
+# Headless-init keys: Langfuse writes these to the DB on first boot so the
+# pk/sk are deterministic across teammates and survive a Tilt restart.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: langfuse-init
+  namespace: djinn
+  labels:
+    app.kubernetes.io/part-of: langfuse
+type: Opaque
+stringData:
+  LANGFUSE_INIT_ORG_ID: djinn-local
+  LANGFUSE_INIT_ORG_NAME: Djinn Local
+  LANGFUSE_INIT_PROJECT_ID: djinn
+  LANGFUSE_INIT_PROJECT_NAME: djinn
+  # Must match values.local.yaml's langfuse.publicKey / langfuse.secretKey.
+  LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-djinn-local-dev
+  LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-djinn-local-dev-secret
+  LANGFUSE_INIT_USER_EMAIL: dev@djinn.local
+  LANGFUSE_INIT_USER_NAME: Djinn Local Dev
+  LANGFUSE_INIT_USER_PASSWORD: djinn-local-dev-CHANGEME
+
+# ─── Postgres ────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-postgres
+  namespace: djinn
+spec:
+  selector:
+    app: langfuse-postgres
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-postgres
+  namespace: djinn
+  labels:
+    app: langfuse-postgres
+    app.kubernetes.io/part-of: langfuse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-postgres
+  template:
+    metadata:
+      labels:
+        app: langfuse-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_DB
+              value: langfuse
+            - name: POSTGRES_USER
+              value: langfuse
+            - name: POSTGRES_PASSWORD
+              value: langfuse-dev-CHANGEME
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "langfuse"]
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}
+
+# ─── ClickHouse ──────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-clickhouse
+  namespace: djinn
+spec:
+  selector:
+    app: langfuse-clickhouse
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+    - name: native
+      port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-clickhouse
+  namespace: djinn
+  labels:
+    app: langfuse-clickhouse
+    app.kubernetes.io/part-of: langfuse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-clickhouse
+  template:
+    metadata:
+      labels:
+        app: langfuse-clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24
+          env:
+            - name: CLICKHOUSE_DB
+              value: default
+            - name: CLICKHOUSE_USER
+              value: default
+            - name: CLICKHOUSE_PASSWORD
+              value: clickhouse-dev-CHANGEME
+          ports:
+            - name: http
+              containerPort: 8123
+            - name: native
+              containerPort: 9000
+          readinessProbe:
+            exec:
+              command: ["wget", "--spider", "-q", "http://localhost:8123/ping"]
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+      volumes:
+        - name: data
+          emptyDir: {}
+
+# ─── Redis ───────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-redis
+  namespace: djinn
+spec:
+  selector:
+    app: langfuse-redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-redis
+  namespace: djinn
+  labels:
+    app: langfuse-redis
+    app.kubernetes.io/part-of: langfuse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-redis
+  template:
+    metadata:
+      labels:
+        app: langfuse-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["redis-server", "--requirepass", "redis-dev-CHANGEME"]
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "-a", "redis-dev-CHANGEME", "ping"]
+            periodSeconds: 5
+
+# ─── MinIO (S3 for Langfuse blob/event upload) ───────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-minio
+  namespace: djinn
+spec:
+  selector:
+    app: langfuse-minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-minio
+  namespace: djinn
+  labels:
+    app: langfuse-minio
+    app.kubernetes.io/part-of: langfuse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-minio
+  template:
+    metadata:
+      labels:
+        app: langfuse-minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          command: ["sh", "-c"]
+          args:
+            - >
+              mkdir -p /data/langfuse /data/langfuse-media &&
+              minio server /data --console-address ":9001"
+          env:
+            - name: MINIO_ROOT_USER
+              value: minioadmin
+            - name: MINIO_ROOT_PASSWORD
+              value: minio-dev-CHANGEME
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: s3
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+
+# ─── Langfuse web (Next.js dashboard + OTLP ingest) ─────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web
+  namespace: djinn
+spec:
+  selector:
+    app: langfuse-web
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-web
+  namespace: djinn
+  labels:
+    app: langfuse-web
+    app.kubernetes.io/part-of: langfuse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-web
+  template:
+    metadata:
+      labels:
+        app: langfuse-web
+    spec:
+      containers:
+        - name: langfuse-web
+          image: langfuse/langfuse:3
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - secretRef:
+                name: langfuse-shared
+            - secretRef:
+                name: langfuse-init
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: NEXTAUTH_URL
+              value: http://localhost:5000
+            - name: TELEMETRY_ENABLED
+              value: "true"
+            - name: LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES
+              value: "true"
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENABLED
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              value: langfuse
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              value: us-east-1
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: http://langfuse-minio:9000
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENABLED
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              value: langfuse-media
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              value: us-east-1
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: http://langfuse-minio:9000
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /api/public/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+
+# ─── Langfuse worker ─────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-worker
+  namespace: djinn
+  labels:
+    app: langfuse-worker
+    app.kubernetes.io/part-of: langfuse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-worker
+  template:
+    metadata:
+      labels:
+        app: langfuse-worker
+    spec:
+      containers:
+        - name: langfuse-worker
+          image: langfuse/langfuse-worker:3
+          ports:
+            - containerPort: 3030
+          envFrom:
+            - secretRef:
+                name: langfuse-shared
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENABLED
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              value: langfuse
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              value: us-east-1
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: http://langfuse-minio:9000
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENABLED
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              value: langfuse-media
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              value: us-east-1
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: http://langfuse-minio:9000
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              value: "true"

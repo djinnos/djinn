@@ -23,12 +23,6 @@ pub struct DjinnSettings {
     /// Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
-    /// Langfuse public key for OTLP trace export (e.g. `pk-lf-...`).
-    pub langfuse_public_key: Option<String>,
-    /// Langfuse secret key for OTLP trace export (e.g. `sk-lf-...`).
-    pub langfuse_secret_key: Option<String>,
-    /// Langfuse OTLP endpoint URL (defaults to `http://localhost:3000/api/public/otel`).
-    pub langfuse_endpoint: Option<String>,
     /// Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
     pub memory_mount_enabled: Option<bool>,
     /// Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.
@@ -39,7 +33,12 @@ impl DjinnSettings {
     /// Deserialize from a raw DB value string, tolerating old/invalid formats
     /// by falling back to defaults with a warning.
     pub fn from_db_value(raw: &str) -> Self {
-        match serde_json::from_str::<Self>(raw) {
+        // Fields removed in prior cut-overs are stripped before parsing so
+        // DBs written under the old schema don't fall through to the lossy
+        // legacy migrator just because of a now-unknown key.
+        let cleaned = Self::strip_removed_fields(raw);
+        let input = cleaned.as_deref().unwrap_or(raw);
+        match serde_json::from_str::<Self>(input) {
             Ok(settings) => settings,
             Err(e) => {
                 // Try parsing as legacy format and migrate what we can.
@@ -60,6 +59,31 @@ impl DjinnSettings {
         }
     }
 
+    /// Remove fields that have been cut from the schema in prior migrations,
+    /// returning the cleaned JSON if any stripping occurred. Keeps old DB
+    /// rows parseable under `deny_unknown_fields` without falling through to
+    /// the lossy legacy migrator.
+    fn strip_removed_fields(raw: &str) -> Option<String> {
+        const REMOVED_KEYS: &[&str] = &[
+            "langfuse_public_key",
+            "langfuse_secret_key",
+            "langfuse_endpoint",
+        ];
+        let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let obj = value.as_object_mut()?;
+        let mut stripped = false;
+        for key in REMOVED_KEYS {
+            if obj.remove(*key).is_some() {
+                stripped = true;
+            }
+        }
+        if stripped {
+            serde_json::to_string(&value).ok()
+        } else {
+            None
+        }
+    }
+
     /// Best-effort migration from the old untyped JSON format.
     fn from_legacy(v: &serde_json::Value) -> Self {
         let dispatch_limit = v
@@ -76,9 +100,6 @@ impl DjinnSettings {
             dispatch_limit,
             models,
             max_sessions,
-            langfuse_public_key: None,
-            langfuse_secret_key: None,
-            langfuse_endpoint: None,
             memory_mount_enabled: None,
             memory_mount_path: None,
         }
@@ -196,6 +217,19 @@ mod tests {
         let raw = r#"{"dispatch_limit":50,"bogus_key":true}"#;
         let result = serde_json::from_str::<DjinnSettings>(raw);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn removed_langfuse_keys_are_stripped_not_migrated() {
+        // DB rows written under the prior schema carried langfuse_* keys.
+        // Ensure the strip path preserves the other typed fields instead of
+        // falling through to the lossy legacy migrator (which would drop
+        // memory_mount_*).
+        let raw = r#"{"dispatch_limit":42,"langfuse_public_key":"pk","langfuse_secret_key":"sk","langfuse_endpoint":"http://x","memory_mount_enabled":true,"memory_mount_path":"/tmp/m"}"#;
+        let s = DjinnSettings::from_db_value(raw);
+        assert_eq!(s.dispatch_limit, Some(42));
+        assert_eq!(s.memory_mount_enabled, Some(true));
+        assert_eq!(s.memory_mount_path.as_deref(), Some("/tmp/m"));
     }
 
     #[test]

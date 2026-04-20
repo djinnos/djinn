@@ -14,8 +14,13 @@
 #     consumed by Jobs the controller spawns at runtime, not by a PodSpec
 #     Tilt can rewrite),
 #   - installs the djinn Helm chart with values.local.yaml,
-#   - port-forwards :3000 (API/UI), :8443 (worker RPC), :3306 (Dolt), and
-#     :6333/:6334 (Qdrant) so no manual kubectl port-forward terminals.
+#   - deploys a self-hosted Langfuse stack (postgres + clickhouse + redis +
+#     minio + langfuse-web/worker) that self-seeds a project + API keys via
+#     LANGFUSE_INIT_* on first boot, matching the pk/sk values.local.yaml
+#     feeds into djinn-server's env,
+#   - port-forwards :3000 (API/UI), :8443 (worker RPC), :3306 (Dolt),
+#     :6333/:6334 (Qdrant), :5000 (Langfuse dashboard), and :9091 (MinIO
+#     console) so no manual kubectl port-forward terminals.
 #
 # `tilt down` deletes the Helm release but leaves the kind cluster + registry
 # alive. To delete the cluster: `kind delete cluster --name djinn`.
@@ -98,6 +103,12 @@ k8s_yaml(helm(
     set=['secrets.vaultKey.key=' + VAULT_KEY],
 ))
 
+# --- Langfuse stack ------------------------------------------------------
+# Deploys into the djinn namespace so the djinn-server env can dial
+# langfuse-web via short service DNS. First-boot headless init seeds the
+# project + pk/sk baked into values.local.yaml — no manual dashboard signup.
+k8s_yaml('deploy/langfuse-local/langfuse.yaml')
+
 # --- Workloads + port-forwards ------------------------------------------
 k8s_resource(
     workload='djinn-server',
@@ -120,4 +131,21 @@ k8s_resource(
         port_forward(6334, 6334, name='grpc'),
     ],
     labels=['infra'],
+)
+
+# Langfuse: only the web UI + MinIO console are useful on the host. The
+# other pods (postgres, clickhouse, redis, worker) stay in-cluster.
+k8s_resource(
+    workload='langfuse-web',
+    port_forwards=[port_forward(5000, 3000, name='dashboard')],
+    labels=['langfuse'],
+)
+k8s_resource(workload='langfuse-worker',     labels=['langfuse'])
+k8s_resource(workload='langfuse-postgres',   labels=['langfuse'])
+k8s_resource(workload='langfuse-clickhouse', labels=['langfuse'])
+k8s_resource(workload='langfuse-redis',      labels=['langfuse'])
+k8s_resource(
+    workload='langfuse-minio',
+    port_forwards=[port_forward(9091, 9001, name='minio-console')],
+    labels=['langfuse'],
 )

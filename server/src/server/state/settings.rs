@@ -253,22 +253,5 @@ impl AppState {
         if let Some(coordinator) = coordinator_handle {
             let _ = coordinator.trigger_dispatch().await;
         }
-
-        // Initialize Langfuse/OTLP telemetry if configured.
-        if let (Some(pk), Some(sk)) = (&settings.langfuse_public_key, &settings.langfuse_secret_key)
-        {
-            let endpoint = settings
-                .langfuse_endpoint
-                .as_deref()
-                .unwrap_or("http://localhost:3000/api/public/otel");
-            let config = djinn_agent::provider::telemetry::LangfuseConfig {
-                endpoint: endpoint.to_string(),
-                public_key: pk.clone(),
-                secret_key: sk.clone(),
-            };
-            if let Err(e) = djinn_agent::provider::telemetry::init(&config) {
-                tracing::warn!(error = %e, "failed to initialize Langfuse telemetry");
-            }
-        }
     }
 }

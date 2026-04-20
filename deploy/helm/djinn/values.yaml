@@ -154,6 +154,24 @@ secrets:
     gcpVertexProjectId: ""
 
 # -----------------------------------------------------------------------------
+# Langfuse (LLM observability) — OTLP export from djinn-server
+# -----------------------------------------------------------------------------
+# djinn-server initialises OpenTelemetry only when both public + secret keys
+# are set. Leave blank to disable. The chart renders a Secret with
+# DJINN_LANGFUSE_{PUBLIC,SECRET}_KEY and injects it via envFrom.
+langfuse:
+  enabled: false
+  # OTLP endpoint. For self-hosted Langfuse this is
+  # http://<langfuse-web-svc>:3000/api/public/otel.
+  endpoint: ""
+  # Langfuse project keys (pk-lf-... / sk-lf-...). When existingSecret is
+  # non-empty, the chart mounts that instead of rendering one; the Secret
+  # must carry DJINN_LANGFUSE_PUBLIC_KEY + DJINN_LANGFUSE_SECRET_KEY.
+  publicKey: ""
+  secretKey: ""
+  existingSecret: ""
+
+# -----------------------------------------------------------------------------
 # Ingress (opt-in)
 # -----------------------------------------------------------------------------
 ingress:

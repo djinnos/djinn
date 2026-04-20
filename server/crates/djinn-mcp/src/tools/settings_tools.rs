@@ -36,12 +36,6 @@ pub struct SettingsSetParams {
     /// Per-model concurrent session caps (e.g. {"openai/gpt-4o": 4}). Omit to keep current value.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
-    /// Langfuse public key for LLM observability (e.g. "pk-lf-..."). Set to "" to disable. Omit to keep current value.
-    pub langfuse_public_key: Option<String>,
-    /// Langfuse secret key for LLM observability (e.g. "sk-lf-..."). Set to "" to disable. Omit to keep current value.
-    pub langfuse_secret_key: Option<String>,
-    /// Langfuse OTLP endpoint URL (defaults to "http://localhost:3000/api/public/otel"). Set to "" to disable. Omit to keep current value.
-    pub langfuse_endpoint: Option<String>,
     /// Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
     pub memory_mount_enabled: Option<bool>,
     /// Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.
@@ -136,15 +130,6 @@ impl DjinnMcpServer {
         }
         if let Some(v) = p.max_sessions {
             settings.max_sessions = Some(v);
-        }
-        if let Some(v) = p.langfuse_public_key {
-            settings.langfuse_public_key = if v.is_empty() { None } else { Some(v) };
-        }
-        if let Some(v) = p.langfuse_secret_key {
-            settings.langfuse_secret_key = if v.is_empty() { None } else { Some(v) };
-        }
-        if let Some(v) = p.langfuse_endpoint {
-            settings.langfuse_endpoint = if v.is_empty() { None } else { Some(v) };
         }
         if let Some(v) = p.memory_mount_enabled {
             settings.memory_mount_enabled = Some(v);

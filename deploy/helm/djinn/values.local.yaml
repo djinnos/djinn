@@ -82,6 +82,15 @@ qdrant:
     size: 2Gi
     accessMode: ReadWriteOnce
 
+# Self-hosted Langfuse is deployed alongside djinn by the Tiltfile
+# (deploy/langfuse-local/langfuse.yaml). The pk/sk here match the ones
+# LANGFUSE_INIT_PROJECT_{PUBLIC,SECRET}_KEY seed on first Langfuse boot.
+langfuse:
+  enabled: true
+  endpoint: "http://langfuse-web.djinn.svc.cluster.local:3000/api/public/otel"
+  publicKey: "pk-lf-djinn-local-dev"
+  secretKey: "sk-lf-djinn-local-dev-secret"
+
 env:
   rustLog: "info,djinn=debug"
   # Browser-side OAuth callback URL. For kind + `kubectl port-forward`, the
