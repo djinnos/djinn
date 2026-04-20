@@ -441,10 +441,15 @@ pub async fn start_codex_oauth(
     // 2. Full browser PKCE flow — stash state, build URL, emit event.
     let pkce = generate_pkce();
     let csrf_state = generate_state();
-    let redirect_uri = format!(
-        "{}/auth/callback",
-        public_url.trim_end_matches('/')
-    );
+    // OpenAI's Codex OAuth client (app_EMoamEEZ73f0CkXaXp7hrann, same as the
+    // Codex CLI) pins the redirect to exactly http://localhost:1455/auth/callback.
+    // The path + port are both whitelisted. The operator has to port-forward
+    // :1455 to reach the server — see server/docker/README.md.
+    // Override via CODEX_REDIRECT_URI if your deployment uses a different
+    // (custom, OpenAI-registered) OAuth client.
+    let _ = public_url;
+    let redirect_uri = std::env::var("CODEX_REDIRECT_URI")
+        .unwrap_or_else(|_| "http://localhost:1455/auth/callback".to_string());
     let authorize_url = build_authorize_url(&redirect_uri, &pkce, &csrf_state)?;
 
     pending
