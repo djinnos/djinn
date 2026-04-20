@@ -12,9 +12,9 @@
 //!   * No session is required. The picker is the prerequisite to sign-in,
 //!     and on a fresh deployment no user can have signed in yet.
 //!
-//! The `OrgBinding` env-loaded path (`GITHUB_INSTALLATION_ID` + friends)
-//! remains the override for fully-automated CI deploys; when env binding is
-//! present the UI never reaches the picker (`needs_app_install: false`).
+//! The picker is the only writer of the deployment-to-org binding. There
+//! is no env override; the operator's only responsibility is the App
+//! credentials Secret.
 //!
 //! See `server/src/server/auth.rs::setup_status` for the gating signals
 //! the UI consumes to decide which screen to render.

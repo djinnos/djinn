@@ -135,11 +135,9 @@ pub fn start_org_member_sync(state: AppState) {
 /// so the caller (admin endpoint *or* background loop) can always surface
 /// structured counters.
 pub async fn sync_once(state: &AppState) -> SyncReport {
-    // 1. Resolve the org binding: env-loaded `OrgBinding` first (canonical
-    //    K8s-secret-only path), legacy `org_config` row second (back-compat).
-    let (org_login, installation_id) = if let Some(b) = state.org_binding().await {
-        (b.org_login.clone(), b.installation_id)
-    } else {
+    // 1. Resolve the org binding from the singleton `org_config` row written
+    //    by the in-UI installation picker.
+    let (org_login, installation_id) = {
         let org_repo = OrgConfigRepository::new(state.db().clone());
         match org_repo.get().await {
             Ok(Some(cfg)) => (cfg.github_org_login, cfg.installation_id as u64),

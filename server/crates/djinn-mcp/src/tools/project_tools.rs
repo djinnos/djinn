@@ -548,7 +548,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<GithubListReposParams>,
     ) -> Json<GithubListReposResponse> {
-        use djinn_provider::github_app::{GitHubAppClient, OrgBinding, get_installation_by_id};
+        use djinn_provider::github_app::{GitHubAppClient, get_installation_by_id};
 
         if std::env::var("GITHUB_APP_ID")
             .ok()
@@ -561,12 +561,9 @@ impl DjinnMcpServer {
             });
         }
 
-        // Source of truth: the env-loaded `OrgBinding` (canonical
-        // K8s-secret-only path). Fall back to the legacy `org_config` row
-        // for back-compat with deployments still mid-migration.
-        let installation_id = if let Some(b) = OrgBinding::load_from_env() {
-            b.installation_id
-        } else {
+        // Source of truth: the singleton `org_config` row written by the
+        // in-UI installation picker.
+        let installation_id = {
             let org_repo = OrgConfigRepository::new(self.state.db().clone());
             match org_repo.get().await {
                 Ok(Some(cfg)) => cfg.installation_id as u64,

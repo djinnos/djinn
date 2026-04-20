@@ -962,7 +962,7 @@ async fn app_setup_callback(
     }
 
     if let Err(e) = org_repo
-        .set_once(NewOrgConfig {
+        .set_or_replace(NewOrgConfig {
             github_org_id: installation.account.id as i64,
             github_org_login: &installation.account.login,
             app_id: cfg.app_id as i64,
@@ -974,13 +974,11 @@ async fn app_setup_callback(
             error = %e,
             installation_id,
             account = %installation.account.login,
-            "app_setup_callback: org_config set_once failed",
+            "app_setup_callback: org_config set failed",
         );
         return (
-            StatusCode::CONFLICT,
-            "This deployment is already bound to a different GitHub org. \
-             To rebind, remove the row from the `org_config` table manually \
-             and retry installation.",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to persist org binding. Check server logs.",
         )
             .into_response();
     }
@@ -1057,7 +1055,7 @@ struct InstallationAccount {
 #[derive(Serialize)]
 struct SetupStatusResponse {
     /// True when either the GitHub App credentials are missing OR the
-    /// deployment has no org binding (env nor DB). The UI uses this to
+    /// deployment has no org binding in `org_config`. The UI uses this to
     /// gate sign-in, but combines it with `app_credentials_configured`
     /// to distinguish "operator must drop a Secret" from "user must
     /// pick an installation".
@@ -1068,40 +1066,21 @@ struct SetupStatusResponse {
     /// the static "GitHub App not configured" runbook screen because the
     /// operator hasn't done their part yet.
     app_credentials_configured: bool,
-    /// The org this deployment is locked to, once known. Sourced from the
-    /// env-loaded `OrgBinding` first, then the legacy `org_config` row
-    /// (back-compat for deployments mid-migration).
+    /// The org this deployment is locked to, once known. Sourced
+    /// exclusively from the `org_config` DB row written by the picker.
     org_login: Option<String>,
 }
 
 async fn setup_status(State(state): State<AppState>) -> Json<SetupStatusResponse> {
-    // Read all three signals independently so a DB blip on one doesn't mask
-    // the others. Env binding wins over DB row when both are present.
     let app_cfg = state.app_config().await;
-    let env_binding = state.org_binding().await;
-
-    let org_cfg = if env_binding.is_some() {
-        // Env wins — skip the DB lookup entirely.
-        None
-    } else {
-        let repo = OrgConfigRepository::new(state.db().clone());
-        match repo.get().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "setup/status: org_config lookup failed");
-                None
-            }
-        }
-    };
-
-    let org_login = env_binding
-        .as_ref()
-        .map(|b| b.org_login.clone())
-        .or_else(|| org_cfg.as_ref().map(|c| c.github_org_login.clone()));
-
-    let bound = env_binding.is_some() || org_cfg.is_some();
+    let org_cfg = OrgConfigRepository::new(state.db().clone())
+        .get()
+        .await
+        .ok()
+        .flatten();
+    let needs_app_install = app_cfg.is_none() || org_cfg.is_none();
     let app_credentials_configured = app_cfg.is_some();
-    let needs_app_install = !app_credentials_configured || !bound;
+    let org_login = org_cfg.map(|c| c.github_org_login);
 
     Json(SetupStatusResponse {
         needs_app_install,
@@ -1210,7 +1189,7 @@ mod tests {
         state.set_app_config(Some(Arc::new(cfg))).await;
 
         OrgConfigRepository::new(state.db().clone())
-            .set_once(NewOrgConfig {
+            .set_or_replace(NewOrgConfig {
                 github_org_id: 777,
                 github_org_login: "acme",
                 app_id: 1,
@@ -1232,7 +1211,7 @@ mod tests {
     async fn setup_status_half_configured_still_needs_install() {
         use crate::test_helpers;
         let state = test_helpers::test_app_state_in_memory().await;
-        // Only app_config; no org_config row + no env binding.
+        // Only app_config; no org_config row.
         let cfg = djinn_provider::github_app::AppConfig {
             app_id: 1,
             slug: "djinn".into(),
@@ -1249,80 +1228,4 @@ mod tests {
         assert!(resp.0.app_credentials_configured);
         assert!(resp.0.org_login.is_none());
     }
-
-    /// `/setup/status` flips to `needs_app_install=false` when the env-loaded
-    /// `OrgBinding` is present, even with no DB `org_config` row. Mirrors the
-    /// K8s-secret-only provisioning model.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn setup_status_env_binding_unblocks_install_gate() {
-        use crate::test_helpers;
-        use djinn_provider::github_app::OrgBinding;
-        let state = test_helpers::test_app_state_in_memory().await;
-
-        let cfg = djinn_provider::github_app::AppConfig {
-            app_id: 1,
-            slug: "djinn".into(),
-            client_id: "Iv1.x".into(),
-            client_secret: "y".into(),
-            pem: "PEM".into(),
-            webhook_secret: "w".into(),
-            public_url: "http://127.0.0.1:8372".into(),
-        };
-        state.set_app_config(Some(Arc::new(cfg))).await;
-        state
-            .set_org_binding(Some(Arc::new(OrgBinding {
-                org_login: "acme".into(),
-                installation_id: 42,
-                org_id: Some(7),
-            })))
-            .await;
-
-        let resp = setup_status(State(state)).await;
-        assert!(!resp.0.needs_app_install);
-        assert_eq!(resp.0.org_login.as_deref(), Some("acme"));
-    }
-
-    /// Env binding wins when both env and DB rows are present. Documents
-    /// the precedence promise so a stale DB row can't shadow a fresh
-    /// env-driven re-bind.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn setup_status_env_binding_wins_over_db_row() {
-        use crate::test_helpers;
-        use djinn_db::{NewOrgConfig, OrgConfigRepository};
-        use djinn_provider::github_app::OrgBinding;
-        let state = test_helpers::test_app_state_in_memory().await;
-
-        let cfg = djinn_provider::github_app::AppConfig {
-            app_id: 1,
-            slug: "djinn".into(),
-            client_id: "Iv1.x".into(),
-            client_secret: "y".into(),
-            pem: "PEM".into(),
-            webhook_secret: "w".into(),
-            public_url: "http://127.0.0.1:8372".into(),
-        };
-        state.set_app_config(Some(Arc::new(cfg))).await;
-
-        OrgConfigRepository::new(state.db().clone())
-            .set_once(NewOrgConfig {
-                github_org_id: 1,
-                github_org_login: "stale-db-org",
-                app_id: 1,
-                installation_id: 99,
-            })
-            .await
-            .unwrap();
-        state
-            .set_org_binding(Some(Arc::new(OrgBinding {
-                org_login: "fresh-env-org".into(),
-                installation_id: 42,
-                org_id: Some(7),
-            })))
-            .await;
-
-        let resp = setup_status(State(state)).await;
-        assert!(!resp.0.needs_app_install);
-        assert_eq!(resp.0.org_login.as_deref(), Some("fresh-env-org"));
-    }
-
 }
