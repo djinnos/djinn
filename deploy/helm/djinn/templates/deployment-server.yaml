@@ -90,6 +90,27 @@ spec:
                   name: {{ include "djinn.secretName.githubApp" . }}
                   key: client-secret
                   optional: true
+            # Org binding — same Secret as the App credentials. All three
+            # are `optional: true`; the server falls back to the legacy
+            # org_config DB row when these are absent.
+            - name: GITHUB_ORG_LOGIN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.githubApp" . }}
+                  key: org-login
+                  optional: true
+            - name: GITHUB_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.githubApp" . }}
+                  key: installation-id
+                  optional: true
+            - name: GITHUB_ORG_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.githubApp" . }}
+                  key: org-id
+                  optional: true
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
