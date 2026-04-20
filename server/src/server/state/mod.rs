@@ -244,26 +244,24 @@ impl AppState {
         self.inner.app_config.read().await.clone()
     }
 
-    /// Hot-swap the in-memory GitHub App configuration. Called after the
-    /// manifest auto-provision flow persists fresh credentials.
+    /// Hot-swap the in-memory GitHub App configuration. Retained for tests
+    /// that seed an in-memory state — the production path only writes once
+    /// from `init_app_config` (env vars require a Pod restart to change).
     pub async fn set_app_config(&self, cfg: Option<Arc<GitHubAppConfig>>) {
         *self.inner.app_config.write().await = cfg;
     }
 
-    /// Initialise the in-memory App config from DB → env on startup.
-    /// Called during server bootstrap; safe to call again to refresh.
+    /// Initialise the in-memory App config from environment variables on
+    /// startup. Called during server bootstrap.
     pub async fn init_app_config(&self) {
-        let cfg = GitHubAppConfig::load(self.db(), self.event_bus()).await;
+        let cfg = GitHubAppConfig::load();
         if cfg.is_some() {
-            tracing::info!("github_app: loaded persisted/env App configuration");
+            tracing::info!("github_app: loaded App configuration from env");
         } else {
-            tracing::debug!("github_app: no persisted or env App configuration on startup");
-        }
-        // Mirror to env so consumers that still read env vars (the JWT
-        // minter, the GitHubAppClient install URL helper, etc.) see the
-        // same values without a code-wide refactor.
-        if let Some(ref c) = cfg {
-            c.export_to_env();
+            tracing::debug!(
+                "github_app: no env App configuration on startup — \
+                 mount the djinn-github-app Secret to enable GitHub integration"
+            );
         }
         *self.inner.app_config.write().await = cfg.map(Arc::new);
     }

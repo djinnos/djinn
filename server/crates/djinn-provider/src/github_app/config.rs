@@ -1,37 +1,27 @@
 //! Resolved GitHub App configuration.
 //!
 //! Holds the credentials needed to mint App JWTs and complete user-to-server
-//! OAuth. Loads from two sources, in order:
+//! OAuth. Loads exclusively from environment variables:
 //!
-//! 1. **Persisted DB row** — a single encrypted credential under the key
-//!    `__GITHUB_APP_CONFIG`. Written by the manifest auto-provision endpoint
-//!    (`/auth/github/app-manifest-callback`). Always wins when present.
-//! 2. **Environment variables** — `GITHUB_APP_ID`, `GITHUB_APP_SLUG`,
-//!    `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
-//!    `GITHUB_APP_PRIVATE_KEY` (or `_PATH`), `GITHUB_APP_WEBHOOK_SECRET`,
-//!    `DJINN_PUBLIC_URL`. Maintains backwards compatibility with operators
-//!    that hand-set `.env` files instead of using the manifest flow.
+//! - `GITHUB_APP_ID`, `GITHUB_APP_SLUG`,
+//!   `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
+//!   `GITHUB_APP_PRIVATE_KEY` (or `_PATH`),
+//!   `GITHUB_APP_WEBHOOK_SECRET`, `DJINN_PUBLIC_URL`.
+//!
+//! Production deployments mount these via the Helm chart's `djinn-github-app`
+//! Secret (see `server/docker/README.md`). The legacy "in-UI manifest wizard
+//! that wrote a `__GITHUB_APP_CONFIG` row into the encrypted credentials
+//! vault" path was removed once the K8s migration made env-mounted Secrets
+//! the canonical provisioning surface.
 //!
 //! The struct is cloned cheaply via `Arc` and held inside the server
-//! `AppState` behind a `RwLock`, so a successful manifest provisioning can
-//! hot-swap the value without restarting the process.
+//! `AppState` behind a `RwLock`. Env vars require a Pod restart to change,
+//! so the in-process cache never needs hot-swapping anymore — `init_app_config`
+//! is the only writer.
 
 use serde::{Deserialize, Serialize};
 
-use djinn_core::events::EventBus;
-use djinn_db::Database;
-
-use crate::repos::credential::CredentialRepository;
-
-use super::{
-    ENV_APP_ID, ENV_APP_SLUG, ENV_CLIENT_ID, ENV_CLIENT_SECRET, ENV_PRIVATE_KEY,
-    ENV_PRIVATE_KEY_PATH,
-};
-
-/// Credential `key_name` used for the JSON blob storing the full App config.
-pub const APP_CONFIG_KEY: &str = "__GITHUB_APP_CONFIG";
-/// Credential `provider_id` for the App config row.
-pub const APP_CONFIG_PROVIDER: &str = "github-app";
+use super::{ENV_PRIVATE_KEY, ENV_PRIVATE_KEY_PATH};
 
 /// Env var: GitHub App webhook secret (HMAC key for signed deliveries).
 pub const ENV_WEBHOOK_SECRET: &str = "GITHUB_APP_WEBHOOK_SECRET";
@@ -39,13 +29,13 @@ pub const ENV_WEBHOOK_SECRET: &str = "GITHUB_APP_WEBHOOK_SECRET";
 /// callback / install URLs).
 pub const ENV_PUBLIC_URL: &str = "DJINN_PUBLIC_URL";
 
-/// Default public URL fallback when neither the DB nor env defines one.
+/// Default public URL fallback when env doesn't define one.
 pub const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 
-/// Persisted GitHub App credentials + identity.
+/// Resolved GitHub App credentials + identity.
 ///
-/// Serialised as JSON into the encrypted `credentials.encrypted_value`
-/// column under [`APP_CONFIG_KEY`].
+/// Built from process env at startup; never persisted by Djinn itself
+/// (operators provision via the `djinn-github-app` Kubernetes Secret).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     /// Numeric GitHub App ID (`iss` claim in App JWTs).
@@ -67,18 +57,17 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Resolve the active config: DB row wins, then env vars.
+    /// Resolve the active config from environment variables.
     ///
-    /// Returns `None` if neither source has enough information to mint a JWT.
-    pub async fn load(db: &Database, events: EventBus) -> Option<Self> {
-        if let Some(cfg) = load_from_db(db.clone(), events).await {
-            return Some(cfg);
-        }
+    /// Returns `None` if any required env var (App ID, OAuth client id/secret,
+    /// private key) is missing — the server then surfaces a "GitHub App not
+    /// configured" status to the UI.
+    pub fn load() -> Option<Self> {
         load_from_env()
     }
 
     /// Build the install URL for this App's slug. Returns `None` if `slug`
-    /// is empty (shouldn't happen for DB-loaded configs).
+    /// is empty.
     pub fn install_url(&self) -> Option<String> {
         let s = self.slug.trim();
         if s.is_empty() {
@@ -86,42 +75,11 @@ impl AppConfig {
         }
         Some(format!("https://github.com/apps/{s}/installations/new"))
     }
-
-    /// Mirror this config back into the process environment so existing
-    /// callers that still read `std::env::var(...)` (the JWT minter, the
-    /// install_url helper, etc.) immediately pick up the new credentials
-    /// without a restart.
-    ///
-    /// Safety: `set_var`/`remove_var` are unsafe in 2024 edition because
-    /// they're not thread-safe. We document that this is only called
-    /// during the provisioning callback, which is single-flighted by
-    /// browser navigation.
-    pub fn export_to_env(&self) {
-        // SAFETY: see doc comment.
-        unsafe {
-            std::env::set_var(ENV_APP_ID, self.app_id.to_string());
-            std::env::set_var(ENV_APP_SLUG, &self.slug);
-            std::env::set_var(ENV_CLIENT_ID, &self.client_id);
-            std::env::set_var(ENV_CLIENT_SECRET, &self.client_secret);
-            std::env::set_var(ENV_PRIVATE_KEY, &self.pem);
-            std::env::set_var(ENV_WEBHOOK_SECRET, &self.webhook_secret);
-            std::env::set_var(ENV_PUBLIC_URL, &self.public_url);
-        }
-    }
-}
-
-async fn load_from_db(db: Database, events: EventBus) -> Option<AppConfig> {
-    let repo = CredentialRepository::new(db, events);
-    match repo.get_github_app_config().await {
-        Ok(opt) => opt,
-        Err(e) => {
-            tracing::warn!(error = %e, "github_app::AppConfig::load: db read failed");
-            None
-        }
-    }
 }
 
 fn load_from_env() -> Option<AppConfig> {
+    use super::{ENV_APP_ID, ENV_APP_SLUG, ENV_CLIENT_ID, ENV_CLIENT_SECRET};
+
     let app_id = std::env::var(ENV_APP_ID).ok()?.trim().parse::<u64>().ok()?;
     let slug = std::env::var(ENV_APP_SLUG).unwrap_or_default();
     let client_id = std::env::var(ENV_CLIENT_ID).unwrap_or_default();
