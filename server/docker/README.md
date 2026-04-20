@@ -176,9 +176,9 @@ Expected, after ~30–90 s on first install:
 
 ```
 NAME                             READY   STATUS    RESTARTS
-djinn-djinn-server-…             1/1     Running   0
-djinn-djinn-dolt-0               1/1     Running   0
-djinn-djinn-qdrant-0             1/1     Running   0
+djinn-server-…             1/1     Running   0
+djinn-dolt-0               1/1     Running   0
+djinn-qdrant-0             1/1     Running   0
 ```
 
 If a Pod stays `Pending`, `CrashLoopBackOff`, or `ErrImagePull`, see
@@ -188,7 +188,7 @@ Health check + log tail:
 
 ```bash
 kubectl logs -n djinn -l app.kubernetes.io/component=server --tail=50
-kubectl exec -n djinn deploy/djinn-djinn-server -- wget -qO- http://localhost:3000/health
+kubectl exec -n djinn deploy/djinn-server -- wget -qO- http://localhost:3000/health
 ```
 
 `/health` should return `200 OK`.
@@ -305,7 +305,7 @@ kubectl logs -n djinn -l djinn.app/component=task-run-worker -f --tail=-1
 Server-side controller logs (where dispatch decisions land):
 
 ```bash
-kubectl logs -n djinn deploy/djinn-djinn-server -f --tail=100
+kubectl logs -n djinn deploy/djinn-server -f --tail=100
 ```
 
 Filter for one specific task-run id:
@@ -343,7 +343,7 @@ make image-push-local             # rebuild + push (Rust cache stays warm)
 # Force the kind node to drop its cached :dev layer — see warning below.
 docker exec djinn-control-plane crictl rmi localhost:5001/djinn-server:dev
 
-kubectl rollout restart -n djinn deploy/djinn-djinn-server
+kubectl rollout restart -n djinn deploy/djinn-server
 ```
 
 > **Why `crictl rmi`?** The chart sets `pullPolicy: IfNotPresent` and the
@@ -414,7 +414,7 @@ without recreating the cluster).
 ## djinn-server CrashLoopBackOff
 
 ```bash
-kubectl logs -n djinn deploy/djinn-djinn-server --previous --tail=100
+kubectl logs -n djinn deploy/djinn-server --previous --tail=100
 ```
 
 Most common causes:
@@ -424,7 +424,7 @@ Most common causes:
 - **Dolt or Qdrant not Ready** — the server's startup waits ~30 s for both.
   If they stay Pending past that, fix the underlying StatefulSet first.
 - **`DJINN_PUBLIC_URL` mismatch** — check `kubectl exec -n djinn
-  deploy/djinn-djinn-server -- env | grep DJINN_`. The chart wires
+  deploy/djinn-server -- env | grep DJINN_`. The chart wires
   `DJINN_PUBLIC_URL` to the in-cluster Service DNS by default; for
   port-forward access, override via `--set env.publicUrl=http://localhost:3000`
   on the helm install.
@@ -462,10 +462,10 @@ on the projected key files), but if it recurs:
 
 ```bash
 # What uid is the server actually running as?
-kubectl exec -n djinn deploy/djinn-djinn-server -- id
+kubectl exec -n djinn deploy/djinn-server -- id
 
 # What mode did kubelet project the Secret with?
-kubectl exec -n djinn deploy/djinn-djinn-server -- ls -l /etc/djinn/github-app/
+kubectl exec -n djinn deploy/djinn-server -- ls -l /etc/djinn/github-app/
 ```
 
 The container runs as uid 10001. The mounted Secret's `defaultMode`
@@ -487,8 +487,8 @@ Not a regression from the K8s migration.
 If `dolt-0` gets into a bad state:
 
 ```bash
-kubectl delete pvc -n djinn data-djinn-djinn-dolt-0
-kubectl delete pod -n djinn djinn-djinn-dolt-0
+kubectl delete pvc -n djinn data-djinn-dolt-0
+kubectl delete pod -n djinn djinn-dolt-0
 ```
 
 The StatefulSet recreates the Pod with a fresh PVC; `djinn-server` will
