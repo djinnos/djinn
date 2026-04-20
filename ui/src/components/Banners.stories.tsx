@@ -6,7 +6,6 @@ import {
   Cancel01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { AlertCircleIcon } from "@hugeicons/core-free-icons";
 import { Button } from "@/components/ui/button";
 import { Loading02Icon } from "@hugeicons/core-free-icons";
 
@@ -147,39 +146,6 @@ function BoardHealthBannerMock({
 }
 
 /* ---------------------------------------------------------------------------
- * SyncHealthBanner — presentational mock
- * Reproduces the exact JSX from SyncHealthBanner.tsx but accepts data as props
- * instead of relying on useSyncHealth() / sseStore.
- * --------------------------------------------------------------------------- */
-
-interface SyncHealthBannerMockProps {
-  errorDetails?: string | null;
-}
-
-function SyncHealthBannerMock({ errorDetails = null }: SyncHealthBannerMockProps) {
-  return (
-    <div className="border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20 p-4 mb-4">
-      <div className="flex items-start gap-3">
-        <HugeiconsIcon icon={AlertCircleIcon} size={20} className="text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
-        <div className="flex-1">
-          <h3 className="font-semibold text-red-900 dark:text-red-100">
-            Sync Issues Detected
-          </h3>
-          <p className="text-sm text-red-800 dark:text-red-200 mt-1">
-            Multiple sync failures have occurred. Please check your git remote configuration.
-          </p>
-          {errorDetails && (
-            <div className="mt-2 text-xs text-red-700 dark:text-red-300 font-mono bg-red-100 dark:bg-red-900/40 p-2 rounded">
-              {errorDetails}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------------
  * Storybook meta & stories
  * --------------------------------------------------------------------------- */
 
@@ -300,20 +266,6 @@ export const BoardHealthMultipleFailures: StoryObj = {
       ]}
       failedRunTaskId="019cbe9f-6ae7-7d90-a8be-6ba626cc0119"
     />
-  ),
-};
-
-/* ---- SyncHealthBanner stories ---- */
-
-export const SyncFailure: StoryObj = {
-  render: () => (
-    <SyncHealthBannerMock errorDetails="fatal: Could not read from remote repository. Please make sure you have the correct access rights and the repository exists." />
-  ),
-};
-
-export const GenericError: StoryObj = {
-  render: () => (
-    <SyncHealthBannerMock errorDetails="Sync channel 'origin' failed after 5 consecutive attempts" />
   ),
 };
 

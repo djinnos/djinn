@@ -1,19 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
+import { render, screen, cleanup, within } from '@testing-library/react';
 import { AgentConfig } from './AgentConfig';
 import { ConnectionStatus } from './ConnectionStatus';
-import { SyncHealthBanner } from './SyncHealthBanner';
 import { sseStore } from '@/stores/sseStore';
 
 vi.mock('@/lib/toast', () => ({
   showToast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
-
-vi.mock('@/api/mcpClient', () => ({
-  callMcpTool: vi.fn(),
-}));
-
-import { callMcpTool } from '@/api/mcpClient';
 
 describe('AgentConfig', () => {
   afterEach(() => cleanup());
@@ -207,35 +200,5 @@ describe('ConnectionStatus', () => {
     const statusRoot = container.firstElementChild as HTMLElement;
     expect(statusRoot).toHaveAttribute('title', expect.stringContaining('Connection Error'));
     expect(within(statusRoot).getByText('Connection Error')).toBeInTheDocument();
-  });
-});
-
-describe('SyncHealthBanner', () => {
-  beforeEach(() => {
-    vi.mocked(callMcpTool).mockReset();
-    sseStore.setState({ connectionStatus: 'connected', reconnectAttempt: 0, lastError: null, isConnected: true });
-  });
-
-  afterEach(() => {
-    cleanup();
-    vi.mocked(callMcpTool).mockReset();
-    sseStore.setState({ connectionStatus: 'connected', reconnectAttempt: 0, lastError: null, isConnected: true });
-  });
-
-  it('is hidden when healthy', async () => {
-    vi.mocked(callMcpTool).mockResolvedValue({ channels: [{ failure_count: 0, last_error: null }] });
-    render(<SyncHealthBanner />);
-
-    await waitFor(() => {
-      expect(screen.queryByText('Sync Issues Detected')).not.toBeInTheDocument();
-    });
-  });
-
-  it('shows warning on errors', async () => {
-    vi.mocked(callMcpTool).mockResolvedValue({ channels: [{ failure_count: 3, last_error: 'fatal: auth failed' }] });
-    render(<SyncHealthBanner />);
-
-    expect(await screen.findByText('Sync Issues Detected')).toBeInTheDocument();
-    expect(screen.getByText('fatal: auth failed')).toBeInTheDocument();
   });
 });

@@ -1,14 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
+import React, { type ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { useTaskActions } from "./useTaskActions";
 import { useExecutionControl } from "./useExecutionControl";
 import { useExecutionStatus } from "./useExecutionStatus";
 import { callMcpTool } from "@/api/mcpClient";
+import { sseStore } from "@/stores/sseStore";
 
 vi.mock("@/api/mcpClient", () => ({
   callMcpTool: vi.fn(),
 }));
+
+function makeWrapper() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false },
+    },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    React.createElement(QueryClientProvider, { client: queryClient }, children);
+  return { queryClient, wrapper };
+}
 
 describe("useTaskActions", () => {
   beforeEach(() => {
@@ -72,6 +87,8 @@ describe("useExecutionControl", () => {
 describe("useExecutionStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset the handlers map so previous tests' subscriptions don't leak.
+    sseStore.setState({ handlers: new Map() });
   });
 
   it("returns mapped status shape", async () => {
@@ -83,7 +100,8 @@ describe("useExecutionStatus", () => {
       extra: true,
     });
 
-    const { result } = renderHook(() => useExecutionStatus("/tmp/project"));
+    const { wrapper } = makeWrapper();
+    const { result } = renderHook(() => useExecutionStatus("/tmp/project"), { wrapper });
 
     await waitFor(() => expect(result.current.state).toBe("running"));
 
@@ -103,7 +121,8 @@ describe("useExecutionStatus", () => {
   it("handles errors by resetting state shape", async () => {
     vi.mocked(callMcpTool).mockRejectedValue(new Error("status failed"));
 
-    const { result } = renderHook(() => useExecutionStatus("/tmp/project"));
+    const { wrapper } = makeWrapper();
+    const { result } = renderHook(() => useExecutionStatus("/tmp/project"), { wrapper });
 
     await waitFor(() => {
       expect(result.current.state).toBeNull();
@@ -112,5 +131,67 @@ describe("useExecutionStatus", () => {
       expect(result.current.capacity).toEqual({});
       expect(result.current.raw).toBeNull();
     });
+  });
+
+  it("refetches when session_started SSE event fires", async () => {
+    vi.mocked(callMcpTool).mockResolvedValue({
+      state: "running",
+      running_sessions: 1,
+      max_sessions: 4,
+      capacity: {},
+    });
+
+    const { wrapper } = makeWrapper();
+    const { result } = renderHook(() => useExecutionStatus("/tmp/project"), { wrapper });
+
+    await waitFor(() => expect(result.current.runningSessions).toBe(1));
+    const initialCalls = vi.mocked(callMcpTool).mock.calls.length;
+
+    vi.mocked(callMcpTool).mockResolvedValue({
+      state: "running",
+      running_sessions: 2,
+      max_sessions: 4,
+      capacity: {},
+    });
+
+    act(() => {
+      sseStore.getState().emit({
+        type: "session_started",
+        data: {},
+        timestamp: Date.now(),
+      });
+    });
+
+    await waitFor(() =>
+      expect(vi.mocked(callMcpTool).mock.calls.length).toBeGreaterThan(initialCalls),
+    );
+    await waitFor(() => expect(result.current.runningSessions).toBe(2));
+  });
+
+  it("does not refetch on unrelated SSE events", async () => {
+    vi.mocked(callMcpTool).mockResolvedValue({
+      state: "running",
+      running_sessions: 1,
+      max_sessions: 4,
+      capacity: {},
+    });
+
+    const { wrapper } = makeWrapper();
+    renderHook(() => useExecutionStatus("/tmp/project"), { wrapper });
+
+    await waitFor(() => expect(callMcpTool).toHaveBeenCalled());
+    const initialCalls = vi.mocked(callMcpTool).mock.calls.length;
+
+    act(() => {
+      sseStore.getState().emit({
+        type: "session_message",
+        data: {},
+        timestamp: Date.now(),
+      });
+    });
+
+    // Give React/TanStack a tick to potentially schedule work.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(vi.mocked(callMcpTool).mock.calls.length).toBe(initialCalls);
   });
 });
