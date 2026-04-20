@@ -54,7 +54,9 @@ docker_build(
         'ui',
         'deploy',
         '.claude',
-        '**/*.md',
+        # Do NOT exclude markdown files: several crates (djinn-provider)
+        # `include_str!` prompt `.md` files at compile time, and excluding
+        # them makes the build fail with "No such file or directory".
     ],
 )
 

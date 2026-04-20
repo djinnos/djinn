@@ -54,10 +54,14 @@ metadata:
     app.kubernetes.io/part-of: langfuse
 type: Opaque
 stringData:
+  # Pick values that don't appear as substrings in your repo paths — Tilt
+  # redacts Secret values in all streamed logs, so naming the project just
+  # "djinn" would replace every `djinn-*` crate path in cargo build output
+  # with `[redacted secret ...]` and make errors unreadable.
   LANGFUSE_INIT_ORG_ID: djinn-local
   LANGFUSE_INIT_ORG_NAME: Djinn Local
-  LANGFUSE_INIT_PROJECT_ID: djinn
-  LANGFUSE_INIT_PROJECT_NAME: djinn
+  LANGFUSE_INIT_PROJECT_ID: djinn-local
+  LANGFUSE_INIT_PROJECT_NAME: Djinn Local
   # Must match values.local.yaml's langfuse.publicKey / langfuse.secretKey.
   LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-djinn-local-dev
   LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-djinn-local-dev-secret
