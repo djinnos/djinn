@@ -23,7 +23,6 @@ use djinn_db::{
 use djinn_git::{GitActorHandle, GitError};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
-use djinn_provider::oauth::codex::CodexPendingStore;
 use djinn_workspace::MirrorManager;
 
 mod canonical_graph_refresh_planner;
@@ -167,12 +166,6 @@ struct Inner {
     /// race against listener boot order — the registry is cheap to hold
     /// around when the `DJINN_RUNTIME=test` path doesn't exercise it.
     pub rpc_registry: Arc<ConnectionRegistry>,
-    /// In-memory pending-auth table for the Codex OAuth flow. `start_*`
-    /// inserts an entry; the `/api/oauth/codex/callback` route handler
-    /// consumes it. Shared between the MCP tool (starts the flow) and the
-    /// HTTP callback handler (finishes it), which is why it lives on
-    /// `AppState` rather than inside either module.
-    pub codex_oauth_pending: Arc<CodexPendingStore>,
 }
 
 impl AppState {
@@ -227,16 +220,8 @@ impl AppState {
                 mirror: Arc::new(MirrorManager::new(mirrors_root())),
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
-                codex_oauth_pending: Arc::new(CodexPendingStore::new()),
             }),
         }
-    }
-
-    /// Shared Codex OAuth pending-auth store. Handed to
-    /// `start_codex_oauth` (from the MCP tool) and `finish_codex_oauth`
-    /// (from the `/api/oauth/codex/callback` route handler).
-    pub fn codex_oauth_pending(&self) -> Arc<CodexPendingStore> {
-        self.inner.codex_oauth_pending.clone()
     }
 
     /// Shared MirrorManager. Used by the task-run supervisor for ephemeral
@@ -776,7 +761,17 @@ impl AppState {
     /// catalog refresh from models.dev.  Call once after server startup.
     pub async fn initialize(&self) {
         use djinn_core::models::{Model, Provider};
-        use djinn_provider::repos::CustomProviderRepository;
+        use djinn_provider::repos::{CredentialRepository, CustomProviderRepository};
+
+        // Bootstrap provider API keys from deployment-provided env vars
+        // (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) into the encrypted vault
+        // before anything else reads from it. Idempotent upsert — a Helm
+        // upgrade takes effect on the next pod restart.
+        let credential_repo = CredentialRepository::new(self.db().clone(), self.event_bus());
+        if let Err(e) = djinn_provider::bootstrap::bootstrap_env_credentials(&credential_repo).await
+        {
+            tracing::warn!(error = %e, "failed to bootstrap provider env credentials");
+        }
 
         // Load custom providers from DB → merge into in-memory catalog.
         let repo = CustomProviderRepository::new(self.db().clone(), self.event_bus());

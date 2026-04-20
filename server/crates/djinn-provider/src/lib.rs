@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod catalog;
 pub mod completion;
 pub mod github_api;

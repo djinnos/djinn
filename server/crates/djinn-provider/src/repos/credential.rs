@@ -5,6 +5,7 @@ use djinn_core::models::Credential;
 use djinn_db::crypto;
 use djinn_db::{Database, Result, ensure_db};
 
+#[derive(Clone)]
 pub struct CredentialRepository {
     db: Database,
     events: EventBus,

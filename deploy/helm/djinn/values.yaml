@@ -122,6 +122,26 @@ secrets:
     # already encrypted under that key stays decryptable. Set this to pin a
     # specific key (e.g. to share across environments or restore from backup).
     key: ""
+  # Provider API keys bootstrapped into the encrypted credential vault at
+  # server startup. Each non-empty value lands as an env var on the djinn-
+  # server pod (keyed by the builtin provider's `required_env_vars`). The
+  # server's `bootstrap_env_credentials` pass upserts them into the vault
+  # so dispatch-time lookups resolve without any UI interaction.
+  #
+  # Leave everything blank to rely on ChatGPT / Codex sign-in through the
+  # SPA (device-code flow) — that path doesn't use any of these fields.
+  providers:
+    # If set, mount this pre-existing Secret instead of chart-rendering one.
+    # The Secret must expose the same keys listed below (ANTHROPIC_API_KEY,
+    # OPENAI_API_KEY, …).
+    existingSecret: ""
+    anthropicApiKey: ""
+    openaiApiKey: ""
+    googleApiKey: ""
+    azureOpenaiApiKey: ""
+    awsAccessKeyId: ""
+    awsSecretAccessKey: ""
+    gcpVertexProjectId: ""
 
 # -----------------------------------------------------------------------------
 # Ingress (opt-in)

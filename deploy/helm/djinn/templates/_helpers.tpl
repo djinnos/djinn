@@ -126,6 +126,14 @@ that string wins; otherwise we use the chart-local name.
 {{- end -}}
 {{- end -}}
 
+{{- define "djinn.secretName.providers" -}}
+{{- if .Values.secrets.providers.existingSecret -}}
+{{- .Values.secrets.providers.existingSecret -}}
+{{- else -}}
+{{- printf "%s-providers" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Service names (used inside DJINN_MYSQL_URL / QDRANT_URL env in configmap).
 */}}

@@ -90,6 +90,53 @@ spec:
                   name: {{ include "djinn.secretName.githubApp" . }}
                   key: client-secret
                   optional: true
+            # Provider API keys — read by djinn-provider::bootstrap at startup.
+            # Every entry is optional: the Secret is rendered with empty
+            # strings for unset keys, and `optional: true` means the pod
+            # happily starts even if the Secret doesn't exist at all (e.g. an
+            # operator who only uses Codex OAuth through the UI).
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.providers" . }}
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.providers" . }}
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.providers" . }}
+                  key: GOOGLE_API_KEY
+                  optional: true
+            - name: AZURE_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.providers" . }}
+                  key: AZURE_OPENAI_API_KEY
+                  optional: true
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.providers" . }}
+                  key: AWS_ACCESS_KEY_ID
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.providers" . }}
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: true
+            - name: GCP_VERTEX_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "djinn.secretName.providers" . }}
+                  key: GCP_VERTEX_PROJECT_ID
+                  optional: true
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

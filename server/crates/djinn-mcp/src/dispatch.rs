@@ -33,8 +33,8 @@ use crate::tools::proposal_tools::{
     ProposeAdrAcceptParams, ProposeAdrListParams, ProposeAdrRejectParams, ProposeAdrShowParams,
 };
 use crate::tools::provider_tools::{
-    ModelHealthInput, ProviderAddCustomInput, ProviderModelLookupInput, ProviderModelsInput,
-    ProviderOauthStartInput, ProviderRemoveInput, ProviderValidateInput,
+    ModelHealthInput, ProviderModelLookupInput, ProviderModelsInput, ProviderOauthStartInput,
+    ProviderRemoveInput, ProviderValidateInput,
 };
 use crate::tools::session_tools::{
     SessionActiveParams, SessionListParams, SessionMessagesParams, SessionShowParams,
@@ -303,13 +303,6 @@ impl DjinnMcpServer {
             "provider_validate" => map_json(
                 name,
                 self.provider_validate(Parameters(decode_args::<ProviderValidateInput>(
-                    name, args,
-                )?))
-                .await,
-            ),
-            "provider_add_custom" => map_json(
-                name,
-                self.provider_add_custom(Parameters(decode_args::<ProviderAddCustomInput>(
                     name, args,
                 )?))
                 .await,

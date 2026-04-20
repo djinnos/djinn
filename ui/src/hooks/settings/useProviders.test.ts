@@ -20,10 +20,6 @@ const serverMocks = vi.hoisted(() => ({
   fetchProviderCatalog: vi.fn(),
   fetchCredentialList: vi.fn(),
   invalidateProviderCatalogCache: vi.fn(),
-  validateProviderApiKey: vi.fn(),
-  saveProviderCredentials: vi.fn(),
-  startProviderOAuth: vi.fn(),
-  addCustomProvider: vi.fn(),
   removeProviderFull: vi.fn(),
 }));
 
@@ -33,10 +29,6 @@ vi.mock('@/api/server', () => ({
   fetchProviderCatalog: serverMocks.fetchProviderCatalog,
   fetchCredentialList: serverMocks.fetchCredentialList,
   invalidateProviderCatalogCache: serverMocks.invalidateProviderCatalogCache,
-  validateProviderApiKey: serverMocks.validateProviderApiKey,
-  saveProviderCredentials: serverMocks.saveProviderCredentials,
-  startProviderOAuth: serverMocks.startProviderOAuth,
-  addCustomProvider: serverMocks.addCustomProvider,
   removeProviderFull: serverMocks.removeProviderFull,
 }));
 
@@ -46,16 +38,17 @@ describe('useProviders', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     serverMocks.fetchProviderCatalog.mockResolvedValue([
-      { id: 'openai', name: 'OpenAI' },
       { id: 'anthropic', name: 'Anthropic' },
+      { id: 'chatgpt_codex', name: 'ChatGPT / Codex' },
     ]);
-    serverMocks.fetchCredentialList.mockResolvedValue([{ provider_id: 'openai', configured: true }]);
-    serverMocks.validateProviderApiKey.mockResolvedValue({ valid: true });
-    serverMocks.startProviderOAuth.mockResolvedValue({ success: true });
-    serverMocks.saveProviderCredentials.mockResolvedValue(undefined);
+    serverMocks.fetchCredentialList.mockResolvedValue([
+      { provider_id: 'anthropic', configured: true, valid: true },
+      { provider_id: 'chatgpt_codex', configured: true, valid: true },
+    ]);
+    serverMocks.removeProviderFull.mockResolvedValue(undefined);
   });
 
-  it('fetches catalog and builds configured/unconfigured providers', async () => {
+  it('fetches catalog and builds configured list', async () => {
     const { result } = renderHook(() => useProviders());
 
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -63,50 +56,45 @@ describe('useProviders', () => {
     expect(serverMocks.invalidateProviderCatalogCache).toHaveBeenCalled();
     expect(serverMocks.fetchProviderCatalog).toHaveBeenCalled();
     expect(serverMocks.fetchCredentialList).toHaveBeenCalled();
-    expect(result.current.configuredProviders.map((p: { id: string }) => p.id)).toEqual(['openai']);
-    expect(result.current.unconfiguredProviders.map((p: { id: string }) => p.id)).toEqual(['anthropic']);
+    expect(result.current.configuredProviders.map((p: { id: string }) => p.id)).toEqual([
+      'anthropic',
+      'chatgpt_codex',
+    ]);
   });
 
-  it('saves credentials after validation', async () => {
+  it('identifies self-serve providers', async () => {
     const { result } = renderHook(() => useProviders());
     await waitFor(() => expect(result.current.loading).toBe(false));
 
-    let ok = false;
+    expect(result.current.isSelfServeProvider('chatgpt_codex')).toBe(true);
+    expect(result.current.isSelfServeProvider('anthropic')).toBe(false);
+  });
+
+  it('removes self-serve providers via provider_remove', async () => {
+    const { result } = renderHook(() => useProviders());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
     await act(async () => {
-      ok = await result.current.saveProvider('openai', '  secret-key  ');
+      await result.current.removeProvider('chatgpt_codex');
     });
 
-    expect(ok).toBe(true);
-    expect(serverMocks.validateProviderApiKey).toHaveBeenCalledWith('openai', 'secret-key');
-    expect(serverMocks.saveProviderCredentials).toHaveBeenCalledWith('openai', 'secret-key');
+    expect(serverMocks.removeProviderFull).toHaveBeenCalledWith('chatgpt_codex');
     expect(settingsStoreMocks.store.loadProviderModels).toHaveBeenCalled();
+    expect(toastMocks.showToast.success).toHaveBeenCalledWith('Provider removed');
   });
 
-  it('starts oauth connection flow', async () => {
+  it('refuses to remove deployment-provisioned providers', async () => {
     const { result } = renderHook(() => useProviders());
     await waitFor(() => expect(result.current.loading).toBe(false));
 
-    let ok = false;
     await act(async () => {
-      ok = await result.current.connectOAuth('anthropic');
+      await result.current.removeProvider('anthropic');
     });
 
-    expect(ok).toBe(true);
-    expect(serverMocks.startProviderOAuth).toHaveBeenCalledWith('anthropic');
-    expect(settingsStoreMocks.store.loadProviderModels).toHaveBeenCalled();
-  });
-
-  it('validates inline api key and sets status', async () => {
-    const { result } = renderHook(() => useProviders());
-    await waitFor(() => expect(result.current.loading).toBe(false));
-
-    serverMocks.validateProviderApiKey.mockResolvedValueOnce({ valid: false, error: 'invalid' });
-
-    await act(async () => {
-      await result.current.validateInline('openai', ' key ');
-    });
-
-    expect(serverMocks.validateProviderApiKey).toHaveBeenCalledWith('openai', 'key');
-    expect(result.current.validationStatus).toEqual({ type: 'error', message: 'invalid' });
+    expect(serverMocks.removeProviderFull).not.toHaveBeenCalled();
+    expect(toastMocks.showToast.error).toHaveBeenCalledWith(
+      'Provisioned via deployment',
+      expect.objectContaining({ description: expect.stringContaining('Helm') }),
+    );
   });
 });

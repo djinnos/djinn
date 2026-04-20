@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::server::DjinnMcpServer;
-use djinn_core::models::{CustomProvider, Model, Provider, SeedModel};
+use djinn_core::models::{Model, Provider};
 use djinn_provider::catalog::builtin;
 use djinn_provider::catalog::health::ModelHealth;
 use djinn_provider::catalog::validate::{self, ValidationRequest};
@@ -67,22 +67,6 @@ fn provider_connection_status(
 fn is_provider_usable(provider: &Provider, builtin_ids: &HashSet<String>) -> bool {
     (provider.is_openai_compatible || builtin_ids.contains(&provider.id))
         && !builtin::is_auth_only_provider(&provider.id)
-}
-
-/// Resolve the public base URL for the server — the value we hand to
-/// OpenAI as the Codex OAuth `redirect_uri`. Mirrors the helper in
-/// `server::auth`: prefers `DJINN_PUBLIC_URL`, falls back to the
-/// historical localhost default used elsewhere in the server.
-///
-/// The trailing slash, if present, is stripped so the caller can
-/// concatenate paths without doubling up.
-fn public_base_url() -> String {
-    std::env::var("DJINN_PUBLIC_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:8372".to_string())
-        .trim_end_matches('/')
-        .to_string()
 }
 
 // ── model_health ──────────────────────────────────────────────────────────────
@@ -235,20 +219,22 @@ pub struct ProviderOauthStartResponse {
     pub oauth_supported: bool,
     pub configured_keys: Vec<String>,
     pub error: Option<String>,
-    /// For device-code flows: the code the user must enter.
+    /// Device-code: the short code the user must enter at `verification_uri`.
     pub user_code: Option<String>,
-    /// For device-code flows: the URL where the user enters the code.
+    /// Device-code: the bare URL the user opens to enter the code manually.
     pub verification_uri: Option<String>,
-    /// True when the flow is still in progress (e.g. device-code polling in
-    /// background, or Codex waiting on the browser redirect to hit
-    /// `/api/oauth/codex/callback`).
+    /// Device-code: convenience URL with `user_code` pre-filled as a query
+    /// param; the UI can surface this as a "click to open" link.
+    pub verification_uri_complete: Option<String>,
+    /// Device-code: recommended polling interval in seconds (informational —
+    /// the server does the polling, not the client).
+    pub interval: Option<i64>,
+    /// Device-code: how long, in seconds, the user has to complete sign-in.
+    pub expires_in: Option<i64>,
+    /// True when the flow is still in progress — the server has spawned a
+    /// background task that polls for tokens. The UI should wait for a
+    /// `credential.updated` SSE event to confirm completion.
     pub pending: bool,
-    /// For browser-redirect flows (Codex): the authorize URL the client
-    /// should open in a new tab. Present only when the flow requires the
-    /// user to complete it in a browser; `None` when a silent refresh
-    /// succeeded or the provider is already connected.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub authorize_url: Option<String>,
 }
 
 // ── provider_model_lookup ─────────────────────────────────────────────────────
@@ -306,36 +292,6 @@ pub struct ProviderRemoveResponse {
     pub credentials_deleted: i64,
     pub custom_provider_deleted: bool,
     pub oauth_cleared: bool,
-    pub error: Option<String>,
-}
-
-// ── provider_add_custom ───────────────────────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub struct SeedModelInput {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ProviderAddCustomInput {
-    /// Unique provider slug (e.g. 'my-llm'). Must not collide with models.dev IDs.
-    pub id: String,
-    /// Human-readable display name (e.g. 'My LLM').
-    pub name: String,
-    /// Root URL for OpenAI-compatible API calls (e.g. https://api.my-llm.com/v1).
-    pub base_url: String,
-    /// Environment variable name for the API key (e.g. MY_LLM_API_KEY).
-    pub env_var: String,
-    /// Optional seed models to pre-populate the model picker.
-    pub seed_models: Option<Vec<SeedModelInput>>,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub struct ProviderAddCustomResponse {
-    pub ok: bool,
-    pub success: bool,
-    pub id: String,
     pub error: Option<String>,
 }
 
@@ -662,22 +618,38 @@ impl DjinnMcpServer {
     ) -> Json<ProviderOauthStartResponse> {
         use djinn_provider::oauth::{OAuthFlowKind, codex, copilot};
 
-        let resolved_name = builtin::resolve_builtin_name(&input.provider_id);
-        let Some(builtin_id) = resolved_name else {
-            return Json(ProviderOauthStartResponse {
+        fn failure(
+            provider_id: String,
+            builtin_id: Option<&str>,
+            oauth_supported: bool,
+            error: String,
+        ) -> ProviderOauthStartResponse {
+            ProviderOauthStartResponse {
                 ok: false,
                 success: false,
-                provider_id: input.provider_id,
-                builtin_id: None,
-                legacy_builtin_id: None,
-                oauth_supported: false,
+                provider_id,
+                builtin_id: builtin_id.map(str::to_string),
+                legacy_builtin_id: builtin_id.map(str::to_string),
+                oauth_supported,
                 configured_keys: vec![],
-                error: Some("provider is not a known built-in".into()),
+                error: Some(error),
                 user_code: None,
                 verification_uri: None,
+                verification_uri_complete: None,
+                interval: None,
+                expires_in: None,
                 pending: false,
-                authorize_url: None,
-            });
+            }
+        }
+
+        let resolved_name = builtin::resolve_builtin_name(&input.provider_id);
+        let Some(builtin_id) = resolved_name else {
+            return Json(failure(
+                input.provider_id,
+                None,
+                false,
+                "provider is not a known built-in".into(),
+            ));
         };
 
         // Resolve OAuth keys (own + merged children, e.g. "openai" inherits "chatgpt_codex" keys).
@@ -692,38 +664,21 @@ impl DjinnMcpServer {
         };
 
         if oauth_keys.is_empty() {
-            return Json(ProviderOauthStartResponse {
-                ok: false,
-                success: false,
-                provider_id: input.provider_id,
-                builtin_id: Some(builtin_id.to_string()),
-                legacy_builtin_id: Some(builtin_id.to_string()),
-                oauth_supported: false,
-                configured_keys: vec![],
-                error: Some("provider does not support OAuth flow".into()),
-                user_code: None,
-                verification_uri: None,
-                pending: false,
-                authorize_url: None,
-            });
+            return Json(failure(
+                input.provider_id,
+                Some(builtin_id),
+                false,
+                "provider does not support OAuth flow".into(),
+            ));
         }
 
-        let flow_kind = OAuthFlowKind::from_provider_id(effective_id);
-        let Some(flow_kind) = flow_kind else {
-            return Json(ProviderOauthStartResponse {
-                ok: false,
-                success: false,
-                provider_id: input.provider_id,
-                builtin_id: Some(builtin_id.to_string()),
-                legacy_builtin_id: Some(builtin_id.to_string()),
-                oauth_supported: true,
-                configured_keys: vec![],
-                error: Some(format!("no OAuth flow implemented for '{effective_id}'")),
-                user_code: None,
-                verification_uri: None,
-                pending: false,
-                authorize_url: None,
-            });
+        let Some(flow_kind) = OAuthFlowKind::from_provider_id(effective_id) else {
+            return Json(failure(
+                input.provider_id,
+                Some(builtin_id),
+                true,
+                format!("no OAuth flow implemented for '{effective_id}'"),
+            ));
         };
 
         let credential_repo =
@@ -731,16 +686,12 @@ impl DjinnMcpServer {
 
         match flow_kind {
             OAuthFlowKind::Codex => {
-                // Codex is now a redirect flow: `start_codex_oauth` stashes a
-                // PKCE entry in the shared pending store and returns the
-                // authorize URL. The browser completes the loop by hitting
-                // `/api/oauth/codex/callback` on the main router, which calls
-                // `finish_codex_oauth` and persists the tokens.
+                // Device-code flow: `start_codex_device_auth` hits OpenAI's
+                // `/deviceauth/usercode` endpoint and spawns a background
+                // polling task. The UI displays the user_code and waits for
+                // the `credential.updated` SSE event to confirm sign-in.
                 let events = self.state.event_bus();
-                let public_url = public_base_url();
-                let pending = self.state.codex_oauth_pending();
-                match codex::start_codex_oauth(pending, credential_repo, &events, &public_url).await
-                {
+                match codex::start_codex_device_auth(credential_repo, &events).await {
                     Ok(None) => Json(ProviderOauthStartResponse {
                         // Already connected (cached token valid or silently refreshed).
                         ok: true,
@@ -753,12 +704,12 @@ impl DjinnMcpServer {
                         error: None,
                         user_code: None,
                         verification_uri: None,
+                        verification_uri_complete: None,
+                        interval: None,
+                        expires_in: None,
                         pending: false,
-                        authorize_url: None,
                     }),
-                    Ok(Some(start)) => Json(ProviderOauthStartResponse {
-                        // Browser flow in progress — UI opens `authorize_url`
-                        // (or relies on the `oauth.open_browser` SSE event).
+                    Ok(Some(session)) => Json(ProviderOauthStartResponse {
                         ok: true,
                         success: false,
                         provider_id: input.provider_id,
@@ -767,25 +718,19 @@ impl DjinnMcpServer {
                         oauth_supported: true,
                         configured_keys: oauth_keys,
                         error: None,
-                        user_code: None,
-                        verification_uri: None,
+                        user_code: Some(session.user_code),
+                        verification_uri: Some(session.verification_uri),
+                        verification_uri_complete: Some(session.verification_uri_complete),
+                        interval: Some(session.interval),
+                        expires_in: Some(session.expires_in),
                         pending: true,
-                        authorize_url: Some(start.authorize_url),
                     }),
-                    Err(e) => Json(ProviderOauthStartResponse {
-                        ok: false,
-                        success: false,
-                        provider_id: input.provider_id,
-                        builtin_id: Some(builtin_id.to_string()),
-                        legacy_builtin_id: Some(builtin_id.to_string()),
-                        oauth_supported: true,
-                        configured_keys: vec![],
-                        error: Some(e.to_string()),
-                        user_code: None,
-                        verification_uri: None,
-                        pending: false,
-                        authorize_url: None,
-                    }),
+                    Err(e) => Json(failure(
+                        input.provider_id,
+                        Some(builtin_id),
+                        true,
+                        e.to_string(),
+                    )),
                 }
             }
             OAuthFlowKind::Copilot => {
@@ -807,23 +752,17 @@ impl DjinnMcpServer {
                         error: None,
                         user_code: None,
                         verification_uri: None,
+                        verification_uri_complete: None,
+                        interval: None,
+                        expires_in: None,
                         pending: false,
-                        authorize_url: None,
                     }),
-                    Err(e) => Json(ProviderOauthStartResponse {
-                        ok: false,
-                        success: false,
-                        provider_id: input.provider_id,
-                        builtin_id: Some(builtin_id.to_string()),
-                        legacy_builtin_id: Some(builtin_id.to_string()),
-                        oauth_supported: true,
-                        configured_keys: vec![],
-                        error: Some(e.to_string()),
-                        user_code: None,
-                        verification_uri: None,
-                        pending: false,
-                        authorize_url: None,
-                    }),
+                    Err(e) => Json(failure(
+                        input.provider_id,
+                        Some(builtin_id),
+                        true,
+                        e.to_string(),
+                    )),
                 }
             }
         }
@@ -899,103 +838,6 @@ impl DjinnMcpServer {
             error: result.error,
             models: result.models,
             http_status: i64::from(result.http_status),
-        })
-    }
-
-    /// Register an unlisted OpenAI-compatible provider with a base URL and API key
-    /// environment variable. Persists to DB for use by the model picker and env injection.
-    #[tool(
-        description = "Register an unlisted OpenAI-compatible provider with a base URL and API key environment variable. Persists to disk for use by the model picker and env injection."
-    )]
-    pub async fn provider_add_custom(
-        &self,
-        Parameters(input): Parameters<ProviderAddCustomInput>,
-    ) -> Json<ProviderAddCustomResponse> {
-        // Validate ID format (basic sanity check).
-        if input.id.is_empty() || input.id.contains('/') {
-            return Json(ProviderAddCustomResponse {
-                ok: false,
-                success: false,
-                id: input.id,
-                error: Some("provider id must be non-empty and must not contain '/'".into()),
-            });
-        }
-
-        // Validate base_url scheme.
-        if !input.base_url.starts_with("http://") && !input.base_url.starts_with("https://") {
-            return Json(ProviderAddCustomResponse {
-                ok: false,
-                success: false,
-                id: input.id,
-                error: Some("base_url must use http or https scheme".into()),
-            });
-        }
-
-        let seed_models: Vec<SeedModel> = input
-            .seed_models
-            .unwrap_or_default()
-            .into_iter()
-            .map(|s| SeedModel {
-                id: s.id,
-                name: s.name,
-            })
-            .collect();
-
-        let provider = CustomProvider {
-            id: input.id.clone(),
-            name: input.name.clone(),
-            base_url: input.base_url.clone(),
-            env_var: input.env_var.clone(),
-            seed_models: seed_models.clone(),
-            created_at: String::new(),
-        };
-
-        // Persist to DB.
-        let repo = CustomProviderRepository::new(self.state.db().clone(), self.state.event_bus());
-        if let Err(e) = repo.upsert(&provider).await {
-            tracing::warn!(id = %input.id, error = %e, "provider_add_custom: DB upsert failed");
-            return Json(ProviderAddCustomResponse {
-                ok: false,
-                success: false,
-                id: input.id,
-                error: Some(e.to_string()),
-            });
-        }
-
-        // Add to in-memory catalog.
-        let catalog_provider = Provider {
-            id: input.id.clone(),
-            name: input.name,
-            npm: String::new(),
-            env_vars: vec![input.env_var],
-            base_url: input.base_url,
-            docs_url: String::new(),
-            is_openai_compatible: true,
-        };
-        let catalog_models: Vec<Model> = seed_models
-            .iter()
-            .map(|s| Model {
-                id: s.id.clone(),
-                provider_id: input.id.clone(),
-                name: s.name.clone(),
-                tool_call: false,
-                reasoning: false,
-                attachment: false,
-                context_window: 0,
-                output_limit: 0,
-                pricing: djinn_core::models::Pricing::default(),
-            })
-            .collect();
-        self.state
-            .catalog()
-            .add_custom_provider(catalog_provider, catalog_models);
-
-        tracing::info!(id = %input.id, "registered custom provider");
-        Json(ProviderAddCustomResponse {
-            ok: true,
-            success: true,
-            id: input.id,
-            error: None,
         })
     }
 

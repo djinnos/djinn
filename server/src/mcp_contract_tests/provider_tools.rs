@@ -163,31 +163,6 @@ async fn model_health_status_and_param_validation_shapes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provider_add_custom_and_remove_custom_work() {
-    let db = create_test_db();
-    let app = create_test_app_with_db(db);
-    let session_id = initialize_mcp_session(&app).await;
-
-    let added = mcp_call_tool(&app, &session_id, "provider_add_custom", serde_json::json!({"id":"my-custom","name":"My Custom","base_url":"https://example.invalid/v1","env_var":"MY_CUSTOM_API_KEY","seed_models":[{"id":"my-model","name":"My Model"}]})).await;
-    assert!(added["ok"].as_bool().unwrap_or(false));
-    assert_eq!(added["id"], "my-custom");
-
-    let removed = mcp_call_tool(
-        &app,
-        &session_id,
-        "provider_remove",
-        serde_json::json!({"provider_id":"my-custom"}),
-    )
-    .await;
-    assert!(removed["ok"].as_bool().unwrap_or(false));
-    assert!(
-        removed["custom_provider_deleted"]
-            .as_bool()
-            .unwrap_or(false)
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_remove_builtin_returns_error_shape() {
     let db = create_test_db();
     let app = create_test_app_with_db(db);

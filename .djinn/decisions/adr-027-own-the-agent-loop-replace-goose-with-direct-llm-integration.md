@@ -66,6 +66,7 @@ The models.dev catalog already handles provider/model discovery. New providers t
 ### OAuth Flows Ported
 
 - **ChatGPT Codex**: Authorization Code + PKCE (~400 LOC). Browser redirect to `auth.openai.com`, local callback server on `localhost:1455`, JWT account ID extraction. Post-auth: OpenAI-compatible with `chatgpt.com/backend-api/codex` base URL + `chatgpt-account-id` header.
+  - **Superseded 2026-04-20 by device-code flow** — see update block below.
 - **GitHub Copilot**: Device Code flow (~300 LOC). POST to GitHub, poll for token, exchange for Copilot API token at `api.github.com/copilot_internal/v2/token`. Dynamic API endpoint from token response.
 - **Databricks**: OAuth device code (if needed later).
 
@@ -155,3 +156,27 @@ Use the same primitives Goose uses internally:
 - Task zih5: Compaction — 80% threshold with LLM summarization
 - Task g7qy: Lifecycle rewiring — replace Goose in slot lifecycle
 - Task qmcl: Goose crate removal and cleanup
+
+---
+
+## Update 2026-04-20 — Codex OAuth migrates to device-code flow; API keys move to deployment config
+
+The original port kept Goose's Codex OAuth path intact: PKCE authorization code with a hardcoded `redirect_uri=http://localhost:1455/auth/callback`. OpenAI's first-party Codex client (`app_EMoamEEZ73f0CkXaXp7hrann`) is the only one we can impersonate without registering our own, and that client has **only** the localhost URL whitelisted as a redirect target. That works when Djinn runs on the operator's laptop but silently breaks when Djinn is hosted under a real domain (`djinn.example.com`) — the browser redirects to `localhost:1455`, which is unreachable from the user's machine.
+
+### Decision
+
+1. **Replace the PKCE+localhost flow with OpenAI's device-code flow.** Same `client_id`, no redirect URI. Server calls `POST /api/accounts/deviceauth/usercode` → receives `{device_auth_id, user_code, interval}`, displays the code to the user, and polls `/api/accounts/deviceauth/token` in the background. On success the server exchanges the returned `authorization_code` + server-minted `code_verifier` at `/oauth/token` for the access/refresh pair. Works identically on localhost and hosted deployments. References: `server/crates/djinn-provider/src/oauth/codex.rs` (device-code rewrite), `codex-rs/login/src/device_code_auth.rs` in `openai/codex`.
+2. **Move API-key providers (Anthropic, OpenAI API, Google, Azure, AWS Bedrock, Vertex AI) to deployment-config only.** A new `djinn-provider::bootstrap::bootstrap_env_credentials` pass runs at `AppState::initialize()` and upserts the declared `required_env_vars` for each built-in provider into the vault. A new `secrets.providers` block in the Helm chart mirrors the existing `secrets.githubApp` pattern. The UI's API-key entry (ApiKeyCard, AddProviderModal, `provider_add_custom` MCP tool, `/providers/add_custom` HTTP route) has been deleted.
+
+### Why now
+
+- Multi-user hosted deployments are the target Phase 1+ topology — per-user UI entry of deployment credentials doesn't fit that model.
+- The PKCE flow was already broken for anything except local docker-desktop; every hosted operator would have hit it eventually.
+- Peer tools (opencode, Roo Code, OpenClaw) use the same `client_id` for Codex OAuth without pushback from OpenAI. The device-code variant is equally tolerated and already ships in the official `openai/codex` CLI.
+
+### What changed in the codebase
+
+- **Deleted:** `server/src/server/oauth.rs` (`/auth/callback` route), `CodexPendingStore` + PKCE helpers in `codex.rs`, `provider_add_custom` MCP tool + dispatch arm, `validateProviderApiKey` / `saveProviderCredentials` / `addCustomProvider` in `ui/src/api/server.ts`, `AddProviderModal.tsx`, `ApiKeyCard` in `ProviderOnboarding.tsx`, and the `?codex=ok` URL-param handler in `SettingsPage.tsx`.
+- **Added:** `CodexDeviceAuth` + `start_codex_device_auth` in `codex.rs`, `oauth_device_code` event variant, `djinn-provider::bootstrap`, `secrets.providers` block in `deploy/helm/djinn/values.yaml`, `templates/secret-providers.yaml`, `CodexSignInCard.tsx`.
+- **Reshaped:** `ProviderOauthStartResponse` now carries `user_code` + `verification_uri` + `verification_uri_complete` + `interval` + `expires_in` instead of `authorize_url`.
+- **Docs:** DEPLOY.md gains a "Provider credentials" section describing both paths.

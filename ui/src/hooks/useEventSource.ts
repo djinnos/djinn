@@ -183,11 +183,12 @@ export function useEventSource(projectId?: string | null) {
           "lifecycle_step",
         ] as const;
 
-        // OAuth flows (Codex, Copilot) ask the desktop to open the
-        // authorization URL in the user's default browser. The server runs in
-        // Docker and can't xdg-open anything itself. The envelope shape is
-        // { entity_type, action, payload: { provider, url } } — hence the
-        // nested `.payload.url` access.
+        // Copilot's in-process OAuth still needs the browser-popup
+        // fallback (its MCP handler opens the authorize URL on the
+        // server side). Codex moved to the device-code flow — the
+        // server emits `oauth.device_code` instead; the ChatGPT sign-in
+        // card consumes it directly from the `provider_oauth_start`
+        // response, so we no longer need a global popup handler.
         es.addEventListener("oauth.open_browser", (event) => {
           if (!isActive) return;
           try {

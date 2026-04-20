@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 175
 expression: signatures
 ---
 [
@@ -5198,88 +5197,6 @@ expression: signatures
   },
   {
     "input_schema": {
-      "$defs": {
-        "SeedModelInput": {
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "name"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "base_url": {
-          "description": "Root URL for OpenAI-compatible API calls (e.g. https://api.my-llm.com/v1).",
-          "type": "string"
-        },
-        "env_var": {
-          "description": "Environment variable name for the API key (e.g. MY_LLM_API_KEY).",
-          "type": "string"
-        },
-        "id": {
-          "description": "Unique provider slug (e.g. 'my-llm'). Must not collide with models.dev IDs.",
-          "type": "string"
-        },
-        "name": {
-          "description": "Human-readable display name (e.g. 'My LLM').",
-          "type": "string"
-        },
-        "seed_models": {
-          "description": "Optional seed models to pre-populate the model picker.",
-          "items": {
-            "$ref": "#/$defs/SeedModelInput"
-          },
-          "nullable": true,
-          "type": "array"
-        }
-      },
-      "required": [
-        "id",
-        "name",
-        "base_url",
-        "env_var"
-      ],
-      "title": "ProviderAddCustomInput",
-      "type": "object"
-    },
-    "name": "provider_add_custom",
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "id": {
-          "type": "string"
-        },
-        "ok": {
-          "type": "boolean"
-        },
-        "success": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "ok",
-        "success",
-        "id"
-      ],
-      "title": "ProviderAddCustomResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
       "properties": {},
       "type": "object"
     },
@@ -5823,11 +5740,6 @@ expression: signatures
     "output_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "authorize_url": {
-          "description": "For browser-redirect flows (Codex): the authorize URL the client\nshould open in a new tab. Present only when the flow requires the\nuser to complete it in a browser; `None` when a silent refresh\nsucceeded or the provider is already connected.",
-          "nullable": true,
-          "type": "string"
-        },
         "builtin_id": {
           "nullable": true,
           "type": "string"
@@ -5842,9 +5754,21 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "expires_in": {
+          "description": "Device-code: how long, in seconds, the user has to complete sign-in.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
         "goose_provider_id": {
           "nullable": true,
           "type": "string"
+        },
+        "interval": {
+          "description": "Device-code: recommended polling interval in seconds (informational —\nthe server does the polling, not the client).",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
         },
         "oauth_supported": {
           "type": "boolean"
@@ -5853,7 +5777,7 @@ expression: signatures
           "type": "boolean"
         },
         "pending": {
-          "description": "True when the flow is still in progress (e.g. device-code polling in\nbackground, or Codex waiting on the browser redirect to hit\n`/api/oauth/codex/callback`).",
+          "description": "True when the flow is still in progress — the server has spawned a\nbackground task that polls for tokens. The UI should wait for a\n`credential.updated` SSE event to confirm completion.",
           "type": "boolean"
         },
         "provider_id": {
@@ -5863,12 +5787,17 @@ expression: signatures
           "type": "boolean"
         },
         "user_code": {
-          "description": "For device-code flows: the code the user must enter.",
+          "description": "Device-code: the short code the user must enter at `verification_uri`.",
           "nullable": true,
           "type": "string"
         },
         "verification_uri": {
-          "description": "For device-code flows: the URL where the user enters the code.",
+          "description": "Device-code: the bare URL the user opens to enter the code manually.",
+          "nullable": true,
+          "type": "string"
+        },
+        "verification_uri_complete": {
+          "description": "Device-code: convenience URL with `user_code` pre-filled as a query\nparam; the UI can surface this as a \"click to open\" link.",
           "nullable": true,
           "type": "string"
         }

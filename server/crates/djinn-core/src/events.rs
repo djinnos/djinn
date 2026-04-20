@@ -394,6 +394,38 @@ impl DjinnEventEnvelope {
         }
     }
 
+    /// Emitted when a provider kicks off an OAuth **device-code** flow. The
+    /// UI displays `user_code` + `verification_uri` (or the convenience
+    /// `verification_uri_complete` with the code pre-filled) and waits for a
+    /// subsequent `credential.updated` event to confirm sign-in. Replaces the
+    /// browser-redirect flow for providers whose first-party OAuth clients
+    /// don't accept arbitrary redirect URIs (e.g. ChatGPT / Codex).
+    pub fn oauth_device_code(
+        provider: &str,
+        verification_uri: &str,
+        verification_uri_complete: &str,
+        user_code: &str,
+        interval: i64,
+        expires_in: i64,
+    ) -> Self {
+        Self {
+            entity_type: "oauth",
+            action: "device_code",
+            payload: serde_json::to_value(serde_json::json!({
+                "provider": provider,
+                "verification_uri": verification_uri,
+                "verification_uri_complete": verification_uri_complete,
+                "user_code": user_code,
+                "interval": interval,
+                "expires_in": expires_in,
+            }))
+            .expect("serializing DjinnEventEnvelope payload to Value should not fail"),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+
     /// Emitted by agent Write/Edit/ApplyPatch tools after a successful file
     /// mutation so that the repo-map watcher can trigger a targeted SCIP refresh
     /// for just the affected worktree instead of relying on the filesystem watcher.

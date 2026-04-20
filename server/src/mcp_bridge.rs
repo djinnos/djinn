@@ -970,7 +970,6 @@ impl AppState {
             Arc::new(self.clone()),
             Arc::new(self.clone()),
             Arc::new(RepoGraphBridge::new(self.clone())),
-            self.codex_oauth_pending(),
         )
     }
 }

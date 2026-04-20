@@ -1,39 +1,45 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import {
-  addCustomProvider,
   removeProviderFull,
   fetchCredentialList,
   fetchProviderCatalog,
   invalidateProviderCatalogCache,
-  saveProviderCredentials,
-  startProviderOAuth,
-  validateProviderApiKey,
   type Provider,
   type ProviderCredential,
 } from '@/api/server';
 import { showToast } from '@/lib/toast';
+
+/**
+ * Providers that users can self-serve via the UI (device-code OAuth). Every
+ * other provider is expected to be deployment-provisioned; removing one from
+ * the UI only clears the vault row but will be re-bootstrapped on the next
+ * server restart from the operator-supplied env var.
+ */
+const SELF_SERVE_PROVIDER_IDS = new Set(['chatgpt_codex']);
 
 export function useProviders() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [validationStatus, setValidationStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  const [validating, setValidating] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [oauthInProgress, setOauthInProgress] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     invalidateProviderCatalogCache();
-    const [catalogResult, credentialResult] = await Promise.allSettled([fetchProviderCatalog(), fetchCredentialList()]);
+    const [catalogResult, credentialResult] = await Promise.allSettled([
+      fetchProviderCatalog(),
+      fetchCredentialList(),
+    ]);
 
     if (catalogResult.status === 'fulfilled') {
       setProviders(catalogResult.value);
     } else {
-      const message = catalogResult.reason instanceof Error ? catalogResult.reason.message : 'Failed to load provider catalog';
+      const message =
+        catalogResult.reason instanceof Error
+          ? catalogResult.reason.message
+          : 'Failed to load provider catalog';
       setLoadError(message);
       showToast.error('Failed to load providers', { description: message });
     }
@@ -41,9 +47,11 @@ export function useProviders() {
     if (credentialResult.status === 'fulfilled') {
       setCredentials(credentialResult.value);
     } else if (catalogResult.status === 'fulfilled') {
-      // Catalog loaded but credentials failed — show a non-blocking warning
       showToast.error('Could not load credential status', {
-        description: credentialResult.reason instanceof Error ? credentialResult.reason.message : 'Unknown error',
+        description:
+          credentialResult.reason instanceof Error
+            ? credentialResult.reason.message
+            : 'Unknown error',
       });
     }
 
@@ -54,128 +62,55 @@ export function useProviders() {
     void loadData();
   }, [loadData]);
 
-  const credentialByProvider = useMemo(() => new Map(credentials.map((entry) => [entry.provider_id, entry])), [credentials]);
-  const configuredProviders = useMemo(() => providers.filter((p) => credentialByProvider.get(p.id)?.configured), [providers, credentialByProvider]);
-  const unconfiguredProviders = useMemo(() => providers.filter((p) => !credentialByProvider.get(p.id)?.configured), [providers, credentialByProvider]);
+  const credentialByProvider = useMemo(
+    () => new Map(credentials.map((entry) => [entry.provider_id, entry])),
+    [credentials],
+  );
+  const configuredProviders = useMemo(
+    () => providers.filter((p) => credentialByProvider.get(p.id)?.configured),
+    [providers, credentialByProvider],
+  );
 
-  const { removeModelsByProvider, saveSettings: saveAgentSettings, loadProviderModels } = useSettingsStore();
-  const validateInline = useCallback(async (providerId: string, apiKey: string) => {
-    if (!providerId || !apiKey.trim()) return;
-    setValidating(true);
-    try {
-      const result = await validateProviderApiKey(providerId, apiKey.trim());
-      if (result.valid) {
-        setValidationStatus({ type: 'success', message: 'API key is valid' });
-      } else {
-        setValidationStatus({ type: 'error', message: result.error ?? 'Validation failed' });
-      }
-    } finally {
-      setValidating(false);
-    }
-  }, []);
+  const { removeModelsByProvider, saveSettings: saveAgentSettings, loadProviderModels } =
+    useSettingsStore();
 
-  const saveProvider = useCallback(async (providerId: string, apiKey: string) => {
-    if (!providerId || !apiKey.trim()) return false;
-    setSaving(true);
-    try {
-      const validation = await validateProviderApiKey(providerId, apiKey.trim());
-      if (!validation.valid) {
-        setValidationStatus({ type: 'error', message: validation.error ?? 'Validation failed' });
-        return false;
-      }
-      await saveProviderCredentials(providerId, apiKey.trim());
-      await loadData();
-      await loadProviderModels();
-
-      showToast.success('Provider added', { description: 'Credentials saved successfully.' });
-      return true;
-    } catch (error) {
-      showToast.error('Could not save API key', { description: error instanceof Error ? error.message : 'Unknown error' });
-      return false;
-    } finally {
-      setSaving(false);
-    }
-  }, [loadData, loadProviderModels]);
-
-  const addCustom = useCallback(async (name: string, baseUrl: string) => {
-    if (!name.trim()) return false;
-    setSaving(true);
-    try {
-      await addCustomProvider({ name: name.trim(), base_url: baseUrl.trim() || undefined });
-      await loadData();
-      await loadProviderModels();
-      showToast.success('Custom provider added');
-      return true;
-    } finally {
-      setSaving(false);
-    }
-  }, [loadData, loadProviderModels]);
-
-  const connectOAuth = useCallback(async (providerId: string) => {
-    setOauthInProgress(true);
-    try {
-      const result = await startProviderOAuth(providerId);
-      if (result.pending) {
-        // Browser-redirect flow: the server has opened (or handed back)
-        // the authorize URL — `startProviderOAuth` already called
-        // `window.open`. The server redirects to
-        // `/settings/providers?codex=ok` once the user completes the
-        // flow, at which point the returning page will refresh the
-        // catalog. We just tell the user what's happening.
-        showToast.success('Complete sign-in in the new tab', {
-          description: result.authorize_url
-            ? 'We opened OpenAI in a new tab. Finish authorizing there and this page will update.'
-            : 'Finish authorizing in the other tab.',
+  const removeProvider = useCallback(
+    async (providerId: string) => {
+      if (!SELF_SERVE_PROVIDER_IDS.has(providerId)) {
+        showToast.error('Provisioned via deployment', {
+          description:
+            'API-key providers are configured through Helm values. Ask your operator to unset the key.',
         });
-        return false;
+        return;
       }
-      if (!result.success) {
-        showToast.error('OAuth failed', { description: result.error ?? 'Unknown error' });
-        return false;
+      try {
+        await removeProviderFull(providerId);
+        removeModelsByProvider(providerId);
+        await saveAgentSettings();
+        await loadData();
+        await loadProviderModels();
+        showToast.success('Provider removed');
+      } catch (error) {
+        showToast.error('Could not remove provider', {
+          description: error instanceof Error ? error.message : 'Unknown error',
+        });
       }
-      await loadData();
-      await loadProviderModels();
+    },
+    [loadData, loadProviderModels, removeModelsByProvider, saveAgentSettings],
+  );
 
-      showToast.success('Connected via OAuth');
-      return true;
-    } catch (error) {
-      showToast.error('OAuth failed', { description: error instanceof Error ? error.message : 'Unknown error' });
-      return false;
-    } finally {
-      setOauthInProgress(false);
-    }
-  }, [loadData, loadProviderModels]);
-
-  const removeProvider = useCallback(async (providerId: string) => {
-    try {
-      await removeProviderFull(providerId);
-      removeModelsByProvider(providerId);
-      await saveAgentSettings();
-      await loadData();
-      await loadProviderModels();
-
-      showToast.success('Provider removed');
-    } catch (error) {
-      showToast.error('Could not remove provider', { description: error instanceof Error ? error.message : 'Unknown error' });
-    }
-  }, [loadData, loadProviderModels, removeModelsByProvider, saveAgentSettings]);
+  const isSelfServeProvider = useCallback(
+    (providerId: string) => SELF_SERVE_PROVIDER_IDS.has(providerId),
+    [],
+  );
 
   return {
     providers,
     configuredProviders,
-    unconfiguredProviders,
     loading,
     loadError,
-    validationStatus,
-    validating,
-    saving,
-    oauthInProgress,
-    setValidationStatus,
     loadData,
-    validateInline,
-    saveProvider,
-    connectOAuth,
-    addCustom,
     removeProvider,
+    isSelfServeProvider,
   };
 }

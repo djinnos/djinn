@@ -14,11 +14,6 @@ function providerDescription(provider: ProviderCatalogItem): string {
   return tags.join(", ");
 }
 
-function fallbackKeyName(providerId: string): string {
-  const normalized = providerId.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase();
-  return `${normalized}_API_KEY`;
-}
-
 let catalogCache: ProviderCatalogItem[] | null = null;
 
 async function listProviderCatalogRaw(): Promise<ProviderCatalogItem[]> {
@@ -30,12 +25,6 @@ async function listProviderCatalogRaw(): Promise<ProviderCatalogItem[]> {
 
 export function invalidateProviderCatalogCache(): void {
   catalogCache = null;
-}
-
-async function resolveKeyName(providerId: string): Promise<string> {
-  const providers = await listProviderCatalogRaw();
-  const match = providers.find((provider) => provider.id === providerId);
-  return match?.env_vars[0] ?? fallbackKeyName(providerId);
 }
 
 export async function checkServerHealth(): Promise<{ status: "ok" }> {
@@ -54,11 +43,6 @@ export interface Provider {
   requires_api_key: boolean;
   oauth_supported: boolean;
   connection_methods: string[];
-}
-
-export interface CustomProviderRequest {
-  name: string;
-  base_url?: string;
 }
 
 export interface ProviderCredential {
@@ -84,29 +68,32 @@ export async function fetchProviderCatalog(): Promise<Provider[]> {
 }
 
 export type OAuthResult = {
+  /** True when the provider was already connected (cached token still valid). */
   success: boolean;
+  /** Populated on failure. */
   error?: string;
-  /** For device-code flows: code the user must enter. */
-  user_code?: string;
-  /** For device-code flows: URL where the user enters the code. */
-  verification_uri?: string;
   /**
-   * True when the flow is pending — either a device-code flow polling
-   * in the background, or the Codex browser-redirect flow waiting for
-   * the user to complete authorisation in a new tab.
+   * True when the device-code flow is in progress: the server has handed us
+   * a short `user_code` and spawned a background task that polls OpenAI for
+   * tokens. The UI renders `verification_uri_complete` as a clickable link
+   * (with the code pre-filled) and waits for a `credential.updated` SSE
+   * event to confirm completion.
    */
   pending?: boolean;
-  /**
-   * For browser-redirect flows (Codex): the authorization URL the UI
-   * should open in a new tab. The server also emits the same URL over
-   * SSE via `oauth.open_browser`; clients that don't react to events
-   * should fall back to opening this directly on tool completion.
-   */
-  authorize_url?: string;
+  /** Short human-typable code (e.g. `ABCD-1234`). */
+  user_code?: string;
+  /** Bare URL where the user enters the code manually. */
+  verification_uri?: string;
+  /** Convenience URL with `user_code` pre-filled as a query string. */
+  verification_uri_complete?: string;
+  /** Recommended polling interval (seconds). Informational. */
+  interval?: number;
+  /** Max time the user has to complete sign-in (seconds). */
+  expires_in?: number;
 };
 
 export async function startProviderOAuth(
-  providerId: string
+  providerId: string,
 ): Promise<OAuthResult> {
   try {
     const result = await callMcpTool("provider_oauth_start", {
@@ -116,27 +103,14 @@ export async function startProviderOAuth(
       return { success: false, error: result.error ?? "OAuth flow failed" };
     }
     if (result.pending) {
-      // Browser-redirect flows (Codex): open the authorize URL ourselves
-      // as a fallback for the `oauth.open_browser` SSE handler. If the SSE
-      // path already opened it, the browser will focus that tab instead of
-      // spawning a duplicate.
-      const authorizeUrl =
-        typeof result.authorize_url === "string" && result.authorize_url
-          ? result.authorize_url
-          : undefined;
-      if (authorizeUrl) {
-        try {
-          window.open(authorizeUrl, "_blank", "noopener,noreferrer");
-        } catch {
-          // Popup blocker — caller renders the URL so the user can click it.
-        }
-      }
       return {
         success: false,
         pending: true,
         user_code: result.user_code ?? undefined,
         verification_uri: result.verification_uri ?? undefined,
-        authorize_url: authorizeUrl,
+        verification_uri_complete: result.verification_uri_complete ?? undefined,
+        interval: typeof result.interval === "number" ? result.interval : undefined,
+        expires_in: typeof result.expires_in === "number" ? result.expires_in : undefined,
       };
     }
     return { success: true };
@@ -145,52 +119,6 @@ export async function startProviderOAuth(
       success: false,
       error: error instanceof Error ? error.message : "OAuth flow failed",
     };
-  }
-}
-
-export async function validateProviderApiKey(
-  providerId: string,
-  apiKey: string
-): Promise<{ valid: boolean; error?: string }> {
-  try {
-    const providers = await listProviderCatalogRaw();
-    const provider = providers.find((entry) => entry.id === providerId);
-    if (!provider) {
-      return { valid: false, error: `Unknown provider: ${providerId}` };
-    }
-
-    const result = await callMcpTool("provider_validate", {
-      provider_id: providerId,
-      base_url: provider.base_url,
-      api_key: apiKey,
-    });
-
-    if (!result.ok) {
-      return { valid: false, error: result.error ?? "Validation failed" };
-    }
-
-    return { valid: true };
-  } catch (error) {
-    return {
-      valid: false,
-      error: error instanceof Error ? error.message : "Validation failed",
-    };
-  }
-}
-
-export async function saveProviderCredentials(
-  providerId: string,
-  apiKey: string
-): Promise<void> {
-  const keyName = await resolveKeyName(providerId);
-  const response = await callMcpTool("credential_set", {
-    provider_id: providerId,
-    key_name: keyName,
-    api_key: apiKey,
-  });
-
-  if (!response.success) {
-    throw new Error(response.error ?? "Failed to save credentials");
   }
 }
 
@@ -441,25 +369,6 @@ export async function removeProject(projectId: string): Promise<void> {
     name: project.name,
     path: project.path,
   });
-}
-
-export async function addCustomProvider(payload: CustomProviderRequest): Promise<Provider> {
-  const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/providers/add_custom`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to add custom provider: ${error || response.status}`);
-  }
-
-  invalidateProviderCatalogCache();
-  return response.json();
 }
 
 export interface KanbanSnapshot {

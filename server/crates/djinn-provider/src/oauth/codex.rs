@@ -1,57 +1,65 @@
-//! Codex OAuth — Authorization Code + PKCE flow.
+//! Codex OAuth — Device Code flow.
 //!
-//! The flow is split into two halves that share a [`CodexPendingStore`]:
+//! OpenAI's first-party Codex OAuth client (`app_EMoamEEZ73f0CkXaXp7hrann`) only
+//! registers `http://localhost:1455/auth/callback` as a redirect URI, so the
+//! Authorization Code + PKCE browser flow only works when Djinn runs on the
+//! user's machine. The **device code flow** (RFC 8628 with OpenAI-specific
+//! paths under `/api/accounts/deviceauth/{usercode,token}`) doesn't need any
+//! redirect URI — the user visits `https://auth.openai.com/codex/device`,
+//! types a short code, and the server polls for tokens. Works identically
+//! on localhost and hosted deployments.
 //!
-//!   * [`start_codex_oauth`] generates PKCE + state, stashes the PKCE verifier
-//!     in the pending store keyed by state, and returns the `authorize_url`
-//!     the browser should be sent to.
-//!   * [`finish_codex_oauth`] — invoked from the main axum router when the
-//!     browser hits `/auth/callback` — looks up the pending entry
-//!     by state, exchanges the authorization code for tokens, and persists
-//!     them in the encrypted credentials table.
-//!
-//! There is no longer a TCP listener on `:1455` — the redirect URL points
-//! directly at `djinn-server` on its main port (`DJINN_PUBLIC_URL`), so the
-//! same port forward that serves the SPA/API also terminates the OAuth
-//! callback. This lets a kind/minikube deployment complete Codex sign-up
-//! without exposing a second port.
+//! Public API:
+//!   * [`start_codex_device_auth`] — phase 1: request a user code, emit the
+//!     `oauth.device_code` SSE event so the UI can display it, and spawn a
+//!     background task that polls until tokens arrive (or the 15-minute TTL
+//!     expires). Returns immediately; the UI listens for `credential.updated`.
+//!   * [`CodexTokens`] / [`refresh_cached_token`] — token storage and silent
+//!     refresh, unchanged from the previous PKCE flow.
 
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::repos::CredentialRepository;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// OAuth client ID for ChatGPT Codex.
+/// OAuth client ID for ChatGPT Codex (same as the official CLI).
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
-/// OpenAI auth issuer base URL.
+/// OpenAI auth issuer base URL — used for the final `/oauth/token` exchange
+/// and for silent refresh.
 const ISSUER: &str = "https://auth.openai.com";
+
+/// Base URL for the device-code endpoints. The official CLI hits
+/// `{issuer}/api/accounts/deviceauth/{usercode,token}`.
+const DEVICE_API_BASE: &str = "https://auth.openai.com/api/accounts";
+
+/// URL the user opens in a browser to enter their code.
+pub const VERIFICATION_URI: &str = "https://auth.openai.com/codex/device";
+
+/// Redirect URI sent on the final `/oauth/token` exchange. No browser actually
+/// redirects here — OpenAI just requires the field to match what their
+/// device-flow server recorded when it issued the authorization code.
+const DEVICE_AUTH_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 
 /// Codex API endpoint (responses sub-path appended at call site).
 pub const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
-
-/// How long a started-but-not-finished OAuth attempt lives in the pending
-/// store before being swept. The canonical OpenAI flow gives the user five
-/// minutes to complete the browser redirect; we match that.
-const OAUTH_PENDING_TTL_SECS: u64 = 300;
-
-/// OAuth scopes requested.
-const OAUTH_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
 
 /// Default model for ChatGPT Codex provider.
 pub const CODEX_DEFAULT_MODEL: &str = "gpt-5.1-codex";
 
 /// Credential key name for DB-stored OAuth tokens.
 pub const CODEX_OAUTH_DB_KEY: &str = "__OAUTH_CHATGPT_CODEX";
+
+/// Maximum wall-clock time we'll poll before giving up.
+const DEVICE_AUTH_TTL: Duration = Duration::from_secs(15 * 60);
 
 // ─── Token types ─────────────────────────────────────────────────────────────
 
@@ -73,14 +81,10 @@ pub struct CodexTokens {
 impl CodexTokens {
     /// Returns true if the access token has expired (with a 60-second buffer).
     pub fn is_expired(&self) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        now >= self.expires_at - 60
+        now_secs() >= self.expires_at - 60
     }
 
-    /// Path where tokens are persisted on disk.
+    /// Path where tokens are persisted on disk (legacy filesystem cache).
     pub fn cache_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -114,20 +118,17 @@ impl CodexTokens {
     /// Load tokens from the encrypted credential DB.
     /// Falls back to the filesystem cache and migrates it into the DB.
     pub async fn load_from_db(repo: &CredentialRepository) -> Option<Self> {
-        // Try DB first.
         if let Ok(Some(json)) = repo.get_decrypted(CODEX_OAUTH_DB_KEY).await {
             if let Ok(tokens) = serde_json::from_str::<Self>(&json) {
                 return Some(tokens);
             }
             tracing::warn!("Codex: corrupt token JSON in DB, ignoring");
         }
-        // Fallback: migrate from filesystem.
         if let Some(tokens) = Self::load_cached() {
             tracing::info!("Codex: migrating tokens from filesystem to DB");
             if let Err(e) = tokens.save_to_db(repo).await {
                 tracing::warn!("Codex: migration save failed: {e}");
             }
-            // Remove old file after successful migration.
             let _ = std::fs::remove_file(Self::cache_path());
             return Some(tokens);
         }
@@ -164,56 +165,6 @@ pub async fn refresh_cached_token(
     Ok(tokens)
 }
 
-// ─── PKCE helpers ─────────────────────────────────────────────────────────────
-
-#[derive(Clone)]
-struct PkceChallenge {
-    verifier: String,
-    challenge: String,
-}
-
-fn generate_pkce() -> PkceChallenge {
-    use ring::rand::{SecureRandom, SystemRandom};
-    use sha2::Digest as _;
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 43]; // 43-byte random = URL-safe base64 ~58 chars, well within 128 limit
-    rng.fill(&mut bytes).expect("rng fill");
-    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    let digest = sha2::Sha256::digest(verifier.as_bytes());
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    PkceChallenge {
-        verifier,
-        challenge,
-    }
-}
-
-fn generate_state() -> String {
-    use ring::rand::{SecureRandom, SystemRandom};
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 24];
-    rng.fill(&mut bytes).expect("rng fill");
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-// ─── Auth URL ─────────────────────────────────────────────────────────────────
-
-fn build_authorize_url(redirect_uri: &str, pkce: &PkceChallenge, state: &str) -> Result<String> {
-    let scopes = OAUTH_SCOPES.join(" ");
-    let params = [
-        ("response_type", "code"),
-        ("client_id", CLIENT_ID),
-        ("redirect_uri", redirect_uri),
-        ("scope", &scopes),
-        ("code_challenge", &pkce.challenge),
-        ("code_challenge_method", "S256"),
-        ("id_token_add_organizations", "true"),
-        ("codex_cli_simplified_flow", "true"),
-        ("state", state),
-    ];
-    let query = serde_urlencoded::to_string(params)?;
-    Ok(format!("{}/oauth/authorize?{}", ISSUER, query))
-}
-
 // ─── Token exchange / refresh ─────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -224,11 +175,15 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
+/// Exchange the `authorization_code` returned by the device-code poll for a
+/// real access/refresh token pair. The PKCE verifier is provided by the
+/// OpenAI server (it mints both the challenge and the verifier during the
+/// device-auth phase and hands us the verifier in the poll success response).
 async fn exchange_code(
     issuer: &str,
     code: &str,
     redirect_uri: &str,
-    pkce: &PkceChallenge,
+    code_verifier: &str,
 ) -> Result<TokenResponse> {
     let client = Client::new();
     let params = [
@@ -236,10 +191,10 @@ async fn exchange_code(
         ("code", code),
         ("redirect_uri", redirect_uri),
         ("client_id", CLIENT_ID),
-        ("code_verifier", &pkce.verifier),
+        ("code_verifier", code_verifier),
     ];
     let resp = client
-        .post(format!("{}/oauth/token", issuer))
+        .post(format!("{issuer}/oauth/token"))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&params)
         .send()
@@ -247,7 +202,7 @@ async fn exchange_code(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("Token exchange failed ({}): {}", status, text));
+        return Err(anyhow!("Token exchange failed ({status}): {text}"));
     }
     Ok(resp.json().await?)
 }
@@ -260,7 +215,7 @@ async fn refresh_token(issuer: &str, refresh_token: &str) -> Result<TokenRespons
         ("client_id", CLIENT_ID),
     ];
     let resp = client
-        .post(format!("{}/oauth/token", issuer))
+        .post(format!("{issuer}/oauth/token"))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&params)
         .send()
@@ -268,7 +223,7 @@ async fn refresh_token(issuer: &str, refresh_token: &str) -> Result<TokenRespons
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("Token refresh failed ({}): {}", status, text));
+        return Err(anyhow!("Token refresh failed ({status}): {text}"));
     }
     Ok(resp.json().await?)
 }
@@ -294,7 +249,7 @@ fn now_secs() -> i64 {
 // ─── JWT account-id extraction ────────────────────────────────────────────────
 
 /// Extract `chatgpt_account_id` (or first org id) from a JWT without verifying signature.
-/// This is best-effort; if it fails we proceed without the account ID.
+/// Best-effort; returns `None` on any parse failure.
 pub fn extract_account_id_unverified(jwt: &str) -> Option<String> {
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() != 3 {
@@ -304,15 +259,12 @@ pub fn extract_account_id_unverified(jwt: &str) -> Option<String> {
         .decode(parts[1])
         .ok()?;
     let value: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    // Try chatgpt_account_id directly
     if let Some(id) = value["chatgpt_account_id"].as_str() {
         return Some(id.to_owned());
     }
-    // Try nested auth claims
     if let Some(id) = value["https://api.openai.com/auth"]["chatgpt_account_id"].as_str() {
         return Some(id.to_owned());
     }
-    // Fall back to first organization id
     if let Some(orgs) = value["organizations"].as_array()
         && let Some(org) = orgs.first()
         && let Some(id) = org["id"].as_str()
@@ -323,7 +275,6 @@ pub fn extract_account_id_unverified(jwt: &str) -> Option<String> {
 }
 
 fn pick_account_id(tokens: &TokenResponse) -> Option<String> {
-    // Prefer id_token since it has richer claims
     if let Some(id_token) = &tokens.id_token
         && let Some(id) = extract_account_id_unverified(id_token)
     {
@@ -332,94 +283,78 @@ fn pick_account_id(tokens: &TokenResponse) -> Option<String> {
     extract_account_id_unverified(&tokens.access_token)
 }
 
-// ─── Pending store ────────────────────────────────────────────────────────────
+// ─── Device-code flow ─────────────────────────────────────────────────────────
 
-/// Per-attempt state that `start_codex_oauth` stashes until the browser
-/// redirect comes back and `finish_codex_oauth` claims it by `state`.
-struct PendingAuth {
-    pkce: PkceChallenge,
-    redirect_uri: String,
-    repo: CredentialRepository,
-    created_at: Instant,
+#[derive(Serialize)]
+struct UserCodeReq<'a> {
+    client_id: &'a str,
 }
 
-/// In-memory, process-wide pending-auth table keyed by the OAuth `state`
-/// parameter.
-///
-/// Entries expire after [`OAUTH_PENDING_TTL_SECS`]. Expiry is checked
-/// lazily on lookup (and opportunistically on insert) — no background
-/// sweep task required.
-pub struct CodexPendingStore {
-    inner: tokio::sync::Mutex<HashMap<String, PendingAuth>>,
+#[derive(Deserialize)]
+struct UserCodeResp {
+    device_auth_id: String,
+    #[serde(alias = "usercode")]
+    user_code: String,
+    #[serde(default, deserialize_with = "deserialize_interval")]
+    interval: u64,
 }
 
-impl CodexPendingStore {
-    pub fn new() -> Self {
-        Self {
-            inner: tokio::sync::Mutex::new(HashMap::new()),
-        }
-    }
-
-    async fn insert(&self, state: String, entry: PendingAuth) {
-        let mut guard = self.inner.lock().await;
-        // Opportunistic sweep so the map doesn't grow unbounded when flows
-        // start but never complete (network failure, user closes the tab).
-        let ttl = Duration::from_secs(OAUTH_PENDING_TTL_SECS);
-        let now = Instant::now();
-        guard.retain(|_, v| now.duration_since(v.created_at) < ttl);
-        guard.insert(state, entry);
-    }
-
-    async fn take(&self, state: &str) -> Option<PendingAuth> {
-        let mut guard = self.inner.lock().await;
-        let entry = guard.remove(state)?;
-        if entry.created_at.elapsed() >= Duration::from_secs(OAUTH_PENDING_TTL_SECS) {
-            tracing::warn!(state, "Codex OAuth: discarded expired pending entry");
-            return None;
-        }
-        Some(entry)
-    }
-
-    #[cfg(test)]
-    pub async fn len(&self) -> usize {
-        self.inner.lock().await.len()
-    }
+// OpenAI's device-code API sometimes returns `interval` as a string (e.g. `"5"`).
+// Match the Codex CLI parser to stay bug-compatible.
+fn deserialize_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    s.trim().parse::<u64>().map_err(de::Error::custom)
 }
 
-impl Default for CodexPendingStore {
-    fn default() -> Self {
-        Self::new()
-    }
+#[derive(Serialize)]
+struct TokenPollReq<'a> {
+    device_auth_id: &'a str,
+    user_code: &'a str,
 }
 
-// ─── Split flow: start + finish ───────────────────────────────────────────────
+#[derive(Deserialize)]
+struct CodeSuccessResp {
+    authorization_code: String,
+    #[allow(dead_code)]
+    code_challenge: String,
+    code_verifier: String,
+}
 
-/// Data returned from [`start_codex_oauth`] — the URL to redirect the
-/// browser to and the CSRF `state` used as the lookup key.
+/// Public payload returned to the MCP tool when a device-code flow kicks off.
+/// The caller displays `user_code` + `verification_uri_complete` to the user
+/// and waits for the background task to emit `credential.updated` via SSE.
 #[derive(Debug, Clone, Serialize)]
-pub struct CodexOAuthStart {
-    pub authorize_url: String,
-    pub state: String,
+pub struct CodexDeviceAuth {
+    /// The short human-typable code (e.g. `ABCD-1234`).
+    pub user_code: String,
+    /// URL the user visits to enter the code manually.
+    pub verification_uri: String,
+    /// Convenience URL with the code pre-filled in a query string.
+    pub verification_uri_complete: String,
+    /// Recommended polling interval (seconds).
+    pub interval: i64,
+    /// Hard cap on how long the user has to complete sign-in.
+    pub expires_in: i64,
 }
 
-/// Begin a Codex OAuth flow.
+/// Begin a Codex device-code flow.
 ///
-/// Short-circuits and returns `Ok(None)` when valid cached tokens (or a
-/// token that can be refreshed silently) are already available — the
-/// caller should treat that as "already connected". Otherwise stashes a
-/// pending entry, emits `oauth.open_browser` so the UI pops the
-/// authorisation URL, and returns the URL + state so the MCP tool
-/// response can surface them too.
-pub async fn start_codex_oauth(
-    pending: Arc<CodexPendingStore>,
+/// Short-circuits and returns `Ok(None)` when valid cached tokens (or a token
+/// that can be refreshed silently) are already available. Otherwise hits
+/// `/deviceauth/usercode`, emits `oauth.device_code` so the UI can surface the
+/// code, and spawns a background task that polls `/deviceauth/token` until
+/// tokens arrive or the 15-minute TTL elapses.
+pub async fn start_codex_device_auth(
     repo: CredentialRepository,
     events: &EventBus,
-    public_url: &str,
-) -> Result<Option<CodexOAuthStart>> {
-    // 1. If we already have usable tokens, don't bother starting a new flow.
+) -> Result<Option<CodexDeviceAuth>> {
+    // 1. If we already have usable tokens, skip the flow.
     if let Some(cached) = CodexTokens::load_from_db(&repo).await {
         if !cached.is_expired() {
-            tracing::debug!("Codex: start_codex_oauth short-circuit — cached token still valid");
+            tracing::debug!("Codex: device-code short-circuit — cached token still valid");
             return Ok(None);
         }
         tracing::debug!("Codex: cached token expired, attempting silent refresh");
@@ -428,76 +363,134 @@ pub async fn start_codex_oauth(
                 let account_id = pick_account_id(&tr).or(cached.account_id.clone());
                 let tokens = token_response_to_tokens(tr, account_id);
                 let _ = tokens.save_to_db(&repo).await;
-                tracing::info!("Codex: token refreshed silently, skipping browser flow");
+                tracing::info!("Codex: token refreshed silently, skipping device flow");
                 return Ok(None);
             }
             Err(e) => {
-                // Keep the refresh token around — a future attempt can retry.
-                tracing::warn!("Codex: silent refresh failed, starting browser flow: {}", e);
+                tracing::warn!("Codex: silent refresh failed, starting device flow: {e}");
             }
         }
     }
 
-    // 2. Full browser PKCE flow — stash state, build URL, emit event.
-    let pkce = generate_pkce();
-    let csrf_state = generate_state();
-    // OpenAI's Codex OAuth client (app_EMoamEEZ73f0CkXaXp7hrann, same as the
-    // Codex CLI) pins the redirect to exactly http://localhost:1455/auth/callback.
-    // The path + port are both whitelisted. The operator has to port-forward
-    // :1455 to reach the server — see server/docker/README.md.
-    // Override via CODEX_REDIRECT_URI if your deployment uses a different
-    // (custom, OpenAI-registered) OAuth client.
-    let _ = public_url;
-    let redirect_uri = std::env::var("CODEX_REDIRECT_URI")
-        .unwrap_or_else(|_| "http://localhost:1455/auth/callback".to_string());
-    let authorize_url = build_authorize_url(&redirect_uri, &pkce, &csrf_state)?;
+    // 2. Phase 1 — request a user code.
+    let client = Client::new();
+    let url = format!("{DEVICE_API_BASE}/deviceauth/usercode");
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&UserCodeReq { client_id: CLIENT_ID })
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("device code request failed ({status}): {text}"));
+    }
+    let uc: UserCodeResp = resp.json().await?;
+    let interval = uc.interval.max(1);
+    let expires_in = DEVICE_AUTH_TTL.as_secs() as i64;
 
-    pending
-        .insert(
-            csrf_state.clone(),
-            PendingAuth {
-                pkce,
-                redirect_uri,
-                repo,
-                created_at: Instant::now(),
-            },
-        )
-        .await;
+    let verification_uri_complete = format!(
+        "{VERIFICATION_URI}?user_code={}",
+        urlencoding_inline(&uc.user_code)
+    );
 
-    tracing::info!("Codex OAuth: emitting open_browser event");
-    events.send(DjinnEventEnvelope::oauth_open_browser(
+    let session = CodexDeviceAuth {
+        user_code: uc.user_code.clone(),
+        verification_uri: VERIFICATION_URI.to_string(),
+        verification_uri_complete: verification_uri_complete.clone(),
+        interval: interval as i64,
+        expires_in,
+    };
+
+    events.send(DjinnEventEnvelope::oauth_device_code(
         "chatgpt_codex",
-        &authorize_url,
+        VERIFICATION_URI,
+        &verification_uri_complete,
+        &uc.user_code,
+        interval as i64,
+        expires_in,
     ));
 
-    Ok(Some(CodexOAuthStart {
-        authorize_url,
-        state: csrf_state,
-    }))
+    // 3. Phase 2 — spawn a detached task that polls until tokens arrive,
+    //    the user denies, or the TTL elapses. The SSE `credential.updated`
+    //    event fires automatically when `save_to_db` commits.
+    let poll_repo = repo.clone();
+    let device_auth_id = uc.device_auth_id;
+    let user_code = uc.user_code;
+    tokio::spawn(async move {
+        match poll_codex_device_auth(&device_auth_id, &user_code, interval, &poll_repo).await {
+            Ok(_) => tracing::info!("Codex: device-code flow completed, tokens persisted"),
+            Err(e) => tracing::warn!(error = %e, "Codex: device-code flow failed"),
+        }
+    });
+
+    Ok(Some(session))
 }
 
-/// Complete a Codex OAuth flow.
-///
-/// Looks up the pending entry by `state`, exchanges `code` for tokens,
-/// persists the tokens in the encrypted credentials table, and returns
-/// them. The `credential.updated` SSE event is emitted as a side-effect
-/// of the repository save — no extra event work here.
-pub async fn finish_codex_oauth(
-    pending: Arc<CodexPendingStore>,
-    code: &str,
-    state: &str,
+async fn poll_codex_device_auth(
+    device_auth_id: &str,
+    user_code: &str,
+    interval: u64,
+    repo: &CredentialRepository,
 ) -> Result<CodexTokens> {
-    let Some(entry) = pending.take(state).await else {
-        return Err(anyhow!(
-            "Unknown or expired OAuth state — start the Codex sign-in flow again"
-        ));
+    let client = Client::new();
+    let url = format!("{DEVICE_API_BASE}/deviceauth/token");
+    let start = Instant::now();
+
+    let code_resp: CodeSuccessResp = loop {
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&TokenPollReq {
+                device_auth_id,
+                user_code,
+            })
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            break resp.json().await?;
+        }
+        if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
+            let elapsed = start.elapsed();
+            if elapsed >= DEVICE_AUTH_TTL {
+                return Err(anyhow!("device auth timed out after 15 minutes"));
+            }
+            let sleep_for = Duration::from_secs(interval).min(DEVICE_AUTH_TTL - elapsed);
+            tokio::time::sleep(sleep_for).await;
+            continue;
+        }
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("device auth failed ({status}): {text}"));
     };
-    let tr = exchange_code(ISSUER, code, &entry.redirect_uri, &entry.pkce).await?;
+
+    let tr = exchange_code(
+        ISSUER,
+        &code_resp.authorization_code,
+        DEVICE_AUTH_REDIRECT_URI,
+        &code_resp.code_verifier,
+    )
+    .await?;
     let account_id = pick_account_id(&tr);
     let tokens = token_response_to_tokens(tr, account_id);
-    tokens.save_to_db(&entry.repo).await?;
-    tracing::info!("Codex OAuth: authentication successful");
+    tokens.save_to_db(repo).await?;
     Ok(tokens)
+}
+
+// Tiny URL-safe query-string encoder for the `?user_code=` suffix. Keeping it
+// inline avoids pulling in `urlencoding` just for one caller.
+fn urlencoding_inline(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let c = *b as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -505,30 +498,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pkce_verifier_is_url_safe() {
-        let pkce = generate_pkce();
-        assert!(
-            pkce.verifier
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        );
-        assert!(!pkce.challenge.is_empty());
-    }
-
-    #[test]
-    fn state_is_url_safe() {
-        let state = generate_state();
-        assert!(
-            state
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        );
-        assert!(!state.is_empty());
-    }
-
-    #[test]
     fn extract_account_id_from_jwt_payload() {
-        // Build a minimal JWT with chatgpt_account_id claim (no signature verification needed)
         let payload =
             serde_json::json!({ "chatgpt_account_id": "acct_test123", "exp": 9999999999i64 });
         let encoded =
@@ -544,7 +514,7 @@ mod tests {
             access_token: "tok".into(),
             refresh_token: "ref".into(),
             id_token: None,
-            expires_at: now_secs() - 100, // already expired
+            expires_at: now_secs() - 100,
             account_id: None,
         };
         assert!(tokens.is_expired());
@@ -560,71 +530,22 @@ mod tests {
     }
 
     #[test]
-    fn build_authorize_url_includes_redirect_uri_and_state() {
-        let pkce = generate_pkce();
-        let url = build_authorize_url("http://localhost:3000/auth/callback", &pkce, "st8")
-            .expect("build_authorize_url");
-        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Foauth%2Fcodex%2Fcallback"));
-        assert!(url.contains("state=st8"));
-        assert!(url.contains("code_challenge="));
-        assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
+    fn interval_deserializer_handles_string_and_int() {
+        let as_int: UserCodeResp =
+            serde_json::from_str(r#"{"device_auth_id":"x","user_code":"ABCD","interval":"7"}"#)
+                .expect("parses string interval");
+        assert_eq!(as_int.interval, 7);
+
+        // The CLI also accepts the `usercode` alias — make sure our copy does too.
+        let aliased: UserCodeResp =
+            serde_json::from_str(r#"{"device_auth_id":"x","usercode":"ABCD","interval":"3"}"#)
+                .expect("parses usercode alias");
+        assert_eq!(aliased.user_code, "ABCD");
     }
 
-    /// Finish rejects an unknown state without calling OpenAI. This is the
-    /// CSRF path: a bogus state must be an error, not an accidental success.
-    #[tokio::test]
-    async fn finish_codex_oauth_rejects_unknown_state() {
-        let store = Arc::new(CodexPendingStore::new());
-        let err = finish_codex_oauth(store, "code", "no-such-state")
-            .await
-            .expect_err("must reject unknown state");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Unknown or expired"),
-            "unexpected error: {msg}"
-        );
-    }
-
-    /// Expired entries disappear on lookup. We simulate the TTL by
-    /// hand-mutating `created_at` because real time-travel tests are
-    /// brittle; the behaviour we care about is the lazy sweep.
-    #[tokio::test]
-    async fn pending_store_evicts_expired_entries_on_take() {
-        let store = CodexPendingStore::new();
-        let entry = PendingAuth {
-            pkce: generate_pkce(),
-            redirect_uri: "http://x/auth/callback".into(),
-            repo: dummy_credential_repo(),
-            // Created 10 minutes ago — well past the 5-minute TTL.
-            created_at: Instant::now() - Duration::from_secs(OAUTH_PENDING_TTL_SECS + 60),
-        };
-        store.inner.lock().await.insert("stale".into(), entry);
-        assert!(store.take("stale").await.is_none());
-    }
-
-    /// Happy-path insert/take round trip — entry survives lookup once,
-    /// and is consumed (so a replay of the same `state` fails).
-    #[tokio::test]
-    async fn pending_store_insert_take_is_single_use() {
-        let store = CodexPendingStore::new();
-        let entry = PendingAuth {
-            pkce: generate_pkce(),
-            redirect_uri: "http://x/auth/callback".into(),
-            repo: dummy_credential_repo(),
-            created_at: Instant::now(),
-        };
-        store.insert("live".into(), entry).await;
-        assert_eq!(store.len().await, 1);
-        assert!(store.take("live").await.is_some());
-        assert!(store.take("live").await.is_none());
-    }
-
-    /// Minimal helper — the tests that need a `CredentialRepository` only
-    /// construct `PendingAuth` to exercise store mechanics; they never hit
-    /// the DB. Build one against a dummy in-memory database so `save_to_db`
-    /// would explode loudly if it were ever called here.
-    fn dummy_credential_repo() -> CredentialRepository {
-        let db = djinn_db::Database::open_in_memory().expect("in-memory db");
-        CredentialRepository::new(db, EventBus::noop())
+    #[test]
+    fn url_encoding_round_trip() {
+        assert_eq!(urlencoding_inline("ABCD-1234"), "ABCD-1234");
+        assert_eq!(urlencoding_inline("a b/c"), "a%20b%2Fc");
     }
 }

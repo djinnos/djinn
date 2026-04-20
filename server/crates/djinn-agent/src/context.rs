@@ -424,7 +424,6 @@ impl AgentContext {
             self.repo_graph_ops
                 .clone()
                 .unwrap_or_else(|| Arc::new(StubRepoGraphOps) as Arc<dyn RepoGraphOps>),
-            Arc::new(djinn_provider::oauth::codex::CodexPendingStore::new()),
         )
     }
 

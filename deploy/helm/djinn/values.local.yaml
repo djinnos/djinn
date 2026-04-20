@@ -30,6 +30,14 @@ storage:
 ingress:
   enabled: false
 
+# Point Helm at a hand-managed GitHub App Secret so the chart never renders
+# its own template over it. Populate the Secret out-of-band via
+# `kubectl create secret generic djinn-github-app` (see this file's top-
+# comment for the required keys). Leaves Helm upgrades non-destructive.
+secrets:
+  githubApp:
+    existingSecret: djinn-github-app
+
 # Tighter resource defaults so the whole stack fits on a laptop.
 resources:
   server:

@@ -70,6 +70,56 @@ After startup, verify djinn-server:
 curl http://127.0.0.1:8372/health
 ```
 
+## Provider credentials
+
+Djinn resolves LLM provider credentials from the **encrypted credential vault** stored inside Dolt. At server start, a bootstrap pass reads a fixed set of env vars and upserts them into the vault; at dispatch time, the agent loop reads back from the vault. The env-var pass is idempotent — a config change takes effect on the next restart and overwrites whatever was there.
+
+There are two ways credentials get into the vault:
+
+### 1. Operator-provisioned API keys (Helm / env vars)
+
+Every built-in provider declares the env var name it expects (see `BUILTIN_PROVIDERS` in `server/crates/djinn-provider/src/catalog/builtin.rs`). Set any of the following on the `djinn-server` container and they'll be bootstrapped automatically:
+
+| Env var | Provider |
+|---|---|
+| `ANTHROPIC_API_KEY` | Anthropic (Claude) |
+| `OPENAI_API_KEY` | OpenAI API |
+| `GOOGLE_API_KEY` | Google AI Studio |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI |
+| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | AWS Bedrock |
+| `GCP_VERTEX_PROJECT_ID` | Vertex AI |
+
+**Helm** — the chart has a dedicated `secrets.providers` block mirroring the `secrets.githubApp` pattern. Either point at an existing Secret via `existingSecret`, or paste values directly:
+
+```yaml
+# -f overrides.local.yaml (do not commit real keys)
+secrets:
+  providers:
+    anthropicApiKey: sk-ant-...
+    openaiApiKey: sk-...
+```
+
+The chart renders a Secret named `<release>-providers` and the Deployment mounts each key as the corresponding env var (`valueFrom.secretKeyRef`, `optional: true` — missing keys just stay unset).
+
+**Docker Compose / local** — export the vars before `docker compose up`, or set them in a `.env` file next to `docker-compose.yml`. Server startup logs each bootstrapped credential as:
+
+```
+INFO bootstrapped provider credential from env provider=anthropic key=ANTHROPIC_API_KEY
+```
+
+Unsetting an env var and restarting does **not** clear the vault — existing entries persist across restarts. To remove a credential, call `credential_delete` via MCP (or use the `djinn-server` CLI).
+
+### 2. ChatGPT / Codex (user self-serve via UI)
+
+The ChatGPT / Codex provider can't be bootstrapped from a static secret — it uses a per-user OAuth flow tied to someone's ChatGPT Plus/Pro/Team account. Users sign in from the Djinn web UI:
+
+1. Open **Settings → Models** (or wait for the onboarding gate if no providers are configured yet).
+2. Click **Continue with ChatGPT**. The server calls OpenAI's device-code endpoint and returns a short user code.
+3. The card displays the code + an **Open sign-in page** link that points at `https://auth.openai.com/codex/device?user_code=…`.
+4. Complete sign-in in the popup. Djinn's background task polls OpenAI for tokens, saves them to the encrypted vault, and emits a `credential.updated` SSE event so the UI flips to "Connected".
+
+No port-forwarding is required — this flow works identically when Djinn is hosted under a real domain. See ADR-027 for the device-code rationale.
+
 ## Data persistence
 
 Volumes are bind-mounted under `~/.djinn/` so data survives `docker compose down` and is easy to back up:
