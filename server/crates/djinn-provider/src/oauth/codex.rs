@@ -6,7 +6,7 @@
 //!     in the pending store keyed by state, and returns the `authorize_url`
 //!     the browser should be sent to.
 //!   * [`finish_codex_oauth`] — invoked from the main axum router when the
-//!     browser hits `/api/oauth/codex/callback` — looks up the pending entry
+//!     browser hits `/auth/callback` — looks up the pending entry
 //!     by state, exchanges the authorization code for tokens, and persists
 //!     them in the encrypted credentials table.
 //!
@@ -442,7 +442,7 @@ pub async fn start_codex_oauth(
     let pkce = generate_pkce();
     let csrf_state = generate_state();
     let redirect_uri = format!(
-        "{}/api/oauth/codex/callback",
+        "{}/auth/callback",
         public_url.trim_end_matches('/')
     );
     let authorize_url = build_authorize_url(&redirect_uri, &pkce, &csrf_state)?;
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn build_authorize_url_includes_redirect_uri_and_state() {
         let pkce = generate_pkce();
-        let url = build_authorize_url("http://localhost:3000/api/oauth/codex/callback", &pkce, "st8")
+        let url = build_authorize_url("http://localhost:3000/auth/callback", &pkce, "st8")
             .expect("build_authorize_url");
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Foauth%2Fcodex%2Fcallback"));
         assert!(url.contains("state=st8"));
@@ -588,7 +588,7 @@ mod tests {
         let store = CodexPendingStore::new();
         let entry = PendingAuth {
             pkce: generate_pkce(),
-            redirect_uri: "http://x/api/oauth/codex/callback".into(),
+            redirect_uri: "http://x/auth/callback".into(),
             repo: dummy_credential_repo(),
             // Created 10 minutes ago — well past the 5-minute TTL.
             created_at: Instant::now() - Duration::from_secs(OAUTH_PENDING_TTL_SECS + 60),
@@ -604,7 +604,7 @@ mod tests {
         let store = CodexPendingStore::new();
         let entry = PendingAuth {
             pkce: generate_pkce(),
-            redirect_uri: "http://x/api/oauth/codex/callback".into(),
+            redirect_uri: "http://x/auth/callback".into(),
             repo: dummy_credential_repo(),
             created_at: Instant::now(),
         };

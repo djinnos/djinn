@@ -3,7 +3,7 @@
 //! listener.
 //!
 //! Currently hosts the Codex (OpenAI) callback at
-//! `GET /api/oauth/codex/callback`. The equivalent Copilot/GitHub App
+//! `GET /auth/callback`. The equivalent Copilot/GitHub App
 //! flows either use different transports (device code) or already live
 //! in `server/src/server/auth.rs`, so they do not appear here.
 //!
@@ -30,7 +30,7 @@ use crate::server::AppState;
 use djinn_provider::oauth::codex;
 
 pub(super) fn router() -> Router<AppState> {
-    Router::new().route("/api/oauth/codex/callback", get(codex_callback))
+    Router::new().route("/auth/callback", get(codex_callback))
 }
 
 #[derive(Deserialize)]
@@ -44,7 +44,7 @@ struct CodexCallbackQuery {
     error_description: Option<String>,
 }
 
-/// `GET /api/oauth/codex/callback` — terminates the Codex (OpenAI) PKCE
+/// `GET /auth/callback` — terminates the Codex (OpenAI) PKCE
 /// redirect on the same port that serves the API/SPA. Replaces the
 /// historical `:1455` ephemeral listener.
 async fn codex_callback(
