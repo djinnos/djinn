@@ -234,16 +234,25 @@ to be running.
 
 ## 6. First-run UI bootstrap
 
-With the UI open, the first-run flow is:
+The in-UI App-install wizard is gone — App credentials are provisioned
+exclusively via the `djinn-github-app` Kubernetes Secret applied in §3a.
+The UI's only job here is to show "GitHub App not configured" if the
+Secret isn't mounted (or the env vars are missing); fixing that means
+re-applying the Secret and `kubectl rollout restart -n djinn
+deploy/djinn-server`, not clicking through the UI.
+
+With the UI open and the App Secret in place, the first-run flow is:
 
 1. **Add an LLM provider credential** — Anthropic, OpenAI, or whichever
    provider your roles target. The credential goes into the encrypted
    `djinn-db` vault (using the auto-generated vault key from §3a).
-2. **(If using GitHub App)** Visit `/api/github/install` to install the
-   App on the target org/repo — this records the App's installation id
-   so the worker can mint installation tokens. (The old in-UI install
-   wizard is gone; the App secret itself is provisioned via kubectl in
-   §3a.)
+2. **Install the App on the target org/repo** — open the App's GitHub
+   page (`https://github.com/apps/<your-app-slug>`) and click *Install*.
+   GitHub posts the user back to the server's
+   `/auth/github/app-setup-callback` endpoint, which writes the
+   singleton `org_config` row binding this deployment to that org.
+   (The "Add project from GitHub" dialog also surfaces a deep link to the
+   App's install page when no installation is bound yet.)
 3. **Add a project.** Point it at a GitHub repo you own. The "add project"
    flow clones the mirror onto the kind node's `/var/lib/djinn/mirrors/`
    hostPath via the controller — first clone takes 10–60 s depending on
