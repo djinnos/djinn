@@ -51,7 +51,6 @@ async fn chat_uses_router_derived_tool_schemas() {
         .collect::<std::collections::HashSet<_>>();
 
     assert!(names.contains("credential_set"));
-    assert!(names.contains("task_sync_enable"));
     assert!(names.contains("project_list"));
     assert!(names.contains("execution_start"));
 }

@@ -1,9 +1,9 @@
 /// Bridge trait implementations: connect djinn-mcp's abstract traits to
 /// the server's concrete actor handles and managers.
 ///
-/// Newtypes are required for CoordinatorHandle, SlotPoolHandle, LspManager,
-/// and SyncManager because both the trait (djinn-mcp) and the implementor
-/// (djinn-agent / crate::sync) are external to the server — orphan rule.
+/// Newtypes are required for CoordinatorHandle, SlotPoolHandle, and LspManager
+/// because both the trait (djinn-mcp) and the implementor (djinn-agent) are
+/// external to the server — orphan rule.
 /// AppState is a server-local type so it implements RuntimeOps and GitOps directly.
 use std::path::Path;
 use std::sync::Arc;
@@ -11,16 +11,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::bridge::{
-    ChannelStatus, CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry, GitOps,
-    GraphDiff, GraphNeighbor, GraphStatus, ImpactEntry, ImpactResult, LspOps, LspWarning,
-    ModelPoolStatus, NeighborsResult, OrphanEntry, PathHop, PathResult, PoolStatus, RankedNode,
-    RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps,
-    SymbolDescription, SyncOps, SyncResult,
+    CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry, GitOps, GraphDiff,
+    GraphNeighbor, GraphStatus, ImpactEntry, ImpactResult, LspOps, LspWarning, ModelPoolStatus,
+    NeighborsResult, OrphanEntry, PathHop, PathResult, PoolStatus, RankedNode, RepoGraphOps,
+    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolDescription,
 };
 use petgraph::visit::EdgeRef;
 
 use crate::canonical_graph::{GRAPH_CACHE, PREVIOUS_GRAPH_CACHE};
-use crate::sync::SyncManager;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
@@ -37,7 +35,6 @@ use self::graph_neighbors::{
 struct CoordinatorBridge(pub CoordinatorHandle);
 struct SlotPoolBridge(pub SlotPoolHandle);
 struct LspBridge(pub LspManager);
-struct SyncBridge(pub SyncManager);
 
 // ── CoordinatorBridge → CoordinatorOps ───────────────────────────────────────
 
@@ -199,79 +196,6 @@ impl LspOps for LspBridge {
             .map(|w| LspWarning {
                 server: w.server,
                 message: w.message,
-            })
-            .collect()
-    }
-}
-
-// ── SyncBridge → SyncOps ─────────────────────────────────────────────────────
-
-#[async_trait]
-impl SyncOps for SyncBridge {
-    async fn enable_project(&self, project_id: &str) -> Result<(), String> {
-        self.0
-            .enable_project(project_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn disable_project(&self, project_id: &str) -> Result<(), String> {
-        self.0
-            .disable_project(project_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn delete_remote_branch(&self, channel: &str, project_path: &Path) -> Result<(), String> {
-        self.0
-            .delete_remote_branch(channel, project_path)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn export_all(&self, user_id: Option<&str>) -> Vec<SyncResult> {
-        self.0
-            .export_all(user_id)
-            .await
-            .into_iter()
-            .map(|r| SyncResult {
-                channel: r.channel,
-                ok: r.ok,
-                count: r.count,
-                error: r.error,
-            })
-            .collect()
-    }
-
-    async fn import_all(&self) -> Vec<SyncResult> {
-        self.0
-            .import_all()
-            .await
-            .into_iter()
-            .map(|r| SyncResult {
-                channel: r.channel,
-                ok: r.ok,
-                count: r.count,
-                error: r.error,
-            })
-            .collect()
-    }
-
-    async fn status(&self) -> Vec<ChannelStatus> {
-        self.0
-            .status()
-            .await
-            .into_iter()
-            .map(|s| ChannelStatus {
-                name: s.name,
-                branch: s.branch,
-                enabled: s.enabled,
-                project_paths: s.project_paths,
-                last_synced_at: s.last_synced_at,
-                last_error: s.last_error,
-                failure_count: s.failure_count,
-                backoff_secs: s.backoff_secs,
-                needs_attention: s.needs_attention,
             })
             .collect()
     }
@@ -964,13 +888,11 @@ impl AppState {
             self.event_bus(),
             self.catalog().clone(),
             self.health_tracker().clone(),
-            self.sync_user_id().to_string(),
             coordinator,
             pool,
             Some(Arc::new(self.embedding_service().clone())),
             Some(self.note_vector_store()),
             Arc::new(LspBridge(self.lsp().clone())),
-            Arc::new(SyncBridge(self.sync_manager().clone())),
             Arc::new(self.clone()),
             Arc::new(self.clone()),
             Arc::new(RepoGraphBridge::new(self.clone())),

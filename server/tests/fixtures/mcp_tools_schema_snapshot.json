@@ -2290,6 +2290,102 @@
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "end_line": {
+            "default": null,
+            "description": "Last line to return (1-based, inclusive). Omit for end of file.",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "path": {
+            "description": "File path within the repository (e.g. \"src/lib.rs\").",
+            "type": "string"
+          },
+          "ref": {
+            "default": null,
+            "description": "Branch, tag, or commit SHA (default: HEAD / default branch).",
+            "nullable": true,
+            "type": "string"
+          },
+          "repo": {
+            "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\").",
+            "type": "string"
+          },
+          "start_line": {
+            "default": null,
+            "description": "First line to return (1-based, inclusive). Omit for start of file.",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repo",
+          "path"
+        ],
+        "title": "GithubFetchFileParams",
+        "type": "object"
+      },
+      "name": "github_fetch_file",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "title": "ErrorOrGithubFetchFileResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": null,
+            "description": "Programming language filter (e.g. \"Rust\", \"Python\", \"TypeScript\").",
+            "nullable": true,
+            "type": "string"
+          },
+          "limit": {
+            "default": null,
+            "description": "Maximum number of results to return (1\u2013100, default 15).",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "path": {
+            "default": null,
+            "description": "Path filter to search within specific directories (e.g. \"src/\").",
+            "nullable": true,
+            "type": "string"
+          },
+          "query": {
+            "description": "Search query string. Supports GitHub code search syntax.",
+            "type": "string"
+          },
+          "repo": {
+            "default": null,
+            "description": "Repository filter in \"owner/repo\" format (e.g. \"tokio-rs/tokio\").",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "GithubSearchParams",
+        "type": "object"
+      },
+      "name": "github_search",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": true,
+        "title": "ErrorOrGithubSearchResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
           "identifier": {
             "description": "Note ID or permalink (e.g. \"decisions/my-adr\").",
             "type": "string"
@@ -2931,6 +3027,128 @@
           "deduplicated"
         ],
         "title": "MemoryNoteResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "ExtractedAuditParams",
+        "type": "object"
+      },
+      "name": "memory_extracted_audit",
+      "output_schema": {
+        "$defs": {
+          "ExtractedNoteAuditCategory": {
+            "description": "Classification assigned during ADR-054 extracted-note corpus audits.",
+            "enum": [
+              "merge_candidate",
+              "underspecified",
+              "demote_to_working_spec",
+              "archive_candidate"
+            ],
+            "type": "string"
+          },
+          "ExtractedNoteAuditFinding": {
+            "description": "A single extracted note flagged by the ADR-054 audit.",
+            "properties": {
+              "category": {
+                "$ref": "#/$defs/ExtractedNoteAuditCategory"
+              },
+              "folder": {
+                "type": "string"
+              },
+              "note_id": {
+                "type": "string"
+              },
+              "note_type": {
+                "type": "string"
+              },
+              "permalink": {
+                "type": "string"
+              },
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "related_note_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "note_id",
+              "permalink",
+              "title",
+              "note_type",
+              "folder",
+              "category",
+              "reasons",
+              "related_note_ids"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "archive_candidates": {
+            "items": {
+              "$ref": "#/$defs/ExtractedNoteAuditFinding"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "demote_to_working_spec": {
+            "items": {
+              "$ref": "#/$defs/ExtractedNoteAuditFinding"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "merge_candidates": {
+            "items": {
+              "$ref": "#/$defs/ExtractedNoteAuditFinding"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "rerun_hint": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scanned_note_count": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "underspecified": {
+            "items": {
+              "$ref": "#/$defs/ExtractedNoteAuditFinding"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "title": "MemoryExtractedAuditResponse",
         "type": "object"
       }
     },
@@ -6005,6 +6223,16 @@
                 "nullable": true,
                 "type": "object"
               },
+              "memory_mount_enabled": {
+                "description": "Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
+                "nullable": true,
+                "type": "boolean"
+              },
+              "memory_mount_path": {
+                "description": "Absolute filesystem path where the Linux FUSE mount should be attached. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; Djinn does not expose additional branch directories in this slice.",
+                "nullable": true,
+                "type": "string"
+              },
               "models": {
                 "description": "Ordered list of models available to agents, e.g. `[\"openai/gpt-4o\"]`.",
                 "items": {
@@ -6108,6 +6336,16 @@
             "description": "Per-model concurrent session caps (e.g. {\"openai/gpt-4o\": 4}). Omit to keep current value.",
             "nullable": true,
             "type": "object"
+          },
+          "memory_mount_enabled": {
+            "description": "Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
+            "nullable": true,
+            "type": "boolean"
+          },
+          "memory_mount_path": {
+            "description": "Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.",
+            "nullable": true,
+            "type": "string"
           },
           "models": {
             "description": "Ordered list of models available to all agents (e.g. [\"openai/gpt-4o\"]). Omit to keep current value.",
@@ -6973,299 +7211,6 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": true,
         "title": "ErrorOrTaskShowResponse",
-        "type": "object"
-      }
-    },
-    {
-      "input_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
-            "description": "Absolute path to the project git repository.",
-            "type": "string"
-          },
-          "team_wide": {
-            "description": "If true, delete the remote `djinn/tasks` branch (team-wide disable).\nIf false or absent, only clear the local enabled flag (machine opt-out).",
-            "nullable": true,
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "project"
-        ],
-        "title": "TaskSyncDisableParams",
-        "type": "object"
-      },
-      "name": "task_sync_disable",
-      "output_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "error": {
-            "nullable": true,
-            "type": "string"
-          },
-          "ok": {
-            "nullable": true,
-            "type": "boolean"
-          },
-          "team_wide": {
-            "nullable": true,
-            "type": "boolean"
-          }
-        },
-        "title": "TaskSyncDisableResponse",
-        "type": "object"
-      }
-    },
-    {
-      "input_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
-            "description": "Absolute path to the project git repository.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "project"
-        ],
-        "title": "TaskSyncEnableParams",
-        "type": "object"
-      },
-      "name": "task_sync_enable",
-      "output_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "error": {
-            "nullable": true,
-            "type": "string"
-          },
-          "note": {
-            "nullable": true,
-            "type": "string"
-          },
-          "ok": {
-            "nullable": true,
-            "type": "boolean"
-          },
-          "tasks_exported": {
-            "format": "int64",
-            "nullable": true,
-            "type": "integer"
-          }
-        },
-        "title": "TaskSyncEnableResponse",
-        "type": "object"
-      }
-    },
-    {
-      "input_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
-            "description": "Project path (accepted for API compatibility, currently unused).",
-            "nullable": true,
-            "type": "string"
-          }
-        },
-        "title": "TaskSyncExportParams",
-        "type": "object"
-      },
-      "name": "task_sync_export",
-      "output_schema": {
-        "$defs": {
-          "SyncChannelResult": {
-            "properties": {
-              "channel": {
-                "type": "string"
-              },
-              "count": {
-                "format": "int64",
-                "nullable": true,
-                "type": "integer"
-              },
-              "error": {
-                "nullable": true,
-                "type": "string"
-              },
-              "ok": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "channel",
-              "ok"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "channels": {
-            "items": {
-              "$ref": "#/$defs/SyncChannelResult"
-            },
-            "nullable": true,
-            "type": "array"
-          },
-          "error": {
-            "nullable": true,
-            "type": "string"
-          },
-          "ok": {
-            "nullable": true,
-            "type": "boolean"
-          }
-        },
-        "title": "TaskSyncRunResponse",
-        "type": "object"
-      }
-    },
-    {
-      "input_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
-            "description": "Project path (accepted for API compatibility, currently unused).",
-            "nullable": true,
-            "type": "string"
-          }
-        },
-        "title": "TaskSyncImportParams",
-        "type": "object"
-      },
-      "name": "task_sync_import",
-      "output_schema": {
-        "$defs": {
-          "SyncChannelResult": {
-            "properties": {
-              "channel": {
-                "type": "string"
-              },
-              "count": {
-                "format": "int64",
-                "nullable": true,
-                "type": "integer"
-              },
-              "error": {
-                "nullable": true,
-                "type": "string"
-              },
-              "ok": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "channel",
-              "ok"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "channels": {
-            "items": {
-              "$ref": "#/$defs/SyncChannelResult"
-            },
-            "nullable": true,
-            "type": "array"
-          },
-          "error": {
-            "nullable": true,
-            "type": "string"
-          },
-          "ok": {
-            "nullable": true,
-            "type": "boolean"
-          }
-        },
-        "title": "TaskSyncRunResponse",
-        "type": "object"
-      }
-    },
-    {
-      "input_schema": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "project": {
-            "description": "Project path (accepted for API compatibility, currently unused).",
-            "nullable": true,
-            "type": "string"
-          }
-        },
-        "title": "TaskSyncStatusParams",
-        "type": "object"
-      },
-      "name": "task_sync_status",
-      "output_schema": {
-        "$defs": {
-          "SyncChannelStatus": {
-            "properties": {
-              "backoff_secs": {
-                "format": "int64",
-                "type": "integer"
-              },
-              "branch": {
-                "type": "string"
-              },
-              "enabled": {
-                "type": "boolean"
-              },
-              "failure_count": {
-                "format": "int64",
-                "type": "integer"
-              },
-              "last_error": {
-                "nullable": true,
-                "type": "string"
-              },
-              "last_synced_at": {
-                "nullable": true,
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              },
-              "needs_attention": {
-                "description": "Whether the channel needs attention (3+ failures) (SYNC-16).",
-                "type": "boolean"
-              },
-              "project_paths": {
-                "description": "Sync-enabled project paths (SYNC-07).",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "name",
-              "branch",
-              "enabled",
-              "project_paths",
-              "failure_count",
-              "backoff_secs",
-              "needs_attention"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "properties": {
-          "channels": {
-            "items": {
-              "$ref": "#/$defs/SyncChannelStatus"
-            },
-            "nullable": true,
-            "type": "array"
-          },
-          "error": {
-            "nullable": true,
-            "type": "string"
-          }
-        },
-        "title": "TaskSyncStatusResponse",
         "type": "object"
       }
     },

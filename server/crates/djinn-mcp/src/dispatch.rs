@@ -39,10 +39,6 @@ use crate::tools::session_tools::{
     TaskTimelineParams,
 };
 use crate::tools::settings_tools::{SettingsGetParams, SettingsResetParams, SettingsSetParams};
-use crate::tools::sync_tools::{
-    TaskSyncDisableParams, TaskSyncEnableParams, TaskSyncExportParams, TaskSyncImportParams,
-    TaskSyncStatusParams,
-};
 use crate::tools::system_tools::SystemLogsInput;
 use crate::tools::task_tools::{
     BoardHealthParams, BoardReconcileParams, ErrorOr, TaskActivityListParams,
@@ -335,33 +331,6 @@ impl DjinnMcpServer {
             "settings_reset" => map_json(
                 name,
                 self.settings_reset(Parameters(decode_args::<SettingsResetParams>(name, args)?))
-                    .await,
-            ),
-            "task_sync_enable" => map_json(
-                name,
-                self.task_sync_enable(Parameters(decode_args::<TaskSyncEnableParams>(name, args)?))
-                    .await,
-            ),
-            "task_sync_disable" => map_json(
-                name,
-                self.task_sync_disable(Parameters(decode_args::<TaskSyncDisableParams>(
-                    name, args,
-                )?))
-                .await,
-            ),
-            "task_sync_export" => map_json(
-                name,
-                self.task_sync_export(Parameters(decode_args::<TaskSyncExportParams>(name, args)?))
-                    .await,
-            ),
-            "task_sync_import" => map_json(
-                name,
-                self.task_sync_import(Parameters(decode_args::<TaskSyncImportParams>(name, args)?))
-                    .await,
-            ),
-            "task_sync_status" => map_json(
-                name,
-                self.task_sync_status(Parameters(decode_args::<TaskSyncStatusParams>(name, args)?))
                     .await,
             ),
             "system_ping" => map_json(name, self.system_ping().await),

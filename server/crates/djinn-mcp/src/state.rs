@@ -11,13 +11,12 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::bridge::{
     CoordinatorOps, GitOps, LspOps, RepoGraphOps, RuntimeOps, SemanticQueryEmbedding, SlotPoolOps,
-    SyncOps,
 };
 
 /// Subset of application state consumed by the MCP layer.
 ///
 /// Holds the database, catalog, and boxed bridge-trait handles for
-/// server-specific actors (coordinator, pool, LSP, sync). The server
+/// server-specific actors (coordinator, pool, LSP). The server
 /// constructs this from AppState; djinn-mcp never depends on AppState or
 /// any actor type directly.
 #[derive(Clone)]
@@ -26,13 +25,11 @@ pub struct McpState {
     event_bus: EventBus,
     catalog: CatalogService,
     health_tracker: HealthTracker,
-    sync_user_id: String,
     coordinator: Option<Arc<dyn CoordinatorOps>>,
     pool: Option<Arc<dyn SlotPoolOps>>,
     embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
     vector_store: Option<Arc<dyn NoteVectorStore>>,
     lsp: Arc<dyn LspOps>,
-    sync: Arc<dyn SyncOps>,
     runtime: Arc<dyn RuntimeOps>,
     git: Arc<dyn GitOps>,
     repo_graph: Arc<dyn RepoGraphOps>,
@@ -45,13 +42,11 @@ impl McpState {
         event_bus: EventBus,
         catalog: CatalogService,
         health_tracker: HealthTracker,
-        sync_user_id: String,
         coordinator: Option<Arc<dyn CoordinatorOps>>,
         pool: Option<Arc<dyn SlotPoolOps>>,
         embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
         vector_store: Option<Arc<dyn NoteVectorStore>>,
         lsp: Arc<dyn LspOps>,
-        sync: Arc<dyn SyncOps>,
         runtime: Arc<dyn RuntimeOps>,
         git: Arc<dyn GitOps>,
         repo_graph: Arc<dyn RepoGraphOps>,
@@ -61,13 +56,11 @@ impl McpState {
             event_bus,
             catalog,
             health_tracker,
-            sync_user_id,
             coordinator,
             pool,
             embedding_provider,
             vector_store,
             lsp,
-            sync,
             runtime,
             git,
             repo_graph,
@@ -90,10 +83,6 @@ impl McpState {
         &self.health_tracker
     }
 
-    pub fn sync_user_id(&self) -> &str {
-        &self.sync_user_id
-    }
-
     pub async fn coordinator(&self) -> Option<Arc<dyn CoordinatorOps>> {
         self.coordinator.clone()
     }
@@ -112,10 +101,6 @@ impl McpState {
 
     pub fn lsp(&self) -> &Arc<dyn LspOps> {
         &self.lsp
-    }
-
-    pub fn sync_manager(&self) -> &Arc<dyn SyncOps> {
-        &self.sync
     }
 
     pub async fn git_actor(
@@ -162,8 +147,7 @@ pub(crate) mod stubs {
     #![allow(dead_code, unused_imports)]
     use super::*;
     use crate::bridge::{
-        ChannelStatus, GraphNeighbor, ImpactEntry, LspWarning, PoolStatus, RankedNode,
-        RunningTaskInfo, SyncResult,
+        GraphNeighbor, ImpactEntry, LspWarning, PoolStatus, RankedNode, RunningTaskInfo,
     };
     use async_trait::async_trait;
     use djinn_git::{GitActorHandle, GitError};
@@ -225,39 +209,6 @@ pub(crate) mod stubs {
     impl LspOps for StubLspOps {
         async fn warnings(&self) -> Vec<LspWarning> {
             vec![]
-        }
-    }
-
-    pub struct StubSyncOps;
-    #[async_trait]
-    impl SyncOps for StubSyncOps {
-        async fn enable_project(&self, _: &str) -> Result<(), String> {
-            Err("sync not enabled".into())
-        }
-        async fn disable_project(&self, _: &str) -> Result<(), String> {
-            Err("sync not enabled".into())
-        }
-        async fn delete_remote_branch(&self, _: &str, _: &Path) -> Result<(), String> {
-            Err("sync not enabled".into())
-        }
-        async fn export_all(&self, _: Option<&str>) -> Vec<SyncResult> {
-            vec![]
-        }
-        async fn import_all(&self) -> Vec<SyncResult> {
-            vec![]
-        }
-        async fn status(&self) -> Vec<ChannelStatus> {
-            vec![ChannelStatus {
-                name: "tasks".into(),
-                branch: "djinn/tasks".into(),
-                enabled: false,
-                project_paths: vec![],
-                last_synced_at: None,
-                last_error: None,
-                failure_count: 0,
-                backoff_secs: 0,
-                needs_attention: false,
-            }]
         }
     }
 
@@ -403,13 +354,11 @@ pub(crate) mod stubs {
             EventBus::noop(),
             CatalogService::new(),
             HealthTracker::new(),
-            "test-user".into(),
             None,
             None,
             None,
             None,
             Arc::new(StubLspOps),
-            Arc::new(StubSyncOps),
             Arc::new(StubRuntimeOps),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),

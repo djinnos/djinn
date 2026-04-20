@@ -20,7 +20,6 @@ pub(crate) mod scip_parser;
 pub mod semantic_memory;
 pub mod server;
 pub mod sse;
-pub mod sync;
 mod task_confidence;
 pub(crate) mod watchers;
 
