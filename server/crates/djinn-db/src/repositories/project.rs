@@ -566,6 +566,40 @@ impl ProjectRepository {
         self.events.send(DjinnEventEnvelope::project_deleted(id));
         Ok(())
     }
+
+    /// Persist the detected stack JSON for a project.
+    ///
+    /// Callers (today: `mirror_fetcher::fetch_one`) own the serialization
+    /// so `djinn-db` doesn't take a dep on `djinn-stack`. The `stack_json`
+    /// argument must be a serialized `djinn_stack::Stack`; any non-empty
+    /// JSON object is accepted by the column, but the MCP tool returning
+    /// it expects the `Stack` shape.
+    pub async fn set_stack(&self, project_id: &str, stack_json: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE projects SET stack = ? WHERE id = ?",
+            stack_json,
+            project_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Fetch the raw `stack` JSON string for a project.
+    ///
+    /// Returns `Ok(None)` when the project id is unknown. A project that
+    /// exists but has not yet been detected returns `Ok(Some("{}"))`
+    /// (the migration-7 default); the MCP tool translates that to a
+    /// `None` typed payload.
+    pub async fn get_stack(&self, project_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_scalar!("SELECT stack FROM projects WHERE id = ?", project_id)
+                .fetch_optional(self.db.pool())
+                .await?,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -896,5 +930,33 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("invalid glob syntax"), "got: {err}");
+    }
+
+    // ── Stack column round-trip ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_stack_default_is_empty_json_object() {
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+        let project = repo.create("stack-default", "/stack-default").await.unwrap();
+        let stack = repo.get_stack(&project.id).await.unwrap().unwrap();
+        assert_eq!(stack, "{}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_stack_round_trips_arbitrary_json() {
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+        let project = repo.create("stack-rt", "/stack-rt").await.unwrap();
+
+        let payload = r#"{"primary_language":"Rust","is_monorepo":false}"#;
+        repo.set_stack(&project.id, payload).await.unwrap();
+
+        let fetched = repo.get_stack(&project.id).await.unwrap().unwrap();
+        assert_eq!(fetched, payload);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_stack_unknown_project_returns_none() {
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+        assert!(repo.get_stack("nonexistent-id").await.unwrap().is_none());
     }
 }

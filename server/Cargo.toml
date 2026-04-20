@@ -27,6 +27,7 @@ djinn-db = { path = "crates/djinn-db" }
 djinn-git = { path = "crates/djinn-git" }
 djinn-mcp = { path = "crates/djinn-mcp" }
 djinn-provider = { path = "crates/djinn-provider" }
+djinn-stack = { path = "crates/djinn-stack" }
 djinn-supervisor = { path = "crates/djinn-supervisor" }
 djinn-workspace = { path = "crates/djinn-workspace" }
 kube = { version = "0.95", features = ["runtime"] }

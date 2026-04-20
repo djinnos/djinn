@@ -95,6 +95,25 @@ pub(crate) async fn fetch_one(
     let mirror = state.mirror();
     mirror.ensure_mirror(project_id, &origin_url).await?;
     mirror.fetch_mirror(project_id, &origin_url).await?;
+
+    // Stack detection — best-effort, must never break the mirror fetch.
+    // Image-controller + graph-warmer triggers land in PR 5 and PR 8.
+    let mirror_path = mirror.mirror_path(project_id);
+    match tokio::task::spawn_blocking(move || djinn_stack::detect_blocking(&mirror_path)).await {
+        Ok(Ok(stack)) => match serde_json::to_string(&stack) {
+            Ok(json) => {
+                let repo_db = ProjectRepository::new(state.db().clone(), state.event_bus());
+                if let Err(err) = repo_db.set_stack(project_id, &json).await {
+                    tracing::warn!(project_id, error = %err, "persist detected stack failed");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(project_id, error = %err, "serialize detected stack failed")
+            }
+        },
+        Ok(Err(err)) => tracing::warn!(project_id, error = %err, "stack detection failed"),
+        Err(err) => tracing::warn!(project_id, error = %err, "stack detection panicked"),
+    }
     Ok(())
 }
 

@@ -25,8 +25,8 @@ use crate::tools::memory_tools::{
     ReindexParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::project_tools::{
-    GithubListReposParams, ProjectAddFromGithubParams, ProjectBranchesParams,
-    ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
+    GetProjectStackParams, GithubListReposParams, ProjectAddFromGithubParams,
+    ProjectBranchesParams, ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
     ProjectSettingsValidateParams,
 };
 use crate::tools::proposal_tools::{
@@ -244,6 +244,13 @@ impl DjinnMcpServer {
                     ProjectSettingsValidateParams,
                 >(name, args)?))
                     .await,
+            ),
+            "get_project_stack" => map_json(
+                name,
+                self.get_project_stack(Parameters(decode_args::<GetProjectStackParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "propose_adr_list" => map_json(
                 name,

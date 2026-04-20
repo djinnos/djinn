@@ -8,6 +8,7 @@ use tokio::fs;
 use crate::server::DjinnMcpServer;
 use djinn_core::auth_context::current_user_token;
 use djinn_db::{OrgConfigRepository, ProjectRepository, VerificationRule};
+use djinn_stack::Stack;
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
@@ -129,6 +130,25 @@ pub struct ProjectConfigSetParams {
     pub project: String,
     pub key: String,
     pub value: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetProjectStackParams {
+    /// Project UUID whose detected stack should be returned.
+    pub project: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct GetProjectStackResponse {
+    /// Detected stack metadata, or `None` when the project exists but no
+    /// detection has run yet (default `{}` in the DB) or when the
+    /// persisted JSON fails to deserialize.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<Stack>,
+    /// Populated on lookup / deserialization failures; clients should
+    /// surface this verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A single verification rule returned in project config.
@@ -892,6 +912,47 @@ impl DjinnMcpServer {
             branches,
             current,
         })
+    }
+
+    /// Return the detected stack metadata for a project, as populated by
+    /// the mirror-fetcher hook after each successful fetch. The empty JSON
+    /// default (`{}`) surfaces as `stack: None`.
+    #[tool(
+        description = "Return detected stack metadata for a project (languages, package managers, frameworks, devcontainer status)."
+    )]
+    pub async fn get_project_stack(
+        &self,
+        Parameters(input): Parameters<GetProjectStackParams>,
+    ) -> Json<GetProjectStackResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        match repo.get_stack(&input.project).await {
+            Ok(Some(raw)) => {
+                if raw.trim() == "{}" || raw.trim().is_empty() {
+                    return Json(GetProjectStackResponse {
+                        stack: None,
+                        error: None,
+                    });
+                }
+                match serde_json::from_str::<Stack>(&raw) {
+                    Ok(stack) => Json(GetProjectStackResponse {
+                        stack: Some(stack),
+                        error: None,
+                    }),
+                    Err(err) => Json(GetProjectStackResponse {
+                        stack: None,
+                        error: Some(format!("stack JSON deserialize failed: {err}")),
+                    }),
+                }
+            }
+            Ok(None) => Json(GetProjectStackResponse {
+                stack: None,
+                error: Some(format!("project not found: {}", input.project)),
+            }),
+            Err(err) => Json(GetProjectStackResponse {
+                stack: None,
+                error: Some(format!("stack lookup failed: {err}")),
+            }),
+        }
     }
 
     #[tool(description = "Validate .djinn/settings.json syntax and schema in a worktree.")]

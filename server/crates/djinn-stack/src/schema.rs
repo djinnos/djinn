@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level stack descriptor — one per project, recomputed on every
 /// mirror fetch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Stack {
     /// Wall-clock timestamp of the detection pass.
+    #[schemars(with = "String")]
     pub detected_at: DateTime<Utc>,
 
     /// Languages detected by extension, sorted descending by byte share.
@@ -51,14 +52,14 @@ pub struct Stack {
     pub manifest_signals: ManifestSignals,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LanguageStat {
     pub name: String,
     pub bytes: u64,
     pub pct: f64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Runtimes {
     #[serde(default)]
     pub node: Option<String>,
@@ -70,7 +71,7 @@ pub struct Runtimes {
     pub go: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ManifestSignals {
     pub has_package_json: bool,
     pub has_cargo_toml: bool,
