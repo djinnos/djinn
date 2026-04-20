@@ -1057,10 +1057,17 @@ struct InstallationAccount {
 #[derive(Serialize)]
 struct SetupStatusResponse {
     /// True when either the GitHub App credentials are missing OR the
-    /// deployment has no org binding (env nor DB). The client treats these
-    /// identically: the operator needs to (re-)provision the
-    /// `djinn-github-app` Secret with both halves.
+    /// deployment has no org binding (env nor DB). The UI uses this to
+    /// gate sign-in, but combines it with `app_credentials_configured`
+    /// to distinguish "operator must drop a Secret" from "user must
+    /// pick an installation".
     needs_app_install: bool,
+    /// True iff the GitHub App credentials (`GITHUB_APP_*` env / Secret)
+    /// resolved on startup. When `true && needs_app_install == true`, the
+    /// UI shows the in-app installation picker; when `false`, the UI shows
+    /// the static "GitHub App not configured" runbook screen because the
+    /// operator hasn't done their part yet.
+    app_credentials_configured: bool,
     /// The org this deployment is locked to, once known. Sourced from the
     /// env-loaded `OrgBinding` first, then the legacy `org_config` row
     /// (back-compat for deployments mid-migration).
@@ -1093,10 +1100,12 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatusResponse
         .or_else(|| org_cfg.as_ref().map(|c| c.github_org_login.clone()));
 
     let bound = env_binding.is_some() || org_cfg.is_some();
-    let needs_app_install = app_cfg.is_none() || !bound;
+    let app_credentials_configured = app_cfg.is_some();
+    let needs_app_install = !app_credentials_configured || !bound;
 
     Json(SetupStatusResponse {
         needs_app_install,
+        app_credentials_configured,
         org_login,
     })
 }
@@ -1177,6 +1186,7 @@ mod tests {
         let resp = setup_status(State(state)).await;
         let body = resp.0;
         assert!(body.needs_app_install);
+        assert!(!body.app_credentials_configured);
         assert!(body.org_login.is_none());
     }
 
@@ -1211,11 +1221,13 @@ mod tests {
 
         let resp = setup_status(State(state)).await;
         assert!(!resp.0.needs_app_install);
+        assert!(resp.0.app_credentials_configured);
         assert_eq!(resp.0.org_login.as_deref(), Some("acme"));
     }
 
-    /// Only one of the two present → still "needs install". Guards against a
-    /// half-written deployment being treated as ready.
+    /// Only one of the two present → still "needs install" but
+    /// `app_credentials_configured=true` so the UI shows the picker rather
+    /// than the operator runbook screen.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn setup_status_half_configured_still_needs_install() {
         use crate::test_helpers;
@@ -1234,6 +1246,7 @@ mod tests {
 
         let resp = setup_status(State(state)).await;
         assert!(resp.0.needs_app_install);
+        assert!(resp.0.app_credentials_configured);
         assert!(resp.0.org_login.is_none());
     }
 

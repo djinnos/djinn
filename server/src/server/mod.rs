@@ -11,6 +11,7 @@ use crate::sse;
 mod agents;
 mod auth;
 mod chat;
+mod github_install;
 mod mcp_handler;
 mod org_sync;
 mod project_tools;
@@ -29,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
         .merge(auth::router())
+        .merge(github_install::router())
         .merge(crate::mirror_fetcher::router())
         .merge(org_sync::router())
         .merge(project_tools::router())

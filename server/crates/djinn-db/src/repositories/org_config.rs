@@ -93,6 +93,51 @@ impl OrgConfigRepository {
 
         Ok(row)
     }
+
+    /// Insert or replace the singleton row.
+    ///
+    /// Loosened counterpart to [`set_once`](Self::set_once), introduced to
+    /// back the in-UI installation picker: an operator setting up a fresh
+    /// deployment may pick the wrong installation on the first click and
+    /// reasonably expect a second click to overwrite the binding. The
+    /// `set_once` strict invariant remains in force for the legacy
+    /// `app_setup_callback` flow, which trusts GitHub's redirect to be the
+    /// authoritative one-shot.
+    ///
+    /// The `created_at` of an overwriting row reflects the *latest* bind —
+    /// callers that need provenance for the original bind should snapshot
+    /// the row before invoking this.
+    pub async fn set_or_replace(&self, cfg: NewOrgConfig<'_>) -> Result<OrgConfig> {
+        self.db.ensure_initialized().await?;
+
+        // Two-step replace so we don't depend on dialect-specific UPSERT.
+        // The row id is hard-coded to 1 by the singleton invariant.
+        sqlx::query!("DELETE FROM org_config WHERE id = 1")
+            .execute(self.db.pool())
+            .await?;
+
+        sqlx::query!(
+            "INSERT INTO org_config
+                (id, github_org_id, github_org_login, app_id, installation_id)
+             VALUES (1, ?, ?, ?, ?)",
+            cfg.github_org_id,
+            cfg.github_org_login,
+            cfg.app_id,
+            cfg.installation_id,
+        )
+        .execute(self.db.pool())
+        .await?;
+
+        let row = sqlx::query_as!(
+            OrgConfig,
+            "SELECT id, github_org_id, github_org_login, app_id, installation_id, created_at
+             FROM org_config WHERE id = 1",
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+
+        Ok(row)
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +209,52 @@ mod tests {
         // And the first binding must still be intact.
         let fetched = repo.get().await.unwrap().unwrap();
         assert_eq!(fetched.github_org_login, "first");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_or_replace_overwrites_existing_row() {
+        let repo = OrgConfigRepository::new(test_db());
+
+        // Initial bind via set_once.
+        repo.set_once(NewOrgConfig {
+            github_org_id: 1,
+            github_org_login: "first",
+            app_id: 10,
+            installation_id: 20,
+        })
+        .await
+        .unwrap();
+
+        // Re-bind via set_or_replace.
+        let replaced = repo
+            .set_or_replace(NewOrgConfig {
+                github_org_id: 2,
+                github_org_login: "second",
+                app_id: 30,
+                installation_id: 40,
+            })
+            .await
+            .unwrap();
+        assert_eq!(replaced.id, 1);
+        assert_eq!(replaced.github_org_login, "second");
+        assert_eq!(replaced.installation_id, 40);
+
+        let fetched = repo.get().await.unwrap().unwrap();
+        assert_eq!(fetched.github_org_login, "second");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_or_replace_inserts_when_unset() {
+        let repo = OrgConfigRepository::new(test_db());
+        let row = repo
+            .set_or_replace(NewOrgConfig {
+                github_org_id: 99,
+                github_org_login: "fresh",
+                app_id: 1,
+                installation_id: 2,
+            })
+            .await
+            .unwrap();
+        assert_eq!(row.github_org_login, "fresh");
     }
 }
