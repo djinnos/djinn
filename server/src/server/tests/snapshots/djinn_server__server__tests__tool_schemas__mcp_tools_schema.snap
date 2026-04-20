@@ -5823,6 +5823,11 @@ expression: signatures
     "output_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "authorize_url": {
+          "description": "For browser-redirect flows (Codex): the authorize URL the client\nshould open in a new tab. Present only when the flow requires the\nuser to complete it in a browser; `None` when a silent refresh\nsucceeded or the provider is already connected.",
+          "nullable": true,
+          "type": "string"
+        },
         "builtin_id": {
           "nullable": true,
           "type": "string"
@@ -5848,7 +5853,7 @@ expression: signatures
           "type": "boolean"
         },
         "pending": {
-          "description": "True when the flow is still in progress (device-code polling in background).",
+          "description": "True when the flow is still in progress (e.g. device-code polling in\nbackground, or Codex waiting on the browser redirect to hit\n`/api/oauth/codex/callback`).",
           "type": "boolean"
         },
         "provider_id": {
