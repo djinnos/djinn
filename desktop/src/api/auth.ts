@@ -64,15 +64,17 @@ export function startGithubLogin(redirect?: string): void {
 }
 
 export interface AuthConfig {
+  /**
+   * `true` once the server has successfully resolved a GitHub App config
+   * from the `GITHUB_APP_*` env vars / mounted `djinn-github-app` Secret.
+   */
   configured: boolean;
+  /**
+   * Names of the env vars the server detected as missing — surfaced so the
+   * "App not configured" message can call out the specific gap to operators.
+   */
   missing: string[];
   setupDocUrl: string;
-  /**
-   * Path on the Djinn server (relative — no host) that kicks off the GitHub
-   * App manifest auto-provision flow. Always present; the UI only surfaces
-   * it as a button when `configured === false`.
-   */
-  createAppUrl: string | null;
 }
 
 /**
@@ -91,33 +93,31 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
     configured: boolean;
     missing: string[];
     setup_doc_url: string;
-    create_app_url?: string | null;
   };
   return {
     configured: body.configured,
     missing: body.missing,
     setupDocUrl: body.setup_doc_url,
-    createAppUrl: body.create_app_url ?? null,
   };
 }
 
 export interface SetupStatus {
   /**
    * True when either the GitHub App credentials haven't been provisioned on
-   * the server OR no `org_config` row is bound to this deployment. The UI
-   * treats these identically: route the operator through the manifest flow.
+   * the server (env / Secret missing) OR no `org_config` row is bound to
+   * this deployment. Both surface the same "App not configured" UI.
    */
   needsAppInstall: boolean;
   /**
    * The GitHub org this deployment is locked to, once known. `null` until
-   * the manifest callback writes `org_config`.
+   * the App-setup callback writes `org_config`.
    */
   orgLogin: string | null;
 }
 
 /**
  * Public, no-auth endpoint used to decide whether to gate the app on the
- * manifest-install screen vs. the sign-in screen. Mirrors the server's
+ * "App not configured" screen vs. the sign-in screen. Mirrors the server's
  * `GET /setup/status` response (snake_case → camelCase).
  */
 export async function fetchSetupStatus(): Promise<SetupStatus> {
@@ -136,27 +136,6 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
     needsAppInstall: body.needs_app_install,
     orgLogin: body.org_login ?? null,
   };
-}
-
-/**
- * Navigate the browser to the server's manifest auto-provision endpoint.
- * The server returns an HTML page that auto-submits a form to GitHub.
- *
- * When `organization` is provided, the manifest is POSTed to
- * `github.com/organizations/<org>/settings/apps/new` so the App is created
- * under that org (the caller must be an org owner). Omit it to create under
- * the signed-in user's personal account.
- */
-export function startManifestProvision(
-  createAppUrl: string,
-  organization?: string,
-): void {
-  const base = `${getBaseUrl()}${createAppUrl}`;
-  const org = organization?.trim();
-  const url = org
-    ? `${base}${base.includes("?") ? "&" : "?"}organization=${encodeURIComponent(org)}`
-    : base;
-  window.location.assign(url);
 }
 
 /**
