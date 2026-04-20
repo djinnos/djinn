@@ -30,7 +30,12 @@ function ModelsTab() {
     return <InlineError message={loadError} onRetry={() => void loadData()} />;
   }
 
-  const codexConnected = configuredProviders.some((p) => p.id === 'chatgpt_codex');
+  // Codex OAuth is folded into the `openai` provider via builtin merge
+  // (chatgpt_codex.merge_into = "openai"), and openai itself has no native
+  // OAuth — so `oauth` in openai's connection_methods means Codex is signed in.
+  const codexConnected = configuredProviders.some(
+    (p) => p.id === 'openai' && p.connection_methods.includes('oauth'),
+  );
 
   return (
     <div className="flex flex-col gap-6 flex-1 min-h-0">
@@ -48,7 +53,7 @@ function ModelsTab() {
           </p>
         </div>
 
-        <CodexSignInCard alreadyConnected={codexConnected} onConnected={() => void loadData()} />
+        {!codexConnected && <CodexSignInCard onConnected={() => void loadData()} />}
 
         <div className="rounded-lg border border-border bg-card px-4 py-3">
           <div className="flex flex-wrap items-center gap-3">
