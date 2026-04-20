@@ -1,4 +1,4 @@
-DESKTOP_DIR := $(CURDIR)/desktop
+UI_DIR := $(CURDIR)/ui
 SERVER_DIR := $(CURDIR)/server
 
 .PHONY: help up up-no-build down logs dev watch test test-all test-vault \
@@ -35,7 +35,7 @@ logs: ## Tail djinn-server logs
 	docker compose logs -f djinn-server
 
 dev: ## Start the Vite web client (assumes `make up` was run)
-	cd $(DESKTOP_DIR) && pnpm dev
+	cd $(UI_DIR) && pnpm dev
 
 watch: ## Rebuild + restart djinn-server on Rust source changes (cargo-watch)
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch: cargo install cargo-watch"; exit 1; }

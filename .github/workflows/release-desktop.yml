@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
-        working-directory: desktop
+        working-directory: ui
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: desktop/pnpm-lock.yaml
+          cache-dependency-path: ui/pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -62,13 +62,13 @@ jobs:
         with:
           name: desktop-${{ matrix.platform }}
           path: |
-            desktop/release/**/*.AppImage
-            desktop/release/**/*.deb
-            desktop/release/**/*.dmg
-            desktop/release/**/*.exe
-            desktop/release/**/*.msi
-            desktop/release/**/*.zip
-            desktop/release/**/*.yml
+            ui/release/**/*.AppImage
+            ui/release/**/*.deb
+            ui/release/**/*.dmg
+            ui/release/**/*.exe
+            ui/release/**/*.msi
+            ui/release/**/*.zip
+            ui/release/**/*.yml
           if-no-files-found: warn
 
   release:

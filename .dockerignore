@@ -2,8 +2,8 @@
 target/
 **/target/
 server/target/
-desktop/dist/
-desktop/node_modules/
+ui/dist/
+ui/node_modules/
 website/node_modules/
 website/.next/
 node_modules/

@@ -2,9 +2,9 @@
 
 React + TypeScript + Vite + shadcn/ui
 
-The Djinn desktop UI is a plain web application that talks to the Djinn
-server over HTTP and SSE. The Electron wrapper was removed; the server
-now runs in Docker and is reached at `http://127.0.0.1:8372` by default.
+The Djinn UI is a plain web application that talks to the Djinn server
+over HTTP and SSE. The Electron wrapper was removed; the server now
+runs in Docker and is reached at `http://127.0.0.1:8372` by default.
 
 ## Tech Stack
 

@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       server: ${{ steps.filter.outputs.server }}
-      desktop: ${{ steps.filter.outputs.desktop }}
+      ui: ${{ steps.filter.outputs.ui }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -39,8 +39,8 @@ jobs:
               - 'server/crates/**/*.rs'
               - 'server/src/**/*.rs'
               - '.github/workflows/quality-gate.yml'
-            desktop:
-              - 'desktop/**'
+            ui:
+              - 'ui/**'
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Cache Warming (main push only)                                 ║
@@ -255,17 +255,17 @@ jobs:
         run: cargo nextest run --workspace --all-targets --all-features --profile ci
 
   # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  Desktop                                                         ║
+  # ║  UI                                                              ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
-  desktop-frontend:
-    name: Desktop Frontend
+  ui-frontend:
+    name: UI Frontend
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.ui == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: desktop
+        working-directory: ui
     steps:
       - uses: actions/checkout@v4
 
@@ -277,7 +277,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: desktop/pnpm-lock.yaml
+          cache-dependency-path: ui/pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -298,7 +298,7 @@ jobs:
       - warm-cache-test
       - server-clippy
       - server-test
-      - desktop-frontend
+      - ui-frontend
     steps:
       - name: Check results
         run: |
@@ -307,7 +307,7 @@ jobs:
             "${{ needs.warm-cache-test.result }}"
             "${{ needs.server-clippy.result }}"
             "${{ needs.server-test.result }}"
-            "${{ needs.desktop-frontend.result }}"
+            "${{ needs.ui-frontend.result }}"
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then

@@ -219,10 +219,10 @@ curl http://localhost:3000/health
 ### 5b. Start the Vite UI dev server
 
 The server only serves `/health` + JSON APIs at `:3000`. The actual UI
-is a Vite SPA in `desktop/`:
+is a Vite SPA in `ui/`:
 
 ```bash
-cd desktop
+cd ui
 pnpm install      # first time only
 pnpm dev --host 0.0.0.0
 ```

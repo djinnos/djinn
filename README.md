@@ -80,7 +80,7 @@ Electron desktop build has been retired.
 docker compose up -d
 
 # 2. Run the web client
-cd desktop
+cd ui
 pnpm install
 pnpm dev   # opens http://127.0.0.1:1420
 ```

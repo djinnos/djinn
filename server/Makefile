@@ -3,7 +3,7 @@ TARGET_DEBUG := $(CURDIR)/target/debug/$(BINARY)
 TARGET_RELEASE := $(CURDIR)/target/release/$(BINARY)
 INSTALL_DIR := $(HOME)/.local/bin
 INSTALL_PATH := $(INSTALL_DIR)/$(BINARY)
-DESKTOP_DIR := $(CURDIR)/../desktop
+UI_DIR := $(CURDIR)/../ui
 DAEMON_FILE := $(HOME)/.djinn/daemon.json
 
 .PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt langfuse-up langfuse-down verify test-db-clean help
@@ -63,10 +63,10 @@ restart: build
 	fi
 	$(TARGET_DEBUG) --ensure-daemon
 
-run-all: ## Start desktop app (server runs as sidecar)
+run-all: ## Start UI (server runs as sidecar)
 	-@pkill -f "djinn-server" 2>/dev/null || true
 	@sleep 0.5
-	cd $(DESKTOP_DIR) && $(MAKE) run-all
+	cd $(UI_DIR) && $(MAKE) run-all
 
 stop: ## Stop the server daemon
 	@if [ -f "$(DAEMON_FILE)" ]; then \
@@ -83,19 +83,19 @@ stop: ## Stop the server daemon
 		echo "No daemon file found."; \
 	fi
 
-halt: stop ## Stop everything (server + desktop)
+halt: stop ## Stop everything (server + UI)
 	-@pkill -f "djinn-server" 2>/dev/null || true
-	-@pkill -f "djinnos-desktop" 2>/dev/null || true
+	-@pkill -f "djinnos-ui" 2>/dev/null || true
 	-@pkill -f "electron.*main" 2>/dev/null || true
-	-@pkill -f "vite.*desktop" 2>/dev/null || true
+	-@pkill -f "vite.*ui" 2>/dev/null || true
 	@echo "All processes halted."
 
 reset: ## Kill everything and restart fresh
 	@echo "Killing all djinn processes..."
 	-@pkill -f "djinn-server" 2>/dev/null || true
-	-@pkill -f "djinnos-desktop" 2>/dev/null || true
+	-@pkill -f "djinnos-ui" 2>/dev/null || true
 	-@pkill -f "electron.*main" 2>/dev/null || true
-	-@pkill -f "vite.*desktop" 2>/dev/null || true
+	-@pkill -f "vite.*ui" 2>/dev/null || true
 	@sleep 1
 	@echo "Restarting..."
 	$(MAKE) run-all

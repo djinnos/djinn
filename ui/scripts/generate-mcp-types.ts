@@ -33,7 +33,7 @@ type DaemonInfo = {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const desktopRoot = path.resolve(__dirname, "..");
+const uiRoot = path.resolve(__dirname, "..");
 
 function parseArgs(): Options {
   const args = process.argv.slice(2);
@@ -46,11 +46,11 @@ function parseArgs(): Options {
   const source = sourceArg === "live" ? "live" : "snapshot";
 
   const outFile = path.resolve(
-    desktopRoot,
+    uiRoot,
     get("--out") ?? "src/api/generated/mcp-tools.gen.ts"
   );
   const snapshotFile = path.resolve(
-    desktopRoot,
+    uiRoot,
     get("--snapshot") ?? "../server/tests/fixtures/mcp_tools_schema_snapshot.json"
   );
   const mcpUrl = get("--url") ?? process.env.DJINN_MCP_URL;
