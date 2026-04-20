@@ -10,6 +10,7 @@ import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
 import { MemoryPage } from "@/pages/MemoryPage";
 import { PulsePage } from "@/pages/PulsePage";
+import { RepositoriesPage } from "@/pages/RepositoriesPage";
 import { SyncHealthBanner } from "@/components/SyncHealthBanner";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { AuthGate } from "@/components/AuthGate";
@@ -54,6 +55,9 @@ function MainLayout() {
 
             {/* Task session (global) */}
             <Route path="/task/:taskId" element={<TaskSessionPage />} />
+
+            {/* Repositories */}
+            <Route path="/repositories" element={<RepositoriesPage />} />
 
             {/* Settings */}
             <Route path="/settings" element={<SettingsPage />} />

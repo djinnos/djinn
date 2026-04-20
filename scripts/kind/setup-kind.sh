@@ -76,10 +76,10 @@ cat <<EOF
 
 >>> kind cluster '${CLUSTER_NAME}' ready.
 
-Next steps:
-  make image               # build djinn images locally
-  make image-push-local    # retag + push to localhost:${REG_PORT}
-  make helm-install-local  # install djinn-crds + djinn into the cluster
+Normally invoked by the Tiltfile (bootstrap resource 'kind-cluster'); run
+directly only when you want the cluster without starting Tilt.
 
-Tear down with: make kind-down
+Next step: tilt up
+
+Tear down with: kind delete cluster --name ${CLUSTER_NAME}
 EOF

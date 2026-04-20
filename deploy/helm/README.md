@@ -16,9 +16,9 @@ Phase 2 installs Djinn on top of Kubernetes via two charts:
   default to RWX so the mirror cache can be shared across task-run Pods on
   multi-node clusters). For single-node dev clusters (kind, k3s on a
   laptop), `values.local.yaml` swaps PVCs for hostPath volumes.
-- For local dev: `kind` and `docker` (see `scripts/kind/setup-kind.sh`).
+- For local dev: `tilt`, `kind`, and `docker`.
 
-## Install order
+## Install order (production / manual)
 
 ```bash
 helm install djinn-crds deploy/helm/djinn-crds
@@ -28,17 +28,36 @@ helm install djinn       deploy/helm/djinn \
 
 ## Local kind workflow
 
+Use Tilt — the `Tiltfile` at the repo root bootstraps the kind cluster +
+localhost:5001 registry, builds both images, installs the Helm release with
+`values.local.yaml`, and port-forwards the API/UI (`:3000`), worker RPC
+(`:8443`), Dolt (`:3306`), and Qdrant (`:6333`/`:6334`) for you:
+
 ```bash
-make kind-up            # create kind cluster + local registry
-make image              # build djinn-server + djinn-agent-runtime images
-make image-push-local   # retag + push to localhost:5001
-make helm-install-local # install both charts with values.local.yaml
-make helm-uninstall     # tear down the release (cluster survives)
-make kind-down          # delete the cluster
+tilt up         # full stack up, watched, port-forwards live in the Tilt UI
+tilt down       # uninstall the Helm release (kind cluster survives)
+kind delete cluster --name djinn   # tear the cluster down entirely
 ```
 
-`values.local.yaml` swaps RWX PVCs for hostPath mounts, sets
-`imagePullPolicy: Never`, and tightens resource requests so the whole stack
+`djinn-server` rebuilds + rolls automatically on changes under `server/`.
+`djinn-agent-runtime` rebuilds when its Dockerfile or `server/` sources
+change and is pushed under the stable `:dev` tag the chart ConfigMap
+references.
+
+Before `tilt up`, create the GitHub App Secret the chart expects (it's
+referenced as `existingSecret` in `values.local.yaml`):
+
+```bash
+kubectl create namespace djinn
+kubectl -n djinn create secret generic djinn-github-app \
+  --from-literal=appId=... \
+  --from-literal=privateKey="$(cat path/to/private-key.pem)" \
+  --from-literal=clientId=... \
+  --from-literal=clientSecret=...
+```
+
+`values.local.yaml` swaps RWX PVCs for hostPath mounts, pins the local
+registry's image refs, and tightens resource requests so the whole stack
 fits on a laptop.
 
 ## VPS vs multi-node cluster differences
