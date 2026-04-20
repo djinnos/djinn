@@ -1071,7 +1071,10 @@ export namespace ExecutionStatusOutputSchema {
   model_id: string
   session_id: string
   task_id: string
-  worktree_path?: string
+  /**
+   * Workspace path resolved from the session's attached `task_run`.
+   */
+  workspace_path?: string
   [k: string]: any
   }
 
@@ -2026,36 +2029,6 @@ export namespace ModelHealthOutputSchema {
 
 }
 export type ModelHealthOutput = ModelHealthOutputSchema.ModelHealthOutput;
-export namespace ProjectAddInputSchema {
-  export interface ProjectAddInput {
-  /**
-   * Human-readable project name (unique identifier).
-   */
-  name: string
-  /**
-   * Absolute path to the project directory.
-   */
-  path: string
-  [k: string]: any
-  }
-
-}
-export type ProjectAddInput = ProjectAddInputSchema.ProjectAddInput;
-export namespace ProjectAddOutputSchema {
-  export interface ProjectAddOutput {
-  project: ProjectInfo
-  status: string
-  [k: string]: any
-  }
-  export interface ProjectInfo {
-  id: string
-  name: string
-  path: string
-  [k: string]: any
-  }
-
-}
-export type ProjectAddOutput = ProjectAddOutputSchema.ProjectAddOutput;
 export namespace ProjectAddFromGithubInputSchema {
   export interface ProjectAddFromGithubInput {
   /**
@@ -2481,49 +2454,6 @@ export namespace ProposeAdrShowOutputSchema {
 
 }
 export type ProposeAdrShowOutput = ProposeAdrShowOutputSchema.ProposeAdrShowOutput;
-export namespace ProviderAddCustomInputSchema {
-  export interface ProviderAddCustomInput {
-  /**
-   * Root URL for OpenAI-compatible API calls (e.g. https://api.my-llm.com/v1).
-   */
-  base_url: string
-  /**
-   * Environment variable name for the API key (e.g. MY_LLM_API_KEY).
-   */
-  env_var: string
-  /**
-   * Unique provider slug (e.g. 'my-llm'). Must not collide with models.dev IDs.
-   */
-  id: string
-  /**
-   * Human-readable display name (e.g. 'My LLM').
-   */
-  name: string
-  /**
-   * Optional seed models to pre-populate the model picker.
-   */
-  seed_models?: SeedModelInput[]
-  [k: string]: any
-  }
-  export interface SeedModelInput {
-  id: string
-  name: string
-  [k: string]: any
-  }
-
-}
-export type ProviderAddCustomInput = ProviderAddCustomInputSchema.ProviderAddCustomInput;
-export namespace ProviderAddCustomOutputSchema {
-  export interface ProviderAddCustomOutput {
-  error?: string
-  id: string
-  ok: boolean
-  success: boolean
-  [k: string]: any
-  }
-
-}
-export type ProviderAddCustomOutput = ProviderAddCustomOutputSchema.ProviderAddCustomOutput;
 export namespace ProviderCatalogInputSchema {
   export interface ProviderCatalogInput {
   [k: string]: any
@@ -2719,23 +2649,39 @@ export namespace ProviderOauthStartOutputSchema {
   builtin_id?: string
   configured_keys: string[]
   error?: string
+  /**
+   * Device-code: how long, in seconds, the user has to complete sign-in.
+   */
+  expires_in?: number
   goose_provider_id?: string
+  /**
+   * Device-code: recommended polling interval in seconds (informational —
+   * the server does the polling, not the client).
+   */
+  interval?: number
   oauth_supported: boolean
   ok: boolean
   /**
-   * True when the flow is still in progress (device-code polling in background).
+   * True when the flow is still in progress — the server has spawned a
+   * background task that polls for tokens. The UI should wait for a
+   * `credential.updated` SSE event to confirm completion.
    */
   pending: boolean
   provider_id: string
   success: boolean
   /**
-   * For device-code flows: the code the user must enter.
+   * Device-code: the short code the user must enter at `verification_uri`.
    */
   user_code?: string
   /**
-   * For device-code flows: the URL where the user enters the code.
+   * Device-code: the bare URL the user opens to enter the code manually.
    */
   verification_uri?: string
+  /**
+   * Device-code: convenience URL with `user_code` pre-filled as a query
+   * param; the UI can surface this as a "click to open" link.
+   */
+  verification_uri_complete?: string
   [k: string]: any
   }
 
@@ -2828,7 +2774,13 @@ export namespace SessionActiveOutputSchema {
   task_id?: string
   tokens_in: number
   tokens_out: number
-  worktree_path?: string
+  /**
+   * Authoritative workspace path for the session, sourced from the
+   * attached `task_run` (via `sessions.task_run_id`). `None` when the
+   * session is not attached to a task run or the run has no recorded
+   * workspace.
+   */
+  workspace_path?: string
   [k: string]: any
   }
 
@@ -2858,7 +2810,10 @@ export namespace SessionForTaskOutputSchema {
   session?: string
   session_id?: string
   task_id: string
-  worktree_path?: string
+  /**
+   * Workspace path resolved from the session's attached `task_run`.
+   */
+  workspace_path?: string
   [k: string]: any
   }
 
@@ -2897,7 +2852,13 @@ export namespace SessionListOutputSchema {
   task_id?: string
   tokens_in: number
   tokens_out: number
-  worktree_path?: string
+  /**
+   * Authoritative workspace path for the session, sourced from the
+   * attached `task_run` (via `sessions.task_run_id`). `None` when the
+   * session is not attached to a task run or the run has no recorded
+   * workspace.
+   */
+  workspace_path?: string
   [k: string]: any
   }
 
@@ -2965,7 +2926,13 @@ export namespace SessionShowOutputSchema {
   task_id?: string
   tokens_in?: number
   tokens_out?: number
-  worktree_path?: string
+  /**
+   * Authoritative workspace path for the session, sourced from the
+   * attached `task_run` (via `sessions.task_run_id`). `None` when the
+   * session is not attached to a task run or the run has no recorded
+   * workspace.
+   */
+  workspace_path?: string
   [k: string]: any
   }
 
@@ -3743,7 +3710,13 @@ export namespace TaskTimelineOutputSchema {
   task_id?: string
   tokens_in: number
   tokens_out: number
-  worktree_path?: string
+  /**
+   * Authoritative workspace path for the session, sourced from the
+   * attached `task_run` (via `sessions.task_run_id`). `None` when the
+   * session is not attached to a task run or the run has no recorded
+   * workspace.
+   */
+  workspace_path?: string
   [k: string]: any
   }
   export interface TimelineVerificationStep {
@@ -3878,7 +3851,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_add_custom" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_sync_disable" | "task_sync_enable" | "task_sync_export" | "task_sync_import" | "task_sync_status" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3933,7 +3906,6 @@ export interface McpToolMap {
   "memory_task_refs": { input: MemoryTaskRefsInput; output: MemoryTaskRefsOutput };
   "memory_write": { input: MemoryWriteInput; output: MemoryWriteOutput };
   "model_health": { input: ModelHealthInput; output: ModelHealthOutput };
-  "project_add": { input: ProjectAddInput; output: ProjectAddOutput };
   "project_add_from_github": { input: ProjectAddFromGithubInput; output: ProjectAddFromGithubOutput };
   "project_branches": { input: ProjectBranchesInput; output: ProjectBranchesOutput };
   "project_config_get": { input: ProjectConfigGetInput; output: ProjectConfigGetOutput };
@@ -3945,7 +3917,6 @@ export interface McpToolMap {
   "propose_adr_list": { input: ProposeAdrListInput; output: ProposeAdrListOutput };
   "propose_adr_reject": { input: ProposeAdrRejectInput; output: ProposeAdrRejectOutput };
   "propose_adr_show": { input: ProposeAdrShowInput; output: ProposeAdrShowOutput };
-  "provider_add_custom": { input: ProviderAddCustomInput; output: ProviderAddCustomOutput };
   "provider_catalog": { input: ProviderCatalogInput; output: ProviderCatalogOutput };
   "provider_connected": { input: ProviderConnectedInput; output: ProviderConnectedOutput };
   "provider_model_lookup": { input: ProviderModelLookupInput; output: ProviderModelLookupOutput };
