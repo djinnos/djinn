@@ -27,11 +27,11 @@ import { useProviderGateStore } from '@/stores/providerGateStore';
 
 /** Well-known providers shown as chips in the API key section. */
 const PROVIDER_CHIPS = [
-  { id: 'anthropic', label: 'Anthropic', color: 'bg-orange-500/15 text-orange-400' },
-  { id: 'google', label: 'Google AI', color: 'bg-blue-500/15 text-blue-400' },
-  { id: 'azure_openai', label: 'Azure', color: 'bg-sky-500/15 text-sky-400' },
-  { id: 'aws_bedrock', label: 'AWS Bedrock', color: 'bg-amber-500/15 text-amber-400' },
-  { id: 'gcp_vertex_ai', label: 'Vertex AI', color: 'bg-emerald-500/15 text-emerald-400' },
+  { id: 'anthropic', label: 'Anthropic' },
+  { id: 'google', label: 'Google AI' },
+  { id: 'azure_openai', label: 'Azure' },
+  { id: 'aws_bedrock', label: 'AWS Bedrock' },
+  { id: 'gcp_vertex_ai', label: 'Vertex AI' },
 ];
 
 function ChatGPTCard({ onDone }: { onDone: () => void }) {
@@ -184,7 +184,7 @@ function ApiKeyCard({ onDone }: { onDone: () => void }) {
             type="button"
             className={cn(
               'rounded-full px-3 py-1 text-xs font-medium transition-opacity hover:opacity-80',
-              chip.color,
+              'bg-muted/40 text-muted-foreground',
             )}
             onClick={() => handleProviderChange(chip.id)}
           >
