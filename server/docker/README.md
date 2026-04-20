@@ -1,165 +1,417 @@
 # `server/docker/`
 
-Container assets for Djinn. The interesting one here is
-`djinn-agent-runtime.Dockerfile` — the per-task-run sandbox image that
-`LocalDockerRuntime` (see `server/crates/djinn-runtime/`) spawns one
-container from per `TaskRunSpec`. See
-`/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md` for the
-full design (§4 runtime, §5 image).
+Container assets for Djinn:
 
-## Purpose
+- `djinn-server.Dockerfile` — long-lived controller image. Multi-stage:
+  `rust:1.82-slim-bookworm` builder → `debian:bookworm-slim` runtime with
+  `git`, `ca-certificates`, `libssl3`, `tini`. Runs as uid 10001. Exposes
+  `:3000` (HTTP API + UI) and `:8443` (worker RPC).
+- `djinn-agent-runtime.Dockerfile` — per-task-run sandbox image. Debian-slim
+  + rustup toolchain + Node 20 + LSPs (rust-analyzer, typescript-language-server,
+  pyright). Each task-run dispatched by `KubernetesRuntime` becomes a Job
+  whose Pod runs one container from this image.
+- `build-runtime-image.sh` — convenience script for building the runtime
+  image. The same build is also wired into `make image`.
+- `docker-compose.langfuse.yml` — optional sidecar for local observability
+  (separate from the main compose stack).
 
-The runtime image is the "agent sandbox": a Debian-slim base with
-`djinn-agent-worker`, rustup toolchain, node + tsserver/pyright, and
-rust-analyzer. The server never builds code inside this image — it
-pulls the prebuilt tag, then `docker run`s one container per task run,
-piping a bincode `TaskRunSpec` in via stdin and opening a Unix-socket
-RPC channel back to `SupervisorServices` on the host.
-
-## Multi-stage layout
-
-Three stages keep the published image small and reproducible:
-
-1. **build** — `rust:1.82-slim-bookworm` + mold/clang; `cargo build
-   --release -p djinn-agent-worker`; binary stripped.
-2. **lsp** — throwaway layer pinning Node 20 LTS, typescript-language-server,
-   pyright, and rust-analyzer. Cache-bustable without invalidating the
-   runtime apt layers.
-3. **runtime** — `debian:bookworm-slim` + rustup, python3, build-essential;
-   worker binary + LSPs copied in; non-root user `djinn` (uid/gid 10001).
-
-## Volume-mount contract
-
-`LocalDockerRuntime` bind-mounts these host paths into every container:
-
-| Host                                | Container         | Mode |
-|-------------------------------------|-------------------|------|
-| `<per-run workspace tempdir>`       | `/workspace`      | rw   |
-| `$DJINN_HOME/mirrors`               | `/mirror`         | ro   |
-| `$DJINN_HOME/cache/cargo`           | `/cache/cargo`    | rw   |
-| `$DJINN_HOME/cache/pnpm`            | `/cache/pnpm`     | rw   |
-| `$DJINN_HOME/cache/pip`             | `/cache/pip`      | rw   |
-| `$DJINN_HOME/ipc`                   | `/var/run/djinn`  | rw   |
-
-The worker runs as uid 10001, so the host paths above must be writable
-by that uid (or owned by it). The top-level `docker-compose.yml` in the
-repo root pre-creates these paths under `${DJINN_HOME:-~/.djinn}`.
-
-## Env defaults baked into the image
+## Quick reference — Make targets
 
 ```
-CARGO_HOME=/cache/cargo
-CARGO_TARGET_DIR=/workspace/target
-PNPM_STORE_DIR=/cache/pnpm
-PIP_CACHE_DIR=/cache/pip
-RUSTUP_HOME=/usr/local/rustup
-PATH=/usr/local/cargo/bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin
+make kind-up             # bring up local kind cluster + registry
+make image               # build both djinn-server + djinn-agent-runtime
+make image-push-local    # push to localhost:5001
+make helm-install-local  # helm install with values.local.yaml
+make helm-uninstall      # uninstall both releases
+make kind-down           # delete kind cluster
 ```
 
-`LocalDockerRuntime` sets `DJINN_IPC_SOCKET=/var/run/djinn/<task-run>.sock`
-and `RUST_LOG=...` per run.
+# End-to-end test runbook (kind, single laptop)
 
-## Build + tag
+Stand up the whole djinn stack in a local kind cluster and dispatch a real
+task-run that opens a GitHub PR. ~15 min for a clean machine; ~3 min on
+re-runs once images are cached.
+
+## 0. Prerequisites
+
+| Tool      | Version  | Install                                              |
+|-----------|----------|------------------------------------------------------|
+| `docker`  | ≥ 24     | distro package or Docker Desktop                     |
+| `kind`    | ≥ 0.22   | `go install sigs.k8s.io/kind@latest`                 |
+| `kubectl` | ≥ 1.29   | distro package or the GKE/EKS plugin                 |
+| `helm`    | ≥ 3.14   | `https://helm.sh/docs/intro/install/`                |
+| `openssl` | any      | distro package (only needed if you pin a vault key)  |
+| GitHub App | n/a    | only required for the "open a real PR" step — see §6 |
+
+Verify:
+
+```bash
+docker info >/dev/null && kind version && kubectl version --client && helm version --short
+```
+
+## 1. Bring up kind + the local registry
+
+```bash
+make kind-up
+```
+
+Idempotent. Creates a single-node kind cluster named `djinn` (override with
+`KIND_CLUSTER_NAME=…`) and a sidecar `kind-registry` container exposing
+`127.0.0.1:5001`. The cluster's containerd is configured to resolve
+`localhost:5001/...` through the registry container, which is how images
+flow from your laptop to the kind node without a public registry push.
+
+Verify:
+
+```bash
+kubectl --context kind-djinn get nodes
+docker ps --filter name=kind-registry
+```
+
+## 2. Build + push the images
+
+```bash
+make image            # 4–8 min cold; <30s with the Rust cache primed
+make image-push-local # ~30s
+```
+
+This builds and pushes:
+
+- `localhost:5001/djinn-server:dev`
+- `localhost:5001/djinn-agent-runtime:dev`
+
+Override the tag with `DJINN_IMAGE_TAG=…` if you want to keep multiple
+versions in the registry across iterations.
+
+## 3. Pre-create Secrets the chart consumes
+
+The vault key is **auto-generated by the chart on first install** (and
+preserved across upgrades via Helm `lookup`). You only need to pre-create
+it if you want to pin a specific key. Skip this subsection unless that's
+the case.
+
+GitHub App credentials are required only for the "real PR" step (§6). If
+you just want to verify the worker Pod runs and exits cleanly, you can skip
+the GitHub App secret too — the worker will fail at PR-open time, which is
+still a valid signal that everything else is wired.
+
+Create the namespace first:
+
+```bash
+kubectl create namespace djinn --dry-run=client -o yaml | kubectl apply -f -
+```
+
+### Optional — pin a vault key
+
+```bash
+openssl rand -out /tmp/djinn-vault.key 32
+kubectl create secret generic djinn-vault-key --namespace djinn \
+  --from-file=vault.key=/tmp/djinn-vault.key
+```
+
+If this Secret already exists when `helm install` runs, the chart respects
+it. If absent, the chart generates a fresh 32-byte key and writes it
+itself.
+
+### Optional — GitHub App credentials
+
+Required for the worker to actually open a PR. Get the values from
+`https://github.com/settings/apps/<your-app>` (or the org-level analog):
+
+```bash
+kubectl create secret generic djinn-github-app --namespace djinn \
+  --from-literal=app-id='<APP_ID>' \
+  --from-literal=client-id='<CLIENT_ID>' \
+  --from-literal=client-secret='<CLIENT_SECRET>' \
+  --from-file=private-key.pem=/path/to/your-app.private-key.pem
+```
+
+The chart's `values.yaml` defaults already point at the literal Secret
+names above (`djinn-vault-key`, `djinn-github-app`). To use different
+names, override `values.secrets.{githubApp,vaultKey}.existingSecret`.
+
+## 4. Install the chart
+
+```bash
+make helm-install-local
+```
+
+This runs:
+
+```bash
+helm upgrade --install djinn-crds deploy/helm/djinn-crds
+helm upgrade --install djinn       deploy/helm/djinn \
+  --values deploy/helm/djinn/values.local.yaml \
+  --namespace djinn --create-namespace
+```
+
+`values.local.yaml` swaps the production RWX PVCs for `hostPath` volumes
+(safe on single-node kind), uses the `localhost:5001/djinn-*:dev` image
+refs, and tightens resource defaults so the whole stack fits on a laptop.
+
+## 5. Verify the stack came up
+
+Watch Pods until everything is `Ready`:
+
+```bash
+kubectl get pods -n djinn -w
+```
+
+Expected, after ~30–90 s on first install:
 
 ```
-./server/docker/build-runtime-image.sh          # djinn-agent-runtime:dev
-./server/docker/build-runtime-image.sh 0.1.0    # djinn-agent-runtime:0.1.0
+NAME                             READY   STATUS    RESTARTS
+djinn-djinn-server-…             1/1     Running   0
+djinn-djinn-dolt-0               1/1     Running   0
+djinn-djinn-qdrant-0             1/1     Running   0
 ```
 
-The build context is the repo root (so the Dockerfile can `COPY server`
-without pulling in `target/` — `.dockerignore` at the root keeps build
-artifacts out).
+If a Pod stays `Pending`, `CrashLoopBackOff`, or `ErrImagePull`, see
+[Troubleshooting](#troubleshooting).
 
-## Why no compose service?
+Health check + log tail:
 
-The image is started on-demand by `LocalDockerRuntime`, one container per
-task run. Declaring it as a compose `service:` would spin up a dangling
-idle container on `docker compose up`, which is not the intended
-lifetime. Compose only owns the persistent server + data plane (dolt,
-qdrant, djinn-server).
+```bash
+kubectl logs -n djinn -l app.kubernetes.io/component=server --tail=50
+kubectl exec -n djinn deploy/djinn-djinn-server -- wget -qO- http://localhost:3000/health
+```
 
-## All-in-cluster smoke test (kind)
+`/health` should return `200 OK`.
 
-End-to-end walkthrough that stands up the whole djinn stack in a local
-kind cluster and dispatches one real task-run Job that opens a GitHub PR.
-Run from the repo root.
+## 6. First-run UI bootstrap
 
-1. **Bring up kind + the local registry.**
-   ```
-   make kind-up
-   ```
-   Idempotent; safe to re-run. Leaves `kind-registry` (localhost:5001)
-   running on the docker network.
+Forward the API/UI port to your browser:
 
-2. **Build the images.**
-   ```
-   make image
-   ```
-   Builds `djinn-server:dev` and `djinn-agent-runtime:dev` from
-   `server/docker/`.
+```bash
+kubectl port-forward -n djinn svc/djinn-server 3000:3000
+```
 
-3. **Push them into the kind-attached registry.**
-   ```
-   make image-push-local
-   ```
-   Retags as `localhost:5001/djinn-*:dev` and pushes; the kind node's
-   containerd resolves `localhost:5001` through the registry container.
+Open `http://localhost:3000`. First-run flow:
 
-4. **Populate the GitHub App + vault key Secrets.**
-   Create the namespace first so `kubectl create secret` has somewhere
-   to land (`helm-install-local` would create it too, but the secrets
-   need to exist before the Deployment rolls out or the server Pod will
-   crashloop waiting for mounts).
-   ```
-   kubectl create namespace djinn --dry-run=client -o yaml | kubectl apply -f -
+1. **Add an LLM provider credential** — Anthropic, OpenAI, or whichever
+   provider your roles target. The credential goes into the encrypted
+   `djinn-db` vault (using the auto-generated vault key from §3).
+2. **(If using GitHub App)** Visit `/api/github/install` to install the
+   App on the target org/repo — this records the App's installation id
+   so the worker can mint installation tokens.
+3. **Add a project.** Point it at a GitHub repo you own. The "add project"
+   flow clones the mirror onto the kind node's `/var/lib/djinn/mirrors/`
+   hostPath via the controller — first clone takes 10–60 s depending on
+   repo size.
 
-   # Vault key — 32 random bytes, base64-encoded is what djinn-db expects
-   # at $DJINN_VAULT_KEY_PATH.
-   openssl rand -out /tmp/djinn-vault.key 32
-   kubectl create secret generic djinn-vault-key \
-     --namespace djinn \
-     --from-file=vault.key=/tmp/djinn-vault.key
+You should now see your project in the project list and the default
+roles (planner / worker / reviewer / verifier / architect) seeded.
 
-   # GitHub App credentials. Replace <APP_ID>, paste the private-key PEM
-   # downloaded from github.com/settings/apps/<your-app>/permissions.
-   kubectl create secret generic djinn-github-app \
-     --namespace djinn \
-     --from-literal=app-id='<APP_ID>' \
-     --from-literal=client-id='<CLIENT_ID>' \
-     --from-literal=client-secret='<CLIENT_SECRET>' \
-     --from-file=private-key.pem=/path/to/app-private-key.pem
-   ```
-   The chart reads these via `values.secrets.*.existingSecret`; the
-   defaults in `values.local.yaml` already match the literal names above.
+## 7. Dispatch a task
 
-5. **Install the chart.**
-   ```
-   make helm-install-local
-   ```
-   Installs `djinn-crds` and `djinn` into the `djinn` namespace using
-   `values.local.yaml` (hostPath PVCs, local-registry images).
+Pick the simplest possible verification: a no-code-impact change to README.
 
-6. **Port-forward the UI.**
-   ```
-   kubectl port-forward -n djinn svc/djinn-server 3000:3000
-   ```
+In the UI, create a task with:
 
-7. **Use the UI.** Open <http://localhost:3000>. Add an Anthropic (or
-   your provider of choice) credential. Register the target GitHub
-   project — the UI's "add project" flow clones the mirror into the
-   `djinn-mirror` PVC under `/var/lib/djinn/mirrors/`.
+- Title: `Add a TODO line to README.md`
+- Description: `Append the line "TODO: kind smoke test" to README.md and open a PR.`
+- Acceptance criteria: `README.md contains the new line.`
 
-8. **Dispatch a task.** In the UI, create a simple task like `"add a
-   TODO line to README.md"`. Watch the Job lifecycle:
-   ```
-   kubectl get jobs -n djinn -w
-   kubectl logs -n djinn -l app.kubernetes.io/component=taskrun -f --tail=-1
-   ```
+Hit dispatch. The controller will:
 
-9. **Observe the PR.** The worker pushes its branch to the upstream
-   repo and uses the GitHub App credentials to open a pull request on
-   the target repo — check the repo's Pull Requests tab.
+1. Allocate a task-run id.
+2. Write a `Secret` named `djinn-taskrun-<uuid>` carrying the bincode
+   `TaskRunSpec`.
+3. Create a `Job` named `djinn-taskrun-<uuid>` that mounts the spec
+   Secret, the projected SA token, the mirror PVC (read-only), the cache
+   PVC, and an emptyDir workspace.
+4. The Pod boots, dials `djinn-server:8443` over TCP, sends an `AuthHello`
+   with its projected ServiceAccount token, gets accepted by the
+   `TokenReview` validator, then runs the role sequence.
+5. On completion, the worker emits a `WorkerEvent::TerminalReport` over
+   the same TCP channel; the controller drains the report, deletes the
+   Secret + Job (`Foreground` propagation cascades the Pod), and closes
+   the run.
 
-Teardown: `make helm-uninstall && make kind-down` (the local registry
-container keeps its cached layers between cluster lifetimes, so the next
-`make kind-up` is fast).
+## 8. Watch it work
+
+Three concurrent watches give you everything:
+
+```bash
+# Job lifecycle
+kubectl get jobs -n djinn -w
+
+# Pod lifecycle (more verbose; shows ContainerCreating → Running → Completed)
+kubectl get pods -n djinn -l djinn.app/component=task-run-worker -w
+
+# Streaming worker logs (rust-analyzer / cargo / role conversation transcripts)
+kubectl logs -n djinn -l djinn.app/component=task-run-worker -f --tail=-1
+```
+
+Server-side controller logs (where dispatch decisions land):
+
+```bash
+kubectl logs -n djinn deploy/djinn-djinn-server -f --tail=100
+```
+
+Filter for one specific task-run id:
+
+```bash
+TASK_RUN_ID=<uuid-from-the-Job-name>
+kubectl logs -n djinn -l djinn.app/task-run-id=$TASK_RUN_ID -f --tail=-1
+```
+
+Expected timeline (rough):
+
+| Stage    | Wall-clock (cold cache) |
+|----------|-------------------------|
+| Pod scheduled + `ContainerCreating` | 5–15 s |
+| Worker boots, AuthHello accepted    | 1–3 s |
+| Planner role completes              | 5–30 s |
+| Worker role (code edit + commit)    | 30 s–2 min |
+| Reviewer + verifier                 | 10–60 s |
+| Push + open PR                      | 5–15 s |
+| Job → `Completed`, GC               | <30 s |
+
+## 9. Verify the PR
+
+Check the target repo's Pull Requests tab. The PR will be opened by the
+GitHub App identity, against a branch named `djinn/<task-id>` (or similar),
+with the title and description sourced from the planner's reasoning.
+
+## 10. Iterate
+
+Rebuild + redeploy on Rust source change:
+
+```bash
+make image-push-local             # rebuild + push (Rust cache stays warm)
+kubectl rollout restart -n djinn deploy/djinn-djinn-server
+```
+
+Restart only the agent-runtime image (no controller bounce — task-runs
+pick up the new image at next dispatch automatically since the chart
+references `:dev` and `pullPolicy: IfNotPresent` re-pulls when the digest
+changes; if a Pod has the old layer cached, delete + recreate the Job).
+
+Reset just the cluster state (PVCs included) without rebuilding images:
+
+```bash
+make helm-uninstall
+kubectl delete pvc --all -n djinn   # !! erases all djinn data
+make helm-install-local
+```
+
+## 11. Teardown
+
+```bash
+make helm-uninstall           # remove releases (PVC data persists)
+make kind-down                # delete the kind cluster
+docker stop kind-registry     # optional: stop the local registry
+```
+
+The registry container's image cache survives between clusters, so the
+next `make kind-up` skips most of the image-pull cost.
+
+# Troubleshooting
+
+## Pod stuck in `Pending`
+
+Most often: PVC can't bind because the kind node ran out of disk, or a
+hostPath isn't writable. Check:
+
+```bash
+kubectl describe pod -n djinn <pod>
+df -h    # on the host — the kind node shares the host filesystem
+```
+
+`values.local.yaml` defaults the mirror hostPath to `/var/lib/djinn/mirrors`
+and the cache hostPath to `/var/lib/djinn/cache` — both must exist and be
+writable by uid 10001 (the djinn-server container's user).
+
+```bash
+sudo mkdir -p /var/lib/djinn/{mirrors,cache}
+sudo chown -R 10001:10001 /var/lib/djinn
+```
+
+## `ErrImagePull` / `ImagePullBackOff`
+
+The kind node's containerd can't reach the local registry. Confirm the
+registry is wired to the kind network:
+
+```bash
+docker inspect -f '{{json .NetworkSettings.Networks.kind}}' kind-registry
+```
+
+If `null`, re-run `make kind-up` (idempotent — it'll attach the network
+without recreating the cluster).
+
+## djinn-server CrashLoopBackOff
+
+```bash
+kubectl logs -n djinn deploy/djinn-djinn-server --previous --tail=100
+```
+
+Most common causes:
+- **Vault key missing or wrong size** — the chart auto-generates 32 bytes;
+  if you pre-applied a Secret with a wrong-sized key, delete it and let
+  the chart regenerate (or supply a correctly-sized one).
+- **Dolt or Qdrant not Ready** — the server's startup waits ~30 s for both.
+  If they stay Pending past that, fix the underlying StatefulSet first.
+- **`DJINN_PUBLIC_URL` mismatch** — check `kubectl exec -n djinn
+  deploy/djinn-djinn-server -- env | grep DJINN_`. The chart wires
+  `DJINN_PUBLIC_URL` to the in-cluster Service DNS by default; for
+  port-forward access, override via `--set env.publicUrl=http://localhost:3000`
+  on the helm install.
+
+## Worker Pod auth rejected
+
+```
+[ERROR] AuthHello rejected: invalid bearer token
+```
+
+The `TokenReview` API call failed to validate the projected SA token. Two
+common causes:
+
+1. **`ClusterRoleBinding` for `tokenreviews` missing** — the chart renders
+   `clusterrolebinding-tokenreview.yaml`; confirm it landed
+   (`kubectl get clusterrolebinding | grep djinn`).
+2. **Audience mismatch** — the chart projects the token with audience
+   `djinn`; the server validates against the same audience. If you
+   tweaked the audience on either side, they must match.
+
+## Worker Pod runs but PR never opens
+
+```bash
+kubectl logs -n djinn -l djinn.app/component=task-run-worker --tail=-1 | grep -iE 'github|push|pr'
+```
+
+Usually a GitHub App credential issue: missing installation, expired
+private key, or the App lacks `contents: write` + `pull_requests: write`
+permissions on the target repo.
+
+## "expected to read 4 bytes, got 0 bytes at EOF" in djinn-server logs
+
+This is the known Dolt cascade-delete bug (see
+`~/.claude/projects/-home-fernando-git-djinnos-djinn/memory/project_server_lib_test_flakes.md`).
+It only fires on multi-cascade `DELETE FROM projects` — i.e. when you
+remove a project that has tasks/notes/sessions/etc. Either avoid deleting
+populated projects from the kind smoke test, or delete dependents first.
+Not a regression from the K8s migration.
+
+## Reset the test Dolt without nuking the cluster
+
+If `dolt-0` gets into a bad state:
+
+```bash
+kubectl delete pvc -n djinn data-djinn-djinn-dolt-0
+kubectl delete pod -n djinn djinn-djinn-dolt-0
+```
+
+The StatefulSet recreates the Pod with a fresh PVC; `djinn-server` will
+rerun migrations on next start.
+
+# Architecture pointers
+
+If you need to understand *why* the runbook looks like this:
+
+- Plan: `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`
+- The K8s runtime crate: `server/crates/djinn-k8s/`
+- The TCP transport + AuthHello handshake: `server/crates/djinn-supervisor/src/services/{server,wire}.rs`
+- The agent-runtime image / worker entrypoint: `server/crates/djinn-agent-worker/src/main.rs`
+- The dispatch cutover that selects `KubernetesRuntime` vs `TestRuntime`:
+  `server/crates/djinn-agent/src/runtime_bridge.rs` + `actors/slot/supervisor_runner.rs`
