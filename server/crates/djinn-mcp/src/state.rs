@@ -8,6 +8,7 @@ use djinn_db::{
     repositories::note::{NoteEmbeddingProvider, NoteVectorStore},
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_provider::oauth::codex::CodexPendingStore;
 
 use crate::bridge::{
     CoordinatorOps, GitOps, LspOps, RepoGraphOps, RuntimeOps, SemanticQueryEmbedding, SlotPoolOps,
@@ -36,6 +37,10 @@ pub struct McpState {
     runtime: Arc<dyn RuntimeOps>,
     git: Arc<dyn GitOps>,
     repo_graph: Arc<dyn RepoGraphOps>,
+    /// Shared Codex OAuth pending-auth store. `provider_oauth_start` inserts
+    /// a PKCE entry keyed by `state`; the HTTP callback route on the main
+    /// router consumes it when the user's browser redirects back.
+    codex_oauth_pending: Arc<CodexPendingStore>,
 }
 
 impl McpState {
@@ -55,6 +60,7 @@ impl McpState {
         runtime: Arc<dyn RuntimeOps>,
         git: Arc<dyn GitOps>,
         repo_graph: Arc<dyn RepoGraphOps>,
+        codex_oauth_pending: Arc<CodexPendingStore>,
     ) -> Self {
         Self {
             db,
@@ -71,6 +77,7 @@ impl McpState {
             runtime,
             git,
             repo_graph,
+            codex_oauth_pending,
         }
     }
 
@@ -127,6 +134,10 @@ impl McpState {
 
     pub fn repo_graph(&self) -> &Arc<dyn RepoGraphOps> {
         &self.repo_graph
+    }
+
+    pub fn codex_oauth_pending(&self) -> Arc<CodexPendingStore> {
+        self.codex_oauth_pending.clone()
     }
 
     pub async fn apply_settings(&self, settings: &DjinnSettings) -> Result<(), String> {
@@ -408,6 +419,7 @@ pub(crate) mod stubs {
             Arc::new(StubRuntimeOps),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),
+            Arc::new(CodexPendingStore::new()),
         )
     }
 }

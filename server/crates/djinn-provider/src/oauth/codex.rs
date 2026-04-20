@@ -1,19 +1,30 @@
 //! Codex OAuth — Authorization Code + PKCE flow.
 //!
-//! Handles the full PKCE browser-redirect
-//! flow, token caching, and silent refresh for the ChatGPT Codex provider.
+//! The flow is split into two halves that share a [`CodexPendingStore`]:
 //!
-//! Tokens are stored encrypted in the credentials DB table. Filesystem cache
-//! (`~/.djinn/oauth/codex.json`) is supported as a migration fallback only.
+//!   * [`start_codex_oauth`] generates PKCE + state, stashes the PKCE verifier
+//!     in the pending store keyed by state, and returns the `authorize_url`
+//!     the browser should be sent to.
+//!   * [`finish_codex_oauth`] — invoked from the main axum router when the
+//!     browser hits `/api/oauth/codex/callback` — looks up the pending entry
+//!     by state, exchanges the authorization code for tokens, and persists
+//!     them in the encrypted credentials table.
+//!
+//! There is no longer a TCP listener on `:1455` — the redirect URL points
+//! directly at `djinn-server` on its main port (`DJINN_PUBLIC_URL`), so the
+//! same port forward that serves the SPA/API also terminates the OAuth
+//! callback. This lets a kind/minikube deployment complete Codex sign-up
+//! without exposing a second port.
 
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex as TokioMutex, oneshot};
+use std::time::{Duration, Instant};
 
 use crate::repos::CredentialRepository;
 
@@ -28,11 +39,10 @@ const ISSUER: &str = "https://auth.openai.com";
 /// Codex API endpoint (responses sub-path appended at call site).
 pub const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 
-/// Default OAuth callback port (canonical per OpenAI docs).
-const OAUTH_PORT: u16 = 1455;
-
-/// Browser redirect timeout.
-const OAUTH_TIMEOUT_SECS: u64 = 300;
+/// How long a started-but-not-finished OAuth attempt lives in the pending
+/// store before being swept. The canonical OpenAI flow gives the user five
+/// minutes to complete the browser redirect; we match that.
+const OAUTH_PENDING_TTL_SECS: u64 = 300;
 
 /// OAuth scopes requested.
 const OAUTH_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
@@ -156,6 +166,7 @@ pub async fn refresh_cached_token(
 
 // ─── PKCE helpers ─────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct PkceChallenge {
     verifier: String,
     challenge: String,
@@ -321,233 +332,165 @@ fn pick_account_id(tokens: &TokenResponse) -> Option<String> {
     extract_account_id_unverified(&tokens.access_token)
 }
 
-// ─── Local callback server ────────────────────────────────────────────────────
+// ─── Pending store ────────────────────────────────────────────────────────────
 
-fn oauth_callback_router(
-    expected_state: String,
-    tx: Arc<TokioMutex<Option<oneshot::Sender<Result<String>>>>>,
-) -> axum::Router {
-    use axum::{Router, extract::Query, response::Html, routing::get};
-    use std::collections::HashMap;
-
-    Router::new().route(
-        "/auth/callback",
-        get(move |Query(params): Query<HashMap<String, String>>| {
-            let tx = tx.clone();
-            let expected = expected_state.clone();
-            async move {
-                // Check for OAuth error
-                if let Some(error) = params.get("error") {
-                    let msg = params
-                        .get("error_description")
-                        .cloned()
-                        .unwrap_or_else(|| error.clone());
-                    if let Some(sender) = tx.lock().await.take() {
-                        let _ = sender.send(Err(anyhow!("{}", msg)));
-                    }
-                    return Html(html_error(&msg));
-                }
-
-                let code = match params.get("code").cloned() {
-                    Some(c) => c,
-                    None => {
-                        let msg = "Missing authorization code";
-                        if let Some(sender) = tx.lock().await.take() {
-                            let _ = sender.send(Err(anyhow!("{}", msg)));
-                        }
-                        return Html(html_error(msg));
-                    }
-                };
-
-                if params.get("state").map(String::as_str) != Some(&expected) {
-                    let msg = "Invalid state — potential CSRF attack";
-                    if let Some(sender) = tx.lock().await.take() {
-                        let _ = sender.send(Err(anyhow!("{}", msg)));
-                    }
-                    return Html(html_error(msg));
-                }
-
-                if let Some(sender) = tx.lock().await.take() {
-                    let _ = sender.send(Ok(code));
-                }
-                Html(html_success())
-            }
-        }),
-    )
+/// Per-attempt state that `start_codex_oauth` stashes until the browser
+/// redirect comes back and `finish_codex_oauth` claims it by `state`.
+struct PendingAuth {
+    pkce: PkceChallenge,
+    redirect_uri: String,
+    repo: CredentialRepository,
+    created_at: Instant,
 }
 
-/// Process-wide slot holding an abort handle for the currently-running OAuth
-/// callback server.
+/// In-memory, process-wide pending-auth table keyed by the OAuth `state`
+/// parameter.
 ///
-/// Only one legitimate listener on OAUTH_PORT at a time. If the user clicks
-/// "Connect" twice, the second attempt aborts the first via this slot rather
-/// than failing with `AddrInUse`.
-static ACTIVE_OAUTH_CALLBACK: tokio::sync::Mutex<Option<tokio::task::AbortHandle>> =
-    tokio::sync::Mutex::const_new(None);
+/// Entries expire after [`OAUTH_PENDING_TTL_SECS`]. Expiry is checked
+/// lazily on lookup (and opportunistically on insert) — no background
+/// sweep task required.
+pub struct CodexPendingStore {
+    inner: tokio::sync::Mutex<HashMap<String, PendingAuth>>,
+}
 
-async fn spawn_callback_server(app: axum::Router) -> Result<(tokio::task::JoinHandle<()>, u16)> {
-    use std::net::SocketAddr;
-
-    // Abort any previous callback server — retry must win over stale listener.
-    if let Some(prev) = ACTIVE_OAUTH_CALLBACK.lock().await.take() {
-        prev.abort();
-        tracing::info!("aborted stale OAuth callback server before starting a new one");
+impl CodexPendingStore {
+    pub fn new() -> Self {
+        Self {
+            inner: tokio::sync::Mutex::new(HashMap::new()),
+        }
     }
 
-    // Bind on 0.0.0.0 so the listener is reachable when djinn-server runs in a
-    // container with port 1455 mapped back to the host's 127.0.0.1:1455
-    // (the browser's redirect target).
-    let addr = SocketAddr::from(([0, 0, 0, 0], OAUTH_PORT));
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            // Abort happens asynchronously; the kernel can hold the socket in
-            // TIME_WAIT briefly. Retry a few times with backoff before giving up.
-            let mut last = e;
-            let mut bound = None;
-            for delay_ms in [50u64, 150, 400, 800, 1500] {
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                match tokio::net::TcpListener::bind(addr).await {
-                    Ok(l) => {
-                        bound = Some(l);
-                        break;
-                    }
-                    Err(err) => last = err,
-                }
-            }
-            match bound {
-                Some(l) => l,
-                None => {
-                    return Err(anyhow!(
-                        "OAuth callback port {} is still busy after retries ({}). Kill the process using it and retry.",
-                        OAUTH_PORT,
-                        last
-                    ));
-                }
-            }
+    async fn insert(&self, state: String, entry: PendingAuth) {
+        let mut guard = self.inner.lock().await;
+        // Opportunistic sweep so the map doesn't grow unbounded when flows
+        // start but never complete (network failure, user closes the tab).
+        let ttl = Duration::from_secs(OAUTH_PENDING_TTL_SECS);
+        let now = Instant::now();
+        guard.retain(|_, v| now.duration_since(v.created_at) < ttl);
+        guard.insert(state, entry);
+    }
+
+    async fn take(&self, state: &str) -> Option<PendingAuth> {
+        let mut guard = self.inner.lock().await;
+        let entry = guard.remove(state)?;
+        if entry.created_at.elapsed() >= Duration::from_secs(OAUTH_PENDING_TTL_SECS) {
+            tracing::warn!(state, "Codex OAuth: discarded expired pending entry");
+            return None;
         }
-        Err(e) => {
-            return Err(anyhow!(
-                "Failed to bind OAuth callback port {}: {}",
-                OAUTH_PORT,
-                e
-            ));
-        }
-    };
-    let port = listener.local_addr()?.port();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+        Some(entry)
+    }
 
-    // Register an abort handle so a subsequent spawn can cancel this server.
-    *ACTIVE_OAUTH_CALLBACK.lock().await = Some(handle.abort_handle());
-
-    Ok((handle, port))
+    #[cfg(test)]
+    pub async fn len(&self) -> usize {
+        self.inner.lock().await.len()
+    }
 }
 
-fn html_success() -> String {
-    r#"<!doctype html><html><head><title>Djinn — Authorization Successful</title></head>
-<body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#131010;color:#f1ecec">
-<div style="text-align:center">
-  <h1 style="color:#f1ecec">Authorization Successful</h1>
-  <p style="color:#b7b1b1">You can close this window and return to Djinn.</p>
-</div>
-<script>setTimeout(()=>window.close(),2000)</script>
-</body></html>"#.to_string()
+impl Default for CodexPendingStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-fn html_error(error: &str) -> String {
-    format!(
-        r#"<!doctype html><html><head><title>Djinn — Authorization Failed</title></head>
-<body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#131010;color:#f1ecec">
-<div style="text-align:center">
-  <h1 style="color:#fc533a">Authorization Failed</h1>
-  <p style="color:#ff917b;font-family:monospace">{}</p>
-</div>
-</body></html>"#,
-        error
-    )
+// ─── Split flow: start + finish ───────────────────────────────────────────────
+
+/// Data returned from [`start_codex_oauth`] — the URL to redirect the
+/// browser to and the CSRF `state` used as the lookup key.
+#[derive(Debug, Clone, Serialize)]
+pub struct CodexOAuthStart {
+    pub authorize_url: String,
+    pub state: String,
 }
 
-// ─── Full PKCE flow ──────────────────────────────────────────────────────────
-
-/// Perform the full Codex PKCE OAuth flow.
+/// Begin a Codex OAuth flow.
 ///
-/// 1. Checks DB cache; returns immediately if unexpired.
-/// 2. Attempts a silent token refresh if the cached token is expired.
-/// 3. Falls back to a full browser redirect if refresh fails or no cache exists.
-///
-/// Tokens are persisted to the encrypted credential DB on success. On refresh
-/// failure the existing tokens are **not** cleared — the refresh token is
-/// preserved so a future attempt can retry.
-pub async fn run_codex_flow(repo: &CredentialRepository, events: &EventBus) -> Result<CodexTokens> {
-    // 1. Check cache
-    if let Some(cached) = CodexTokens::load_from_db(repo).await {
+/// Short-circuits and returns `Ok(None)` when valid cached tokens (or a
+/// token that can be refreshed silently) are already available — the
+/// caller should treat that as "already connected". Otherwise stashes a
+/// pending entry, emits `oauth.open_browser` so the UI pops the
+/// authorisation URL, and returns the URL + state so the MCP tool
+/// response can surface them too.
+pub async fn start_codex_oauth(
+    pending: Arc<CodexPendingStore>,
+    repo: CredentialRepository,
+    events: &EventBus,
+    public_url: &str,
+) -> Result<Option<CodexOAuthStart>> {
+    // 1. If we already have usable tokens, don't bother starting a new flow.
+    if let Some(cached) = CodexTokens::load_from_db(&repo).await {
         if !cached.is_expired() {
-            tracing::debug!("Codex: using cached access token");
-            return Ok(cached);
+            tracing::debug!("Codex: start_codex_oauth short-circuit — cached token still valid");
+            return Ok(None);
         }
-        tracing::debug!("Codex: cached token expired, attempting refresh");
+        tracing::debug!("Codex: cached token expired, attempting silent refresh");
         match refresh_token(ISSUER, &cached.refresh_token).await {
             Ok(tr) => {
                 let account_id = pick_account_id(&tr).or(cached.account_id.clone());
                 let tokens = token_response_to_tokens(tr, account_id);
-                let _ = tokens.save_to_db(repo).await;
-                tracing::info!("Codex: token refreshed successfully");
-                return Ok(tokens);
+                let _ = tokens.save_to_db(&repo).await;
+                tracing::info!("Codex: token refreshed silently, skipping browser flow");
+                return Ok(None);
             }
             Err(e) => {
-                // Do NOT clear tokens — keep the refresh token for future retries.
-                tracing::warn!("Codex: token refresh failed, starting full flow: {}", e);
+                // Keep the refresh token around — a future attempt can retry.
+                tracing::warn!("Codex: silent refresh failed, starting browser flow: {}", e);
             }
         }
     }
 
-    // 2. Full PKCE browser flow
+    // 2. Full browser PKCE flow — stash state, build URL, emit event.
     let pkce = generate_pkce();
     let csrf_state = generate_state();
-    let redirect_uri = format!("http://localhost:{}/auth/callback", OAUTH_PORT);
-    let auth_url = build_authorize_url(&redirect_uri, &pkce, &csrf_state)?;
+    let redirect_uri = format!(
+        "{}/api/oauth/codex/callback",
+        public_url.trim_end_matches('/')
+    );
+    let authorize_url = build_authorize_url(&redirect_uri, &pkce, &csrf_state)?;
 
-    let (tx, rx) = oneshot::channel::<Result<String>>();
-    let tx = Arc::new(TokioMutex::new(Some(tx)));
-    let app = oauth_callback_router(csrf_state, tx);
-    let (server_handle, _port) = spawn_callback_server(app).await?;
+    pending
+        .insert(
+            csrf_state.clone(),
+            PendingAuth {
+                pkce,
+                redirect_uri,
+                repo,
+                created_at: Instant::now(),
+            },
+        )
+        .await;
 
-    tracing::info!("Codex OAuth: emitting open_browser event for desktop");
-    // The desktop (Electron) is responsible for opening the browser via
-    // shell.openExternal. The server — which may be running in a container —
-    // never shells out to xdg-open/open.
+    tracing::info!("Codex OAuth: emitting open_browser event");
     events.send(DjinnEventEnvelope::oauth_open_browser(
         "chatgpt_codex",
-        &auth_url,
+        &authorize_url,
     ));
 
-    // 3. Wait for callback (5-minute timeout)
-    let code =
-        match tokio::time::timeout(std::time::Duration::from_secs(OAUTH_TIMEOUT_SECS), rx).await {
-            Ok(Ok(result)) => {
-                server_handle.abort();
-                result?
-            }
-            Ok(Err(_)) => {
-                server_handle.abort();
-                return Err(anyhow!("OAuth callback channel closed unexpectedly"));
-            }
-            Err(_) => {
-                server_handle.abort();
-                return Err(anyhow!(
-                    "OAuth flow timed out after {} seconds",
-                    OAUTH_TIMEOUT_SECS
-                ));
-            }
-        };
+    Ok(Some(CodexOAuthStart {
+        authorize_url,
+        state: csrf_state,
+    }))
+}
 
-    // 4. Exchange code for tokens
-    let tr = exchange_code(ISSUER, &code, &redirect_uri, &pkce).await?;
+/// Complete a Codex OAuth flow.
+///
+/// Looks up the pending entry by `state`, exchanges `code` for tokens,
+/// persists the tokens in the encrypted credentials table, and returns
+/// them. The `credential.updated` SSE event is emitted as a side-effect
+/// of the repository save — no extra event work here.
+pub async fn finish_codex_oauth(
+    pending: Arc<CodexPendingStore>,
+    code: &str,
+    state: &str,
+) -> Result<CodexTokens> {
+    let Some(entry) = pending.take(state).await else {
+        return Err(anyhow!(
+            "Unknown or expired OAuth state — start the Codex sign-in flow again"
+        ));
+    };
+    let tr = exchange_code(ISSUER, code, &entry.redirect_uri, &entry.pkce).await?;
     let account_id = pick_account_id(&tr);
     let tokens = token_response_to_tokens(tr, account_id);
-    tokens.save_to_db(repo).await?;
+    tokens.save_to_db(&entry.repo).await?;
     tracing::info!("Codex OAuth: authentication successful");
     Ok(tokens)
 }
@@ -609,5 +552,74 @@ mod tests {
             account_id: None,
         };
         assert!(!tokens_valid.is_expired());
+    }
+
+    #[test]
+    fn build_authorize_url_includes_redirect_uri_and_state() {
+        let pkce = generate_pkce();
+        let url = build_authorize_url("http://localhost:3000/api/oauth/codex/callback", &pkce, "st8")
+            .expect("build_authorize_url");
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Foauth%2Fcodex%2Fcallback"));
+        assert!(url.contains("state=st8"));
+        assert!(url.contains("code_challenge="));
+        assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
+    }
+
+    /// Finish rejects an unknown state without calling OpenAI. This is the
+    /// CSRF path: a bogus state must be an error, not an accidental success.
+    #[tokio::test]
+    async fn finish_codex_oauth_rejects_unknown_state() {
+        let store = Arc::new(CodexPendingStore::new());
+        let err = finish_codex_oauth(store, "code", "no-such-state")
+            .await
+            .expect_err("must reject unknown state");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unknown or expired"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// Expired entries disappear on lookup. We simulate the TTL by
+    /// hand-mutating `created_at` because real time-travel tests are
+    /// brittle; the behaviour we care about is the lazy sweep.
+    #[tokio::test]
+    async fn pending_store_evicts_expired_entries_on_take() {
+        let store = CodexPendingStore::new();
+        let entry = PendingAuth {
+            pkce: generate_pkce(),
+            redirect_uri: "http://x/api/oauth/codex/callback".into(),
+            repo: dummy_credential_repo(),
+            // Created 10 minutes ago — well past the 5-minute TTL.
+            created_at: Instant::now() - Duration::from_secs(OAUTH_PENDING_TTL_SECS + 60),
+        };
+        store.inner.lock().await.insert("stale".into(), entry);
+        assert!(store.take("stale").await.is_none());
+    }
+
+    /// Happy-path insert/take round trip — entry survives lookup once,
+    /// and is consumed (so a replay of the same `state` fails).
+    #[tokio::test]
+    async fn pending_store_insert_take_is_single_use() {
+        let store = CodexPendingStore::new();
+        let entry = PendingAuth {
+            pkce: generate_pkce(),
+            redirect_uri: "http://x/api/oauth/codex/callback".into(),
+            repo: dummy_credential_repo(),
+            created_at: Instant::now(),
+        };
+        store.insert("live".into(), entry).await;
+        assert_eq!(store.len().await, 1);
+        assert!(store.take("live").await.is_some());
+        assert!(store.take("live").await.is_none());
+    }
+
+    /// Minimal helper — the tests that need a `CredentialRepository` only
+    /// construct `PendingAuth` to exercise store mechanics; they never hit
+    /// the DB. Build one against a dummy in-memory database so `save_to_db`
+    /// would explode loudly if it were ever called here.
+    fn dummy_credential_repo() -> CredentialRepository {
+        let db = djinn_db::Database::open_in_memory().expect("in-memory db");
+        CredentialRepository::new(db, EventBus::noop())
     }
 }

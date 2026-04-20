@@ -69,6 +69,22 @@ fn is_provider_usable(provider: &Provider, builtin_ids: &HashSet<String>) -> boo
         && !builtin::is_auth_only_provider(&provider.id)
 }
 
+/// Resolve the public base URL for the server — the value we hand to
+/// OpenAI as the Codex OAuth `redirect_uri`. Mirrors the helper in
+/// `server::auth`: prefers `DJINN_PUBLIC_URL`, falls back to the
+/// historical localhost default used elsewhere in the server.
+///
+/// The trailing slash, if present, is stripped so the caller can
+/// concatenate paths without doubling up.
+fn public_base_url() -> String {
+    std::env::var("DJINN_PUBLIC_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8372".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
 // ── model_health ──────────────────────────────────────────────────────────────
 
 fn default_model_health_action() -> String {
@@ -223,8 +239,16 @@ pub struct ProviderOauthStartResponse {
     pub user_code: Option<String>,
     /// For device-code flows: the URL where the user enters the code.
     pub verification_uri: Option<String>,
-    /// True when the flow is still in progress (device-code polling in background).
+    /// True when the flow is still in progress (e.g. device-code polling in
+    /// background, or Codex waiting on the browser redirect to hit
+    /// `/api/oauth/codex/callback`).
     pub pending: bool,
+    /// For browser-redirect flows (Codex): the authorize URL the client
+    /// should open in a new tab. Present only when the flow requires the
+    /// user to complete it in a browser; `None` when a silent refresh
+    /// succeeded or the provider is already connected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorize_url: Option<String>,
 }
 
 // ── provider_model_lookup ─────────────────────────────────────────────────────
@@ -652,6 +676,7 @@ impl DjinnMcpServer {
                 user_code: None,
                 verification_uri: None,
                 pending: false,
+                authorize_url: None,
             });
         };
 
@@ -679,6 +704,7 @@ impl DjinnMcpServer {
                 user_code: None,
                 verification_uri: None,
                 pending: false,
+                authorize_url: None,
             });
         }
 
@@ -696,58 +722,110 @@ impl DjinnMcpServer {
                 user_code: None,
                 verification_uri: None,
                 pending: false,
+                authorize_url: None,
             });
         };
 
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        // Blocking flows (Codex, Copilot). The historical GitHub App
-        // device-code flow has been retired — GitHub auth goes through the
-        // browser-based `/auth/github/*` routes on the server instead, and
-        // all repo I/O uses App installation tokens.
-        let result = match flow_kind {
+        match flow_kind {
             OAuthFlowKind::Codex => {
+                // Codex is now a redirect flow: `start_codex_oauth` stashes a
+                // PKCE entry in the shared pending store and returns the
+                // authorize URL. The browser completes the loop by hitting
+                // `/api/oauth/codex/callback` on the main router, which calls
+                // `finish_codex_oauth` and persists the tokens.
                 let events = self.state.event_bus();
-                codex::run_codex_flow(&credential_repo, &events)
-                    .await
-                    .map(|_| ())
+                let public_url = public_base_url();
+                let pending = self.state.codex_oauth_pending();
+                match codex::start_codex_oauth(pending, credential_repo, &events, &public_url).await
+                {
+                    Ok(None) => Json(ProviderOauthStartResponse {
+                        // Already connected (cached token valid or silently refreshed).
+                        ok: true,
+                        success: true,
+                        provider_id: input.provider_id,
+                        builtin_id: Some(builtin_id.to_string()),
+                        legacy_builtin_id: Some(builtin_id.to_string()),
+                        oauth_supported: true,
+                        configured_keys: oauth_keys,
+                        error: None,
+                        user_code: None,
+                        verification_uri: None,
+                        pending: false,
+                        authorize_url: None,
+                    }),
+                    Ok(Some(start)) => Json(ProviderOauthStartResponse {
+                        // Browser flow in progress — UI opens `authorize_url`
+                        // (or relies on the `oauth.open_browser` SSE event).
+                        ok: true,
+                        success: false,
+                        provider_id: input.provider_id,
+                        builtin_id: Some(builtin_id.to_string()),
+                        legacy_builtin_id: Some(builtin_id.to_string()),
+                        oauth_supported: true,
+                        configured_keys: oauth_keys,
+                        error: None,
+                        user_code: None,
+                        verification_uri: None,
+                        pending: true,
+                        authorize_url: Some(start.authorize_url),
+                    }),
+                    Err(e) => Json(ProviderOauthStartResponse {
+                        ok: false,
+                        success: false,
+                        provider_id: input.provider_id,
+                        builtin_id: Some(builtin_id.to_string()),
+                        legacy_builtin_id: Some(builtin_id.to_string()),
+                        oauth_supported: true,
+                        configured_keys: vec![],
+                        error: Some(e.to_string()),
+                        user_code: None,
+                        verification_uri: None,
+                        pending: false,
+                        authorize_url: None,
+                    }),
+                }
             }
-            OAuthFlowKind::Copilot => match copilot::start_copilot_flow().await {
-                Ok(session) => copilot::poll_copilot_flow(session, &credential_repo)
-                    .await
-                    .map(|_| ()),
-                Err(e) => Err(e),
-            },
-        };
-
-        match result {
-            Ok(()) => Json(ProviderOauthStartResponse {
-                ok: true,
-                success: true,
-                provider_id: input.provider_id,
-                builtin_id: Some(builtin_id.to_string()),
-                legacy_builtin_id: Some(builtin_id.to_string()),
-                oauth_supported: true,
-                configured_keys: oauth_keys,
-                error: None,
-                user_code: None,
-                verification_uri: None,
-                pending: false,
-            }),
-            Err(e) => Json(ProviderOauthStartResponse {
-                ok: false,
-                success: false,
-                provider_id: input.provider_id,
-                builtin_id: Some(builtin_id.to_string()),
-                legacy_builtin_id: Some(builtin_id.to_string()),
-                oauth_supported: true,
-                configured_keys: vec![],
-                error: Some(e.to_string()),
-                user_code: None,
-                verification_uri: None,
-                pending: false,
-            }),
+            OAuthFlowKind::Copilot => {
+                let result = match copilot::start_copilot_flow().await {
+                    Ok(session) => copilot::poll_copilot_flow(session, &credential_repo)
+                        .await
+                        .map(|_| ()),
+                    Err(e) => Err(e),
+                };
+                match result {
+                    Ok(()) => Json(ProviderOauthStartResponse {
+                        ok: true,
+                        success: true,
+                        provider_id: input.provider_id,
+                        builtin_id: Some(builtin_id.to_string()),
+                        legacy_builtin_id: Some(builtin_id.to_string()),
+                        oauth_supported: true,
+                        configured_keys: oauth_keys,
+                        error: None,
+                        user_code: None,
+                        verification_uri: None,
+                        pending: false,
+                        authorize_url: None,
+                    }),
+                    Err(e) => Json(ProviderOauthStartResponse {
+                        ok: false,
+                        success: false,
+                        provider_id: input.provider_id,
+                        builtin_id: Some(builtin_id.to_string()),
+                        legacy_builtin_id: Some(builtin_id.to_string()),
+                        oauth_supported: true,
+                        configured_keys: vec![],
+                        error: Some(e.to_string()),
+                        user_code: None,
+                        verification_uri: None,
+                        pending: false,
+                        authorize_url: None,
+                    }),
+                }
+            }
         }
     }
 

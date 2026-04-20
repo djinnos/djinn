@@ -91,6 +91,7 @@ mod tests {
             Arc::new(StubRuntimeOps),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),
+            Arc::new(djinn_provider::oauth::codex::CodexPendingStore::new()),
         )
     }
 
@@ -582,6 +583,7 @@ mod tests {
             }),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),
+            Arc::new(djinn_provider::oauth::codex::CodexPendingStore::new()),
         ));
 
         let semantic_candidates = repo
@@ -649,6 +651,7 @@ mod tests {
             Arc::new(FailingSemanticRuntimeOps),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),
+            Arc::new(djinn_provider::oauth::codex::CodexPendingStore::new()),
         ));
 
         let response = ops::memory_search(

@@ -39,6 +39,7 @@ mod tests {
             Arc::new(StubRuntimeOps),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),
+            Arc::new(djinn_provider::oauth::codex::CodexPendingStore::new()),
         )
     }
 
