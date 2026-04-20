@@ -1,0 +1,35 @@
+# Reduced subset vendored from github-linguist
+# https://github.com/github-linguist/linguist/blob/main/lib/linguist/heuristics.yml
+#
+# Copyright (c) 2017 GitHub, Inc. - MIT license.
+# See https://github.com/github-linguist/linguist/blob/main/LICENSE
+#
+# Djinn-stack only uses heuristics.yml for the ambiguous-extension subset
+# it cares about today. Current detection is extension-only + filename
+# lookup; heuristics are vendored here so a future PR can wire them in
+# (for `.h` vs C/C++/Obj-C, `.pl` vs Perl/Prolog, `.m` vs Obj-C/Matlab)
+# without a second vendoring pass.
+
+disambiguations:
+- extensions: ['.h']
+  rules:
+  - language: "Objective-C"
+    pattern: '@(interface|class|protocol|property|end|synchronised|selector|implementation)\b'
+  - language: "C++"
+    pattern: '^\s*template\s*<|^[ \t]*try\b|^[ \t]*catch\s*\(|\bstd::\w+'
+  - language: C
+
+- extensions: ['.m']
+  rules:
+  - language: "Objective-C"
+    pattern: '^\s*(@(interface|class|protocol|property|end|implementation))|^\s*#\s*import\s+'
+  - language: Mercury
+    pattern: ':- module'
+
+- extensions: ['.ts']
+  rules:
+  - language: TypeScript
+
+- extensions: ['.tsx']
+  rules:
+  - language: TSX

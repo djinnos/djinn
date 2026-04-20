@@ -1,0 +1,25 @@
+{
+  "primary_language": "Rust",
+  "languages": ["Rust"],
+  "package_managers": ["cargo"],
+  "monorepo_tools": [],
+  "is_monorepo": false,
+  "test_runners": [],
+  "frameworks": [],
+  "runtimes": {
+    "node": null,
+    "rust": "1.84",
+    "python": null,
+    "go": null
+  },
+  "manifest_signals": {
+    "has_package_json": false,
+    "has_cargo_toml": true,
+    "has_pyproject_toml": false,
+    "has_go_mod": false,
+    "has_pnpm_workspace": false,
+    "has_turbo_json": false,
+    "has_devcontainer": false,
+    "has_devcontainer_lock": false
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "primary_language": "TypeScript",
+  "languages": ["TypeScript", "TSX"],
+  "package_managers": ["pnpm"],
+  "monorepo_tools": ["npm-workspaces", "pnpm-workspaces", "turbo"],
+  "is_monorepo": true,
+  "test_runners": ["vitest"],
+  "frameworks": ["next", "react"],
+  "runtimes": {
+    "node": "22",
+    "rust": null,
+    "python": null,
+    "go": null
+  },
+  "manifest_signals": {
+    "has_package_json": true,
+    "has_cargo_toml": false,
+    "has_pyproject_toml": false,
+    "has_go_mod": false,
+    "has_pnpm_workspace": true,
+    "has_turbo_json": true,
+    "has_devcontainer": true,
+    "has_devcontainer_lock": true
+  }
+}

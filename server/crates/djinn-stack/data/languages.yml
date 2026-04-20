@@ -1,0 +1,289 @@
+# Reduced subset vendored from github-linguist
+# https://github.com/github-linguist/linguist/blob/main/lib/linguist/languages.yml
+#
+# Copyright (c) 2017 GitHub, Inc. - MIT license.
+# See https://github.com/github-linguist/linguist/blob/main/LICENSE
+#
+# This subset covers ~40 of the most commonly observed languages in the
+# Djinn corpus. Only fields djinn-stack consumes are kept: `type`,
+# `extensions`, `filenames`. Full Linguist data (tm_scope, color, alias
+# tables, interpreter lookups) is intentionally omitted.
+
+Rust:
+  type: programming
+  extensions:
+  - ".rs"
+  - ".rs.in"
+
+TypeScript:
+  type: programming
+  extensions:
+  - ".ts"
+  - ".cts"
+  - ".mts"
+
+TSX:
+  type: programming
+  extensions:
+  - ".tsx"
+
+JavaScript:
+  type: programming
+  extensions:
+  - ".js"
+  - ".cjs"
+  - ".mjs"
+  - ".jsx"
+  - ".es6"
+
+Python:
+  type: programming
+  extensions:
+  - ".py"
+  - ".pyi"
+  - ".pyw"
+
+Go:
+  type: programming
+  extensions:
+  - ".go"
+
+Ruby:
+  type: programming
+  extensions:
+  - ".rb"
+  filenames:
+  - "Gemfile"
+  - "Rakefile"
+
+Java:
+  type: programming
+  extensions:
+  - ".java"
+
+Kotlin:
+  type: programming
+  extensions:
+  - ".kt"
+  - ".ktm"
+  - ".kts"
+
+Scala:
+  type: programming
+  extensions:
+  - ".scala"
+  - ".sbt"
+  - ".sc"
+
+C:
+  type: programming
+  extensions:
+  - ".c"
+  - ".h"
+
+"C++":
+  type: programming
+  extensions:
+  - ".cpp"
+  - ".cxx"
+  - ".cc"
+  - ".hpp"
+  - ".hxx"
+  - ".hh"
+
+"C#":
+  type: programming
+  extensions:
+  - ".cs"
+  - ".csx"
+
+PHP:
+  type: programming
+  extensions:
+  - ".php"
+  - ".phtml"
+  - ".php3"
+  - ".php4"
+  - ".php5"
+  - ".phps"
+
+Swift:
+  type: programming
+  extensions:
+  - ".swift"
+
+"Objective-C":
+  type: programming
+  extensions:
+  - ".m"
+  - ".mm"
+
+Shell:
+  type: programming
+  extensions:
+  - ".sh"
+  - ".bash"
+  - ".zsh"
+  - ".fish"
+  filenames:
+  - ".bashrc"
+  - ".bash_profile"
+
+PowerShell:
+  type: programming
+  extensions:
+  - ".ps1"
+  - ".psd1"
+  - ".psm1"
+
+Lua:
+  type: programming
+  extensions:
+  - ".lua"
+
+Haskell:
+  type: programming
+  extensions:
+  - ".hs"
+  - ".lhs"
+
+Erlang:
+  type: programming
+  extensions:
+  - ".erl"
+
+Elixir:
+  type: programming
+  extensions:
+  - ".ex"
+  - ".exs"
+
+OCaml:
+  type: programming
+  extensions:
+  - ".ml"
+  - ".mli"
+
+Clojure:
+  type: programming
+  extensions:
+  - ".clj"
+  - ".cljs"
+  - ".cljc"
+
+Dart:
+  type: programming
+  extensions:
+  - ".dart"
+
+R:
+  type: programming
+  extensions:
+  - ".r"
+  - ".R"
+  - ".rd"
+
+Zig:
+  type: programming
+  extensions:
+  - ".zig"
+
+Nim:
+  type: programming
+  extensions:
+  - ".nim"
+  - ".nims"
+
+HTML:
+  type: markup
+  extensions:
+  - ".html"
+  - ".htm"
+  - ".xhtml"
+
+CSS:
+  type: markup
+  extensions:
+  - ".css"
+
+SCSS:
+  type: markup
+  extensions:
+  - ".scss"
+
+Sass:
+  type: markup
+  extensions:
+  - ".sass"
+
+Less:
+  type: markup
+  extensions:
+  - ".less"
+
+Vue:
+  type: markup
+  extensions:
+  - ".vue"
+
+Svelte:
+  type: markup
+  extensions:
+  - ".svelte"
+
+Markdown:
+  type: prose
+  extensions:
+  - ".md"
+  - ".markdown"
+  - ".mdown"
+  - ".mkd"
+
+JSON:
+  type: data
+  extensions:
+  - ".json"
+
+YAML:
+  type: data
+  extensions:
+  - ".yaml"
+  - ".yml"
+
+TOML:
+  type: data
+  extensions:
+  - ".toml"
+
+SQL:
+  type: data
+  extensions:
+  - ".sql"
+
+Dockerfile:
+  type: programming
+  filenames:
+  - "Dockerfile"
+  extensions:
+  - ".dockerfile"
+
+Makefile:
+  type: programming
+  filenames:
+  - "Makefile"
+  - "GNUmakefile"
+  - "makefile"
+  extensions:
+  - ".mak"
+  - ".mk"
+
+Terraform:
+  type: programming
+  extensions:
+  - ".tf"
+  - ".tfvars"
+
+Protocol Buffer:
+  type: data
+  extensions:
+  - ".proto"

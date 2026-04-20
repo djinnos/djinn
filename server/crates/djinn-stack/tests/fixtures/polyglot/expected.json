@@ -1,0 +1,25 @@
+{
+  "primary_language": "Rust",
+  "languages": ["Rust", "Python", "TypeScript"],
+  "package_managers": ["cargo", "pnpm", "uv"],
+  "monorepo_tools": ["cargo-workspace", "npm-workspaces"],
+  "is_monorepo": true,
+  "test_runners": ["vitest"],
+  "frameworks": ["fastapi", "react"],
+  "runtimes": {
+    "node": "22",
+    "rust": "stable",
+    "python": "3.12",
+    "go": null
+  },
+  "manifest_signals": {
+    "has_package_json": true,
+    "has_cargo_toml": true,
+    "has_pyproject_toml": true,
+    "has_go_mod": false,
+    "has_pnpm_workspace": false,
+    "has_turbo_json": false,
+    "has_devcontainer": false,
+    "has_devcontainer_lock": false
+  }
+}
