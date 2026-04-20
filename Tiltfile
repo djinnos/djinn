@@ -161,6 +161,26 @@ k8s_resource(
     labels=['infra'],
 )
 
+# --- Vite dev server for the React UI -----------------------------------
+# Runs on the host (not in-cluster) so HMR works over localhost and pnpm
+# caches persist. values.local.yaml's env.webUrl already points djinn-
+# server's OAuth redirect at http://localhost:1420, so everything just
+# works without Ingress. Installs deps on first boot if node_modules is
+# missing; cheap no-op otherwise.
+local_resource(
+    'djinn-ui',
+    cmd='cd ui && [ -d node_modules ] || pnpm install --frozen-lockfile',
+    serve_cmd='cd ui && pnpm dev --host',
+    serve_env={'VITE_DJINN_SERVER_URL': 'http://localhost:3000'},
+    readiness_probe=probe(
+        period_secs=5,
+        http_get=http_get_action(port=1420, path='/'),
+    ),
+    links=['http://localhost:1420'],
+    resource_deps=['djinn-server'],
+    labels=['djinn'],
+)
+
 # Langfuse: only the web UI + MinIO console are useful on the host. The
 # other pods (postgres, clickhouse, redis, worker) stay in-cluster.
 k8s_resource(
