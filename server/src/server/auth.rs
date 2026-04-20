@@ -49,26 +49,13 @@ use djinn_db::{
     CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository,
     UserAuthSessionRecord, UserRepository,
 };
-use djinn_provider::github_app::AppConfig as GhAppConfig;
 use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
-use djinn_provider::repos::credential::CredentialRepository;
-use std::sync::Arc;
 
 const SESSION_COOKIE: &str = "djinn_session";
 const OAUTH_STATE_COOKIE: &str = "djinn_oauth_state";
-const MANIFEST_STATE_COOKIE: &str = "djinn_app_manifest_state";
-/// Short-lived hint from the manifest callback — encodes the owner's
-/// GitHub numeric id + login as `"<id>|<login>"`. Read by
-/// `app_setup_callback` to cross-check GitHub's post-install redirect
-/// against the org that actually provisioned the App.
-const PENDING_OWNER_COOKIE: &str = "djinn_app_pending_owner";
 const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
-/// How long the owner-hint cookie from the manifest callback remains
-/// valid. Long enough for the user to click through the install step,
-/// short enough that a stale cookie can't silently bind the wrong org.
-const PENDING_OWNER_TTL_SECS: i64 = 60 * 30; // 30 minutes
 
 /// Read a GitHub App OAuth client id/secret from the environment.
 ///
@@ -85,11 +72,6 @@ pub(super) fn router() -> Router<AppState> {
         .route("/auth/config", get(config))
         .route("/auth/github/start", get(github_start))
         .route("/auth/github/callback", get(github_callback))
-        .route("/auth/github/create-app", get(create_app_form))
-        .route(
-            "/auth/github/app-manifest-callback",
-            get(app_manifest_callback),
-        )
         .route(
             "/auth/github/app-setup-callback",
             get(app_setup_callback),
@@ -103,21 +85,18 @@ struct ConfigResponse {
     configured: bool,
     missing: Vec<&'static str>,
     setup_doc_url: &'static str,
-    /// Path the client can navigate the browser to so the server kicks off
-    /// the GitHub App manifest flow. Always populated; the client only
-    /// shows the button when `configured == false`.
-    create_app_url: &'static str,
 }
 
-/// Report whether the GitHub App is configured (DB row or env), and offer
-/// a one-click manifest-flow URL so first-time operators can self-provision.
+/// Report whether the GitHub App is configured (env-only after the K8s
+/// migration). Used by the UI to decide between sign-in and a static
+/// "App not configured" notice.
 async fn config(State(state): State<AppState>) -> Json<ConfigResponse> {
     let active = state.app_config().await;
     let mut missing: Vec<&'static str> = Vec::new();
 
     if active.is_none() {
-        // Fall back to env detection so we can produce a useful "missing"
-        // list — same surface as before.
+        // Surface a useful "missing" list so the operator can spot which
+        // env var (or Helm secret key) is unset.
         let required = [
             "GITHUB_APP_CLIENT_ID",
             "GITHUB_APP_CLIENT_SECRET",
@@ -140,7 +119,6 @@ async fn config(State(state): State<AppState>) -> Json<ConfigResponse> {
         configured: active.is_some(),
         missing,
         setup_doc_url: "https://github.com/djinnos/djinn/blob/main/docs/GITHUB_APP_SETUP.md",
-        create_app_url: "/auth/github/create-app",
     })
 }
 
@@ -866,296 +844,14 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-// ─── GitHub App manifest auto-provision flow ──────────────────────────────────
+// ─── GitHub App install flow ──────────────────────────────────────────────────
 //
-// One-click GitHub App creation per
-// https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
-//
-// Two endpoints:
-//   1. `GET /auth/github/create-app` — set a CSRF cookie + serve an HTML
-//      page that POSTs the manifest JSON to GitHub. Browser navigates to
-//      GitHub's "Create GitHub App" page with our values pre-filled.
-//   2. `GET /auth/github/app-manifest-callback?code=&state=` — GitHub
-//      redirects here once the user confirms. We POST the temporary code
-//      to `/app-manifests/{code}/conversions` to fetch the App's id,
-//      private key, secrets, etc., persist them, swap the in-memory
-//      config, then send the user to `/auth/github/start?install=1`.
-
-/// Build the manifest JSON object for a given public URL. Pure function so
-/// tests can pin its shape.
-pub(crate) fn build_manifest_json(public_url: &str) -> serde_json::Value {
-    let host = url_host(public_url).unwrap_or_else(|| "local".to_string());
-    let permissions = serde_json::json!({
-        "contents": "write",
-        "metadata": "read",
-        "pull_requests": "write",
-        "issues": "write",
-        "actions": "read",
-        "checks": "read",
-    });
-    serde_json::json!({
-        "name": format!("Djinn ({host})"),
-        "url": public_url,
-        "redirect_url": format!("{public_url}/auth/github/app-manifest-callback"),
-        "callback_urls": [format!("{public_url}/auth/github/callback")],
-        // Where GitHub sends the user after they install the App. Points at
-        // a server endpoint (not the web client root) so the server can
-        // capture `installation_id`, bind the org via `OrgConfigRepository`,
-        // and *then* redirect the browser to the web client. The manifest
-        // flow only creates the App — installation (and therefore the
-        // installation_id) only materialises on this callback, so the
-        // org_config write has to live here, not in the manifest callback.
-        "setup_url": format!("{public_url}/auth/github/app-setup-callback"),
-        "setup_on_update": false,
-        // We OAuth the user *before* the install redirect (via
-        // `/auth/github/start?install=1`), so an install-time OAuth here
-        // is redundant — and harmful: with this flag set to `true`, GitHub
-        // bypasses `setup_url` post-install and redirects to
-        // `callback_urls[0]` with `code + state + installation_id` instead.
-        // That defeats the two-redirect design because `org_config` only
-        // gets written on the `setup_url` path.
-        "request_oauth_on_install": false,
-        "public": false,
-        "default_permissions": permissions,
-    })
-}
-
-fn url_host(s: &str) -> Option<String> {
-    // Lightweight parser: strip scheme, take up to first `/` or `:`.
-    let after_scheme = s.split("://").nth(1).unwrap_or(s);
-    let host_with_port = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let host = host_with_port.split(':').next().unwrap_or(host_with_port);
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
-    }
-}
-
-/// Render an auto-submitting HTML form that POSTs our manifest JSON to
-/// `https://github.com/settings/apps/new?state=<csrf>`.
-#[derive(Deserialize)]
-struct CreateAppQuery {
-    /// Optional GitHub org login. When set, the App is created under the
-    /// org (`github.com/organizations/<org>/settings/apps/new`) so it can
-    /// be installed on that org's repos. Without it, the App is created
-    /// under the signed-in GitHub user and can only be installed on that
-    /// user's personal account.
-    organization: Option<String>,
-}
-
-async fn create_app_form(
-    State(state): State<AppState>,
-    Query(q): Query<CreateAppQuery>,
-) -> Response {
-    if state.app_config().await.is_some() {
-        return (
-            StatusCode::CONFLICT,
-            "GitHub App is already configured; remove the existing config first",
-        )
-            .into_response();
-    }
-
-    let public = public_url();
-    let manifest = build_manifest_json(&public);
-    let manifest_json = manifest.to_string();
-    let csrf = random_token_b64();
-    let manifest_escaped = html_attr_escape(&manifest_json);
-    let csrf_escaped = html_attr_escape(&csrf);
-    let action = match q
-        .organization
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(org) => format!(
-            "https://github.com/organizations/{}/settings/apps/new?state={}",
-            urlencode(org),
-            csrf_escaped
-        ),
-        None => format!(
-            "https://github.com/settings/apps/new?state={}",
-            csrf_escaped
-        ),
-    };
-
-    let html = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Create Djinn GitHub App</title></head>\
-         <body><p>Redirecting to GitHub to create the Djinn App…</p>\
-         <form id=\"f\" method=\"post\" action=\"{action}\">\
-         <input type=\"hidden\" name=\"manifest\" value=\"{manifest}\" />\
-         <noscript><button type=\"submit\">Continue to GitHub</button></noscript>\
-         </form>\
-         <script>document.getElementById('f').submit();</script>\
-         </body></html>",
-        action = action,
-        manifest = manifest_escaped,
-    );
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    set_cookie(
-        &mut headers,
-        MANIFEST_STATE_COOKIE,
-        &csrf,
-        STATE_COOKIE_TTL_SECS,
-    );
-    (StatusCode::OK, headers, html).into_response()
-}
-
-#[derive(Deserialize)]
-struct ManifestCallbackQuery {
-    code: Option<String>,
-    state: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ManifestConversion {
-    id: u64,
-    slug: String,
-    #[serde(default)]
-    client_id: String,
-    #[serde(default)]
-    client_secret: String,
-    #[serde(default)]
-    webhook_secret: Option<String>,
-    pem: String,
-    /// The GitHub account (user or org) under which the App was created. This
-    /// is the account that visited `/settings/apps/new` (for a personal App)
-    /// or `/organizations/<org>/settings/apps/new` (for an org App). Phase 2
-    /// requires `owner.type == "Organization"`.
-    #[serde(default)]
-    owner: Option<ManifestOwner>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct ManifestOwner {
-    #[serde(default)]
-    id: i64,
-    #[serde(default)]
-    login: String,
-    /// Either `"User"` or `"Organization"`.
-    #[serde(rename = "type", default)]
-    account_type: String,
-}
-
-async fn app_manifest_callback(
-    State(state): State<AppState>,
-    Query(q): Query<ManifestCallbackQuery>,
-    headers: HeaderMap,
-) -> Response {
-    if state.app_config().await.is_some() {
-        return (StatusCode::CONFLICT, "GitHub App is already configured").into_response();
-    }
-
-    let (code, state_param) = match (q.code, q.state) {
-        (Some(c), Some(s)) if !c.is_empty() && !s.is_empty() => (c, s),
-        _ => return (StatusCode::BAD_REQUEST, "missing code or state").into_response(),
-    };
-
-    let Some(cookie_state) = extract_cookie(&headers, MANIFEST_STATE_COOKIE) else {
-        return (StatusCode::BAD_REQUEST, "missing manifest state cookie").into_response();
-    };
-    if !constant_time_eq(cookie_state.as_bytes(), state_param.as_bytes()) {
-        return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
-    }
-
-    let conversion = match exchange_manifest_code(&code).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "manifest callback: conversion failed");
-            return (StatusCode::BAD_GATEWAY, "manifest conversion failed").into_response();
-        }
-    };
-
-    // Phase 2 invariant: this deployment is pinned to exactly one GitHub
-    // *org*. Reject personal-account installs early — otherwise we'd write
-    // an `org_config` row pointing at a user account and later OAuth logins
-    // would fail the `GET /user/memberships/orgs/<login>` check (that
-    // endpoint only accepts org logins).
-    let owner = match conversion.owner.as_ref() {
-        Some(o) if !o.login.is_empty() => o.clone(),
-        _ => {
-            tracing::error!(
-                "manifest callback: conversion response missing owner; cannot bind deployment"
-            );
-            return (
-                StatusCode::BAD_GATEWAY,
-                "manifest conversion response did not include owner information",
-            )
-                .into_response();
-        }
-    };
-    if !owner.account_type.eq_ignore_ascii_case("Organization") {
-        tracing::warn!(
-            owner_login = %owner.login,
-            owner_type = %owner.account_type,
-            "manifest callback: rejecting non-org owner",
-        );
-        return (
-            StatusCode::BAD_REQUEST,
-            format!(
-                "This deployment requires the GitHub App to be owned by an \
-                 organization, but the submitted manifest was created under \
-                 the personal account '{}' (type={}). Re-run the manifest \
-                 flow from the target org's 'Developer settings → GitHub Apps' \
-                 page.",
-                owner.login, owner.account_type,
-            ),
-        )
-            .into_response();
-    }
-
-    let cfg = GhAppConfig {
-        app_id: conversion.id,
-        slug: conversion.slug,
-        client_id: conversion.client_id,
-        client_secret: conversion.client_secret,
-        pem: conversion.pem,
-        webhook_secret: conversion.webhook_secret.unwrap_or_default(),
-        public_url: public_url(),
-    };
-
-    let cred_repo = CredentialRepository::new(state.db().clone(), state.event_bus());
-    if let Err(e) = cred_repo.set_github_app_config(&cfg).await {
-        tracing::error!(error = %e, "manifest callback: failed to persist App config");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    // Mirror creds into env + hot-swap so downstream consumers (JWT minter,
-    // install URL helper) see them immediately.
-    cfg.export_to_env();
-    state.set_app_config(Some(Arc::new(cfg.clone()))).await;
-
-    // The manifest flow only *creates* the App on GitHub — it does not
-    // install it anywhere. The installation_id (and therefore the
-    // `org_config` binding) only materialises after the user completes the
-    // install step, at which point GitHub redirects to our `setup_url` —
-    // the `app_setup_callback` handler below writes `org_config`.
-    //
-    // Bounce through `/auth/github/start?install=1` so the user OAuths into
-    // djinn, then lands on the App's install page (pre-targeted at the
-    // owning org via the GitHub UI). Persist the owner info briefly in a
-    // short-lived cookie so `app_setup_callback` can cross-check what
-    // GitHub reports on the installation against the org that provisioned
-    // the App.
-    let owner_hint = format!("{}|{}", owner.id, owner.login);
-    let mut resp_headers = HeaderMap::new();
-    clear_cookie(&mut resp_headers, MANIFEST_STATE_COOKIE);
-    set_cookie(
-        &mut resp_headers,
-        PENDING_OWNER_COOKIE,
-        &owner_hint,
-        PENDING_OWNER_TTL_SECS,
-    );
-    resp_headers.insert(
-        header::LOCATION,
-        HeaderValue::from_static("/auth/github/start?install=1"),
-    );
-    (StatusCode::FOUND, resp_headers).into_response()
-}
+// The legacy in-UI manifest auto-provision wizard is gone — App credentials
+// are provisioned exclusively via the `djinn-github-app` Kubernetes Secret
+// (see `server/docker/README.md`). The only endpoint that survives in this
+// section is `GET /auth/github/app-setup-callback` (further down): GitHub
+// posts the user there after they complete an App install on the target
+// org, and we use that callback to bind `org_config`.
 
 /// Query parameters for `GET /auth/github/app-setup-callback` — GitHub
 /// appends `?installation_id=<N>&setup_action=install` after the user
@@ -1167,11 +863,10 @@ struct AppSetupQuery {
     setup_action: Option<String>,
 }
 
-/// `GET /auth/github/app-setup-callback` — the second half of the
-/// manifest → install two-redirect flow. GitHub invokes this after the
-/// user installs the App on an org; we fetch the installation's authoritative
-/// account info with the App JWT and write the singleton `org_config` row
-/// that binds this deployment to that org.
+/// `GET /auth/github/app-setup-callback` — invoked by GitHub after the user
+/// installs the App on an org (configured as the App's `setup_url`). We fetch
+/// the installation's authoritative account info with the App JWT and write
+/// the singleton `org_config` row that binds this deployment to that org.
 ///
 /// Security note: the `installation_id` in the query is user-controllable,
 /// so we do not trust query-derived org metadata. The binding is based on
@@ -1181,7 +876,6 @@ struct AppSetupQuery {
 async fn app_setup_callback(
     State(state): State<AppState>,
     Query(q): Query<AppSetupQuery>,
-    headers: HeaderMap,
 ) -> Response {
     let installation_id: u64 = match q.installation_id.as_deref().and_then(|s| s.parse().ok()) {
         Some(id) if id > 0 => id,
@@ -1203,8 +897,9 @@ async fn app_setup_callback(
         None => {
             return (
                 StatusCode::CONFLICT,
-                "GitHub App credentials are not configured; complete the \
-                 manifest flow first.",
+                "GitHub App credentials are not configured. Mount the \
+                 djinn-github-app Kubernetes Secret (see \
+                 server/docker/README.md) and restart the Pod.",
             )
                 .into_response();
         }
@@ -1212,9 +907,7 @@ async fn app_setup_callback(
 
     // Resolve the installation authoritatively via the App JWT. This call
     // returns the target org's numeric id + login, which we need for the
-    // org_config row. Using GitHub's own response avoids trusting the
-    // user-supplied `owner_hint` cookie for the binding itself — the
-    // cookie is treated as a cross-check, not a source of truth.
+    // org_config row.
     let installation = match fetch_installation_for_setup(installation_id).await {
         Ok(i) => i,
         Err(e) => {
@@ -1252,23 +945,6 @@ async fn app_setup_callback(
             .into_response();
     }
 
-    // Soft cross-check against the owner hint from the manifest callback.
-    // If present and mismatched, log — but don't block, since the user may
-    // legitimately install on a different org than the App's owner.
-    if let Some(hint) = extract_cookie(&headers, PENDING_OWNER_COOKIE)
-        && let Some((hint_id_str, hint_login)) = hint.split_once('|')
-        && let Ok(hint_id) = hint_id_str.parse::<u64>()
-        && (hint_id != installation.account.id || hint_login != installation.account.login)
-    {
-        tracing::info!(
-            hint_id,
-            hint_login,
-            actual_id = installation.account.id,
-            actual_login = %installation.account.login,
-            "app_setup_callback: installed org differs from App owner",
-        );
-    }
-
     let org_repo = OrgConfigRepository::new(state.db().clone());
     // Idempotency: if org_config already points at this installation, the
     // user probably double-clicked or reloaded — don't surface a confusing
@@ -1282,7 +958,7 @@ async fn app_setup_callback(
             action,
             "app_setup_callback: re-entry for already-bound org, redirecting home",
         );
-        return redirect_to_web(&headers);
+        return redirect_to_web();
     }
 
     if let Err(e) = org_repo
@@ -1315,14 +991,12 @@ async fn app_setup_callback(
         action,
         "app_setup_callback: org_config bound",
     );
-    redirect_to_web(&headers)
+    redirect_to_web()
 }
 
-/// Common post-success redirect — clear the short-lived owner-hint cookie
-/// and send the browser to the web client root.
-fn redirect_to_web(_headers: &HeaderMap) -> Response {
+/// Common post-success redirect — send the browser to the web client root.
+fn redirect_to_web() -> Response {
     let mut resp_headers = HeaderMap::new();
-    clear_cookie(&mut resp_headers, PENDING_OWNER_COOKIE);
     let target = format!("{}/", web_url().trim_end_matches('/'));
     resp_headers.insert(
         header::LOCATION,
@@ -1373,26 +1047,6 @@ struct InstallationAccount {
     account_type: String,
 }
 
-async fn exchange_manifest_code(code: &str) -> Result<ManifestConversion, String> {
-    let url = format!("https://api.github.com/app-manifests/{code}/conversions");
-    let client = Client::new();
-    let resp = client
-        .post(&url)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "djinn-server")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("manifest conversion HTTP {status}: {body}"));
-    }
-    resp.json::<ManifestConversion>()
-        .await
-        .map_err(|e| format!("manifest conversion decode: {e}"))
-}
-
 // ─── Setup-status endpoint (Phase 2) ──────────────────────────────────────────
 //
 // Public, no-auth endpoint so the web client can gate itself before even
@@ -1435,24 +1089,10 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatusResponse
     })
 }
 
-fn html_attr_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn extract_cookie_handles_multiple_pairs() {
@@ -1505,108 +1145,6 @@ mod tests {
         assert!(session_expired("2000-01-01T00:00:00Z"));
         assert!(!session_expired("2099-01-01T00:00:00Z"));
         assert!(session_expired("not-a-date"));
-    }
-
-    #[test]
-    fn manifest_json_has_expected_shape() {
-        let manifest = build_manifest_json("https://djinn.example.com");
-        assert_eq!(manifest["name"], "Djinn (djinn.example.com)");
-        assert_eq!(manifest["url"], "https://djinn.example.com");
-        assert_eq!(
-            manifest["redirect_url"],
-            "https://djinn.example.com/auth/github/app-manifest-callback"
-        );
-        assert_eq!(
-            manifest["callback_urls"][0],
-            "https://djinn.example.com/auth/github/callback"
-        );
-        assert_eq!(
-            manifest["setup_url"],
-            "https://djinn.example.com/auth/github/app-setup-callback",
-            "setup_url must point at the server (not the web client) so the \
-             post-install redirect can capture installation_id and bind org_config"
-        );
-        assert!(
-            manifest.get("hook_attributes").is_none(),
-            "webhooks are off — omit hook_attributes so GitHub doesn't reject loopback URLs"
-        );
-        assert_eq!(
-            manifest["request_oauth_on_install"], false,
-            "must stay false so GitHub honours setup_url post-install instead of diverting to callback_urls"
-        );
-        assert_eq!(manifest["public"], false);
-        assert_eq!(manifest["default_permissions"]["contents"], "write");
-        assert_eq!(manifest["default_permissions"]["pull_requests"], "write");
-        assert_eq!(manifest["default_permissions"]["metadata"], "read");
-        // Round-trips as valid JSON.
-        let s = manifest.to_string();
-        let _back: serde_json::Value = serde_json::from_str(&s).unwrap();
-    }
-
-    #[test]
-    fn manifest_url_host_handles_localhost_fallback() {
-        assert_eq!(
-            url_host("http://127.0.0.1:8372").as_deref(),
-            Some("127.0.0.1")
-        );
-        assert_eq!(
-            url_host("https://djinn.example.com/path").as_deref(),
-            Some("djinn.example.com")
-        );
-        assert_eq!(url_host("not a url").as_deref(), Some("not a url"));
-    }
-
-    #[test]
-    fn html_attr_escape_neutralises_quotes_and_brackets() {
-        let raw = "<\"&'>";
-        assert_eq!(html_attr_escape(raw), "&lt;&quot;&amp;&#39;&gt;");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn create_app_form_refuses_when_already_configured() {
-        use crate::test_helpers;
-        let state = test_helpers::test_app_state_in_memory().await;
-        // Seed an in-memory configured state.
-        let cfg = djinn_provider::github_app::AppConfig {
-            app_id: 1,
-            slug: "djinn".into(),
-            client_id: "Iv1.x".into(),
-            client_secret: "y".into(),
-            pem: "PEM".into(),
-            webhook_secret: "w".into(),
-            public_url: "http://127.0.0.1:8372".into(),
-        };
-        state.set_app_config(Some(Arc::new(cfg))).await;
-
-        let resp = create_app_form(
-            State(state.clone()),
-            Query(CreateAppQuery { organization: None }),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn manifest_callback_refuses_when_already_configured() {
-        use crate::test_helpers;
-        let state = test_helpers::test_app_state_in_memory().await;
-        let cfg = djinn_provider::github_app::AppConfig {
-            app_id: 1,
-            slug: "djinn".into(),
-            client_id: "Iv1.x".into(),
-            client_secret: "y".into(),
-            pem: "PEM".into(),
-            webhook_secret: "w".into(),
-            public_url: "http://127.0.0.1:8372".into(),
-        };
-        state.set_app_config(Some(Arc::new(cfg))).await;
-
-        let q = ManifestCallbackQuery {
-            code: Some("xyz".into()),
-            state: Some("abc".into()),
-        };
-        let resp = app_manifest_callback(State(state.clone()), Query(q), HeaderMap::new()).await;
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
     #[test]
@@ -1687,43 +1225,4 @@ mod tests {
         assert!(resp.0.org_login.is_none());
     }
 
-    /// Manifest-conversion payload with `owner.type == "User"` must be
-    /// rejected. We short-circuit the HTTP call out to GitHub by testing the
-    /// decision directly on the parsed struct — the handler shape makes a
-    /// full integration test impractical without a mock server.
-    #[test]
-    fn manifest_conversion_rejects_user_owner() {
-        let raw = r#"{
-            "id": 1,
-            "slug": "djinn",
-            "client_id": "Iv1.x",
-            "client_secret": "y",
-            "pem": "PEM",
-            "owner": { "id": 99, "login": "alice", "type": "User" }
-        }"#;
-        let parsed: ManifestConversion = serde_json::from_str(raw).unwrap();
-        let owner = parsed.owner.expect("owner present");
-        assert_eq!(owner.account_type, "User");
-        assert!(
-            !owner.account_type.eq_ignore_ascii_case("Organization"),
-            "User owner must be rejected — see Phase 2 invariant"
-        );
-    }
-
-    #[test]
-    fn manifest_conversion_accepts_org_owner() {
-        let raw = r#"{
-            "id": 1,
-            "slug": "djinn",
-            "client_id": "Iv1.x",
-            "client_secret": "y",
-            "pem": "PEM",
-            "owner": { "id": 7, "login": "acme-corp", "type": "Organization" }
-        }"#;
-        let parsed: ManifestConversion = serde_json::from_str(raw).unwrap();
-        let owner = parsed.owner.expect("owner present");
-        assert_eq!(owner.login, "acme-corp");
-        assert_eq!(owner.id, 7);
-        assert!(owner.account_type.eq_ignore_ascii_case("Organization"));
-    }
 }
