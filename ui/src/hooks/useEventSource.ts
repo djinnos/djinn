@@ -20,6 +20,7 @@ import { projectStore, ALL_PROJECTS } from "@/stores/projectStore";
 import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
+import { useProviderGateStore } from "@/stores/providerGateStore";
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -189,6 +190,18 @@ export function useEventSource(projectId?: string | null) {
         // server emits `oauth.device_code` instead; the ChatGPT sign-in
         // card consumes it directly from the `provider_oauth_start`
         // response, so we no longer need a global popup handler.
+        // Credential writes (vault upsert + OAuth token persistence) fire
+        // `credential.updated`; re-check the provider gate so the onboarding
+        // screen unmounts as soon as a new provider becomes usable — e.g.
+        // right after the Codex device-code flow lands tokens in the DB.
+        const refreshGate = () => {
+          if (!isActive) return;
+          void useProviderGateStore.getState().refresh();
+        };
+        es.addEventListener("credential.updated", refreshGate);
+        es.addEventListener("credential.created", refreshGate);
+        es.addEventListener("credential.deleted", refreshGate);
+
         es.addEventListener("oauth.open_browser", (event) => {
           if (!isActive) return;
           try {
