@@ -1,7 +1,7 @@
 /// Bridge traits that decouple djinn-mcp from the server binary.
 ///
 /// The server implements each trait for its concrete handle types
-/// (CoordinatorHandle, SlotPoolHandle, LspManager, SyncManager, AppState).
+/// (CoordinatorHandle, SlotPoolHandle, LspManager, AppState).
 /// McpState holds Arc<dyn Trait> so the MCP layer never imports server types.
 use std::collections::HashMap;
 use std::path::Path;
@@ -64,28 +64,6 @@ pub struct LspWarning {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ChannelStatus {
-    pub name: String,
-    pub branch: String,
-    pub enabled: bool,
-    /// Sync-enabled project paths.
-    pub project_paths: Vec<String>,
-    pub last_synced_at: Option<String>,
-    pub last_error: Option<String>,
-    pub failure_count: u32,
-    pub backoff_secs: u64,
-    pub needs_attention: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SyncResult {
-    pub channel: String,
-    pub ok: bool,
-    pub count: Option<usize>,
-    pub error: Option<String>,
-}
-
 // ── Coordinator ─────────────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -117,18 +95,6 @@ pub trait SlotPoolOps: Send + Sync {
 #[async_trait]
 pub trait LspOps: Send + Sync {
     async fn warnings(&self) -> Vec<LspWarning>;
-}
-
-// ── Sync ────────────────────────────────────────────────────────────────────────
-
-#[async_trait]
-pub trait SyncOps: Send + Sync {
-    async fn enable_project(&self, project_id: &str) -> Result<(), String>;
-    async fn disable_project(&self, project_id: &str) -> Result<(), String>;
-    async fn delete_remote_branch(&self, channel: &str, project_path: &Path) -> Result<(), String>;
-    async fn export_all(&self, user_id: Option<&str>) -> Vec<SyncResult>;
-    async fn import_all(&self) -> Vec<SyncResult>;
-    async fn status(&self) -> Vec<ChannelStatus>;
 }
 
 // ── Runtime ─────────────────────────────────────────────────────────────────────

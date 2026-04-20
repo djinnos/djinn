@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
 use crate::semantic_memory::{EmbeddingService, default_embedding_cache_dir};
-use crate::sync::SyncManager;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
@@ -101,18 +100,10 @@ struct Inner {
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
     pub role_registry: Arc<RoleRegistry>,
-    /// djinn/ namespace git sync manager.
-    pub sync: SyncManager,
     /// Long-running coordinator actor handle.
     pub coordinator: Arc<tokio::sync::Mutex<Option<CoordinatorHandle>>>,
     /// Long-running slot pool actor handle.
     pub pool: Mutex<Option<SlotPoolHandle>>,
-    /// User identity for sync (JSONL filename). Single source of truth.
-    ///
-    /// Resolved once at startup from `git config user.email`. When djinn
-    /// authentication is added, update `resolve_sync_user_id()` to return
-    /// the authenticated email instead — everything else follows.
-    pub sync_user_id: String,
     /// Task IDs with an in-flight verification pipeline (background tokio task).
     /// Used by the coordinator to distinguish genuinely stuck `verifying` tasks
     /// (orphaned after server restart) from ones with a live pipeline.
@@ -190,9 +181,6 @@ impl AppState {
         cancel: CancellationToken,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let sync = SyncManager::new(db.clone(), events.clone());
-        let sync_user_id = resolve_sync_user_id();
-        tracing::info!(sync_user_id = %sync_user_id, "resolved sync user identity");
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -203,10 +191,8 @@ impl AppState {
                 catalog: CatalogService::new(),
                 health_tracker: HealthTracker::new(),
                 role_registry: Arc::new(RoleRegistry::new()),
-                sync,
                 coordinator: Arc::new(tokio::sync::Mutex::new(None)),
                 pool: Mutex::new(None),
-                sync_user_id,
                 verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 file_time: Arc::new(FileTime::new()),
                 lsp: LspManager::new(),
@@ -578,10 +564,6 @@ impl AppState {
         crate::events::event_bus_for(&self.inner.events)
     }
 
-    pub fn sync_user_id(&self) -> &str {
-        &self.inner.sync_user_id
-    }
-
     /// Get or spawn a `GitActorHandle` for the given project path (GIT-04).
     pub async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
         let mut map = self.inner.git_actors.lock().await;
@@ -594,10 +576,6 @@ impl AppState {
 
     pub fn health_tracker(&self) -> &HealthTracker {
         &self.inner.health_tracker
-    }
-
-    pub fn sync_manager(&self) -> &SyncManager {
-        &self.inner.sync
     }
 
     pub fn embedding_service(&self) -> &EmbeddingService {
@@ -820,11 +798,6 @@ impl AppState {
             // Re-inject after refresh so built-in providers survive the replace.
             catalog.inject_builtin_providers(BUILTIN_PROVIDERS);
         });
-
-        // Restore sync state from DB and start background auto-export task.
-        let sync = self.sync_manager().clone();
-        sync.restore().await;
-        sync.spawn_background_task(self.cancel().clone(), self.sync_user_id().to_string());
 
         self.restore_model_health_state().await;
 
@@ -1304,52 +1277,6 @@ impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer
             }
         }
     }
-}
-
-/// Resolve the sync user identity.
-///
-/// **Single point of update:** When djinn authentication is added, change this
-/// function to return the authenticated email. Every caller (JSONL filename,
-/// commit author, event metadata) flows through `AppState::sync_user_id()`
-/// which reads the value set here at startup.
-///
-/// Current strategy: `git config user.email` → sanitized email.
-/// Fallback chain: git email → hostname → "local".
-fn resolve_sync_user_id() -> String {
-    // Try git config user.email first.
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["config", "user.email"])
-        .output()
-        && output.status.success()
-    {
-        let email = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !email.is_empty() {
-            return sanitize_sync_id(&email);
-        }
-    }
-
-    // Fallback: machine hostname.
-    if let Ok(output) = std::process::Command::new("hostname").output()
-        && output.status.success()
-    {
-        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !name.is_empty() {
-            return sanitize_sync_id(&name);
-        }
-    }
-
-    "local".to_string()
-}
-
-/// Sanitize a string for use as a JSONL filename stem.
-/// Replaces characters that are problematic in filenames with underscores.
-fn sanitize_sync_id(raw: &str) -> String {
-    raw.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | '@' => c,
-            _ => '_',
-        })
-        .collect()
 }
 
 #[cfg(test)]

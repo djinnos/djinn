@@ -14,7 +14,6 @@ pub mod proposal_tools;
 pub mod provider_tools;
 pub mod session_tools;
 pub mod settings_tools;
-pub mod sync_tools;
 pub mod system_tools;
 pub mod task_tools;
 pub mod validation;

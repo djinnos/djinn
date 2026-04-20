@@ -13,7 +13,7 @@ mod tests {
     use crate::state::McpState;
     use crate::state::stubs::{
         StubCoordinatorOps, StubGitOps, StubLspOps, StubRepoGraphOps, StubRuntimeOps,
-        StubSlotPoolOps, StubSyncOps,
+        StubSlotPoolOps,
     };
     use crate::tools::memory_tools::ops;
     use crate::tools::memory_tools::{
@@ -81,13 +81,11 @@ mod tests {
             event_bus_for(tx),
             djinn_provider::catalog::CatalogService::new(),
             djinn_provider::catalog::HealthTracker::new(),
-            "test-user".into(),
             Some(Arc::new(StubCoordinatorOps)),
             Some(Arc::new(StubSlotPoolOps)),
             None,
             None,
             Arc::new(StubLspOps),
-            Arc::new(StubSyncOps),
             Arc::new(StubRuntimeOps),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),
@@ -570,13 +568,11 @@ mod tests {
             event_bus_for(&tx),
             djinn_provider::catalog::CatalogService::new(),
             djinn_provider::catalog::HealthTracker::new(),
-            "test-user".into(),
             Some(Arc::new(StubCoordinatorOps)),
             Some(Arc::new(StubSlotPoolOps)),
             None,
             None,
             Arc::new(StubLspOps),
-            Arc::new(StubSyncOps),
             Arc::new(SemanticRuntimeOps {
                 embedding: embedding.clone(),
             }),
@@ -639,13 +635,11 @@ mod tests {
             setup.server.state.event_bus(),
             djinn_provider::catalog::CatalogService::new(),
             djinn_provider::catalog::HealthTracker::new(),
-            "test-user".into(),
             Some(Arc::new(StubCoordinatorOps)),
             Some(Arc::new(StubSlotPoolOps)),
             None,
             None,
             Arc::new(StubLspOps),
-            Arc::new(StubSyncOps),
             Arc::new(FailingSemanticRuntimeOps),
             Arc::new(StubGitOps),
             Arc::new(StubRepoGraphOps),

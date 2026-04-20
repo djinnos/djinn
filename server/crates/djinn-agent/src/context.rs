@@ -212,35 +212,6 @@ impl AgentContext {
     }
 }
 
-struct AgentSyncOps;
-
-#[async_trait]
-impl bridge::SyncOps for AgentSyncOps {
-    async fn enable_project(&self, _: &str) -> Result<(), String> {
-        Err("sync not available in djinn-agent task-mutation bridge".into())
-    }
-
-    async fn disable_project(&self, _: &str) -> Result<(), String> {
-        Err("sync not available in djinn-agent task-mutation bridge".into())
-    }
-
-    async fn delete_remote_branch(&self, _: &str, _: &Path) -> Result<(), String> {
-        Err("sync not available in djinn-agent task-mutation bridge".into())
-    }
-
-    async fn export_all(&self, _: Option<&str>) -> Vec<bridge::SyncResult> {
-        vec![]
-    }
-
-    async fn import_all(&self) -> Vec<bridge::SyncResult> {
-        vec![]
-    }
-
-    async fn status(&self) -> Vec<bridge::ChannelStatus> {
-        vec![]
-    }
-}
-
 struct AgentRuntimeOps {
     db: Database,
     event_bus: EventBus,
@@ -406,13 +377,11 @@ impl AgentContext {
             self.event_bus.clone(),
             self.catalog.clone(),
             self.health_tracker.clone(),
-            "agent".to_owned(),
             None,
             None,
             None,
             None,
             Arc::new(self.lsp.clone()),
-            Arc::new(AgentSyncOps),
             Arc::new(AgentRuntimeOps {
                 db: self.db.clone(),
                 event_bus: self.event_bus.clone(),
