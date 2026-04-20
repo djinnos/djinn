@@ -97,23 +97,44 @@ pub(crate) async fn fetch_one(
     mirror.fetch_mirror(project_id, &origin_url).await?;
 
     // Stack detection — best-effort, must never break the mirror fetch.
-    // Image-controller + graph-warmer triggers land in PR 5 and PR 8.
+    // Graph-warmer trigger lands in PR 8.
     let mirror_path = mirror.mirror_path(project_id);
-    match tokio::task::spawn_blocking(move || djinn_stack::detect_blocking(&mirror_path)).await {
-        Ok(Ok(stack)) => match serde_json::to_string(&stack) {
-            Ok(json) => {
-                let repo_db = ProjectRepository::new(state.db().clone(), state.event_bus());
-                if let Err(err) = repo_db.set_stack(project_id, &json).await {
-                    tracing::warn!(project_id, error = %err, "persist detected stack failed");
+    let detected_stack =
+        match tokio::task::spawn_blocking(move || djinn_stack::detect_blocking(&mirror_path)).await
+        {
+            Ok(Ok(stack)) => {
+                match serde_json::to_string(&stack) {
+                    Ok(json) => {
+                        let repo_db =
+                            ProjectRepository::new(state.db().clone(), state.event_bus());
+                        if let Err(err) = repo_db.set_stack(project_id, &json).await {
+                            tracing::warn!(project_id, error = %err, "persist detected stack failed");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(project_id, error = %err, "serialize detected stack failed")
+                    }
                 }
+                Some(stack)
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(project_id, error = %err, "stack detection failed");
+                None
             }
             Err(err) => {
-                tracing::warn!(project_id, error = %err, "serialize detected stack failed")
+                tracing::warn!(project_id, error = %err, "stack detection panicked");
+                None
             }
-        },
-        Ok(Err(err)) => tracing::warn!(project_id, error = %err, "stack detection failed"),
-        Err(err) => tracing::warn!(project_id, error = %err, "stack detection panicked"),
+        };
+
+    // Phase 3 PR 5: image-controller enqueue — fire-and-forget, log on error.
+    // Absent controller (local dev without a kube::Client) is expected.
+    if let (Some(stack), Some(controller)) = (detected_stack, state.image_controller().await) {
+        if let Err(err) = controller.enqueue(project_id, &stack).await {
+            tracing::warn!(project_id, error = %err, "image-controller enqueue failed");
+        }
     }
+
     Ok(())
 }
 

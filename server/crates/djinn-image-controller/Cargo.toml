@@ -1,5 +1,5 @@
 [package]
-name = "djinn-k8s"
+name = "djinn-image-controller"
 version = "0.1.0"
 edition = "2024"
 
@@ -9,23 +9,21 @@ doctest = false
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
-djinn-runtime = { path = "../djinn-runtime" }
-djinn-supervisor = { path = "../djinn-supervisor" }
+djinn-stack = { path = "../djinn-stack" }
 anyhow = "1"
 async-trait = "0.1"
-bincode = "1.3"
-kube = { version = "0.95", features = ["runtime", "derive"] }
+git2 = "0.20"
+hex = "0.4"
 k8s-openapi = { version = "0.23", features = ["v1_30"] }
+kube = { version = "0.95", features = ["runtime", "derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync", "macros", "time", "net", "io-util"] }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
 tracing = "0.1"
-uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
-async-trait = "0.1"
-djinn-workspace = { path = "../djinn-workspace" }
+tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
-tokio-util = "0.7"

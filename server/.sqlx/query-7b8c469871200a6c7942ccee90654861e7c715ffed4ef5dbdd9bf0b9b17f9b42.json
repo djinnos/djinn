@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT stack FROM projects WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stack",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7b8c469871200a6c7942ccee90654861e7c715ffed4ef5dbdd9bf0b9b17f9b42"
+}

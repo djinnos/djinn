@@ -1163,6 +1163,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-image-controller"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "djinn-core",
+ "djinn-db",
+ "djinn-stack",
+ "git2",
+ "hex",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-k8s"
 version = "0.1.0"
 dependencies = [
@@ -1170,6 +1193,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "djinn-core",
+ "djinn-db",
  "djinn-runtime",
  "djinn-supervisor",
  "djinn-workspace",
@@ -1287,6 +1311,7 @@ dependencies = [
  "djinn-daemon",
  "djinn-db",
  "djinn-git",
+ "djinn-image-controller",
  "djinn-mcp",
  "djinn-provider",
  "djinn-runtime",
@@ -6748,11 +6773,13 @@ dependencies = [
  "either",
  "errno",
  "form_urlencoded",
+ "futures",
  "futures-channel",
  "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-util",
+ "getrandom 0.3.4",
  "getrandom 0.4.2",
  "git2",
  "hashbrown 0.16.1",

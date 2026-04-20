@@ -20,6 +20,7 @@ use djinn_db::{
     QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
+use djinn_image_controller::{ImageController, ImageControllerConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_workspace::MirrorManager;
@@ -157,6 +158,14 @@ struct Inner {
     /// race against listener boot order — the registry is cheap to hold
     /// around when the `DJINN_RUNTIME=test` path doesn't exercise it.
     pub rpc_registry: Arc<ConnectionRegistry>,
+    /// Phase 3 PR 5 — per-project devcontainer image controller.
+    ///
+    /// Populated during [`AppState::initialize`] when a `kube::Client` can
+    /// be constructed from the ambient environment (in-cluster SA token or
+    /// local `$KUBECONFIG`). Remains `None` on dev boxes without a cluster
+    /// — the mirror-fetcher reads this via [`AppState::image_controller`]
+    /// and silently skips the enqueue step when absent.
+    pub image_controller: tokio::sync::RwLock<Option<Arc<ImageController>>>,
 }
 
 impl AppState {
@@ -206,6 +215,7 @@ impl AppState {
                 mirror: Arc::new(MirrorManager::new(mirrors_root())),
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
+                image_controller: tokio::sync::RwLock::new(None),
             }),
         }
     }
@@ -223,6 +233,53 @@ impl AppState {
     /// runtime awaiting their handshake share a single bridge.
     pub fn rpc_registry(&self) -> Arc<ConnectionRegistry> {
         self.inner.rpc_registry.clone()
+    }
+
+    /// Per-project devcontainer image controller (Phase 3 PR 5).
+    ///
+    /// `None` on dev boxes without a reachable cluster. The mirror-fetcher
+    /// threads this through — an absent controller means the enqueue hook
+    /// is silently skipped, which is the correct local-dev behaviour.
+    pub async fn image_controller(&self) -> Option<Arc<ImageController>> {
+        self.inner.image_controller.read().await.clone()
+    }
+
+    /// Construct the image controller once a `kube::Client` is available.
+    ///
+    /// Called from [`Self::initialize`]. Idempotent — a second call that
+    /// finds an existing controller is a no-op.
+    async fn initialize_image_controller(&self) {
+        {
+            let existing = self.inner.image_controller.read().await;
+            if existing.is_some() {
+                return;
+            }
+        }
+
+        if !matches!(runtime_kind(), RuntimeKind::Kubernetes) {
+            tracing::debug!(
+                "image_controller: DJINN_RUNTIME is not kubernetes; skipping controller construction"
+            );
+            return;
+        }
+
+        let client = match kube::Client::try_default().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::info!(
+                    error = %e,
+                    "image_controller: no kube::Client available; controller disabled \
+                     (dev/local mode — per-project builds skipped)"
+                );
+                return;
+            }
+        };
+
+        let config = ImageControllerConfig::from_env();
+        let controller = Arc::new(ImageController::new(client, config, self.db().clone()));
+        let mut guard = self.inner.image_controller.write().await;
+        *guard = Some(controller);
+        tracing::info!("image_controller: initialized");
     }
 
     /// Read-only snapshot of the active GitHub App configuration, if any.
@@ -842,6 +899,12 @@ impl AppState {
         // path; the `DJINN_RUNTIME=test` path exercises the supervisor
         // in-process through `TestRuntime` and does not need a TCP listener.
         self.start_rpc_listener_if_needed().await;
+
+        // Phase 3 PR 5: per-project devcontainer image controller.  Best-
+        // effort: absent on dev boxes without a kube::Client; the mirror
+        // fetcher silently skips the enqueue step when `image_controller()`
+        // returns `None`.
+        self.initialize_image_controller().await;
     }
 
     /// Spawn `djinn_supervisor::serve_on_tcp` on the configured RPC address

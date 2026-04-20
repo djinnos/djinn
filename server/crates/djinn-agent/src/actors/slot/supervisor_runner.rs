@@ -161,7 +161,13 @@ pub(crate) async fn run_supervisor_dispatch(
                     );
                 }
             };
-            match djinn_k8s::KubernetesRuntime::new(config, registry).await {
+            match djinn_k8s::KubernetesRuntime::with_db(
+                config,
+                registry,
+                app_state.db.clone(),
+            )
+            .await
+            {
                 Ok(rt) => Arc::new(rt),
                 Err(e) => {
                     anyhow::bail!(

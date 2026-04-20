@@ -48,6 +48,17 @@ pub enum RuntimeError {
     /// lifecycle-stage failures above.
     #[error("runtime internal: {0}")]
     Internal(String),
+    /// The project targeted by `prepare` has no per-project devcontainer
+    /// image ready yet — the Kubernetes backend cannot dispatch a task
+    /// until the image controller has built and pushed one. The string
+    /// is the project id so surrounding logs can correlate.
+    ///
+    /// Surfaced by [`SessionRuntime::prepare`] on the Kubernetes path.
+    /// The UI devcontainer banner (Phase 3 PR 6) is the user-facing
+    /// recovery path; the runtime just fails fast so the slot actor
+    /// doesn't leak a half-prepared Job.
+    #[error("devcontainer missing for project {0}")]
+    DevcontainerMissing(String),
 }
 
 /// Object-safe lifecycle interface every runtime backend implements.

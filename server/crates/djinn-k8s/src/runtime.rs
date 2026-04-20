@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
+use djinn_db::{Database, ProjectImageStatus, ProjectRepository};
 use djinn_runtime::wire::ControlMsg;
 use djinn_runtime::{
     BiStream, RoleKind, RunHandle, RuntimeError, SessionRuntime, StreamEvent, StreamFrame,
@@ -96,6 +97,12 @@ pub struct KubernetesRuntime {
     client: kube::Client,
     config: KubernetesConfig,
     registry: Arc<ConnectionRegistry>,
+    /// Database handle used by [`Self::prepare`] to look up the per-project
+    /// devcontainer image tag before building the task-run Job manifest
+    /// (Phase 3 PR 5). `None` in tests that construct the runtime via the
+    /// legacy `new`/`from_client` surface — those callers never reach the
+    /// `prepare` code path (they exercise pure-builder unit tests).
+    db: Option<Database>,
     /// Per-task-run [`PendingConnection`] handles reserved during `prepare`
     /// and drained by `attach_stdio` / `teardown`.  Keyed by
     /// `task_run_id`.  Entries stay present until whichever method lands
@@ -112,9 +119,10 @@ impl KubernetesRuntime {
     /// ambient environment (in-cluster ServiceAccount when running in a Pod,
     /// `$KUBECONFIG` otherwise).
     ///
-    /// Returns the underlying `kube::Error` on discovery failure rather than
-    /// panicking — callers on a dev box without a cluster can surface the
-    /// error and fall back to another runtime.
+    /// The returned runtime has no database handle bound; callers that need
+    /// to dispatch task-run Jobs (the production path) must prefer
+    /// [`Self::with_db`] so `prepare` can resolve the per-project
+    /// devcontainer image tag.
     pub async fn new(
         config: KubernetesConfig,
         registry: Arc<ConnectionRegistry>,
@@ -124,6 +132,24 @@ impl KubernetesRuntime {
             client,
             config,
             registry,
+            db: None,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Construct a new runtime with a bound database handle (production
+    /// path — `prepare` uses the DB to resolve `projects.image_tag`).
+    pub async fn with_db(
+        config: KubernetesConfig,
+        registry: Arc<ConnectionRegistry>,
+        db: Database,
+    ) -> Result<Self, kube::Error> {
+        let client = kube::Client::try_default().await?;
+        Ok(Self {
+            client,
+            config,
+            registry,
+            db: Some(db),
             pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -139,6 +165,24 @@ impl KubernetesRuntime {
             client,
             config,
             registry,
+            db: None,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Construct a runtime from an already-built client + DB (the supervisor
+    /// production path uses this so it can also share the DB pool).
+    pub fn from_client_with_db(
+        client: kube::Client,
+        config: KubernetesConfig,
+        registry: Arc<ConnectionRegistry>,
+        db: Database,
+    ) -> Self {
+        Self {
+            client,
+            config,
+            registry,
+            db: Some(db),
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -183,8 +227,38 @@ impl SessionRuntime for KubernetesRuntime {
         debug!(
             task_run_id = %task_run_id_str,
             namespace = %ns,
+            project_id = %spec.project_id,
             "kubernetes_runtime: preparing task-run resources"
         );
+
+        // Phase 3 PR 5: resolve the per-project devcontainer image BEFORE
+        // doing any cluster work.  The dispatch path is hard-failed if the
+        // image controller hasn't produced a ready build — no silent
+        // fallback to `config.image`.
+        let db = self.db.as_ref().ok_or_else(|| {
+            RuntimeError::Prepare(
+                "KubernetesRuntime constructed without a database handle; \
+                 `with_db` / `from_client_with_db` is required to dispatch \
+                 task-run Jobs".into(),
+            )
+        })?;
+        let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let image_row = repo
+            .get_project_image(&spec.project_id)
+            .await
+            .map_err(|e| {
+                RuntimeError::Prepare(format!(
+                    "get_project_image({}): {e}",
+                    spec.project_id
+                ))
+            })?;
+        let project_image_tag = match image_row {
+            Some(row) if row.status == ProjectImageStatus::READY => match row.tag {
+                Some(tag) if !tag.is_empty() => tag,
+                _ => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
+            },
+            _ => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
+        };
 
         // 0. Reserve the registry slot BEFORE creating the Job.  This closes
         //    the race where the Pod starts up and completes the AuthHello
@@ -220,7 +294,12 @@ impl SessionRuntime for KubernetesRuntime {
         }
 
         // 2. Build + create the Job manifest.
-        let job = build_task_run_job(&self.config, &task_run_id, &resource_name);
+        let job = build_task_run_job(
+            &self.config,
+            &task_run_id,
+            &resource_name,
+            &project_image_tag,
+        );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {
             Ok(j) => j,
@@ -822,7 +901,12 @@ mod tests {
 
         let secret = crate::secret::build_task_run_secret(&cfg.namespace, &task_run_id, &spec)
             .expect("build per-task-run Secret");
-        let job = crate::job::build_task_run_job(&cfg, &task_run_id, &resource_name);
+        let job = crate::job::build_task_run_job(
+            &cfg,
+            &task_run_id,
+            &resource_name,
+            "reg.test:5000/djinn-project-proj-xyz:deadbeefcafe",
+        );
 
         // The Secret and Job share the same resource name.
         assert_eq!(

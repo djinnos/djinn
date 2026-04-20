@@ -600,6 +600,121 @@ impl ProjectRepository {
                 .await?,
         )
     }
+
+    /// Fetch the persisted devcontainer-image state for a project (Phase 3 PR 5).
+    ///
+    /// Returns `Ok(None)` when the project id is unknown. A project whose
+    /// `image_*` columns have never been written returns a
+    /// [`ProjectImage`] with `tag = None`, `hash = None`, `status = "none"`
+    /// (migration-8 default). Callers that need a typed [`ProjectImageStatus`]
+    /// can use [`ProjectImageStatus::from_str`].
+    pub async fn get_project_image(&self, project_id: &str) -> Result<Option<ProjectImage>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query!(
+            "SELECT image_tag, image_hash, image_status, image_last_error
+               FROM projects WHERE id = ?",
+            project_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row.map(|r| ProjectImage {
+            tag: r.image_tag,
+            hash: r.image_hash,
+            status: r.image_status,
+            last_error: r.image_last_error,
+        }))
+    }
+
+    /// Write the full devcontainer-image state for a project.
+    ///
+    /// Used by `djinn_image_controller` immediately after computing a new
+    /// hash (flip `status` to `building`) and on Job completion (flip to
+    /// `ready` + fill `tag`) or failure (flip to `failed` + fill
+    /// `last_error`). Callers stringify [`ProjectImageStatus`] into the
+    /// `status` field.
+    pub async fn set_project_image(
+        &self,
+        project_id: &str,
+        image: &ProjectImage,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE projects
+                SET image_tag = ?,
+                    image_hash = ?,
+                    image_status = ?,
+                    image_last_error = ?
+              WHERE id = ?",
+            image.tag,
+            image.hash,
+            image.status,
+            image.last_error,
+            project_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Flip only the `image_status` column (e.g. transitioning a previously-
+    /// `ready` project into `building` while retaining the existing tag/hash
+    /// until the new Job lands).
+    pub async fn set_image_status(&self, project_id: &str, status: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE projects SET image_status = ? WHERE id = ?",
+            status,
+            project_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+}
+
+/// Per-project devcontainer-image record as persisted in migration 8.
+///
+/// All four columns round-trip as raw strings at the DB boundary so
+/// `djinn-db` doesn't have to know the status vocabulary. The
+/// `djinn-image-controller` crate owns the typed [`ProjectImageStatus`]
+/// vocabulary and converts on the way in/out.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectImage {
+    pub tag: Option<String>,
+    pub hash: Option<String>,
+    pub status: String,
+    pub last_error: Option<String>,
+}
+
+impl ProjectImage {
+    /// Empty record matching migration 8's column defaults — used by tests
+    /// + the controller's first-ever write path.
+    pub fn none() -> Self {
+        Self {
+            tag: None,
+            hash: None,
+            status: ProjectImageStatus::NONE.to_string(),
+            last_error: None,
+        }
+    }
+}
+
+/// Canonical vocabulary for the `projects.image_status` column.
+///
+/// Stored as a raw string in the DB (migration-8 column is VARCHAR(32));
+/// this newtype wrapper + `const` namespace lets controllers spell the
+/// variants without duplicating literals.
+pub struct ProjectImageStatus;
+
+impl ProjectImageStatus {
+    /// No build has been enqueued for this project.
+    pub const NONE: &'static str = "none";
+    /// A build Job has been submitted and is waiting or running.
+    pub const BUILDING: &'static str = "building";
+    /// A build succeeded and `image_tag` / `image_hash` are populated.
+    pub const READY: &'static str = "ready";
+    /// The most recent build failed; `image_last_error` carries detail.
+    pub const FAILED: &'static str = "failed";
 }
 
 #[cfg(test)]

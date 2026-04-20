@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE projects\n                SET image_tag = ?,\n                    image_hash = ?,\n                    image_status = ?,\n                    image_last_error = ?\n              WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "d6a7d8ed20b26d0b03e023837dbfc696d49a75ad901d7eab5412b72d05d1bbda"
+}

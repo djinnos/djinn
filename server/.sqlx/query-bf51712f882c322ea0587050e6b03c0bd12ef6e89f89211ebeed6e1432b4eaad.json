@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE projects SET stack = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bf51712f882c322ea0587050e6b03c0bd12ef6e89f89211ebeed6e1432b4eaad"
+}

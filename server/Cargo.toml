@@ -25,6 +25,7 @@ djinn-daemon = { path = "crates/djinn-daemon" }
 djinn-core = { path = "crates/djinn-core", features = ["sqlx"] }
 djinn-db = { path = "crates/djinn-db" }
 djinn-git = { path = "crates/djinn-git" }
+djinn-image-controller = { path = "crates/djinn-image-controller" }
 djinn-mcp = { path = "crates/djinn-mcp" }
 djinn-provider = { path = "crates/djinn-provider" }
 djinn-runtime = { path = "crates/djinn-runtime" }

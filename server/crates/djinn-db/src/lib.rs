@@ -60,7 +60,10 @@ pub use repositories::{
         virtual_note_path_for_permalink,
     },
     org_config::{NewOrgConfig, OrgConfig, OrgConfigRepository},
-    project::{ProjectConfig, ProjectRepository, VerificationRule, validate_verification_rules},
+    project::{
+        ProjectConfig, ProjectImage, ProjectImageStatus, ProjectRepository, VerificationRule,
+        validate_verification_rules,
+    },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_map_cache::{CachedRepoMap, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository},
     session::{CreateSessionParams, SessionRepository},

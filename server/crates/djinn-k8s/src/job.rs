@@ -74,10 +74,18 @@ pub const VOLUME_WORKSPACE: &str = "workspace";
 /// [`crate::secret::build_taskrun_secret`] whose `spec.bin` key is mounted at
 /// [`SPEC_MOUNT_FILE`]. The caller is responsible for having created that
 /// Secret before the Job is submitted to the cluster.
+///
+/// `project_image_tag` is the per-project devcontainer image tag resolved
+/// from `projects.image_tag` (Phase 3 PR 5). The caller MUST verify the
+/// project's `image_status == ready` before reaching this builder —
+/// there is no fallback to `config.image`; the per-task-run Pod always
+/// runs the project-specific image. `config.image` is retained only for
+/// legacy call sites we no longer expect to reach at runtime.
 pub fn build_task_run_job(
     config: &KubernetesConfig,
     task_run_id: &Uuid,
     secret_name: &str,
+    project_image_tag: &str,
 ) -> Job {
     let task_run_id_str = task_run_id.to_string();
     let labels = job_labels(&task_run_id_str);
@@ -85,7 +93,7 @@ pub fn build_task_run_job(
 
     let container = Container {
         name: "worker".to_string(),
-        image: Some(config.image.clone()),
+        image: Some(project_image_tag.to_string()),
         image_pull_policy: Some(config.image_pull_policy.clone()),
         env: Some(vec![
             env_var("DJINN_SERVER_ADDR", &config.server_addr),
@@ -244,8 +252,9 @@ mod tests {
         let cfg = KubernetesConfig::for_testing();
         let task_run_id = Uuid::now_v7();
         let secret_name = "djinn-taskrun-test";
+        let project_image = "registry.example:5000/djinn-project-p:abc123def456";
 
-        let job = build_task_run_job(&cfg, &task_run_id, secret_name);
+        let job = build_task_run_job(&cfg, &task_run_id, secret_name, project_image);
 
         // Metadata.
         let meta = &job.metadata;
@@ -295,7 +304,7 @@ mod tests {
         assert_eq!(pod.containers.len(), 1);
         let container = &pod.containers[0];
         assert_eq!(container.name, "worker");
-        assert_eq!(container.image.as_deref(), Some("djinn-agent-runtime:dev"));
+        assert_eq!(container.image.as_deref(), Some(project_image));
 
         // Env vars — require the two load-bearing ones, and confirm the
         // task-run id made it through.
