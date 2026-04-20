@@ -135,6 +135,8 @@ kubectl create secret generic djinn-github-app --namespace djinn \
   --from-literal=app-id='<APP_ID>' \
   --from-literal=client-id='<CLIENT_ID>' \
   --from-literal=client-secret='<CLIENT_SECRET>' \
+  --from-literal=org-login='<ORG_LOGIN>' \
+  --from-literal=installation-id='<INSTALLATION_ID>' \
   --from-file=private-key.pem=/path/to/your-app.private-key.pem
 
 kubectl rollout restart -n djinn deploy/djinn-server
@@ -142,6 +144,16 @@ kubectl rollout restart -n djinn deploy/djinn-server
 
 The rollout restart is required so the running Pod re-reads the Secret
 on next start.
+
+`org-login` is the GitHub org (or user) the App is installed on — the
+same name that appears in `https://github.com/<ORG_LOGIN>`. The
+`installation-id` is the numeric id from the install URL: browse to
+`https://github.com/organizations/<ORG_LOGIN>/settings/installations`
+(or `https://github.com/settings/installations` for personal
+accounts), click "Configure" on the Djinn App, and read the trailing
+number off the URL `https://github.com/.../installations/<INSTALLATION_ID>`.
+An optional `org-id` (numeric org id) can be added too; the server
+fetches it from GitHub on demand when omitted.
 
 > **If you must pre-apply the secret before `helm install`** (e.g. CI
 > pipeline ordering), the chart will otherwise refuse with `Secret

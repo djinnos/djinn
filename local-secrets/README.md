@@ -19,8 +19,19 @@ kubectl create secret generic djinn-github-app --namespace djinn \
   --from-literal=app-id='<APP_ID>' \
   --from-literal=client-id='<CLIENT_ID>' \
   --from-literal=client-secret='<CLIENT_SECRET>' \
+  --from-literal=org-login='<ORG_LOGIN>' \
+  --from-literal=installation-id='<INSTALLATION_ID>' \
   --from-file=private-key.pem=local-secrets/github-app.private-key.pem
 ```
+
+`org-login` and `installation-id` bind the deployment to a specific
+GitHub org + App installation (server reads them from
+`GITHUB_ORG_LOGIN` / `GITHUB_INSTALLATION_ID`). Get the
+`installation-id` by opening
+`https://github.com/organizations/<ORG_LOGIN>/settings/installations`
+(or `https://github.com/settings/installations` for personal
+accounts) → "Configure" on the Djinn App → numeric tail of the URL.
+An optional `--from-literal=org-id='<NUMERIC_ID>'` can be added too.
 
 ## Why a separate directory
 
