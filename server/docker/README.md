@@ -151,31 +151,6 @@ each org/account, and writes `org_config` when the operator clicks
 one. No further kubectl steps required for the common single-org
 bring-up.
 
-#### Optional — pre-bind for fully-automated CI deploys
-
-Skip the picker by adding the binding keys to the Secret too:
-
-```bash
-kubectl create secret generic djinn-github-app --namespace djinn \
-  --from-literal=app-id='<APP_ID>' \
-  --from-literal=client-id='<CLIENT_ID>' \
-  --from-literal=client-secret='<CLIENT_SECRET>' \
-  --from-literal=org-login='<ORG_LOGIN>' \
-  --from-literal=installation-id='<INSTALLATION_ID>' \
-  --from-file=private-key.pem=/path/to/your-app.private-key.pem
-```
-
-`org-login` is the GitHub org (or user) the App is installed on — the
-same name that appears in `https://github.com/<ORG_LOGIN>`. The
-`installation-id` is the numeric id from the install URL: browse to
-`https://github.com/organizations/<ORG_LOGIN>/settings/installations`
-(or `https://github.com/settings/installations` for personal
-accounts), click "Configure" on the Djinn App, and read the trailing
-number off the URL `https://github.com/.../installations/<INSTALLATION_ID>`.
-An optional `org-id` (numeric org id) can be added too; the server
-fetches it from GitHub on demand when omitted. When env binding is
-present the picker is skipped entirely (env wins over the DB row).
-
 > **If you must pre-apply the secret before `helm install`** (e.g. CI
 > pipeline ordering), the chart will otherwise refuse with `Secret
 > "djinn-github-app" … cannot be imported into the current release: …
@@ -274,18 +249,21 @@ Secret isn't mounted (or the env vars are missing); fixing that means
 re-applying the Secret and `kubectl rollout restart -n djinn
 deploy/djinn-server`, not clicking through the UI.
 
+The first screen after sign-in is an installation picker. Click the org
+or account you want this deployment bound to; the choice is persisted to
+Dolt.
+
 With the UI open and the App Secret in place, the first-run flow is:
 
 1. **Add an LLM provider credential** — Anthropic, OpenAI, or whichever
    provider your roles target. The credential goes into the encrypted
    `djinn-db` vault (using the auto-generated vault key from §3a).
-2. **Install the App on the target org/repo** — open the App's GitHub
-   page (`https://github.com/apps/<your-app-slug>`) and click *Install*.
-   GitHub posts the user back to the server's
-   `/auth/github/app-setup-callback` endpoint, which writes the
-   singleton `org_config` row binding this deployment to that org.
-   (The "Add project from GitHub" dialog also surfaces a deep link to the
-   App's install page when no installation is bound yet.)
+2. **Pick the installation** — the picker (`GET /api/github/installations`)
+   lists every org/account the App is installed on. Clicking a row writes
+   the `org_config` row that binds this deployment. Re-clicking a different
+   row overwrites the binding in place. If the App isn't installed anywhere
+   yet, install it from `https://github.com/apps/<your-app-slug>` and
+   reload the picker.
 3. **Add a project.** Point it at a GitHub repo you own. The "add project"
    flow clones the mirror onto the kind node's `/var/lib/djinn/mirrors/`
    hostPath via the controller — first clone takes 10–60 s depending on

@@ -113,13 +113,6 @@ secrets:
     privateKey: ""
     clientId: ""
     clientSecret: ""
-    # Org binding — populated via the same Secret as the App credentials.
-    # See `server/docker/README.md` §3a for the kubectl create command.
-    # Empty values are skipped so the server falls back to the legacy
-    # org_config DB row (back-compat for deployments mid-migration).
-    orgLogin: ""
-    installationId: ""
-    orgId: ""
   vaultKey:
     existingSecret: ""
     # Base64-encoded 32-byte AES key used by djinn-db's credential vault.
