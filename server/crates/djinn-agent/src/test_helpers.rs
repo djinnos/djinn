@@ -79,7 +79,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         active_tasks: crate::context::ActivityTracker::default(),
         task_ops_project_path_override: None,
         working_root: None,
-        canonical_graph_warmer: None,
+        graph_warmer: None,
         repo_graph_ops: None,
         mirror: None,
         rpc_registry: None,

@@ -23,6 +23,7 @@ pub mod handle;
 pub mod session_runtime;
 pub mod spec;
 pub mod stream;
+pub mod warmer;
 pub mod wire;
 
 #[cfg(any(test, feature = "test-runtime"))]
@@ -30,6 +31,7 @@ pub mod test_runtime;
 
 pub use handle::RunHandle;
 pub use session_runtime::{RuntimeError, SessionRuntime};
+pub use warmer::{GraphWarmerService, WarmerError};
 pub use spec::{
     RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
 };

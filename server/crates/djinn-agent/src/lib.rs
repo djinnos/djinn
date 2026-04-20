@@ -31,6 +31,7 @@ pub mod skills;
 pub mod direct_services;
 pub mod runtime_bridge;
 pub mod supervisor;
+pub mod warmer;
 pub(crate) mod supervisor_impl;
 pub(crate) mod truncate;
 

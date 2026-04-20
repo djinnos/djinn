@@ -4,12 +4,12 @@ use std::time::{Duration, Instant as StdInstant};
 
 use super::consolidation::ConsolidationRunner;
 use crate::actors::slot::SlotPoolHandle;
-use crate::context::CanonicalGraphWarmer;
 use crate::roles::RoleRegistry;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::Database;
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
+use djinn_runtime::GraphWarmerService;
 use djinn_workspace::MirrorManager;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -30,11 +30,11 @@ pub struct CoordinatorDeps {
     pub verification_tracker: VerificationTracker,
     pub lsp: crate::lsp::LspManager,
     /// Optional ADR-051 §3 canonical-graph warmer.  When `Some`, the
-    /// coordinator tick loop calls `maybe_refresh_if_stale` for every
-    /// dispatch-enabled project on a 10-minute cadence
-    /// (see `GRAPH_REFRESH_INTERVAL`).  Tests and off-server contexts leave
-    /// this `None`, which makes the proactive refresh tick branch a no-op.
-    pub canonical_graph_warmer: Option<Arc<dyn CanonicalGraphWarmer>>,
+    /// coordinator tick loop calls `trigger` for every dispatch-enabled
+    /// project on a 10-minute cadence (see `GRAPH_REFRESH_INTERVAL`).  Tests
+    /// and off-server contexts leave this `None`, which makes the proactive
+    /// refresh tick branch a no-op.
+    pub graph_warmer: Option<Arc<dyn GraphWarmerService>>,
     pub(super) consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
     /// Shared bare-mirror manager. Threaded into the synthesized `AgentContext`
     /// built inside `process_approved_tasks` so the direct-push merge fallback
@@ -66,7 +66,7 @@ impl CoordinatorDeps {
             role_registry,
             verification_tracker,
             lsp,
-            canonical_graph_warmer: None,
+            graph_warmer: None,
             consolidation_runner: None,
             mirror: None,
         }
@@ -75,8 +75,8 @@ impl CoordinatorDeps {
     /// Inject the production canonical-graph warmer, enabling the ADR-051 §3
     /// proactive staleness refresh tick in the coordinator loop.  Tests and
     /// off-server contexts that omit this leave the tick as a no-op.
-    pub fn with_canonical_graph_warmer(mut self, warmer: Arc<dyn CanonicalGraphWarmer>) -> Self {
-        self.canonical_graph_warmer = Some(warmer);
+    pub fn with_graph_warmer(mut self, warmer: Arc<dyn GraphWarmerService>) -> Self {
+        self.graph_warmer = Some(warmer);
         self
     }
 

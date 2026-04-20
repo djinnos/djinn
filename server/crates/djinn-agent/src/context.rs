@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
+use djinn_runtime::GraphWarmerService;
 use djinn_workspace::MirrorManager;
 use djinn_mcp::{
     McpState, bridge,
@@ -28,53 +29,6 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
 pub type ActivityTracker = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>;
-
-/// Cross-crate hook into the server's `ensure_canonical_graph` machinery so
-/// the agent lifecycle can warm the canonical-main graph cache before any
-/// role (worker, reviewer, planner, lead, architect) starts its session.
-///
-/// `djinn-agent` does not depend on the server crate, so the concrete
-/// implementation is wired in `server::AppState::agent_context()`.  Tests in
-/// this crate leave the warmer as `None`, which makes the warming call a
-/// no-op.
-#[async_trait]
-pub trait CanonicalGraphWarmer: Send + Sync {
-    /// Resolve `(project_id, project_root)` to the canonical graph cache,
-    /// building it if necessary.  Best-effort: callers must treat any error
-    /// as non-fatal and let the agent continue without a warm skeleton.
-    async fn warm(&self, project_id: &str, project_root: &Path) -> Result<(), String>;
-
-    /// ADR-051 §3 proactive staleness refresh entry point.
-    ///
-    /// Called from the coordinator tick loop on a 10-minute cadence so the
-    /// canonical-main graph cache stays current with `origin/main` even when
-    /// no agent is dispatched and no Pulse panel is open.
-    ///
-    /// Production semantics (see `AppStateCanonicalGraphWarmer`):
-    ///   * Cold cache → no-op.  The cold path is owned by the
-    ///     first-consumer-demand kicker
-    ///     (`mcp_bridge::maybe_kick_background_warm`); kicking from this
-    ///     path would thrash on every tick for projects nobody is reading.
-    ///   * Warm cache with `commits_since_pin == 0` → no-op.  The cache is
-    ///     already current for `origin/main`.
-    ///   * Warm cache with `commits_since_pin >= 1` → delegate to
-    ///     [`Self::warm`] (which is single-flight + detached, so this call
-    ///     returns immediately).
-    ///   * Errors at every step are logged and swallowed — the call is
-    ///     fire-and-forget and scheduling churn is not worth surfacing
-    ///     transient git/fetch failures.
-    ///
-    /// The default body simply delegates to [`Self::warm`] so existing test
-    /// stubs and fakes continue to work without an extra `impl` block.
-    /// Production overrides this with the staleness check.
-    async fn maybe_refresh_if_stale(
-        &self,
-        project_id: &str,
-        project_root: &Path,
-    ) -> Result<(), String> {
-        self.warm(project_id, project_root).await
-    }
-}
 
 /// Subset of application state required by agent lifecycle, coordinator, and
 /// slot code.  Cheaply cloneable — all fields are either `Clone` or wrapped in
@@ -104,12 +58,13 @@ pub struct AgentContext {
     /// reviewers, planners, and lead leave this `None` so their tools continue
     /// to resolve against their task worktree.
     pub working_root: Option<PathBuf>,
-    /// Optional hook into the server's `ensure_canonical_graph` machinery.
-    /// When `Some`, the slot lifecycle calls it before starting the agent
-    /// runtime so workers/reviewers/planners/lead receive a freshly rendered
-    /// canonical-main repo-map note via the standard note pipeline.  When
-    /// `None` (tests, off-server contexts) the warming call is skipped.
-    pub canonical_graph_warmer: Option<Arc<dyn CanonicalGraphWarmer>>,
+    /// Optional hook into the server's canonical-graph warming pipeline.
+    /// When `Some`, the architect lifecycle calls
+    /// [`GraphWarmerService::await_fresh`] before starting a session and the
+    /// coordinator tick loop calls [`GraphWarmerService::trigger`] on a
+    /// 10-minute cadence (see ADR-051 §3).  When `None` (tests, off-server
+    /// contexts) both paths are skipped.
+    pub graph_warmer: Option<Arc<dyn GraphWarmerService>>,
     /// Real `RepoGraphOps` implementation injected at the server boundary
     /// (typically `RepoGraphBridge` wrapping `AppState`).  When `Some`, the
     /// agent bridge routes `code_graph` tool calls through it — the same path

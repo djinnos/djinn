@@ -79,7 +79,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         active_tasks: Default::default(),
         task_ops_project_path_override: None,
         working_root: None,
-        canonical_graph_warmer: None,
+        graph_warmer: None,
         repo_graph_ops: None,
         mirror: None,
         rpc_registry: None,

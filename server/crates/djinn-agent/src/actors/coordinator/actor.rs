@@ -72,10 +72,10 @@ pub(super) struct CoordinatorActor {
     /// staleness refresh sweep (see `GRAPH_REFRESH_INTERVAL`).
     pub(super) last_graph_refresh: StdInstant,
     /// ADR-051 §3 — production canonical-graph warmer.  When `Some`, the
-    /// coordinator tick loop calls `maybe_refresh_if_stale` for every
-    /// dispatch-enabled project on a 10-minute cadence.  Tests leave this
-    /// `None`, which makes the proactive refresh tick branch a no-op.
-    pub(super) canonical_graph_warmer: Option<Arc<dyn crate::context::CanonicalGraphWarmer>>,
+    /// coordinator tick loop calls `trigger` for every dispatch-enabled
+    /// project on a 10-minute cadence.  Tests leave this `None`, which makes
+    /// the proactive refresh tick branch a no-op.
+    pub(super) graph_warmer: Option<Arc<dyn djinn_runtime::GraphWarmerService>>,
     /// Shared bare-mirror manager used by `process_approved_tasks` to build
     /// an `AgentContext` whose direct-push fallback can clone ephemeral
     /// workspaces. `None` in tests.
@@ -149,7 +149,7 @@ impl CoordinatorActor {
             role_registry,
             verification_tracker,
             lsp,
-            canonical_graph_warmer,
+            graph_warmer,
             consolidation_runner,
             mirror,
         } = deps;
@@ -183,7 +183,7 @@ impl CoordinatorActor {
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
             last_graph_refresh: StdInstant::now(),
-            canonical_graph_warmer,
+            graph_warmer,
             mirror,
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
@@ -309,7 +309,7 @@ impl CoordinatorActor {
                             active_tasks: crate::context::ActivityTracker::default(),
                             task_ops_project_path_override: None,
                             working_root: None,
-                            canonical_graph_warmer: None,
+                            graph_warmer: None,
                             repo_graph_ops: None,
                             mirror: self.mirror.clone(),
                             rpc_registry: None,
@@ -870,17 +870,16 @@ impl CoordinatorActor {
 
     /// ADR-051 §3 proactive canonical-graph staleness refresh.
     ///
-    /// Iterates every dispatch-enabled project and asks the injected
-    /// `CanonicalGraphWarmer` to refresh whose cache has fallen behind
-    /// `origin/main`.  The warmer is a no-op on cold caches and on warm
-    /// caches that are already current, so this method is cheap on a board
-    /// where nothing has changed.
+    /// Iterates every dispatch-enabled project and fires
+    /// [`djinn_runtime::GraphWarmerService::trigger`] — fire-and-forget.  The
+    /// warmer implementation owns the cache-freshness short-circuit and
+    /// single-flight semantics, so this tick is cheap on a board where
+    /// nothing has changed.
     ///
     /// Run from the coordinator tick loop on a 10-minute cadence
-    /// (`GRAPH_REFRESH_INTERVAL`).  Serial — the per-project warmer is
-    /// already single-flight + detached at the server boundary.
+    /// (`GRAPH_REFRESH_INTERVAL`).
     pub(super) async fn refresh_canonical_graphs_if_stale(&mut self) {
-        let Some(warmer) = self.canonical_graph_warmer.clone() else {
+        let Some(warmer) = self.graph_warmer.clone() else {
             tracing::debug!("CoordinatorActor: graph refresh tick — no warmer injected, skipping");
             return;
         };
@@ -906,17 +905,7 @@ impl CoordinatorActor {
                 continue;
             }
             considered += 1;
-            let project_root = std::path::PathBuf::from(&project.path);
-            if let Err(e) = warmer
-                .maybe_refresh_if_stale(&project.id, &project_root)
-                .await
-            {
-                tracing::warn!(
-                    project_id = %project.id,
-                    error = %e,
-                    "CoordinatorActor: graph refresh tick — maybe_refresh_if_stale reported error (swallowed)"
-                );
-            }
+            warmer.trigger(&project.id).await;
         }
         tracing::debug!(considered, "CoordinatorActor: graph refresh tick complete");
     }

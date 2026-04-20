@@ -128,11 +128,11 @@ struct Inner {
     /// Chunk C cleanup.
     pub chat_warmed_sessions: Arc<std::sync::Mutex<HashMap<(String, String), PathBuf>>>,
     /// Single-flight gate for background canonical-graph warm tasks spawned
-    /// by `AppStateCanonicalGraphWarmer::warm`.  Keyed by `project_id`:
-    /// membership means a detached warm task is already running for that
-    /// project and additional warm requests should be coalesced (return
-    /// immediately without spawning a duplicate task).  The entry is removed
-    /// by the spawned task in its completion branch.
+    /// by the in-process graph warmer (`build_in_process_graph_warmer`).
+    /// Keyed by `project_id`: membership means a detached warm task is
+    /// already running for that project and additional warm requests should
+    /// be coalesced (return immediately without spawning a duplicate task).
+    /// The entry is removed by the spawned task in its completion branch.
     pub canonical_warm_inflight: Arc<std::sync::Mutex<HashSet<String>>>,
     pub memory_mount: Mutex<Option<MountedMemoryFilesystem>>,
     /// Active GitHub App configuration (DB row → env fallback). Populated
@@ -649,9 +649,10 @@ impl AppState {
             active_tasks: self.inner.active_tasks.clone(),
             task_ops_project_path_override: None,
             working_root: None,
-            canonical_graph_warmer: Some(Arc::new(AppStateCanonicalGraphWarmer {
-                state: self.clone(),
-            })),
+            graph_warmer: Some(
+                Arc::new(build_in_process_graph_warmer(self.clone()))
+                    as Arc<dyn djinn_runtime::GraphWarmerService>,
+            ),
             repo_graph_ops: Some(Arc::new(crate::mcp_bridge::RepoGraphBridge::new(
                 self.clone(),
             ))),
@@ -719,10 +720,10 @@ impl AppState {
                 self.inner.verifying_tasks.clone(),
                 self.inner.lsp.clone(),
             )
-            .with_canonical_graph_warmer(Arc::new(AppStateCanonicalGraphWarmer {
-                state: self.clone(),
-            })
-                as Arc<dyn djinn_agent::context::CanonicalGraphWarmer>)
+            .with_graph_warmer(
+                Arc::new(build_in_process_graph_warmer(self.clone()))
+                    as Arc<dyn djinn_runtime::GraphWarmerService>,
+            )
             .with_mirror(self.inner.mirror.clone()),
         );
 
@@ -1064,17 +1065,10 @@ impl AppState {
     }
 }
 
-/// `CanonicalGraphWarmer` impl that bridges the agent lifecycle into
-/// `crate::mcp_bridge::ensure_canonical_graph`.  ADR-050 Chunk C cold-start
-/// fix: every dispatched task (any role) calls `warm` before its session
-/// starts, which builds (or fetches from cache) the canonical-main graph and
-/// persists the rendered skeleton as a `repo_map` note.  Workers then pick
-/// the note up via the existing note-loading machinery without needing
-/// per-worktree SCIP indexing.
-struct AppStateCanonicalGraphWarmer {
-    state: AppState,
-}
-
+/// Refresh probe used by the `CanonicalGraphRefreshPlanner`.  Unchanged from
+/// the pre-PR-7 shape — the planner stays in place to drive the decision
+/// tree for "cold / pinned-commit-unavailable / current / stale" before we
+/// hand off to the heavy warm pipeline.
 struct AppStateCanonicalGraphRefreshProbe;
 
 #[async_trait::async_trait]
@@ -1093,190 +1087,161 @@ impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
     }
 }
 
-#[async_trait::async_trait]
-impl djinn_agent::context::CanonicalGraphWarmer for AppStateCanonicalGraphWarmer {
-    /// Detached-warm semantics (ADR-050 Chunk C follow-up, 2026-04-07):
-    ///
-    /// Previously this impl awaited `ensure_canonical_graph` inline, which
-    /// meant the lifecycle's outer `tokio::time::timeout(45s, warmer.warm(..))`
-    /// would drop the inner future on expiry.  On a cold cache the timeout
-    /// routinely fired while `run_indexers_already_locked` was still running
-    /// rust-analyzer — dropping that future killed the subprocess, the
-    /// post-SCIP `spawn_blocking` CPU pipeline never started, and
-    /// `GRAPH_CACHE` stayed empty forever.  Every architect dispatch then
-    /// rehit the same timeout.
-    ///
-    /// The fix:
-    ///   1. **Fast path**: if the in-memory `GRAPH_CACHE` already has an
-    ///      entry for this project's `_index` worktree path, return
-    ///      `Ok(())` instantly.  (We do not verify commit SHA here; the
-    ///      detached task handles freshness when it does eventually run.)
-    ///   2. **Single-flight**: try to claim a per-`project_id` slot.  If
-    ///      another warm task is already running, coalesce and return
-    ///      `Ok(())` instantly.
-    ///   3. **Spawn detached**: `tokio::spawn` a background task that
-    ///      `.await`s `ensure_canonical_graph` to completion on its own —
-    ///      independent of any lifecycle timeout.  The post-SCIP CPU work
-    ///      still happens in `spawn_blocking` inside `ensure_canonical_graph`;
-    ///      detaching at this layer just prevents the lifecycle's 45s
-    ///      timeout from cancelling the outer future.
-    ///   4. Always return `Ok(())` — the lifecycle treats the result as
-    ///      informational anyway and proceeds with whatever skeleton
-    ///      currently lives in the DB `repo_map` note pipeline.
-    async fn warm(&self, project_id: &str, project_root: &Path) -> Result<(), String> {
-        let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
-        let planner = CanonicalGraphRefreshPlanner;
-        let warm_plan = planner.plan_warm(WarmPlanInputs {
-            cache_has_entry: crate::canonical_graph::canonical_graph_cache_has_entry_for(
-                &index_tree_path,
-            )
-            .await,
-            warm_slot_claimed: self.state.try_claim_canonical_warm_slot(project_id),
-        });
+/// Build the production [`djinn_agent::warmer::InProcessGraphWarmer`] backed
+/// by this `AppState`.
+///
+/// The warmer is the sole in-process implementation of
+/// [`djinn_runtime::GraphWarmerService`] — it wraps the server's
+/// `ensure_canonical_graph` pipeline behind three callbacks so djinn-agent
+/// stays free of any server-crate dependency.
+///
+/// * `warm` — fires the existing single-flight + detached-spawn pipeline.
+///   The closure returns `Ok(())` immediately after claiming the slot and
+///   spawning the background task; the heavy pipeline runs independently of
+///   the caller's future.
+/// * `project_root` — resolves a `project_id` to the on-disk project root
+///   via `ProjectRepository::get`.  Returns `None` when the project has
+///   been deleted.
+/// * `is_fresh` — delegates to the `CanonicalGraphRefreshPlanner` to decide
+///   whether the in-memory `GRAPH_CACHE` is current for the project's
+///   `_index` worktree.  `SkipColdCache` and `SkipPinnedCommitUnavailable`
+///   are treated as not-fresh; everything else (the cache contains an entry
+///   whose pinned commit is either known-current or
+///   commit-check-failed) is treated as fresh so `await_fresh` does not spin.
+fn build_in_process_graph_warmer(
+    state: AppState,
+) -> djinn_agent::warmer::InProcessGraphWarmer {
+    use djinn_agent::warmer::{InProcessGraphWarmer, InProcessWarmerDeps};
+    use djinn_db::ProjectRepository;
 
-        match warm_plan {
-            WarmPlan::SkipHotCache => {
-                self.state.release_canonical_warm_slot(project_id);
-                tracing::debug!(
-                    project_id = %project_id,
-                    "AppStateCanonicalGraphWarmer: cache already hot, skipping warm"
-                );
-                return Ok(());
-            }
-            WarmPlan::CoalesceInflight => {
-                tracing::info!(
-                    project_id = %project_id,
-                    "AppStateCanonicalGraphWarmer: warm already in flight, coalescing"
-                );
-                return Ok(());
-            }
-            WarmPlan::KickDetachedWarm => {}
-        }
+    let warm_state = state.clone();
+    let warm: djinn_agent::warmer::WarmCallback = Arc::new(move |project_id, project_root| {
+        let state = warm_state.clone();
+        Box::pin(async move {
+            let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
+            let planner = CanonicalGraphRefreshPlanner;
+            let warm_plan = planner.plan_warm(WarmPlanInputs {
+                cache_has_entry: crate::canonical_graph::canonical_graph_cache_has_entry_for(
+                    &index_tree_path,
+                )
+                .await,
+                warm_slot_claimed: state.try_claim_canonical_warm_slot(&project_id),
+            });
 
-        // Detach the warm onto a background task so the lifecycle's outer
-        // `tokio::time::timeout` cannot cancel it mid-flight.  The task
-        // owns its own clones of every resource it needs.
-        let state = self.state.clone();
-        let project_id_owned = project_id.to_string();
-        let project_root_owned = project_root.to_path_buf();
-        tracing::info!(
-            project_id = %project_id,
-            project_root = %project_root_owned.display(),
-            "AppStateCanonicalGraphWarmer: spawning background warm task"
-        );
-        tokio::spawn(async move {
-            let started = std::time::Instant::now();
-            let result = crate::canonical_graph::ensure_canonical_graph(
-                &state,
-                &project_id_owned,
-                &project_root_owned,
-            )
-            .await;
-            let elapsed_ms = started.elapsed().as_millis() as u64;
-            match result {
-                Ok((handle, graph)) => {
-                    tracing::info!(
-                        project_id = %project_id_owned,
-                        elapsed_ms,
-                        commit_sha = %handle.commit_sha(),
-                        node_count = graph.node_count(),
-                        edge_count = graph.edge_count(),
-                        "AppStateCanonicalGraphWarmer: background warm task complete"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        project_id = %project_id_owned,
-                        elapsed_ms,
-                        error = %e,
-                        "AppStateCanonicalGraphWarmer: background warm task failed"
-                    );
-                }
-            }
-            state.release_canonical_warm_slot(&project_id_owned);
-        });
-
-        Ok(())
-    }
-
-    /// ADR-051 §3 proactive staleness refresh, called from the coordinator
-    /// tick loop on a 10-minute cadence (see `GRAPH_REFRESH_INTERVAL`).
-    ///
-    /// Decision tree (always returns `Ok(())`):
-    ///   1. Cold cache → no-op.  The cold path is owned by
-    ///      `mcp_bridge::maybe_kick_background_warm`; kicking from here
-    ///      would thrash on every tick for projects nobody is reading.
-    ///   2. Warm cache but the pinned commit is missing (race window) →
-    ///      no-op.
-    ///   3. `git rev-list pinned..origin/main` returns `0` → cache is
-    ///      already current, no-op.
-    ///   4. `>= 1` commits behind → delegate to [`Self::warm`], which is
-    ///      single-flight via `try_claim_canonical_warm_slot` and detached
-    ///      onto a background task, so this call returns instantly.
-    ///
-    /// Errors at every step are logged at `debug!`/`warn!` and converted to
-    /// `Ok(())` — the caller is fire-and-forget and scheduling churn is not
-    /// worth surfacing transient git/fetch failures.
-    async fn maybe_refresh_if_stale(
-        &self,
-        project_id: &str,
-        project_root: &Path,
-    ) -> Result<(), String> {
-        let planner = CanonicalGraphRefreshPlanner;
-        let probe = AppStateCanonicalGraphRefreshProbe;
-
-        match planner.plan_refresh(&probe, project_root).await {
-            RefreshPlan::SkipColdCache => {
-                tracing::debug!(
-                    project_id = %project_id,
-                    "AppStateCanonicalGraphWarmer: cache cold, skipping proactive refresh (cold path is owned by maybe_kick_background_warm)"
-                );
-                Ok(())
-            }
-            RefreshPlan::SkipPinnedCommitUnavailable => {
-                tracing::debug!(
-                    project_id = %project_id,
-                    "AppStateCanonicalGraphWarmer: cache pinned commit unavailable (race), skipping proactive refresh"
-                );
-                Ok(())
-            }
-            RefreshPlan::SkipCurrent { pinned_commit } => {
-                tracing::debug!(
-                    project_id = %project_id,
-                    pinned_commit = %pinned_commit,
-                    "AppStateCanonicalGraphWarmer: graph cache current, skipping refresh"
-                );
-                Ok(())
-            }
-            RefreshPlan::RefreshStale {
-                pinned_commit,
-                commits_behind,
-            } => {
-                tracing::info!(
-                    project_id = %project_id,
-                    pinned_commit = %pinned_commit,
-                    commits_behind,
-                    "AppStateCanonicalGraphWarmer: graph cache stale, kicking warm"
-                );
-                if let Err(e) = self.warm(project_id, project_root).await {
-                    tracing::warn!(
+            match warm_plan {
+                WarmPlan::SkipHotCache => {
+                    state.release_canonical_warm_slot(&project_id);
+                    tracing::debug!(
                         project_id = %project_id,
-                        error = %e,
-                        "AppStateCanonicalGraphWarmer: proactive warm dispatch reported error (swallowed)"
+                        "AppStateGraphWarmer: cache already hot, skipping warm"
                     );
+                    return Ok(());
                 }
-                Ok(())
+                WarmPlan::CoalesceInflight => {
+                    tracing::info!(
+                        project_id = %project_id,
+                        "AppStateGraphWarmer: warm already in flight, coalescing"
+                    );
+                    return Ok(());
+                }
+                WarmPlan::KickDetachedWarm => {}
             }
-            RefreshPlan::SkipCommitCheckFailed { pinned_commit } => {
-                tracing::debug!(
-                    project_id = %project_id,
-                    pinned_commit = %pinned_commit,
-                    "AppStateCanonicalGraphWarmer: count_commits_since failed (e.g. fetch error), skipping refresh"
-                );
-                Ok(())
-            }
-        }
-    }
+
+            // Detach the warm onto a background task so the caller's future
+            // cannot cancel it mid-flight.  The task owns its own clones of
+            // every resource it needs.
+            let state = state.clone();
+            let project_id_owned = project_id.clone();
+            let project_root_owned = project_root;
+            tracing::info!(
+                project_id = %project_id,
+                project_root = %project_root_owned.display(),
+                "AppStateGraphWarmer: spawning background warm task"
+            );
+            tokio::spawn(async move {
+                let started = std::time::Instant::now();
+                let result = crate::canonical_graph::ensure_canonical_graph(
+                    &state,
+                    &project_id_owned,
+                    &project_root_owned,
+                )
+                .await;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                match result {
+                    Ok((handle, graph)) => {
+                        tracing::info!(
+                            project_id = %project_id_owned,
+                            elapsed_ms,
+                            commit_sha = %handle.commit_sha(),
+                            node_count = graph.node_count(),
+                            edge_count = graph.edge_count(),
+                            "AppStateGraphWarmer: background warm task complete"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            project_id = %project_id_owned,
+                            elapsed_ms,
+                            error = %e,
+                            "AppStateGraphWarmer: background warm task failed"
+                        );
+                    }
+                }
+                state.release_canonical_warm_slot(&project_id_owned);
+            });
+
+            Ok(())
+        })
+    });
+
+    let project_root_state = state.clone();
+    let project_root: djinn_agent::warmer::ProjectRootResolver =
+        Arc::new(move |project_id| {
+            let state = project_root_state.clone();
+            Box::pin(async move {
+                let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+                match repo.get(&project_id).await {
+                    Ok(Some(project)) => Some(PathBuf::from(project.path)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            error = %e,
+                            "AppStateGraphWarmer: project lookup failed"
+                        );
+                        None
+                    }
+                }
+            })
+        });
+
+    let is_fresh: djinn_agent::warmer::FreshnessProbe =
+        Arc::new(move |_project_id, project_root, _ttl| {
+            Box::pin(async move {
+                // Freshness model: the graph is considered fresh when the
+                // planner's refresh decision is anything other than
+                // "cold cache" or "pinned commit unavailable".  That covers
+                // both the "cache current" and "commit-check failed"
+                // branches — the latter being a transient git/fetch error
+                // where we would rather proceed with a slightly-stale graph
+                // than spin waiting for the network to recover.
+                let planner = CanonicalGraphRefreshPlanner;
+                let probe = AppStateCanonicalGraphRefreshProbe;
+                match planner.plan_refresh(&probe, &project_root).await {
+                    RefreshPlan::SkipColdCache
+                    | RefreshPlan::SkipPinnedCommitUnavailable
+                    | RefreshPlan::RefreshStale { .. } => false,
+                    RefreshPlan::SkipCurrent { .. }
+                    | RefreshPlan::SkipCommitCheckFailed { .. } => true,
+                }
+            })
+        });
+
+    InProcessGraphWarmer::new(InProcessWarmerDeps {
+        warm,
+        project_root,
+        is_fresh,
+    })
 }
 
 #[cfg(test)]

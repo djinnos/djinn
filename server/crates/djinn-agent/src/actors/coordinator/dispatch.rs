@@ -1283,7 +1283,7 @@ impl CoordinatorActor {
             active_tasks: crate::context::ActivityTracker::default(),
             task_ops_project_path_override: None,
             working_root: None,
-            canonical_graph_warmer: None,
+            graph_warmer: None,
             repo_graph_ops: None,
             mirror: self.mirror.clone(),
             rpc_registry: None,
