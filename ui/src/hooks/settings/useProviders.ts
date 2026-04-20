@@ -115,6 +115,20 @@ export function useProviders() {
     setOauthInProgress(true);
     try {
       const result = await startProviderOAuth(providerId);
+      if (result.pending) {
+        // Browser-redirect flow: the server has opened (or handed back)
+        // the authorize URL — `startProviderOAuth` already called
+        // `window.open`. The server redirects to
+        // `/settings/providers?codex=ok` once the user completes the
+        // flow, at which point the returning page will refresh the
+        // catalog. We just tell the user what's happening.
+        showToast.success('Complete sign-in in the new tab', {
+          description: result.authorize_url
+            ? 'We opened OpenAI in a new tab. Finish authorizing there and this page will update.'
+            : 'Finish authorizing in the other tab.',
+        });
+        return false;
+      }
       if (!result.success) {
         showToast.error('OAuth failed', { description: result.error ?? 'Unknown error' });
         return false;

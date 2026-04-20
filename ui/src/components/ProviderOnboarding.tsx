@@ -44,7 +44,15 @@ function ChatGPTCard({ onDone }: { onDone: () => void }) {
     try {
       const result = await startProviderOAuth('openai');
       if (result.success) {
+        // Token already cached on the server — nothing else to do.
         onDone();
+      } else if (result.pending) {
+        // Browser-redirect flow: the server returned (and we opened) the
+        // authorize URL. Completion is signalled when the OpenAI callback
+        // hits `/api/oauth/codex/callback`, which 302s back to the SPA
+        // with `?codex=ok`. That query is what `useCodexCallbackFlash`
+        // watches for — we don't block the onboarding panel on it here.
+        setError(null);
       } else {
         setError(result.error ?? 'OAuth flow failed');
       }

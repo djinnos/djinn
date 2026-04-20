@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Delete02Icon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,7 @@ import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useServerHealth } from '@/hooks/useServerHealth';
 import { AddProviderModal } from '@/components/AddProviderModal';
+import { showToast } from '@/lib/toast';
 
 function ModelsTab() {
   const {
@@ -28,6 +29,33 @@ function ModelsTab() {
   const loadProviderModels = useSettingsStore((s) => s.loadProviderModels);
 
   const [isAddOpen, setIsAddOpen] = useState(false);
+
+  // When the Codex OAuth callback redirects us back with `?codex=ok` or
+  // `?codex=error`, flash a toast and scrub the query so reloading the
+  // page doesn't re-fire it. Refresh the provider catalog on success so
+  // the "Connected" row picks up chatgpt_codex without a manual reload.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const codex = params.get('codex');
+    if (!codex) return;
+
+    if (codex === 'ok') {
+      showToast.success('ChatGPT / Codex connected');
+      void loadData();
+      void loadProviderModels();
+    } else if (codex === 'error') {
+      const detail = params.get('error') ?? 'Authorization failed';
+      showToast.error('ChatGPT / Codex sign-in failed', { description: detail });
+    }
+
+    params.delete('codex');
+    params.delete('error');
+    const next = `${window.location.pathname}${
+      params.toString() ? `?${params.toString()}` : ''
+    }`;
+    window.history.replaceState({}, '', next);
+  }, [loadData, loadProviderModels]);
 
   if (loading) {
     return <div className="rounded-lg border border-border bg-card p-6">Loading providers...</div>;

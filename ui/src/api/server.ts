@@ -90,8 +90,19 @@ export type OAuthResult = {
   user_code?: string;
   /** For device-code flows: URL where the user enters the code. */
   verification_uri?: string;
-  /** True when the flow is pending (device-code polling in background). */
+  /**
+   * True when the flow is pending — either a device-code flow polling
+   * in the background, or the Codex browser-redirect flow waiting for
+   * the user to complete authorisation in a new tab.
+   */
   pending?: boolean;
+  /**
+   * For browser-redirect flows (Codex): the authorization URL the UI
+   * should open in a new tab. The server also emits the same URL over
+   * SSE via `oauth.open_browser`; clients that don't react to events
+   * should fall back to opening this directly on tool completion.
+   */
+  authorize_url?: string;
 };
 
 export async function startProviderOAuth(
@@ -105,11 +116,27 @@ export async function startProviderOAuth(
       return { success: false, error: result.error ?? "OAuth flow failed" };
     }
     if (result.pending) {
+      // Browser-redirect flows (Codex): open the authorize URL ourselves
+      // as a fallback for the `oauth.open_browser` SSE handler. If the SSE
+      // path already opened it, the browser will focus that tab instead of
+      // spawning a duplicate.
+      const authorizeUrl =
+        typeof result.authorize_url === "string" && result.authorize_url
+          ? result.authorize_url
+          : undefined;
+      if (authorizeUrl) {
+        try {
+          window.open(authorizeUrl, "_blank", "noopener,noreferrer");
+        } catch {
+          // Popup blocker — caller renders the URL so the user can click it.
+        }
+      }
       return {
         success: false,
         pending: true,
         user_code: result.user_code ?? undefined,
         verification_uri: result.verification_uri ?? undefined,
+        authorize_url: authorizeUrl,
       };
     }
     return { success: true };

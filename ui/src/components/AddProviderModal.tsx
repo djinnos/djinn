@@ -48,7 +48,14 @@ function ChatGPTCard({ onDone }: { onDone: () => void }) {
     try {
       const result = await startProviderOAuth('openai');
       if (result.success) {
+        // Cached tokens still valid — connected immediately.
         onDone();
+      } else if (result.pending) {
+        // Redirect flow in progress: the authorize URL has been opened
+        // in a new tab. Completion happens when OpenAI redirects back
+        // to `/api/oauth/codex/callback` — leave the modal open so the
+        // user can see the status change on return.
+        setError(null);
       } else {
         setError(result.error ?? 'OAuth flow failed');
       }
