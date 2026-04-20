@@ -1,5 +1,6 @@
 import { useSidebarStore } from '@/stores/sidebarStore';
 import { useAuthUser } from '@/components/AuthGate';
+import { ExecutionIndicator } from '@/components/ExecutionIndicator';
 import { logout } from '@/api/auth';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -213,6 +214,7 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="border-t p-3 space-y-2">
+        <ExecutionIndicator />
         <NavItem
           icon={<HugeiconsIcon icon={Settings01Icon} size={16} />}
           label="Settings"
