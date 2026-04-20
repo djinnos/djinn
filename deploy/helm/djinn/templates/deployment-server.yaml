@@ -144,9 +144,17 @@ spec:
             items:
               - key: vault.key
                 path: vault.key
-            defaultMode: 0400
+            # 0444 (world-readable) so the non-root djinn user (uid 10001)
+            # can read the file. The Secret is namespace-scoped + only
+            # mounted into this Pod, so "world-readable" inside the
+            # container is fine.
+            defaultMode: 0444
         - name: github-app
           secret:
             secretName: {{ include "djinn.secretName.githubApp" . }}
             optional: true
-            defaultMode: 0400
+            # 0444 (world-readable) so the non-root djinn user (uid 10001)
+            # can read the file. The Secret is namespace-scoped + only
+            # mounted into this Pod, so "world-readable" inside the
+            # container is fine.
+            defaultMode: 0444
