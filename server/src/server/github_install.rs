@@ -141,7 +141,7 @@ async fn select_installation(
 
     let repo = OrgConfigRepository::new(state.db().clone());
     let result = repo
-        .set_or_replace(NewOrgConfig {
+        .set(NewOrgConfig {
             github_org_id: chosen.account_id as i64,
             github_org_login: &chosen.account_login,
             app_id: cfg.app_id as i64,
@@ -166,7 +166,7 @@ async fn select_installation(
             tracing::error!(
                 error = %e,
                 installation_id = chosen.installation_id,
-                "installation picker: set_or_replace failed",
+                "installation picker: set failed",
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

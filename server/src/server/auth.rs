@@ -962,7 +962,7 @@ async fn app_setup_callback(
     }
 
     if let Err(e) = org_repo
-        .set_or_replace(NewOrgConfig {
+        .set(NewOrgConfig {
             github_org_id: installation.account.id as i64,
             github_org_login: &installation.account.login,
             app_id: cfg.app_id as i64,
@@ -1189,7 +1189,7 @@ mod tests {
         state.set_app_config(Some(Arc::new(cfg))).await;
 
         OrgConfigRepository::new(state.db().clone())
-            .set_or_replace(NewOrgConfig {
+            .set(NewOrgConfig {
                 github_org_id: 777,
                 github_org_login: "acme",
                 app_id: 1,
