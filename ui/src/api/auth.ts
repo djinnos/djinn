@@ -105,9 +105,19 @@ export interface SetupStatus {
   /**
    * True when either the GitHub App credentials haven't been provisioned on
    * the server (env / Secret missing) OR no `org_config` row is bound to
-   * this deployment. Both surface the same "App not configured" UI.
+   * this deployment. Combined with `appCredentialsConfigured` to decide
+   * which screen the gate renders:
+   *   - `appCredentialsConfigured=false`         → "App not configured" (operator action).
+   *   - `appCredentialsConfigured=true && needsAppInstall=true` → installation picker.
+   *   - `needsAppInstall=false`                  → normal sign-in.
    */
   needsAppInstall: boolean;
+  /**
+   * True iff the GitHub App credentials (env / Secret) were resolved on
+   * server startup. When `false`, the operator hasn't dropped the
+   * `djinn-github-app` Secret yet and the UI can't recover automatically.
+   */
+  appCredentialsConfigured: boolean;
   /**
    * The GitHub org this deployment is locked to, once known. `null` until
    * the App-setup callback writes `org_config`.
@@ -130,11 +140,102 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
   }
   const body = (await res.json()) as {
     needs_app_install: boolean;
+    app_credentials_configured?: boolean;
     org_login?: string | null;
   };
   return {
     needsAppInstall: body.needs_app_install,
+    // Default to `false` so an older server (pre-this-PR) is treated as
+    // "operator must fix" — the UI's existing static screen still works.
+    appCredentialsConfigured: body.app_credentials_configured ?? false,
     orgLogin: body.org_login ?? null,
+  };
+}
+
+// ─── Installation picker ──────────────────────────────────────────────────────
+
+/**
+ * One row in the installation picker. Mirrors the server's
+ * `InstallationSummary` JSON shape from `GET /api/github/installations`.
+ */
+export interface InstallationSummary {
+  installationId: number;
+  accountLogin: string;
+  accountId: number;
+  /** "User" or "Organization" — surfaced as a hint next to the row. */
+  accountType: string;
+  /** "all" or "selected" — used to render the repo-scope hint. */
+  repositorySelection: "all" | "selected" | string;
+  /** Direct link to the installation's settings page on github.com. */
+  htmlUrl: string;
+}
+
+/**
+ * Fetch the list of GitHub App installations the operator can choose from.
+ * Server returns `503 SERVICE_UNAVAILABLE` if App credentials are missing.
+ */
+export async function fetchInstallations(): Promise<InstallationSummary[]> {
+  const res = await fetch(`${getBaseUrl()}/api/github/installations`, {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `Failed to fetch installations: ${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`,
+    );
+  }
+  const raw = (await res.json()) as Array<{
+    installation_id: number;
+    account_login: string;
+    account_id: number;
+    account_type: string;
+    repository_selection: string;
+    html_url: string;
+  }>;
+  return raw.map((r) => ({
+    installationId: r.installation_id,
+    accountLogin: r.account_login,
+    accountId: r.account_id,
+    accountType: r.account_type,
+    repositorySelection: r.repository_selection,
+    htmlUrl: r.html_url,
+  }));
+}
+
+/**
+ * Bind the deployment to a chosen installation. Returns the installation id
+ * + account login that the server actually persisted, so the caller can
+ * render a confirmation toast without re-fetching.
+ */
+export async function selectInstallation(
+  installationId: number,
+): Promise<{ installationId: number; accountLogin: string }> {
+  const res = await fetch(
+    `${getBaseUrl()}/api/github/installations/select`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ installation_id: installationId }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `Failed to bind installation: ${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`,
+    );
+  }
+  const body = (await res.json()) as {
+    installation_id: number;
+    account_login: string;
+  };
+  return {
+    installationId: body.installation_id,
+    accountLogin: body.account_login,
   };
 }
 

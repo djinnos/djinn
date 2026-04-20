@@ -5,6 +5,7 @@ import { GithubIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import logoSvg from "@/assets/logo.svg";
 import { LoadingScreen } from "@/components/LoadingScreen";
+import { InstallationPicker } from "@/components/InstallationPicker";
 import {
   fetchCurrentUser,
   fetchSetupStatus,
@@ -171,9 +172,18 @@ function AuthBody({
     );
   }
 
-  // Server reachable but the App isn't configured (no Secret mounted) OR no
-  // org is bound yet. Env vars require a Pod restart to change, so the UI
-  // can't fix this — point operators at the runbook.
+  // App credentials are present but no installation is bound yet — render
+  // the in-UI picker so the operator can pick one without editing the
+  // Secret. Env-driven `GITHUB_INSTALLATION_ID` short-circuits this branch
+  // entirely on CI deploys (`needsAppInstall` flips to false on the server
+  // when env binding is set).
+  if (setupStatus.appCredentialsConfigured) {
+    return <InstallationPicker />;
+  }
+
+  // Server reachable but the App credentials themselves are missing (no
+  // Secret mounted, env unset). The UI can't recover automatically —
+  // point operators at the runbook.
   return (
     <div className="w-full space-y-4 text-left">
       <div className="space-y-2 text-center">
