@@ -7,8 +7,10 @@ use tokio::fs;
 
 use crate::server::DjinnMcpServer;
 use djinn_core::auth_context::current_user_token;
-use djinn_db::{OrgConfigRepository, ProjectRepository, VerificationRule};
-use djinn_stack::Stack;
+use djinn_db::{
+    OrgConfigRepository, ProjectImage, ProjectImageStatus, ProjectRepository, VerificationRule,
+};
+use djinn_stack::{Stack, generate_starter};
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
@@ -147,6 +149,52 @@ pub struct GetProjectStackResponse {
     pub stack: Option<Stack>,
     /// Populated on lookup / deserialization failures; clients should
     /// surface this verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetProjectDevcontainerStatusParams {
+    /// Project UUID whose devcontainer + image status should be returned.
+    pub project: String,
+}
+
+/// Snapshot of a project's devcontainer + image-build state, used by the
+/// UI onboarding banner.
+#[derive(Serialize, JsonSchema)]
+pub struct GetProjectDevcontainerStatusResponse {
+    /// True when the mirror's HEAD contains `.devcontainer/devcontainer.json`.
+    pub has_devcontainer: bool,
+    /// True when the mirror's HEAD also contains `.devcontainer/devcontainer-lock.json`.
+    pub has_devcontainer_lock: bool,
+    /// Content-addressable image tag from the last successful build, or
+    /// `None` when no build has completed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_tag: Option<String>,
+    /// One of `none | building | ready | failed`.
+    pub image_status: String,
+    /// Human-readable error from the most recent failed build, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_last_error: Option<String>,
+    /// Generated starter `devcontainer.json` (pretty-printed). Populated
+    /// when `has_devcontainer == false` so the UI can show a copyable
+    /// template.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starter_json: Option<String>,
+    /// Populated on lookup failures; clients should surface this verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RetriggerImageBuildParams {
+    /// Project UUID whose image should be rebuilt on the next mirror-fetch tick.
+    pub project: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct RetriggerImageBuildResponse {
+    pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -951,6 +999,175 @@ impl DjinnMcpServer {
             Err(err) => Json(GetProjectStackResponse {
                 stack: None,
                 error: Some(format!("stack lookup failed: {err}")),
+            }),
+        }
+    }
+
+    /// Return devcontainer + image-build status for a project.
+    ///
+    /// Drives the UI onboarding banner (Phase 3 PR 6). Reads the latest
+    /// stack JSON for the two `manifest_signals.has_devcontainer*` flags,
+    /// joins it with the `image_*` columns, and — when the project has
+    /// no committed devcontainer — fills `starter_json` with
+    /// `djinn_stack::generate_starter(&stack)` so the banner can show a
+    /// copyable template.
+    #[tool(
+        description = "Return devcontainer + image-build status for a project (has_devcontainer, has_devcontainer_lock, image_tag, image_status, image_last_error, starter_json). Drives the UI onboarding banner."
+    )]
+    pub async fn get_project_devcontainer_status(
+        &self,
+        Parameters(input): Parameters<GetProjectDevcontainerStatusParams>,
+    ) -> Json<GetProjectDevcontainerStatusResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        // Resolve the stack first — the `has_devcontainer*` signals drive
+        // whether we bother generating a starter template.
+        let stack_raw = match repo.get_stack(&input.project).await {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                return Json(GetProjectDevcontainerStatusResponse {
+                    has_devcontainer: false,
+                    has_devcontainer_lock: false,
+                    image_tag: None,
+                    image_status: ProjectImageStatus::NONE.to_string(),
+                    image_last_error: None,
+                    starter_json: None,
+                    error: Some(format!("project not found: {}", input.project)),
+                });
+            }
+            Err(err) => {
+                return Json(GetProjectDevcontainerStatusResponse {
+                    has_devcontainer: false,
+                    has_devcontainer_lock: false,
+                    image_tag: None,
+                    image_status: ProjectImageStatus::NONE.to_string(),
+                    image_last_error: None,
+                    starter_json: None,
+                    error: Some(format!("stack lookup failed: {err}")),
+                });
+            }
+        };
+
+        // Treat empty / default (`{}`) stack as "not detected yet" — no
+        // signals known, no starter JSON; banner will render the
+        // `missing` state as soon as detection runs.
+        let stack: Option<Stack> = if stack_raw.trim().is_empty() || stack_raw.trim() == "{}" {
+            None
+        } else {
+            match serde_json::from_str::<Stack>(&stack_raw) {
+                Ok(s) => Some(s),
+                Err(err) => {
+                    return Json(GetProjectDevcontainerStatusResponse {
+                        has_devcontainer: false,
+                        has_devcontainer_lock: false,
+                        image_tag: None,
+                        image_status: ProjectImageStatus::NONE.to_string(),
+                        image_last_error: None,
+                        starter_json: None,
+                        error: Some(format!("stack JSON deserialize failed: {err}")),
+                    });
+                }
+            }
+        };
+
+        let (has_devcontainer, has_devcontainer_lock) = stack
+            .as_ref()
+            .map(|s| {
+                (
+                    s.manifest_signals.has_devcontainer,
+                    s.manifest_signals.has_devcontainer_lock,
+                )
+            })
+            .unwrap_or((false, false));
+
+        // Generate a starter only when the user has nothing committed and
+        // we have a non-trivial stack to base it on. A missing stack
+        // falls back to a minimal Ubuntu-based starter so the banner is
+        // still actionable on the first mirror fetch.
+        let starter_json = if !has_devcontainer {
+            Some(match stack.as_ref() {
+                Some(s) => generate_starter(s),
+                None => generate_starter(&Stack::empty()),
+            })
+        } else {
+            None
+        };
+
+        let image = match repo.get_project_image(&input.project).await {
+            Ok(Some(img)) => img,
+            Ok(None) => ProjectImage::none(),
+            Err(err) => {
+                return Json(GetProjectDevcontainerStatusResponse {
+                    has_devcontainer,
+                    has_devcontainer_lock,
+                    image_tag: None,
+                    image_status: ProjectImageStatus::NONE.to_string(),
+                    image_last_error: None,
+                    starter_json,
+                    error: Some(format!("image state lookup failed: {err}")),
+                });
+            }
+        };
+
+        Json(GetProjectDevcontainerStatusResponse {
+            has_devcontainer,
+            has_devcontainer_lock,
+            image_tag: image.tag,
+            image_status: image.status,
+            image_last_error: image.last_error,
+            starter_json,
+            error: None,
+        })
+    }
+
+    /// Force the image controller to rebuild the project's image on the
+    /// next mirror-fetch tick.
+    ///
+    /// Nulls `projects.image_hash` so the controller's unchanged-hash
+    /// fast-path is defeated; the next `enqueue(project_id, stack)` call
+    /// recomputes from HEAD and submits a build Job. Status is flipped to
+    /// `building` so the banner reflects the pending rebuild immediately
+    /// without waiting for the mirror-fetcher cadence.
+    #[tool(
+        description = "Mark a project's image for rebuild on the next mirror-fetch tick. Nulls the cached devcontainer hash so the image controller re-enqueues a build."
+    )]
+    pub async fn retrigger_image_build(
+        &self,
+        Parameters(input): Parameters<RetriggerImageBuildParams>,
+    ) -> Json<RetriggerImageBuildResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        // Load the current image record so we don't clobber tag / error.
+        let mut image = match repo.get_project_image(&input.project).await {
+            Ok(Some(img)) => img,
+            Ok(None) => {
+                return Json(RetriggerImageBuildResponse {
+                    status: "error".into(),
+                    error: Some(format!("project not found: {}", input.project)),
+                });
+            }
+            Err(err) => {
+                return Json(RetriggerImageBuildResponse {
+                    status: "error".into(),
+                    error: Some(format!("image state lookup failed: {err}")),
+                });
+            }
+        };
+
+        // Clear hash + error, flip to building. The controller's next
+        // enqueue recomputes the hash from HEAD and submits a Job.
+        image.hash = None;
+        image.last_error = None;
+        image.status = ProjectImageStatus::BUILDING.to_string();
+
+        match repo.set_project_image(&input.project, &image).await {
+            Ok(()) => Json(RetriggerImageBuildResponse {
+                status: "ok".into(),
+                error: None,
+            }),
+            Err(err) => Json(RetriggerImageBuildResponse {
+                status: "error".into(),
+                error: Some(format!("failed to flag image for rebuild: {err}")),
             }),
         }
     }

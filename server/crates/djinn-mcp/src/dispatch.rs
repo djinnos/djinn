@@ -25,9 +25,10 @@ use crate::tools::memory_tools::{
     ReindexParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::project_tools::{
-    GetProjectStackParams, GithubListReposParams, ProjectAddFromGithubParams,
-    ProjectBranchesParams, ProjectConfigGetParams, ProjectConfigSetParams, ProjectRemoveParams,
-    ProjectSettingsValidateParams,
+    GetProjectDevcontainerStatusParams, GetProjectStackParams, GithubListReposParams,
+    ProjectAddFromGithubParams, ProjectBranchesParams, ProjectConfigGetParams,
+    ProjectConfigSetParams, ProjectRemoveParams, ProjectSettingsValidateParams,
+    RetriggerImageBuildParams,
 };
 use crate::tools::proposal_tools::{
     ProposeAdrAcceptParams, ProposeAdrListParams, ProposeAdrRejectParams, ProposeAdrShowParams,
@@ -248,6 +249,22 @@ impl DjinnMcpServer {
             "get_project_stack" => map_json(
                 name,
                 self.get_project_stack(Parameters(decode_args::<GetProjectStackParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "get_project_devcontainer_status" => map_json(
+                name,
+                self.get_project_devcontainer_status(Parameters(decode_args::<
+                    GetProjectDevcontainerStatusParams,
+                >(
+                    name, args
+                )?))
+                .await,
+            ),
+            "retrigger_image_build" => map_json(
+                name,
+                self.retrigger_image_build(Parameters(decode_args::<RetriggerImageBuildParams>(
                     name, args,
                 )?))
                 .await,

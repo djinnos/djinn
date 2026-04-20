@@ -29,6 +29,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDialog';
+import { DevcontainerBanner } from '@/components/DevcontainerBanner';
 import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
 import { projectStore } from '@/stores/projectStore';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
@@ -307,28 +308,39 @@ export function RepositoriesPage() {
               </Button>
             </div>
           ) : (
-            <div className="overflow-hidden rounded-md border">
-              <table className="w-full text-left">
-                <thead className="bg-white/[0.02]">
-                  <tr className="border-b text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="px-4 py-2.5 font-medium">Repository</th>
-                    <th className="px-4 py-2.5 font-medium">Branch</th>
-                    <th className="px-4 py-2.5 text-right font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {projects.map((project) => (
-                    <RepositoryRow
-                      key={project.id}
-                      project={project}
-                      isSelected={selectedProjectId === project.id}
-                      onSelect={() => navigateToProject(project.id)}
-                      onRemoved={refreshProjects}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="flex flex-col gap-2">
+                {projects.map((project) => (
+                  <DevcontainerBanner
+                    key={`devcontainer-${project.id}`}
+                    projectId={project.id}
+                    projectName={project.name}
+                  />
+                ))}
+              </div>
+              <div className="mt-4 overflow-hidden rounded-md border">
+                <table className="w-full text-left">
+                  <thead className="bg-white/[0.02]">
+                    <tr className="border-b text-xs uppercase tracking-wide text-muted-foreground">
+                      <th className="px-4 py-2.5 font-medium">Repository</th>
+                      <th className="px-4 py-2.5 font-medium">Branch</th>
+                      <th className="px-4 py-2.5 text-right font-medium">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {projects.map((project) => (
+                      <RepositoryRow
+                        key={project.id}
+                        project={project}
+                        isSelected={selectedProjectId === project.id}
+                        onSelect={() => navigateToProject(project.id)}
+                        onRemoved={refreshProjects}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       </div>
