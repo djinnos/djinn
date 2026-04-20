@@ -122,10 +122,12 @@ still a valid signal that everything else is wired.
 
 ### GitHub App credentials (provisioned via kubectl, not the UI)
 
-The in-UI install wizard is gone. The App is provisioned **only** by
-applying a Kubernetes Secret with the chart's expected name
-(`djinn-github-app`). If the Secret is missing, the UI surfaces a
-"GitHub App not configured" error.
+The in-UI install *wizard* is gone, but the in-UI installation
+*picker* survives: the App is provisioned by applying a Kubernetes
+Secret with the chart's expected name (`djinn-github-app`), and on
+first visit the UI lets the operator click which installation to
+bind. If the Secret is missing, the UI surfaces a "GitHub App not
+configured" error.
 
 Get the values from `https://github.com/settings/apps/<your-app>` (or
 the org-level analog), then:
@@ -135,8 +137,6 @@ kubectl create secret generic djinn-github-app --namespace djinn \
   --from-literal=app-id='<APP_ID>' \
   --from-literal=client-id='<CLIENT_ID>' \
   --from-literal=client-secret='<CLIENT_SECRET>' \
-  --from-literal=org-login='<ORG_LOGIN>' \
-  --from-literal=installation-id='<INSTALLATION_ID>' \
   --from-file=private-key.pem=/path/to/your-app.private-key.pem
 
 kubectl rollout restart -n djinn deploy/djinn-server
@@ -144,6 +144,26 @@ kubectl rollout restart -n djinn deploy/djinn-server
 
 The rollout restart is required so the running Pod re-reads the Secret
 on next start.
+
+After the rollout, the UI's first-visit screen shows an installation
+picker — it calls `GET /app/installations` with the App JWT, lists
+each org/account, and writes `org_config` when the operator clicks
+one. No further kubectl steps required for the common single-org
+bring-up.
+
+#### Optional — pre-bind for fully-automated CI deploys
+
+Skip the picker by adding the binding keys to the Secret too:
+
+```bash
+kubectl create secret generic djinn-github-app --namespace djinn \
+  --from-literal=app-id='<APP_ID>' \
+  --from-literal=client-id='<CLIENT_ID>' \
+  --from-literal=client-secret='<CLIENT_SECRET>' \
+  --from-literal=org-login='<ORG_LOGIN>' \
+  --from-literal=installation-id='<INSTALLATION_ID>' \
+  --from-file=private-key.pem=/path/to/your-app.private-key.pem
+```
 
 `org-login` is the GitHub org (or user) the App is installed on — the
 same name that appears in `https://github.com/<ORG_LOGIN>`. The
@@ -153,7 +173,8 @@ same name that appears in `https://github.com/<ORG_LOGIN>`. The
 accounts), click "Configure" on the Djinn App, and read the trailing
 number off the URL `https://github.com/.../installations/<INSTALLATION_ID>`.
 An optional `org-id` (numeric org id) can be added too; the server
-fetches it from GitHub on demand when omitted.
+fetches it from GitHub on demand when omitted. When env binding is
+present the picker is skipped entirely (env wins over the DB row).
 
 > **If you must pre-apply the secret before `helm install`** (e.g. CI
 > pipeline ordering), the chart will otherwise refuse with `Secret
