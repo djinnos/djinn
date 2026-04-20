@@ -135,25 +135,30 @@ pub fn start_org_member_sync(state: AppState) {
 /// so the caller (admin endpoint *or* background loop) can always surface
 /// structured counters.
 pub async fn sync_once(state: &AppState) -> SyncReport {
-    // 1. Deployment must be bound to an org.
-    let org_repo = OrgConfigRepository::new(state.db().clone());
-    let cfg = match org_repo.get().await {
-        Ok(Some(cfg)) => cfg,
-        Ok(None) => {
-            return SyncReport::skipped("deployment is not bound to a GitHub org yet");
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "org_sync: org_config read failed");
-            return SyncReport::error(format!("org_config read failed: {e}"));
+    // 1. Resolve the org binding: env-loaded `OrgBinding` first (canonical
+    //    K8s-secret-only path), legacy `org_config` row second (back-compat).
+    let (org_login, installation_id) = if let Some(b) = state.org_binding().await {
+        (b.org_login.clone(), b.installation_id)
+    } else {
+        let org_repo = OrgConfigRepository::new(state.db().clone());
+        match org_repo.get().await {
+            Ok(Some(cfg)) => (cfg.github_org_login, cfg.installation_id as u64),
+            Ok(None) => {
+                return SyncReport::skipped("deployment is not bound to a GitHub org yet");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "org_sync: org_config read failed");
+                return SyncReport::error(format!("org_config read failed: {e}"));
+            }
         }
     };
 
     // 2. Mint an installation token for the App's installation.
-    let token = match get_installation_token(cfg.installation_id as u64).await {
+    let token = match get_installation_token(installation_id).await {
         Ok(t) => t.token,
         Err(e) => {
             tracing::warn!(
-                installation_id = cfg.installation_id,
+                installation_id,
                 error = %e,
                 "org_sync: failed to mint installation token"
             );
@@ -162,11 +167,11 @@ pub async fn sync_once(state: &AppState) -> SyncReport {
     };
 
     // 3. Fetch the org's member list (paginated).
-    let members = match fetch_org_members(&token, &cfg.github_org_login).await {
+    let members = match fetch_org_members(&token, &org_login).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
-                org = %cfg.github_org_login,
+                org = %org_login,
                 error = %e,
                 "org_sync: /orgs/{{org}}/members fetch failed — check that the \
                  GitHub App has the 'Members: Read' organization permission"

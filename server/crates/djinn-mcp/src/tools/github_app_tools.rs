@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use djinn_db::OrgConfigRepository;
-use djinn_provider::github_app::{Installation, get_installation_by_id, install_url};
+use djinn_provider::github_app::{Installation, OrgBinding, get_installation_by_id, install_url};
 
 use crate::server::DjinnMcpServer;
 
@@ -106,29 +106,33 @@ impl DjinnMcpServer {
             });
         }
 
-        // Source of truth: the singleton `org_config` row written at deploy
-        // setup. If unset, we refuse to list — the deployment has not been
-        // bound to a GitHub org yet.
-        let org_repo = OrgConfigRepository::new(self.state.db().clone());
-        let cfg = match org_repo.get().await {
-            Ok(Some(cfg)) => cfg,
-            Ok(None) => {
-                return Json(GithubAppInstallationsResponse {
-                    status: "error: deployment not bound to an organization".into(),
-                    installations: vec![],
-                    install_url: install_url(),
-                });
-            }
-            Err(e) => {
-                return Json(GithubAppInstallationsResponse {
-                    status: format!("error: read org_config: {e}"),
-                    installations: vec![],
-                    install_url: install_url(),
-                });
+        // Source of truth: the env-loaded `OrgBinding` (canonical
+        // K8s-secret-only path). Fall back to the legacy `org_config` row
+        // for back-compat with deployments still mid-migration.
+        let installation_id = if let Some(b) = OrgBinding::load_from_env() {
+            b.installation_id
+        } else {
+            let org_repo = OrgConfigRepository::new(self.state.db().clone());
+            match org_repo.get().await {
+                Ok(Some(cfg)) => cfg.installation_id as u64,
+                Ok(None) => {
+                    return Json(GithubAppInstallationsResponse {
+                        status: "error: deployment not bound to an organization".into(),
+                        installations: vec![],
+                        install_url: install_url(),
+                    });
+                }
+                Err(e) => {
+                    return Json(GithubAppInstallationsResponse {
+                        status: format!("error: read org_config: {e}"),
+                        installations: vec![],
+                        install_url: install_url(),
+                    });
+                }
             }
         };
 
-        match get_installation_by_id(cfg.installation_id as u64).await {
+        match get_installation_by_id(installation_id).await {
             Ok(install) => Json(GithubAppInstallationsResponse {
                 status: "ok".into(),
                 installations: vec![installation_to_entry(install)],

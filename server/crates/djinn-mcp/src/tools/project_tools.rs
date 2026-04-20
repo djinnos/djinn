@@ -548,7 +548,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<GithubListReposParams>,
     ) -> Json<GithubListReposResponse> {
-        use djinn_provider::github_app::{GitHubAppClient, get_installation_by_id};
+        use djinn_provider::github_app::{GitHubAppClient, OrgBinding, get_installation_by_id};
 
         if std::env::var("GITHUB_APP_ID")
             .ok()
@@ -561,27 +561,29 @@ impl DjinnMcpServer {
             });
         }
 
-        // Source of truth: the singleton `org_config` row. If unset, we
-        // refuse to list — the deployment has not been bound to a GitHub
-        // org yet.
-        let org_repo = OrgConfigRepository::new(self.state.db().clone());
-        let cfg = match org_repo.get().await {
-            Ok(Some(cfg)) => cfg,
-            Ok(None) => {
-                return Json(GithubListReposResponse {
-                    status: "error: deployment not bound to an organization".into(),
-                    repos: vec![],
-                });
-            }
-            Err(e) => {
-                return Json(GithubListReposResponse {
-                    status: format!("error: read org_config: {e}"),
-                    repos: vec![],
-                });
+        // Source of truth: the env-loaded `OrgBinding` (canonical
+        // K8s-secret-only path). Fall back to the legacy `org_config` row
+        // for back-compat with deployments still mid-migration.
+        let installation_id = if let Some(b) = OrgBinding::load_from_env() {
+            b.installation_id
+        } else {
+            let org_repo = OrgConfigRepository::new(self.state.db().clone());
+            match org_repo.get().await {
+                Ok(Some(cfg)) => cfg.installation_id as u64,
+                Ok(None) => {
+                    return Json(GithubListReposResponse {
+                        status: "error: deployment not bound to an organization".into(),
+                        repos: vec![],
+                    });
+                }
+                Err(e) => {
+                    return Json(GithubListReposResponse {
+                        status: format!("error: read org_config: {e}"),
+                        repos: vec![],
+                    });
+                }
             }
         };
-
-        let installation_id = cfg.installation_id as u64;
 
         // Pull the installation's account_login for the response payload.
         // This hits `GET /app/installations/{id}` (App JWT), which is cheap
