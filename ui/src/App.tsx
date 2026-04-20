@@ -11,7 +11,6 @@ import { ChatPage } from "@/pages/ChatPage";
 import { MemoryPage } from "@/pages/MemoryPage";
 import { PulsePage } from "@/pages/PulsePage";
 import { RepositoriesPage } from "@/pages/RepositoriesPage";
-import { SyncHealthBanner } from "@/components/SyncHealthBanner";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { AuthGate } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
@@ -31,7 +30,6 @@ function MainLayout() {
         <Titlebar />
         <div className="flex min-h-0 flex-1 flex-col">
           <ConnectionBanner />
-          <SyncHealthBanner />
           <Routes>
             {/* Global views (All Projects) */}
             <Route path="/kanban" element={<KanbanPage />} />
