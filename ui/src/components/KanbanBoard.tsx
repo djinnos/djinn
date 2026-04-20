@@ -10,17 +10,12 @@ import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
 import { GitHubAppBanner } from "@/components/GitHubAppBanner";
 import {
-  AlertDiamondIcon,
   ArrowDown01Icon,
   ArrowRight01Icon,
   CheckmarkCircle03Icon,
   CircleIcon,
-  FullSignalIcon,
   GitPullRequestIcon,
   Loading02Icon,
-  LowSignalIcon,
-  MediumSignalIcon,
-  NoSignalIcon,
   Progress02Icon,
   type UnavailableIcon,
 } from "@hugeicons/core-free-icons";
@@ -104,39 +99,6 @@ const STATUS_COLUMNS: Array<{
     icon: CheckmarkCircle03Icon,
   },
 ];
-
-const PRIORITIES = [-1, 0, 1, 2, 3] as const;
-
-const PRIORITY_ICONS: Record<
-  number,
-  { icon: typeof FullSignalIcon; color: string; activeColor: string }
-> = {
-  [-1]: {
-    icon: AlertDiamondIcon,
-    color: "text-muted-foreground/50",
-    activeColor: "text-orange-400",
-  },
-  0: {
-    icon: FullSignalIcon,
-    color: "text-muted-foreground/50",
-    activeColor: "text-[#D1D5DB]",
-  },
-  1: {
-    icon: MediumSignalIcon,
-    color: "text-muted-foreground/50",
-    activeColor: "text-[#9CA3AF]",
-  },
-  2: {
-    icon: LowSignalIcon,
-    color: "text-muted-foreground/50",
-    activeColor: "text-[#6B7280]",
-  },
-  3: {
-    icon: NoSignalIcon,
-    color: "text-muted-foreground/50",
-    activeColor: "text-[#4B5563]",
-  },
-};
 
 function taskToColumnKey(task: Task): ColumnKey {
   if (task.status === "closed") return "done";
@@ -357,17 +319,6 @@ export function KanbanBoard({
   const [ownerFilters, setOwnerFilters] = useState<string[]>(
     (searchParams.get("owner") ?? "").split(",").filter(Boolean),
   );
-  const [priorityFilters, setPriorityFilters] = useState<number[]>(
-    (searchParams.get("priority") ?? "")
-      .split(",")
-      .filter(Boolean)
-      .map((p) => {
-        if (p.toLowerCase() === "critical") return -1;
-        const match = p.match(/^P?(-?\d)$/i);
-        return match ? Number(match[1]) : -99;
-      })
-      .filter((p) => p >= -1 && p <= 3),
-  );
   const [issueTypeFilters, setIssueTypeFilters] = useState<string[]>(
     (searchParams.get("type") ?? "").split(",").filter(Boolean),
   );
@@ -431,13 +382,6 @@ export function KanbanBoard({
     if (ownerFilters.length > 0) next.set("owner", ownerFilters.join(","));
     else next.delete("owner");
 
-    if (priorityFilters.length > 0)
-      next.set(
-        "priority",
-        priorityFilters.map((p) => (p === -1 ? "critical" : `P${p}`)).join(","),
-      );
-    else next.delete("priority");
-
     if (issueTypeFilters.length > 0)
       next.set("type", issueTypeFilters.join(","));
     else next.delete("type");
@@ -449,7 +393,6 @@ export function KanbanBoard({
   }, [
     epicFilters,
     ownerFilters,
-    priorityFilters,
     issueTypeFilters,
     textFilter,
     searchParams,
@@ -482,11 +425,6 @@ export function KanbanBoard({
       if (ownerFilters.length > 0 && !ownerFilters.includes(task.owner ?? ""))
         return false;
       if (
-        priorityFilters.length > 0 &&
-        !priorityFilters.includes(task.priority)
-      )
-        return false;
-      if (
         issueTypeFilters.length > 0 &&
         !issueTypeFilters.includes(task.issue_type ?? "task")
       )
@@ -498,7 +436,6 @@ export function KanbanBoard({
     tasks,
     epicFilters,
     ownerFilters,
-    priorityFilters,
     issueTypeFilters,
     textFilter,
   ]);
@@ -567,57 +504,6 @@ export function KanbanBoard({
           selected={epicFilters}
           onChange={setEpicFilters}
         />
-
-        <div className="flex h-8 items-center gap-1 rounded-lg border border-input px-1.5 dark:bg-input/30">
-          {PRIORITIES.map((priority) => {
-            const config = PRIORITY_ICONS[priority];
-            const isActive = priorityFilters.includes(priority);
-            const noFilters = priorityFilters.length === 0;
-            return (
-              <button
-                key={priority}
-                type="button"
-                title={priority === -1 ? "Critical" : `P${priority}`}
-                onClick={() =>
-                  setPriorityFilters((prev) =>
-                    prev.includes(priority)
-                      ? prev.filter((p) => p !== priority)
-                      : [...prev, priority],
-                  )
-                }
-                className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-md transition-colors",
-                  isActive
-                    ? "bg-primary/20 ring-1 ring-primary/40"
-                    : "hover:bg-muted/50",
-                )}
-              >
-                <HugeiconsIcon
-                  icon={config.icon}
-                  size={16}
-                  className={cn(
-                    "shrink-0 transition-colors",
-                    isActive
-                      ? "text-primary"
-                      : noFilters
-                        ? config.activeColor
-                        : config.color,
-                  )}
-                />
-              </button>
-            );
-          })}
-          {priorityFilters.length > 0 && (
-            <button
-              type="button"
-              title="Clear priority filter"
-              onClick={() => setPriorityFilters([])}
-              className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground/70 hover:text-foreground transition-colors"
-            >
-              <span className="text-xs leading-none">✕</span>
-            </button>
-          )}
-        </div>
 
         <Combobox
           multiple
