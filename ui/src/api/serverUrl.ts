@@ -5,7 +5,11 @@
  * time via `VITE_DJINN_SERVER_URL`, and falls back to the default local daemon
  * port (3000) for dev.
  */
-const DEFAULT_SERVER_URL = "http://127.0.0.1:3000";
+// Use `localhost` rather than `127.0.0.1` so the cookie origin matches the
+// `DJINN_PUBLIC_URL` the server hands to GitHub OAuth (also `localhost:3000`).
+// `localhost` and `127.0.0.1` are distinct cookie origins — mixing them
+// breaks the OAuth state-cookie round-trip.
+const DEFAULT_SERVER_URL = "http://localhost:3000";
 
 function stripTrailingSlash(url: string): string {
   return url.endsWith("/") ? url.slice(0, -1) : url;

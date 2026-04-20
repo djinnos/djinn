@@ -73,3 +73,10 @@ qdrant:
 
 env:
   rustLog: "info,djinn=debug"
+  # Browser-side OAuth callback URL. For kind + `kubectl port-forward`, the
+  # browser reaches the server at http://localhost:3000 — NOT the cluster-
+  # internal Service DNS the configmap default would compute. Match this
+  # value against your GitHub App's "Callback URL" setting at
+  # https://github.com/settings/apps/<your-app>/edit (the path is
+  # `/auth/github/callback`).
+  publicUrl: "http://localhost:3000"
