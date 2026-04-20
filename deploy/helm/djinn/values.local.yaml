@@ -33,13 +33,11 @@ storage:
 ingress:
   enabled: false
 
-# Point Helm at a hand-managed GitHub App Secret so the chart never renders
-# its own template over it. Populate the Secret out-of-band via
-# `kubectl create secret generic djinn-github-app` (see this file's top-
-# comment for the required keys). Leaves Helm upgrades non-destructive.
-secrets:
-  githubApp:
-    existingSecret: djinn-github-app
+# GitHub App credentials are plumbed in by the Tiltfile from .tilt/github-app/
+# via `helm --set-file` — see the Tiltfile's "GitHub App credentials" block.
+# Leave `secrets.githubApp` alone here so the chart's default path (render a
+# Secret from values) stays active; the Tiltfile overrides the fields when
+# the local files exist.
 
 # Tighter resource defaults so the whole stack fits on a laptop.
 resources:

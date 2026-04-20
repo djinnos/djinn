@@ -30,16 +30,15 @@ NS       = 'djinn'
 REGISTRY = 'localhost:5001'
 AGENT_RUNTIME_REF = '{}/djinn-agent-runtime:dev'.format(REGISTRY)
 
+# --- kind cluster + registry ---------------------------------------------
+# Bootstrap runs at Tiltfile parse (blocking, idempotent) so the cluster
+# exists before `allow_k8s_contexts` / `k8s_yaml` try to talk to kubectl.
+# Running it as a `local_resource` would defer until after parse and every
+# workload would sit in "Waiting for cluster connection".
+local('bash scripts/kind/setup-kind.sh', quiet=False, echo_off=True)
+
 # Refuse to apply against anything other than the local kind cluster.
 allow_k8s_contexts(CLUSTER)
-
-# --- kind cluster + registry ---------------------------------------------
-local_resource(
-    'kind-cluster',
-    cmd='bash scripts/kind/setup-kind.sh',
-    allow_parallel=False,
-    labels=['bootstrap'],
-)
 
 # --- djinn-server image --------------------------------------------------
 # Use the literal localhost:5001 ref so Tilt's image-injection matches the
@@ -72,7 +71,6 @@ local_resource(
     ]),
     deps=['server', 'server/docker/djinn-agent-runtime.Dockerfile'],
     ignore=['server/target', 'server/.sqlx/cache'],
-    resource_deps=['kind-cluster'],
     labels=['build'],
 )
 
@@ -91,17 +89,45 @@ local(
 )
 VAULT_KEY = str(read_file('.tilt/vault.key')).strip()
 
+# --- GitHub App credentials ---------------------------------------------
+# Optional. If `.tilt/github-app/` exists with the four files below, Tilt
+# passes them to the chart via --set-file so the chart renders its own
+# Secret. Missing files → chart renders a Secret with empty strings and
+# the djinn-server Deployment mounts it as optional (pod starts, GitHub
+# auth is just disabled). Files are gitignored via /.tilt/.
+#
+# Expected layout:
+#   .tilt/github-app/app-id          — GitHub App numeric ID
+#   .tilt/github-app/client-id       — Client ID (Iv1.* / Iv23li*)
+#   .tilt/github-app/client-secret   — Client secret
+#   .tilt/github-app/private-key.pem — Private key PEM file
+GITHUB_APP_FILES = [
+    ('secrets.githubApp.appId',        '.tilt/github-app/app-id'),
+    ('secrets.githubApp.clientId',     '.tilt/github-app/client-id'),
+    ('secrets.githubApp.clientSecret', '.tilt/github-app/client-secret'),
+    ('secrets.githubApp.privateKey',   '.tilt/github-app/private-key.pem'),
+]
+gh_present = [(k, p) for k, p in GITHUB_APP_FILES if os.path.exists(p)]
+gh_missing = [p for k, p in GITHUB_APP_FILES if not os.path.exists(p)]
+if gh_missing and len(gh_missing) < len(GITHUB_APP_FILES):
+    warn('GitHub App credentials partially configured; missing: {}'.format(', '.join(gh_missing)))
+
 # --- Helm release --------------------------------------------------------
+# Tilt's native `helm()` doesn't accept `--set-file`, and `--set` mangles
+# PEM newlines. Shell out to `helm template` directly so we can pass
+# arbitrary flags and feed the raw YAML into k8s_yaml via blob().
 # djinn-crds has no templates yet (reserved for future CRDs) — skip until
-# it grows real manifests; reinstate with a second k8s_yaml(helm(...)) call
+# it grows real manifests; reinstate with a second helm template call
 # when that happens.
-k8s_yaml(helm(
-    'deploy/helm/djinn',
-    name='djinn',
-    namespace=NS,
-    values=['deploy/helm/djinn/values.local.yaml'],
-    set=['secrets.vaultKey.key=' + VAULT_KEY],
-))
+helm_cmd = [
+    'helm', 'template', 'djinn', 'deploy/helm/djinn',
+    '--namespace', NS,
+    '--values', 'deploy/helm/djinn/values.local.yaml',
+    '--set', 'secrets.vaultKey.key=' + VAULT_KEY,
+]
+for key, path in gh_present:
+    helm_cmd += ['--set-file', '{}={}'.format(key, path)]
+k8s_yaml(local(' '.join(helm_cmd), quiet=True, echo_off=True))
 
 # --- Langfuse stack ------------------------------------------------------
 # Deploys into the djinn namespace so the djinn-server env can dial
@@ -116,7 +142,7 @@ k8s_resource(
         port_forward(3000, 3000, name='api-ui'),
         port_forward(8443, 8443, name='worker-rpc'),
     ],
-    resource_deps=['kind-cluster', 'djinn-agent-runtime-image'],
+    resource_deps=['djinn-agent-runtime-image'],
     labels=['djinn'],
 )
 k8s_resource(
