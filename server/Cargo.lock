@@ -1171,6 +1171,7 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "djinn-stack",
+ "futures",
  "git2",
  "hex",
  "k8s-openapi",
@@ -1181,6 +1182,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "workspace-hack",
 ]

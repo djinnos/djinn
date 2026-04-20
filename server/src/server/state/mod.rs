@@ -20,7 +20,7 @@ use djinn_db::{
     QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
-use djinn_image_controller::{ImageController, ImageControllerConfig};
+use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_workspace::MirrorManager;
@@ -166,6 +166,12 @@ struct Inner {
     /// — the mirror-fetcher reads this via [`AppState::image_controller`]
     /// and silently skips the enqueue step when absent.
     pub image_controller: tokio::sync::RwLock<Option<Arc<ImageController>>>,
+    /// Phase 3 PR 5.5 — background task that watches build `Job`s to
+    /// terminal state and flips `projects.image_status`.  Spawned
+    /// alongside the controller when a `kube::Client` is available;
+    /// `None` on dev boxes without a cluster. `shutdown_image_watcher`
+    /// aborts + awaits the task on graceful shutdown.
+    pub image_build_watcher: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl AppState {
@@ -216,6 +222,7 @@ impl AppState {
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
                 image_controller: tokio::sync::RwLock::new(None),
+                image_build_watcher: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -276,10 +283,47 @@ impl AppState {
         };
 
         let config = ImageControllerConfig::from_env();
-        let controller = Arc::new(ImageController::new(client, config, self.db().clone()));
-        let mut guard = self.inner.image_controller.write().await;
-        *guard = Some(controller);
+        let controller = Arc::new(ImageController::new(
+            client.clone(),
+            config.clone(),
+            self.db().clone(),
+        ));
+        {
+            let mut guard = self.inner.image_controller.write().await;
+            *guard = Some(controller);
+        }
         tracing::info!("image_controller: initialized");
+
+        // Phase 3 PR 5.5: spawn the companion Job-completion watcher so
+        // `projects.image_status` flips from `building` → `ready`/`failed`
+        // without operator intervention. Uses the same `kube::Client`
+        // and config; observes `self.cancel()` for graceful shutdown.
+        let handle = ImageBuildWatcher::spawn(
+            client,
+            config,
+            self.db().clone(),
+            self.event_bus(),
+            self.cancel().clone(),
+        );
+        *self.inner.image_build_watcher.lock().await = Some(handle);
+        tracing::info!("image_build_watcher: spawned");
+    }
+
+    /// Abort + await the image-build watcher task if it was spawned.
+    ///
+    /// Called from the process-wide graceful-shutdown path alongside
+    /// [`Self::shutdown_rpc_listener`] so the background task exits
+    /// cleanly rather than being dropped implicitly with the runtime.
+    pub async fn shutdown_image_watcher(&self) {
+        let handle = self.inner.image_build_watcher.lock().await.take();
+        if let Some(handle) = handle {
+            // The watcher exits on its own when `self.cancel()` fires;
+            // abort is belt-and-braces in case cancellation was already
+            // observed but the task is still winding down.
+            handle.abort();
+            let _ = handle.await;
+            tracing::info!("image_build_watcher: stopped");
+        }
     }
 
     /// Read-only snapshot of the active GitHub App configuration, if any.

@@ -37,7 +37,9 @@ pub mod config;
 pub mod controller;
 pub mod hash;
 pub mod types;
+pub mod watcher;
 
 pub use config::ImageControllerConfig;
 pub use controller::ImageController;
 pub use types::{BuildRequest, BuildStatus, ProjectImageView};
+pub use watcher::ImageBuildWatcher;
