@@ -66,6 +66,13 @@ struct Cli {
 }
 
 fn main() {
+    // rustls 0.23 requires an explicit process-level CryptoProvider before
+    // any TLS use. Without this every reqwest HTTPS call (LLM providers,
+    // GitHub App, OTLP exporter) panics on first invocation.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls ring crypto provider");
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

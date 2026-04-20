@@ -1314,6 +1314,7 @@ dependencies = [
  "ring",
  "rmcp",
  "rstest",
+ "rustls",
  "schemars 1.2.1",
  "scip",
  "serde",
