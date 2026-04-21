@@ -31,12 +31,17 @@ interface DevcontainerBannerProps {
 
 type BannerState =
   | { kind: "missing"; starter: string | null; status: DevcontainerStatus }
-  | { kind: "missing_lock"; status: DevcontainerStatus }
   | { kind: "building"; status: DevcontainerStatus }
   | { kind: "failed"; status: DevcontainerStatus }
   | { kind: "ready" }
   | { kind: "unknown" };
 
+// NOTE: `status.has_devcontainer_lock` is intentionally NOT surfaced as a
+// banner state. The image-controller pipeline only requires
+// `devcontainer.json`; the lock file is a reproducibility nudge (it pins
+// feature digests via `devcontainer features info lock`) and not worth
+// blocking users on. The flag still comes back in the status response for
+// future use.
 function deriveState(status: DevcontainerStatus | null): BannerState {
   if (!status) return { kind: "unknown" };
   if (!status.has_devcontainer) {
@@ -46,16 +51,12 @@ function deriveState(status: DevcontainerStatus | null): BannerState {
       status,
     };
   }
-  if (!status.has_devcontainer_lock) {
-    return { kind: "missing_lock", status };
-  }
   if (status.image_status === "building") {
     return { kind: "building", status };
   }
   if (status.image_status === "failed") {
     return { kind: "failed", status };
   }
-  // ready / none-with-devcontainer: nothing to surface.
   return { kind: "ready" };
 }
 
@@ -177,8 +178,6 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
   const title =
     state.kind === "missing"
       ? `Set up your devcontainer${label}`
-      : state.kind === "missing_lock"
-      ? `Missing devcontainer-lock.json${label}`
       : state.kind === "building"
       ? `Building project image${label}`
       : `Image build failed${label}`;
@@ -186,8 +185,6 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
   const description =
     state.kind === "missing"
       ? "Djinn needs a devcontainer.json committed to your repo before it can run tasks. A starter is generated below from the detected stack — copy it into .devcontainer/devcontainer.json, commit, and push."
-      : state.kind === "missing_lock"
-      ? "Commit a devcontainer-lock.json so feature versions are pinned and builds stay reproducible."
       : state.kind === "building"
       ? "The per-project image is being built in the cluster. This usually takes 1–3 minutes on first build; cached layers make subsequent rebuilds much faster."
       : state.status.image_last_error
@@ -264,15 +261,6 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
                 Check again
               </Button>
             </div>
-          </div>
-        )}
-
-        {state.kind === "missing_lock" && (
-          <div className="mt-3 pl-11">
-            <p className="text-xs text-muted-foreground">Run this in your repo root:</p>
-            <pre className="mt-1 rounded-md border border-border/50 bg-black/30 p-3 text-xs text-muted-foreground">
-              <code>devcontainer features info lock --workspace-folder .</code>
-            </pre>
           </div>
         )}
 
