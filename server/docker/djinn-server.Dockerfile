@@ -96,7 +96,7 @@ COPY --from=planner /app/server/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/server/target \
-    cargo chef cook --release --recipe-path recipe.json -p djinn-server
+    cargo chef cook --release --recipe-path recipe.json --features qdrant -p djinn-server
 
 # Bring in the actual source and build only the binary. Deps are already
 # compiled and sitting in the target cache mount, so this is pure
@@ -106,7 +106,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/server/target \
     set -eux; \
-    cargo build --release --locked -p djinn-server; \
+    cargo build --release --locked --features qdrant -p djinn-server; \
     mkdir -p /out; \
     cp /app/server/target/release/djinn-server /out/djinn-server; \
     strip /out/djinn-server

@@ -40,14 +40,16 @@ ingress:
 # the local files exist.
 
 # Tighter resource defaults so the whole stack fits on a laptop.
+# Server limit accounts for the in-process nomic-embed model (~500MB) +
+# Dolt pool + OTEL + actors — 1Gi was OOMing on idle load.
 resources:
   server:
     requests:
       cpu: "100m"
-      memory: "256Mi"
+      memory: "512Mi"
     limits:
-      cpu: "1"
-      memory: "1Gi"
+      cpu: "2"
+      memory: "4Gi"
   taskrun:
     requests:
       cpu: "250m"
@@ -56,14 +58,16 @@ resources:
       cpu: "1"
       memory: "2Gi"
 
+# Dolt's chunk store memory-maps aggressively and runs inline GC on COMMIT.
+# 2Gi caused 60-130s COMMIT stalls under ordinary stack-update traffic.
 dolt:
   resources:
     requests:
-      cpu: "100m"
-      memory: "512Mi"
+      cpu: "250m"
+      memory: "1Gi"
     limits:
-      cpu: "1"
-      memory: "2Gi"
+      cpu: "2"
+      memory: "6Gi"
   storage:
     size: 5Gi
     accessMode: ReadWriteOnce
