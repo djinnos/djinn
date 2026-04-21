@@ -62,15 +62,19 @@ spec:
             - name: http
               containerPort: {{ .Values.imagePipeline.zot.port }}
               protocol: TCP
+          # Zot uses htpasswd auth, so GET /v2/ without credentials
+          # returns 401 — which kubelet treats as probe failure and
+          # cycles the Pod every ~4 min. TCP-socket probe just validates
+          # the port is bound, which matches what "Zot is up" actually
+          # means (if the process is serving anywhere, it's serving on
+          # :5000).
           readinessProbe:
-            httpGet:
-              path: /v2/
+            tcpSocket:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet:
-              path: /v2/
+            tcpSocket:
               port: http
             initialDelaySeconds: 30
             periodSeconds: 30

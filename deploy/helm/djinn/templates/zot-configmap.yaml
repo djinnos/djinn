@@ -30,7 +30,14 @@ data:
           "htpasswd": {
             "path": "/secret/htpasswd"
           }
-        }
+        }{{- if .Values.imagePipeline.zot.anonymousPull }},
+        "accessControl": {
+          "repositories": {
+            "**": {
+              "anonymousPolicy": ["read"]
+            }
+          }
+        }{{- end }}
       },
       "log": {
         "level": "info"

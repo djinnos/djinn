@@ -1,0 +1,26 @@
+{{/*
+Per-registry buildkitd config. Only rendered when `imagePipeline.buildkitd.zotPlaintext`
+is true — typically the local/kind path where Zot serves plain HTTP
+behind ClusterIP. Prod topologies that front Zot (or any other target
+registry) with TLS leave this off and buildkitd runs with its defaults.
+
+Without this, buildkitd's push step errors with
+`http: server gave HTTP response to HTTPS client` because the daemon
+negotiates TLS against every registry by default.
+*/}}
+{{- if .Values.imagePipeline.buildkitd.zotPlaintext -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "djinn.fullname" . }}-buildkitd-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkitd
+data:
+  buildkitd.toml: |
+    debug = false
+
+    [registry."{{ include "djinn.imagePipeline.registryHost" . }}"]
+      http = true
+{{- end }}

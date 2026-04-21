@@ -98,6 +98,38 @@ spec:
               value: "kubernetes"
             - name: DJINN_IMAGE_BUILDER_IMAGE
               value: {{ .Values.imagePipeline.builderImage | quote }}
+            # Image-pipeline hostnames are computed from the release name
+            # here so the Rust controller doesn't fall back to its
+            # hardcoded `djinn-`-prefixed defaults when the Helm release
+            # is named something else. Override at values level via
+            # imagePipeline.registryHost / imagePipeline.buildkitdHost.
+            - name: DJINN_IMAGE_REGISTRY_HOST
+              value: {{ include "djinn.imagePipeline.registryHost" . | quote }}
+            - name: DJINN_IMAGE_BUILDKITD_HOST
+              value: {{ include "djinn.imagePipeline.buildkitdHost" . | quote }}
+            - name: DJINN_IMAGE_NAMESPACE
+              value: {{ include "djinn.namespace" . | quote }}
+            - name: DJINN_IMAGE_REGISTRY_AUTH_SECRET
+              value: {{ include "djinn.imagePipeline.registryAuthSecretName" . | quote }}
+            - name: DJINN_IMAGE_MIRROR_PVC
+              value: {{ include "djinn.pvcName.mirrors" . | quote }}
+            # djinn-k8s runtime (task-run + warm-job dispatcher) — same
+            # pattern as the image pipeline above: everything is derived
+            # from the release fullname + namespace so no hardcoded
+            # "djinn-" prefix leaks into the compiled binary.
+            - name: DJINN_K8S_NAMESPACE
+              value: {{ include "djinn.namespace" . | quote }}
+            - name: DJINN_K8S_SERVICE_ACCOUNT
+              value: {{ include "djinn.serviceAccountName.taskrun" . | quote }}
+            - name: DJINN_K8S_MIRROR_PVC
+              value: {{ include "djinn.pvcName.mirrors" . | quote }}
+            - name: DJINN_K8S_CACHE_PVC
+              value: {{ include "djinn.pvcName.cache" . | quote }}
+            - name: DJINN_K8S_SERVER_ADDR
+              value: {{ printf "%s-server.%s.svc.cluster.local:%d"
+                        (include "djinn.fullname" .)
+                        (include "djinn.namespace" .)
+                        (.Values.service.rpcPort | int) | quote }}
             - name: DJINN_VAULT_KEY_PATH
               value: /var/run/secrets/djinn/vault.key
             - name: GITHUB_APP_PRIVATE_KEY_PATH

@@ -134,6 +134,57 @@ that string wins; otherwise we use the chart-local name.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Image-pipeline DNS helpers — all derive from release fullname + namespace so
+we never assume a release name like "djinn". `imagePipeline.registryHost` in
+values.yaml is treated as an override; when empty (the expected case) we
+compute the in-cluster Zot Service DNS.
+
+These helpers are the single source of truth consumed by:
+  * registry-auth-secret.yaml — sets the `auths.<host>` key in config.json
+  * buildkitd-configmap.yaml  — sets the `[registry."<host>"]` block
+  * deployment-server.yaml    — injects DJINN_IMAGE_{REGISTRY,BUILDKITD}_HOST
+                                env vars so the server reads the chart-
+                                computed value instead of the Rust defaults.
+
+External registries (ECR, GHCR) override `imagePipeline.registryHost`
+directly and the in-cluster Zot Service name is ignored.
+*/}}
+{{- define "djinn.imagePipeline.registryHost" -}}
+{{- if .Values.imagePipeline.registryHost -}}
+{{- .Values.imagePipeline.registryHost -}}
+{{- else -}}
+{{- printf "%s-zot.%s.svc.cluster.local:%d"
+      (include "djinn.fullname" .)
+      (include "djinn.namespace" .)
+      (.Values.imagePipeline.zot.port | int) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "djinn.imagePipeline.buildkitdHost" -}}
+{{- if .Values.imagePipeline.buildkitdHost -}}
+{{- .Values.imagePipeline.buildkitdHost -}}
+{{- else -}}
+{{- printf "tcp://%s-buildkitd.%s.svc.cluster.local:%d"
+      (include "djinn.fullname" .)
+      (include "djinn.namespace" .)
+      (.Values.imagePipeline.buildkitd.port | int) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "djinn.imagePipeline.registryAuthSecretName" -}}
+{{- if .Values.imagePipeline.zot.auth.existingSecret -}}
+{{- .Values.imagePipeline.zot.auth.existingSecret -}}
+{{- else -}}
+{{- printf "%s-zot-auth" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* Back-compat alias — canonical source is djinn.pvcName.mirrors. */ -}}
+{{- define "djinn.imagePipeline.mirrorPvcName" -}}
+{{- include "djinn.pvcName.mirrors" . -}}
+{{- end -}}
+
 {{- define "djinn.secretName.langfuse" -}}
 {{- if .Values.langfuse.existingSecret -}}
 {{- .Values.langfuse.existingSecret -}}

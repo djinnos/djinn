@@ -61,6 +61,12 @@ spec:
             # Rootless: no nested process-sandbox. Upstream-documented flag
             # for this exact K8s rootless mode.
             - --oci-worker-no-process-sandbox
+            {{- if .Values.imagePipeline.buildkitd.zotPlaintext }}
+            # Plaintext-Zot topologies (local/kind) mount a ConfigMap with
+            # a per-registry `http = true` entry; pass it via --config.
+            - --config
+            - /etc/buildkit/buildkitd.toml
+            {{- end }}
           securityContext:
             # Minimum privileges for rootless BuildKit in K8s: unconfined
             # seccomp + AppArmor, runAsUser 1000 (the `user` account baked
@@ -100,9 +106,19 @@ spec:
               mountPath: /home/user/.docker/config.json
               subPath: config.json
               readOnly: true
+            {{- if .Values.imagePipeline.buildkitd.zotPlaintext }}
+            - name: buildkitd-config
+              mountPath: /etc/buildkit
+              readOnly: true
+            {{- end }}
       volumes:
         - name: buildkitd-data
           emptyDir: {}
+        {{- if .Values.imagePipeline.buildkitd.zotPlaintext }}
+        - name: buildkitd-config
+          configMap:
+            name: {{ include "djinn.fullname" . }}-buildkitd-config
+        {{- end }}
         - name: registry-auth
           secret:
             {{- if .Values.imagePipeline.zot.auth.existingSecret }}

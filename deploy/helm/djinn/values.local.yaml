@@ -106,7 +106,17 @@ imagePipeline:
   # resource). ghcr.io/djinnos/djinn-image-builder:latest is org-private;
   # anonymous pulls 401 inside kind. Override to the in-cluster registry.
   builderImage: "localhost:5001/djinn-image-builder:dev"
+  buildkitd:
+    # Local Zot serves plaintext HTTP over ClusterIP — tell buildkitd to
+    # not expect TLS. Prod environments that front Zot with an Ingress +
+    # TLS should leave this at its chart default (false).
+    zotPlaintext: true
   zot:
+    # kubelet on the kind node pulls per-project devcontainer images from
+    # this registry; wiring pull-secrets onto every Job is more friction
+    # than letting local-only Zot serve anonymous reads. Writes still need
+    # htpasswd (buildkitd has credentials).
+    anonymousPull: true
     storage:
       storageClassName: standard
       size: 5Gi

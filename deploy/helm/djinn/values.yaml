@@ -263,9 +263,16 @@ labels: {}
 #   sysctl user.max_user_namespaces=28633   # or higher
 imagePipeline:
   enabled: true
-  # Fully-qualified cluster-local hostname workers + controller use to pull
-  # per-project images. Must resolve to the Zot Service.
-  registryHost: "zot.djinn.svc.cluster.local:5000"
+  # Host:port where the controller + buildkitd push/pull per-project images.
+  # Leave empty to derive from the Release name and namespace
+  # (`<release>-zot.<ns>.svc.cluster.local:<zot.port>`). Set this to an
+  # external registry (ECR, GHCR, a TLS-fronted Zot) to bypass the in-cluster
+  # Zot Service entirely.
+  registryHost: ""
+  # tcp:// endpoint of the BuildKit daemon. Leave empty to derive from the
+  # Release name and namespace (`tcp://<release>-buildkitd.<ns>.svc.cluster.local:<buildkitd.port>`).
+  # Set to an external buildkitd to bypass the in-cluster daemon.
+  buildkitdHost: ""
   # Pinned reference to the djinn-agent-worker devcontainer Feature. Consumed
   # by generated `.devcontainer/devcontainer.json` starter files (PR 6) and
   # by PR 5's build Job env.
@@ -275,6 +282,13 @@ imagePipeline:
     # gRPC port exposed on the buildkitd Service. Consumed by the build Job
     # via DOCKER_HOST=tcp://<svc>:<port>.
     port: 1234
+    # When Zot is served plaintext (local/kind), buildkitd needs a
+    # per-registry `http = true` entry so its push step doesn't negotiate
+    # TLS. Set to `false` in environments where Zot is fronted with TLS
+    # (Ingress + cert-manager / ACM / etc.) or where the target registry
+    # is a managed HTTPS service (ECR, GHCR). Changing this toggles the
+    # `buildkitd-config` ConfigMap + mount on/off.
+    zotPlaintext: false
     resources:
       requests:
         cpu: "500m"
@@ -286,6 +300,12 @@ imagePipeline:
     image: ghcr.io/project-zot/zot-linux-amd64:v2.1.0
     # HTTP port exposed on the Zot Service. v1 OCI distribution spec.
     port: 5000
+    # Allow anonymous pulls (no auth challenge) for in-cluster image
+    # pulls. Writes still require htpasswd credentials. Useful when
+    # kubelet pulls per-project devcontainer images built by the image
+    # pipeline — avoids wiring pull-secrets onto every Job Pod Spec.
+    # Leave false in environments where image confidentiality matters.
+    anonymousPull: false
     storage:
       size: 100Gi
       storageClassName: ""   # "" → cluster default

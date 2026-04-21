@@ -53,6 +53,36 @@ for node in $(kind get nodes --name "${CLUSTER_NAME}"); do
 EOF
 done
 
+# --- 3b. Teach the kind node's containerd about the in-cluster Zot host ---
+# kubelet runs on the node's host network and has no cluster-DNS resolver, so
+# it can't look up `<release>-zot.<ns>.svc.cluster.local` natively. Mirror the
+# Service hostname to its ClusterIP over plain HTTP (Zot serves HTTP; the
+# `http = true` buildkit toggle mirrors this on the push side). Re-runs
+# tolerate an existing file because the Service IP is stable per release.
+#
+# Only applies when the chart is installed with default DNS shape
+# (<release>-zot.<ns>.svc.cluster.local:5000). For prod/EKS where Zot is
+# fronted by a real DNS ingress, this block is a no-op: `kubectl get svc`
+# returns nothing and we silently skip.
+ZOT_NS="${ZOT_NAMESPACE:-djinn}"
+ZOT_SVC="${ZOT_SERVICE:-djinn-zot}"
+ZOT_HOST="${ZOT_HOST:-${ZOT_SVC}.${ZOT_NS}.svc.cluster.local:5000}"
+ZOT_IP="$(kubectl -n "${ZOT_NS}" get svc "${ZOT_SVC}" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+if [ -n "${ZOT_IP}" ]; then
+  echo ">>> wiring kubelet → Zot mirror: ${ZOT_HOST} → http://${ZOT_IP}:5000"
+  ZOT_DIR="/etc/containerd/certs.d/${ZOT_HOST}"
+  for node in $(kind get nodes --name "${CLUSTER_NAME}"); do
+    docker exec "${node}" mkdir -p "${ZOT_DIR}"
+    cat <<EOF | docker exec -i "${node}" cp /dev/stdin "${ZOT_DIR}/hosts.toml"
+[host."http://${ZOT_IP}:5000"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true
+EOF
+  done
+else
+  echo ">>> Zot Service not found yet at ${ZOT_NS}/${ZOT_SVC} — skipping kubelet mirror (chart not installed?)"
+fi
+
 # --- 4. Attach the registry to the kind network ----------------------------
 if [ "$(docker inspect -f '{{json .NetworkSettings.Networks.kind}}' "${REG_NAME}" 2>/dev/null)" = 'null' ]; then
   docker network connect "kind" "${REG_NAME}"
