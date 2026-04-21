@@ -317,16 +317,26 @@ impl CandleEmbeddingRuntime {
             }));
         }
         // nomic-embed-text-v1.5's RoPE cache is sized to
-        // `max_position_embeddings`; longer inputs panic the model forward
-        // pass with "inconsistent last dim size in rope". Truncate at the
-        // tokenizer so notes that exceed the context window still get a
-        // best-effort embedding (first N tokens) instead of falling into
-        // the repair-loop retry pathology.
-        let max_seq_len = if config.n_positions == 0 {
+        // `config.n_positions` (8192); longer inputs panic the model
+        // forward pass with "inconsistent last dim size in rope". Even
+        // within that bound, full-attention memory grows O(N²) —
+        // 8192-token self-attention needs ~3GB peak. Cap at a smaller
+        // ceiling by default so the embedding model fits comfortably in
+        // the pod's memory limit and long notes still get a best-effort
+        // prefix embedding.
+        //
+        // Tunable via `DJINN_EMBEDDING_MAX_TOKENS` for operators who have
+        // memory headroom and want higher-fidelity embeddings.
+        let configured_cap = std::env::var("DJINN_EMBEDDING_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|v| *v >= 64);
+        let hard_cap = if config.n_positions == 0 {
             8192
         } else {
             config.n_positions
         };
+        let max_seq_len = configured_cap.unwrap_or(2048).min(hard_cap);
         tokenizer
             .with_truncation(Some(TruncationParams {
                 max_length: max_seq_len,
@@ -336,6 +346,11 @@ impl CandleEmbeddingRuntime {
             }))
             .map_err(anyhow::Error::msg)
             .context("enable tokenizer truncation")?;
+        tracing::info!(
+            model = %model.model_id,
+            max_seq_len,
+            "embedding tokenizer truncation enabled"
+        );
 
         let device = Device::Cpu;
         let vb = unsafe {
