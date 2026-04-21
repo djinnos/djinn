@@ -2110,6 +2110,15 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "graph_warm_status": {
+          "description": "Derived status for the UI banner. One of\n`pending | running | ready | failed`. `pending` means no warm has\never run; `running` means the image is ready and a warm should be\nin flight (or imminent); `ready` means `graph_warmed_at` is set;\n`failed` mirrors the image build's failed status (no warm possible).",
+          "type": "string"
+        },
+        "graph_warmed_at": {
+          "description": "ISO-8601 UTC timestamp of the most recent successful canonical-graph\nwarm for this project. `None` means the warmer has not completed a\nrun yet (cold project or failing pipeline). The coordinator will not\ndispatch tasks until this is set.",
+          "nullable": true,
+          "type": "string"
+        },
         "has_devcontainer": {
           "description": "True when the mirror's HEAD contains `.devcontainer/devcontainer.json`.",
           "type": "boolean"
@@ -2153,7 +2162,8 @@ expression: signatures
       "required": [
         "has_devcontainer",
         "has_devcontainer_lock",
-        "image_status"
+        "image_status",
+        "graph_warm_status"
       ],
       "title": "GetProjectDevcontainerStatusResponse",
       "type": "object"

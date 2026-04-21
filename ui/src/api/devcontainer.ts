@@ -60,6 +60,20 @@ export interface DevcontainerStatus {
    * the "Open PR" CTA is the right affordance.
    */
   open_setup_pr?: DevcontainerPrRef | null;
+  /**
+   * ISO-8601 UTC timestamp of the last successful canonical-graph warm
+   * for this project. Absent/null means the warmer has not completed a
+   * run yet — the coordinator will not dispatch tasks until this is set.
+   */
+  graph_warmed_at?: string | null;
+  /**
+   * Derived warm-pipeline status for the banner row:
+   * - `pending`: no warm has run (image not yet ready).
+   * - `running`: image is ready; warm Job should be in flight or imminent.
+   * - `ready`: warm completed at least once (`graph_warmed_at` is set).
+   * - `failed`: image build failed, warm cannot run.
+   */
+  graph_warm_status: "pending" | "running" | "ready" | "failed" | string;
   error?: string | null;
 }
 

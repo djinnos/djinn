@@ -310,11 +310,18 @@ impl AppState {
         // `projects.image_status` flips from `building` → `ready`/`failed`
         // without operator intervention. Uses the same `kube::Client`
         // and config; observes `self.cancel()` for graceful shutdown.
+        //
+        // Inject the graph warmer so a successful build transition kicks
+        // the canonical-graph warm without waiting for the next mirror-fetch
+        // tick — this closes the last gap before the coordinator's dispatch
+        // gate can clear on first setup.
+        let warmer = self.graph_warmer().await;
         let handle = ImageBuildWatcher::spawn(
             client,
             config,
             self.db().clone(),
             self.event_bus(),
+            Some(warmer),
             self.cancel().clone(),
         );
         *self.inner.image_build_watcher.lock().await = Some(handle);

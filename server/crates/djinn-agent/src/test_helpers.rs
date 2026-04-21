@@ -93,9 +93,29 @@ pub async fn create_test_project(db: &Database) -> Project {
         .to_string_lossy()
         .to_string();
     let name = format!("test-project-{id}");
-    repo.create(&name, &path)
+    let project = repo
+        .create(&name, &path)
         .await
-        .expect("failed to create test project")
+        .expect("failed to create test project");
+    // Satisfy the coordinator's readiness gate so existing tests can dispatch
+    // without threading a full devcontainer pipeline: mark the image as ready
+    // and stamp `graph_warmed_at` via a cache row with a synthetic commit SHA.
+    let image = djinn_db::ProjectImage {
+        tag: Some(format!("test-registry/djinn-project-{}:testhash", &project.id)),
+        hash: Some("testhash".into()),
+        status: djinn_db::ProjectImageStatus::READY.into(),
+        last_error: None,
+    };
+    let _ = repo.set_project_image(&project.id, &image).await;
+    let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
+    let _ = cache_repo
+        .upsert(djinn_db::RepoGraphCacheInsert {
+            project_id: &project.id,
+            commit_sha: "test-commit",
+            graph_blob: b"test-graph",
+        })
+        .await;
+    project
 }
 
 pub async fn create_test_epic(db: &Database, project_id: &str) -> Epic {

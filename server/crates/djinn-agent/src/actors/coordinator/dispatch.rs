@@ -6,6 +6,22 @@ use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 
+/// Env flag allowing operators (and the in-process TestRuntime path) to
+/// bypass the devcontainer-image + graph-warm readiness gate. Default is
+/// "on" (fail-closed). Set to `0`/`false`/`no` to dispatch as soon as a
+/// task is ready, regardless of project readiness.
+const ENV_REQUIRE_WARMED_GRAPH: &str = "DJINN_REQUIRE_WARMED_GRAPH";
+
+fn readiness_gate_enabled() -> bool {
+    match std::env::var(ENV_REQUIRE_WARMED_GRAPH) {
+        Ok(val) => !matches!(
+            val.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
 /// Result of a single `try_dispatch_to_pool` attempt.
 enum DispatchOutcome {
     /// Successfully dispatched to a slot.
@@ -310,11 +326,46 @@ impl CoordinatorActor {
         self.last_dispatched
             .retain(|_, instant| instant.elapsed() < RAPID_FAILURE_THRESHOLD);
 
+        // Cache readiness per project across this dispatch pass so we don't
+        // hammer the DB on every task.
+        let gate_enabled = readiness_gate_enabled();
+        let mut readiness_cache: HashMap<String, bool> = HashMap::new();
+
         for task in ready {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
             {
                 continue;
+            }
+            if gate_enabled {
+                let ready_for_dispatch = match readiness_cache.get(&task.project_id) {
+                    Some(v) => *v,
+                    None => {
+                        let project_repo = djinn_db::ProjectRepository::new(
+                            self.db.clone(),
+                            crate::events::event_bus_for(&self.events_tx),
+                        );
+                        let ok = match project_repo
+                            .get_dispatch_readiness(&task.project_id)
+                            .await
+                        {
+                            Ok(Some(r)) => r.is_ready_for_dispatch(),
+                            // Unknown project or DB error: fail-closed so a
+                            // broken setup never silently burns tokens.
+                            _ => false,
+                        };
+                        readiness_cache.insert(task.project_id.clone(), ok);
+                        ok
+                    }
+                };
+                if !ready_for_dispatch {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        project_id = %task.project_id,
+                        "CoordinatorActor: dispatch deferred — project devcontainer image + graph warm not both ready"
+                    );
+                    continue;
+                }
             }
             // Detect rapid failure: if this task was dispatched very recently and
             // is already back as ready, it failed lifecycle early → add to cooldown.

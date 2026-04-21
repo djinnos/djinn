@@ -45,10 +45,12 @@
 //! ample for realistic project counts, trivial to rebuild on restart.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_db::{Database, ProjectImage, ProjectImageStatus, ProjectRepository};
+use djinn_runtime::GraphWarmerService;
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::Api;
@@ -93,10 +95,11 @@ impl ImageBuildWatcher {
         config: ImageControllerConfig,
         db: Database,
         event_bus: EventBus,
+        graph_warmer: Option<Arc<dyn GraphWarmerService>>,
         cancel: CancellationToken,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            run_loop(client, config, db, event_bus, cancel).await;
+            run_loop(client, config, db, event_bus, graph_warmer, cancel).await;
         })
     }
 }
@@ -106,6 +109,7 @@ async fn run_loop(
     config: ImageControllerConfig,
     db: Database,
     event_bus: EventBus,
+    graph_warmer: Option<Arc<dyn GraphWarmerService>>,
     cancel: CancellationToken,
 ) {
     let jobs: Api<Job> = Api::namespaced(client, &config.namespace);
@@ -132,7 +136,15 @@ async fn run_loop(
                 next = stream.next() => {
                     match next {
                         Some(Ok(ev)) => {
-                            handle_event(&config, &repo, &event_bus, &mut seen, ev).await;
+                            handle_event(
+                                &config,
+                                &repo,
+                                &event_bus,
+                                graph_warmer.as_ref(),
+                                &mut seen,
+                                ev,
+                            )
+                            .await;
                         }
                         Some(Err(e)) => {
                             warn!(error = %e, "image_build_watcher: stream error; reconnecting");
@@ -165,13 +177,14 @@ pub async fn __test_handle_event(
     ev: watcher::Event<Job>,
 ) {
     let repo = ProjectRepository::new(db.clone(), event_bus.clone());
-    handle_event(config, &repo, event_bus, seen, ev).await;
+    handle_event(config, &repo, event_bus, None, seen, ev).await;
 }
 
 async fn handle_event(
     config: &ImageControllerConfig,
     repo: &ProjectRepository,
     event_bus: &EventBus,
+    graph_warmer: Option<&Arc<dyn GraphWarmerService>>,
     seen: &mut HashSet<String>,
     ev: watcher::Event<Job>,
 ) {
@@ -227,6 +240,17 @@ async fn handle_event(
         JobOutcome::Succeeded => {
             apply_success(config, repo, event_bus, &project_id, &hash_prefix, &job_name, &labels)
                 .await;
+            // Kick the canonical-graph warmer so the coordinator's dispatch
+            // gate clears without waiting for the next mirror-fetch tick.
+            // Fire-and-forget: the warmer's own single-flight guard + DB
+            // freshness check make duplicate calls cheap.
+            if let Some(warmer) = graph_warmer {
+                warmer.trigger(&project_id).await;
+                info!(
+                    project_id,
+                    "image_build_watcher: graph warmer triggered after build success"
+                );
+            }
         }
         JobOutcome::Failed => {
             apply_failure(repo, event_bus, &project_id, &hash_prefix, &job_name).await;

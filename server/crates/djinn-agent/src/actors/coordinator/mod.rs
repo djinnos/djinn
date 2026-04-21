@@ -130,10 +130,32 @@ mod tests {
         db: &Database,
         tx: broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Epic {
-        EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
             .create("Epic", "", "", "", "", None)
             .await
-            .unwrap()
+            .unwrap();
+        // Satisfy the coordinator's readiness gate: mark the synthesized
+        // default project as image-ready and stamp `graph_warmed_at`.
+        let project_repo = djinn_db::ProjectRepository::new(
+            db.clone(),
+            crate::events::event_bus_for(&tx),
+        );
+        let image = djinn_db::ProjectImage {
+            tag: Some(format!("test-registry/djinn-project-{}:testhash", &epic.project_id)),
+            hash: Some("testhash".into()),
+            status: djinn_db::ProjectImageStatus::READY.into(),
+            last_error: None,
+        };
+        let _ = project_repo.set_project_image(&epic.project_id, &image).await;
+        let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
+        let _ = cache_repo
+            .upsert(djinn_db::RepoGraphCacheInsert {
+                project_id: &epic.project_id,
+                commit_sha: "test-commit",
+                graph_blob: b"test-graph",
+            })
+            .await;
+        epic
     }
 
     async fn create_task_with_note(

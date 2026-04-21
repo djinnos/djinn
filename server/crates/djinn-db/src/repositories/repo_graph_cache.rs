@@ -75,6 +75,23 @@ impl RepoGraphCacheRepository {
         )
         .execute(self.db.pool())
         .await?;
+        // Stamp the project row so the coordinator's dispatch gate can see
+        // that the warm pipeline has completed at least once for this project.
+        // Intentionally best-effort: a stamp failure must not roll back the
+        // cache write, so we log and continue. Uses the non-macro
+        // `sqlx::query` form so builds work on databases that haven't yet
+        // applied migration 9.
+        if let Err(e) = sqlx::query("UPDATE projects SET graph_warmed_at = NOW(3) WHERE id = ?")
+            .bind(entry.project_id)
+            .execute(self.db.pool())
+            .await
+        {
+            tracing::warn!(
+                project_id = %entry.project_id,
+                error = %e,
+                "RepoGraphCacheRepository::upsert: failed to stamp projects.graph_warmed_at"
+            );
+        }
         Ok(())
     }
 }
@@ -120,6 +137,47 @@ mod tests {
         .expect("upsert");
         let miss = repo.get("p1", "def456").await.expect("get");
         assert!(miss.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_stamps_projects_graph_warmed_at() {
+        use crate::repositories::project::ProjectRepository;
+        use djinn_core::events::EventBus;
+        let db = Database::open_in_memory().expect("in-memory db");
+        let repo = RepoGraphCacheRepository::new(db.clone());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = project_repo
+            .create("proj-warm-stamp", "/tmp/djinn-tests/warm-stamp")
+            .await
+            .expect("create project");
+
+        let before = project_repo
+            .get_dispatch_readiness(&project.id)
+            .await
+            .expect("readiness")
+            .expect("exists");
+        assert!(
+            before.graph_warmed_at.is_none(),
+            "graph_warmed_at should be NULL before the first warm"
+        );
+
+        repo.upsert(RepoGraphCacheInsert {
+            project_id: &project.id,
+            commit_sha: "abc",
+            graph_blob: b"graph",
+        })
+        .await
+        .expect("upsert");
+
+        let after = project_repo
+            .get_dispatch_readiness(&project.id)
+            .await
+            .expect("readiness")
+            .expect("exists");
+        assert!(
+            after.graph_warmed_at.is_some(),
+            "graph_warmed_at must be stamped after a cache upsert"
+        );
     }
 
     #[tokio::test]

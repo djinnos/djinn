@@ -1170,6 +1170,7 @@ dependencies = [
  "async-trait",
  "djinn-core",
  "djinn-db",
+ "djinn-runtime",
  "djinn-stack",
  "futures",
  "git2",

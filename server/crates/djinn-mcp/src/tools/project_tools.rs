@@ -194,6 +194,18 @@ pub struct GetProjectDevcontainerStatusResponse {
     /// button to "View PR" without a second round-trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_setup_pr: Option<DevcontainerPrRef>,
+    /// ISO-8601 UTC timestamp of the most recent successful canonical-graph
+    /// warm for this project. `None` means the warmer has not completed a
+    /// run yet (cold project or failing pipeline). The coordinator will not
+    /// dispatch tasks until this is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_warmed_at: Option<String>,
+    /// Derived status for the UI banner. One of
+    /// `pending | running | ready | failed`. `pending` means no warm has
+    /// ever run; `running` means the image is ready and a warm should be
+    /// in flight (or imminent); `ready` means `graph_warmed_at` is set;
+    /// `failed` mirrors the image build's failed status (no warm possible).
+    pub graph_warm_status: String,
     /// Populated on lookup failures; clients should surface this verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -345,6 +357,40 @@ fn parse_branch_list(stdout: &str) -> Vec<String> {
         .filter(|l| !l.is_empty() && !l.starts_with('('))
         .map(|l| l.to_string())
         .collect()
+}
+
+/// Derive the banner's `graph_warm_status` from image status + warm stamp.
+fn derive_graph_warm_status(image_status: &str, graph_warmed_at: &Option<String>) -> String {
+    if graph_warmed_at.is_some() {
+        return "ready".to_string();
+    }
+    match image_status {
+        s if s == ProjectImageStatus::FAILED => "failed".to_string(),
+        s if s == ProjectImageStatus::READY => "running".to_string(),
+        _ => "pending".to_string(),
+    }
+}
+
+/// Build a `GetProjectDevcontainerStatusResponse` for the error/early-exit
+/// paths. Keeps the many early-return sites short + consistent.
+fn error_response(
+    image_status: String,
+    image_last_error: Option<String>,
+    error: String,
+) -> GetProjectDevcontainerStatusResponse {
+    let graph_warm_status = derive_graph_warm_status(&image_status, &None);
+    GetProjectDevcontainerStatusResponse {
+        has_devcontainer: false,
+        has_devcontainer_lock: false,
+        image_tag: None,
+        image_status,
+        image_last_error,
+        starter_json: None,
+        open_setup_pr: None,
+        graph_warmed_at: None,
+        graph_warm_status,
+        error: Some(error),
+    }
 }
 
 /// Look up an open PR on the `djinn/setup-devcontainer` branch for a
@@ -1092,28 +1138,18 @@ impl DjinnMcpServer {
         let stack_raw = match repo.get_stack(&input.project).await {
             Ok(Some(raw)) => raw,
             Ok(None) => {
-                return Json(GetProjectDevcontainerStatusResponse {
-                    has_devcontainer: false,
-                    has_devcontainer_lock: false,
-                    image_tag: None,
-                    image_status: ProjectImageStatus::NONE.to_string(),
-                    image_last_error: None,
-                    starter_json: None,
-                    open_setup_pr: None,
-                    error: Some(format!("project not found: {}", input.project)),
-                });
+                return Json(error_response(
+                    ProjectImageStatus::NONE.to_string(),
+                    None,
+                    format!("project not found: {}", input.project),
+                ));
             }
             Err(err) => {
-                return Json(GetProjectDevcontainerStatusResponse {
-                    has_devcontainer: false,
-                    has_devcontainer_lock: false,
-                    image_tag: None,
-                    image_status: ProjectImageStatus::NONE.to_string(),
-                    image_last_error: None,
-                    starter_json: None,
-                    open_setup_pr: None,
-                    error: Some(format!("stack lookup failed: {err}")),
-                });
+                return Json(error_response(
+                    ProjectImageStatus::NONE.to_string(),
+                    None,
+                    format!("stack lookup failed: {err}"),
+                ));
             }
         };
 
@@ -1126,16 +1162,11 @@ impl DjinnMcpServer {
             match serde_json::from_str::<Stack>(&stack_raw) {
                 Ok(s) => Some(s),
                 Err(err) => {
-                    return Json(GetProjectDevcontainerStatusResponse {
-                        has_devcontainer: false,
-                        has_devcontainer_lock: false,
-                        image_tag: None,
-                        image_status: ProjectImageStatus::NONE.to_string(),
-                        image_last_error: None,
-                        starter_json: None,
-                        open_setup_pr: None,
-                        error: Some(format!("stack JSON deserialize failed: {err}")),
-                    });
+                    return Json(error_response(
+                        ProjectImageStatus::NONE.to_string(),
+                        None,
+                        format!("stack JSON deserialize failed: {err}"),
+                    ));
                 }
             }
         };
@@ -1167,16 +1198,11 @@ impl DjinnMcpServer {
             Ok(Some(img)) => img,
             Ok(None) => ProjectImage::none(),
             Err(err) => {
-                return Json(GetProjectDevcontainerStatusResponse {
-                    has_devcontainer,
-                    has_devcontainer_lock,
-                    image_tag: None,
-                    image_status: ProjectImageStatus::NONE.to_string(),
-                    image_last_error: None,
-                    starter_json,
-                    open_setup_pr: None,
-                    error: Some(format!("image state lookup failed: {err}")),
-                });
+                return Json(error_response(
+                    ProjectImageStatus::NONE.to_string(),
+                    None,
+                    format!("image state lookup failed: {err}"),
+                ));
             }
         };
 
@@ -1190,6 +1216,18 @@ impl DjinnMcpServer {
             find_open_setup_pr(&repo, &input.project).await
         };
 
+        // Graph-warm status: derived from the dispatch-readiness row so the
+        // banner can surface a distinct progress row alongside image state.
+        // Errors are swallowed — banner shows `pending` on lookup failure.
+        let graph_warmed_at = repo
+            .get_dispatch_readiness(&input.project)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.graph_warmed_at);
+
+        let graph_warm_status = derive_graph_warm_status(&image.status, &graph_warmed_at);
+
         Json(GetProjectDevcontainerStatusResponse {
             has_devcontainer,
             has_devcontainer_lock,
@@ -1198,6 +1236,8 @@ impl DjinnMcpServer {
             image_last_error: image.last_error,
             starter_json,
             open_setup_pr,
+            graph_warmed_at,
+            graph_warm_status,
             error: None,
         })
     }

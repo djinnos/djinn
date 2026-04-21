@@ -3,6 +3,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Pulse01Icon } from "@hugeicons/core-free-icons";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { callMcpTool } from "@/api/mcpClient";
+import { fetchDevcontainerStatus } from "@/api/devcontainer";
 import { FreshnessStrip } from "@/components/pulse/FreshnessStrip";
 import { ArchitectProposalsSection } from "@/components/pulse/ArchitectProposalsSection";
 import { HotspotsPanel } from "@/components/pulse/HotspotsPanel";
@@ -45,7 +46,7 @@ function ProjectEmptyState() {
   );
 }
 
-function NotWarmedState() {
+function NotWarmedState({ reason }: { reason?: string }) {
   return (
     <div className="flex h-full items-center justify-center">
       <div className="max-w-md text-center">
@@ -59,15 +60,15 @@ function NotWarmedState() {
         </span>
         <h2 className="mt-5 text-base font-medium text-foreground">Pulse not ready</h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          The canonical code graph hasn&apos;t been warmed yet. Pulse will populate
-          on the next Planner patrol or Architect spike.
+          {reason ??
+            "The canonical code graph hasn’t been warmed yet. Pulse will populate on the next Planner patrol or Architect spike."}
         </p>
       </div>
     </div>
   );
 }
 
-function WarmingState() {
+function WarmingState({ title, description }: { title?: string; description?: string }) {
   return (
     <div className="flex h-full items-center justify-center">
       <div className="max-w-md text-center">
@@ -80,11 +81,11 @@ function WarmingState() {
           <HugeiconsIcon icon={Pulse01Icon} className="h-6 w-6" />
         </span>
         <h2 className="mt-5 text-base font-medium text-foreground">
-          Architect is patrolling your codebase…
+          {title ?? "Architect is patrolling your codebase…"}
         </h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          Reading symbols, computing centrality, mapping dependencies. This usually
-          takes ~30 seconds.
+          {description ??
+            "Reading symbols, computing centrality, mapping dependencies. This usually takes ~30 seconds."}
         </p>
       </div>
     </div>
@@ -94,6 +95,7 @@ function WarmingState() {
 export function PulsePage() {
   const project = useSelectedProject();
   const projectPath = project?.path ?? null;
+  const projectId = project?.id ?? null;
   const architectActive = useArchitectActive(projectPath);
 
   const { data, isLoading } = useQuery({
@@ -111,6 +113,18 @@ export function PulsePage() {
     refetchOnWindowFocus: true,
   });
 
+  // Devcontainer + graph-warm pipeline state. Pulse needs this so it can
+  // tell the user whether "not warmed" means "waiting for image" vs. "warm
+  // Job is running" vs. "project just hasn't had an architect session yet".
+  const { data: devcontainer } = useQuery({
+    queryKey: ["pulse", "devcontainer-status", projectId],
+    queryFn: () => fetchDevcontainerStatus(projectId!),
+    enabled: !!projectId,
+    staleTime: 15_000,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+  });
+
   if (!project) {
     return <ProjectEmptyState />;
   }
@@ -125,11 +139,43 @@ export function PulsePage() {
 
   const warmed = data?.warmed ?? false;
 
-  if (!warmed && architectActive) {
-    return <WarmingState />;
-  }
-
   if (!warmed) {
+    // Surface the graph-warm pipeline explicitly so the user sees whether
+    // Pulse is blocked on the image build, the first warm Job, or just on
+    // an architect session.
+    if (devcontainer) {
+      if (!devcontainer.has_devcontainer) {
+        return (
+          <NotWarmedState reason="This project has no devcontainer.json yet. Commit one (use the banner on the Repositories page) and Pulse will warm automatically." />
+        );
+      }
+      if (devcontainer.image_status === "failed") {
+        return (
+          <NotWarmedState reason="The devcontainer image build failed. Fix it from the Repositories banner and Pulse will warm once the rebuild lands." />
+        );
+      }
+      if (devcontainer.image_status === "building") {
+        return (
+          <WarmingState
+            title="Building project image…"
+            description="Pulse will warm automatically as soon as the per-project devcontainer image lands."
+          />
+        );
+      }
+      if (devcontainer.graph_warm_status === "running") {
+        return (
+          <WarmingState
+            title="Warming code graph…"
+            description="Djinn is indexing the project inside its devcontainer image. This usually takes 1–3 minutes on first warm."
+          />
+        );
+      }
+    }
+
+    if (architectActive) {
+      return <WarmingState />;
+    }
+
     return <NotWarmedState />;
   }
 

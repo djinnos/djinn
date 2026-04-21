@@ -688,6 +688,42 @@ impl ProjectRepository {
         Ok(())
     }
 
+    /// Return the readiness snapshot the dispatch gate consults before it is
+    /// willing to run tasks for a project: the current `image_status` plus
+    /// whether the canonical-graph warm pipeline has produced a
+    /// `graph_warmed_at` stamp. Returns `Ok(None)` when the project id is
+    /// unknown.
+    ///
+    /// Uses the non-macro `sqlx::query` form because the `graph_warmed_at`
+    /// column was added in migration 9 — older DBs that haven't run the
+    /// migration yet still compile (the query fails at runtime with a
+    /// clear schema error, which the caller surfaces).
+    pub async fn get_dispatch_readiness(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectDispatchReadiness>> {
+        self.db.ensure_initialized().await?;
+        use sqlx::Row;
+        // Format the timestamp as ISO-8601 UTC server-side so sqlx decodes it
+        // as `Option<String>` instead of a platform-dependent TIMESTAMP type.
+        let row = sqlx::query(
+            "SELECT image_status,
+                    DATE_FORMAT(graph_warmed_at, '%Y-%m-%dT%H:%i:%s.%fZ')
+                        AS graph_warmed_at_iso
+               FROM projects WHERE id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row.map(|r| ProjectDispatchReadiness {
+            image_status: r.get::<String, _>("image_status"),
+            graph_warmed_at: r
+                .try_get::<Option<String>, _>("graph_warmed_at_iso")
+                .ok()
+                .flatten(),
+        }))
+    }
+
     /// Flip only the `image_status` column (e.g. transitioning a previously-
     /// `ready` project into `building` while retaining the existing tag/hash
     /// until the new Job lands).
@@ -728,6 +764,26 @@ impl ProjectImage {
             status: ProjectImageStatus::NONE.to_string(),
             last_error: None,
         }
+    }
+}
+
+/// Readiness fields the coordinator needs to decide whether a project can
+/// receive task dispatches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectDispatchReadiness {
+    /// Current `image_status` string (`"none"` / `"building"` / `"ready"` / `"failed"`).
+    pub image_status: String,
+    /// Wall-clock timestamp of the most recent successful canonical-graph warm.
+    /// `None` means the warm has never completed for this project.
+    pub graph_warmed_at: Option<String>,
+}
+
+impl ProjectDispatchReadiness {
+    /// True when the project's devcontainer image is `ready` AND the
+    /// canonical-graph warmer has stamped at least one completion. This is
+    /// the coordinator's hard gate for task dispatch.
+    pub fn is_ready_for_dispatch(&self) -> bool {
+        self.image_status == ProjectImageStatus::READY && self.graph_warmed_at.is_some()
     }
 }
 

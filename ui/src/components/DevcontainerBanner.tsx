@@ -33,6 +33,7 @@ type BannerState =
   | { kind: "missing"; starter: string | null; status: DevcontainerStatus }
   | { kind: "building"; status: DevcontainerStatus }
   | { kind: "failed"; status: DevcontainerStatus }
+  | { kind: "warming"; status: DevcontainerStatus }
   | { kind: "ready" }
   | { kind: "unknown" };
 
@@ -56,6 +57,11 @@ function deriveState(status: DevcontainerStatus | null): BannerState {
   }
   if (status.image_status === "failed") {
     return { kind: "failed", status };
+  }
+  // Image is ready but the graph warm has not completed — keep the banner
+  // up so the user can see the dispatch gate is still blocked.
+  if (status.image_status === "ready" && status.graph_warm_status !== "ready") {
+    return { kind: "warming", status };
   }
   return { kind: "ready" };
 }
@@ -153,7 +159,7 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
 
   const label = projectName ? ` for ${projectName}` : "";
   const isError = state.kind === "failed";
-  const isInfo = state.kind === "building";
+  const isInfo = state.kind === "building" || state.kind === "warming";
   const ring = isError
     ? "ring-red-500/50 bg-red-500/10"
     : isInfo
@@ -180,6 +186,8 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
       ? `Set up your devcontainer${label}`
       : state.kind === "building"
       ? `Building project image${label}`
+      : state.kind === "warming"
+      ? `Warming code graph${label}`
       : `Image build failed${label}`;
 
   const description =
@@ -187,6 +195,8 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
       ? "Djinn needs a devcontainer.json committed to your repo before it can run tasks. A starter is generated below from the detected stack — copy it into .devcontainer/devcontainer.json, commit, and push."
       : state.kind === "building"
       ? "The per-project image is being built in the cluster. This usually takes 1–3 minutes on first build; cached layers make subsequent rebuilds much faster."
+      : state.kind === "warming"
+      ? "The image is ready. Djinn is now indexing the project's code graph inside that image — task dispatch stays paused until the first warm completes so we can validate the end-to-end pipeline."
       : state.status.image_last_error
       ? `The last build failed: ${state.status.image_last_error}`
       : "The last build failed.";
@@ -264,7 +274,9 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
           </div>
         )}
 
-        {(state.kind === "failed" || state.kind === "building") && (
+        {(state.kind === "failed" ||
+          state.kind === "building" ||
+          state.kind === "warming") && (
           <div className="mt-3 flex flex-wrap items-center gap-2 pl-11">
             {state.kind === "failed" && (
               <Button
@@ -282,7 +294,7 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
                 Rebuild
               </Button>
             )}
-            {state.kind === "building" && (
+            {(state.kind === "building" || state.kind === "warming") && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -295,9 +307,39 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
             )}
           </div>
         )}
+
+        {(state.kind === "building" ||
+          state.kind === "warming" ||
+          state.kind === "failed") && (
+          <div className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pl-11 text-xs text-muted-foreground">
+            <span className="font-medium">Image build:</span>
+            <span>{pipelineLabel(state.status.image_status)}</span>
+            <span className="font-medium">Graph warm:</span>
+            <span>{pipelineLabel(state.status.graph_warm_status)}</span>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
+}
+
+function pipelineLabel(raw: string | undefined | null): string {
+  switch (raw) {
+    case "none":
+      return "not started";
+    case "building":
+      return "building…";
+    case "ready":
+      return "ready";
+    case "failed":
+      return "failed";
+    case "pending":
+      return "waiting for image";
+    case "running":
+      return "running…";
+    default:
+      return raw ?? "—";
+  }
 }
 
 function PrButton({

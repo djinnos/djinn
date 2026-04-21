@@ -1013,6 +1013,21 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    */
   error?: string
   /**
+   * Derived status for the UI banner. One of
+   * `pending | running | ready | failed`. `pending` means no warm has
+   * ever run; `running` means the image is ready and a warm should be
+   * in flight (or imminent); `ready` means `graph_warmed_at` is set;
+   * `failed` mirrors the image build's failed status (no warm possible).
+   */
+  graph_warm_status: string
+  /**
+   * ISO-8601 UTC timestamp of the most recent successful canonical-graph
+   * warm for this project. `None` means the warmer has not completed a
+   * run yet (cold project or failing pipeline). The coordinator will not
+   * dispatch tasks until this is set.
+   */
+  graph_warmed_at?: string
+  /**
    * True when the mirror's HEAD contains `.devcontainer/devcontainer.json`.
    */
   has_devcontainer: boolean

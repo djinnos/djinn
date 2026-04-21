@@ -61,8 +61,8 @@ pub use repositories::{
     },
     org_config::{NewOrgConfig, OrgConfig, OrgConfigRepository},
     project::{
-        ProjectConfig, ProjectImage, ProjectImageStatus, ProjectRepository, VerificationRule,
-        validate_verification_rules,
+        ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,
+        ProjectRepository, VerificationRule, validate_verification_rules,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     repo_map_cache::{CachedRepoMap, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository},
