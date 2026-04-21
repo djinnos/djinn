@@ -130,14 +130,27 @@ impl ImageController {
         let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
         let current = repo.get_project_image(project_id).await?;
         let current_hash = current.as_ref().and_then(|r| r.hash.clone());
-        if current_hash.as_deref() == Some(new_hash.as_str()) {
+        let current_status = current.as_ref().map(|r| r.status.as_str()).unwrap_or("");
+        // Skip rebuild only when the previous build actually produced a ready
+        // image — a stale BUILDING/FAILED/NONE row with a matching hash means
+        // the last attempt never published an image, so we must re-enqueue.
+        // Otherwise the warmer waits forever on an image that will never arrive.
+        if current_hash.as_deref() == Some(new_hash.as_str())
+            && current_status == ProjectImageStatus::READY
+        {
             debug!(
                 project_id,
                 hash = %short_hash(&new_hash),
-                "image_controller: devcontainer hash unchanged — skipping rebuild"
+                "image_controller: devcontainer hash unchanged and image ready — skipping rebuild"
             );
             return Ok(());
         }
+        debug!(
+            project_id,
+            hash = %short_hash(&new_hash),
+            status = %current_status,
+            "image_controller: enqueueing build (hash mismatch or image not ready)"
+        );
 
         // In-flight guard: swallow duplicate enqueues for the same project
         // without stalling callers behind a held semaphore permit.
@@ -185,14 +198,29 @@ impl ImageController {
         let job = build_image_build_job(&self.config, project_id, hash_prefix, &image_tag);
 
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
-        let created = jobs.create(&PostParams::default(), &job).await?;
-        info!(
-            project_id,
-            hash = %hash_prefix,
-            job = %created.metadata.name.as_deref().unwrap_or_default(),
-            namespace = %self.config.namespace,
-            "image_controller: build Job created"
-        );
+        match jobs.create(&PostParams::default(), &job).await {
+            Ok(created) => {
+                info!(
+                    project_id,
+                    hash = %hash_prefix,
+                    job = %created.metadata.name.as_deref().unwrap_or_default(),
+                    namespace = %self.config.namespace,
+                    "image_controller: build Job created"
+                );
+            }
+            // A previous tick (or a previous server process) already created
+            // the Job for this hash. Treat as a successful no-op — the
+            // image_build_watcher will drive the DB status on Job completion.
+            Err(kube::Error::Api(err)) if err.code == 409 => {
+                info!(
+                    project_id,
+                    hash = %hash_prefix,
+                    namespace = %self.config.namespace,
+                    "image_controller: build Job already exists — leaving it running"
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
         drop(permit);
 
         // Flip state to `building` + stash the new hash so subsequent
