@@ -36,7 +36,10 @@
 #   process is already dead" when cargo tries to spawn the missing wrapper.
 ###############################################################################
 
-FROM rust:1.82-slim-bookworm AS chef
+# Track the latest stable Rust 1.x; the workspace's rust-toolchain.toml pins
+# to "stable", so anchoring the base image here avoids rustup re-downloading
+# the toolchain on every fresh chef-base layer build.
+FROM rust:1-slim-bookworm AS chef
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_TERM_COLOR=always \
@@ -61,7 +64,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         mold \
     && rm -rf /var/lib/apt/lists/*
 
-RUN cargo install cargo-chef --locked --version 0.1.68
+# cargo-chef must be recent enough to recognize Rust edition 2024 — older
+# pins (≤0.1.68) crash with "data did not match any variant of untagged enum
+# MaybeInherited" on edition = "2024" in workspace member manifests.
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
 ###############################################################################
