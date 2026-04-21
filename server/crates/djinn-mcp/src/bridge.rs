@@ -204,24 +204,8 @@ pub struct EdgeEntry {
     pub edge_weight: f64,
 }
 
-/// A node referenced by a graph diff.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct GraphDiffNode {
-    pub key: String,
-    pub kind: String,
-    pub display_name: String,
-}
-
-/// An edge referenced by a graph diff.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct GraphDiffEdge {
-    pub from: String,
-    pub to: String,
-    pub edge_kind: String,
-}
-
-/// Result of a `status` query — a peek at the in-memory canonical graph cache
-/// for a project.  No warming side effects.
+/// Result of a `status` query — a peek at the persisted canonical graph cache
+/// for a project. No warming side effects.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GraphStatus {
     pub project_id: String,
@@ -229,17 +213,6 @@ pub struct GraphStatus {
     pub last_warm_at: Option<String>,
     pub pinned_commit: Option<String>,
     pub commits_since_pin: Option<u64>,
-}
-
-/// Result of a `diff` query — what changed between two graph snapshots.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct GraphDiff {
-    pub base_commit: Option<String>,
-    pub head_commit: Option<String>,
-    pub added_nodes: Vec<GraphDiffNode>,
-    pub removed_nodes: Vec<GraphDiffNode>,
-    pub added_edges: Vec<GraphDiffEdge>,
-    pub removed_edges: Vec<GraphDiffEdge>,
 }
 
 /// A symbol description sourced from `ScipSymbol` fields without an LSP round
@@ -370,15 +343,6 @@ pub trait RepoGraphOps: Send + Sync {
         edge_kind: Option<&str>,
         limit: usize,
     ) -> Result<Vec<EdgeEntry>, String>;
-
-    /// Diff between the current canonical graph and its in-memory predecessor.
-    /// `since` accepts `None` or `Some("previous")`. Anything else returns an
-    /// error explaining persistent diff is not yet supported.
-    async fn diff(
-        &self,
-        project_path: &str,
-        since: Option<&str>,
-    ) -> Result<Option<GraphDiff>, String>;
 
     /// Detailed description of a single symbol.
     async fn describe(

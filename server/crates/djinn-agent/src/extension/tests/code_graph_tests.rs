@@ -398,28 +398,6 @@ async fn code_graph_dispatch_edges_requires_globs() {
 }
 
 #[tokio::test]
-async fn code_graph_dispatch_diff_reaches_graph_ops() {
-    let worktree = crate::test_helpers::test_tempdir("djinn-cg-diff-");
-    let state =
-        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
-    let err = code_graph_tool(
-        &state,
-        serde_json::json!({
-            "operation": "diff",
-            "project_path": worktree.path().to_string_lossy(),
-            "since": "previous",
-        }),
-        worktree.path(),
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.contains("code_graph not available"),
-        "diff should reach graph ops layer, got: {err}"
-    );
-}
-
-#[tokio::test]
 async fn code_graph_dispatch_describe_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-describe-");
     let state =

@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
-    CycleGroup, EdgeEntry, FileGroupEntry, GraphDiff, GraphNeighbor, GraphStatus, ImpactEntry,
+    CycleGroup, EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, ImpactEntry,
     ImpactResult, NeighborsResult, OrphanEntry, PathResult, RankedNode, SearchHit,
     SymbolDescription,
 };
@@ -55,9 +55,6 @@ pub struct CodeGraphParams {
     /// Destination path glob for `edges`.
     #[serde(default)]
     pub to_glob: Option<String>,
-    /// Diff base selector for `diff`. Currently only `previous` is supported.
-    #[serde(default)]
-    pub since: Option<String>,
     /// Minimum SCC size for `cycles` (default 2).
     #[serde(default)]
     pub min_size: Option<i64>,
@@ -145,11 +142,6 @@ pub struct EdgesResponse {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct DiffResponse {
-    pub diff: Option<GraphDiff>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DescribeResponse {
     pub description: Option<SymbolDescription>,
 }
@@ -172,7 +164,6 @@ pub enum CodeGraphResponse {
     Orphans(OrphansResponse),
     Path(PathResponse),
     Edges(EdgesResponse),
-    Diff(DiffResponse),
     Describe(DescribeResponse),
     Status(StatusResponse),
 }
@@ -297,7 +288,7 @@ fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), diff (what changed since the previous canonical graph), describe (symbol signature/documentation without an LSP round trip), status (peek at the in-memory canonical graph cache; never warms)."
+        description = "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms)."
     )]
     pub async fn code_graph(
         &self,
@@ -313,13 +304,12 @@ impl DjinnMcpServer {
             "orphans" => self.code_graph_orphans(&params).await,
             "path" => self.code_graph_path(&params).await,
             "edges" => self.code_graph_edges(&params).await,
-            "diff" => self.code_graph_diff(&params).await,
             "describe" => self.code_graph_describe(&params).await,
             "status" => self.code_graph_status(&params).await,
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', 'diff', 'describe', 'status'"
+                 'search', 'cycles', 'orphans', 'path', 'edges', 'describe', 'status'"
             )),
         };
 
@@ -529,15 +519,6 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Edges(EdgesResponse { edges }))
     }
 
-    async fn code_graph_diff(&self, params: &CodeGraphParams) -> Result<CodeGraphResponse, String> {
-        let diff = self
-            .state
-            .repo_graph()
-            .diff(&params.project_path, params.since.as_deref())
-            .await?;
-        Ok(CodeGraphResponse::Diff(DiffResponse { diff }))
-    }
-
     async fn code_graph_describe(
         &self,
         params: &CodeGraphParams,
@@ -602,7 +583,6 @@ mod tests {
             to: None,
             from_glob: None,
             to_glob: None,
-            since: None,
             min_size: None,
             visibility: None,
             sort_by: None,
@@ -808,17 +788,6 @@ mod tests {
         assert_eq!(params.from_glob.as_deref(), Some("server/src/**"));
         assert_eq!(params.to_glob.as_deref(), Some("server/crates/**"));
         assert_eq!(params.edge_kind.as_deref(), Some("FileReference"));
-    }
-
-    #[test]
-    fn parses_diff_params_from_json() {
-        let json = serde_json::json!({
-            "operation": "diff",
-            "project_path": "/workspace/repo",
-            "since": "previous",
-        });
-        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.since.as_deref(), Some("previous"));
     }
 
     #[test]

@@ -274,10 +274,6 @@ pub(crate) async fn call_code_graph(
                 .await?;
             serde_json::to_value(&edges).map_err(|e| format!("serialize error: {e}"))?
         }
-        "diff" => {
-            let diff = graph_ops.diff(effective_path, p.since.as_deref()).await?;
-            serde_json::to_value(&diff).map_err(|e| format!("serialize error: {e}"))?
-        }
         "describe" => {
             let key = p
                 .key
@@ -291,7 +287,7 @@ pub(crate) async fn call_code_graph(
             return Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', 'diff', 'describe'"
+                 'search', 'cycles', 'orphans', 'path', 'edges', 'describe'"
             ));
         }
     };

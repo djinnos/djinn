@@ -292,13 +292,6 @@ pub(crate) mod stubs {
         ) -> Result<Vec<crate::bridge::EdgeEntry>, String> {
             Ok(vec![])
         }
-        async fn diff(
-            &self,
-            _: &str,
-            _: Option<&str>,
-        ) -> Result<Option<crate::bridge::GraphDiff>, String> {
-            Ok(None)
-        }
         async fn describe(
             &self,
             _: &str,

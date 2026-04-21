@@ -817,56 +817,12 @@ pub(crate) fn format_knowledge_notes(
     lines.join("\n")
 }
 
-fn graph_diff_module_paths(diff: &djinn_mcp::bridge::GraphDiff) -> (Vec<String>, Vec<String>) {
-    let mut added = std::collections::BTreeSet::new();
-    let mut removed = std::collections::BTreeSet::new();
-
-    for node in &diff.added_nodes {
-        if node.kind == "file"
-            && let Some(path) = node.key.strip_prefix("file:")
-        {
-            added.insert(path.to_string());
-        }
-    }
-    for node in &diff.removed_nodes {
-        if node.kind == "file"
-            && let Some(path) = node.key.strip_prefix("file:")
-        {
-            removed.insert(path.to_string());
-        }
-    }
-
-    (added.into_iter().collect(), removed.into_iter().collect())
-}
-
 fn note_scope_covers_path(note_scope_paths: &[String], path: &str) -> bool {
     note_scope_paths.iter().any(|scope| {
         path == scope
             || path.starts_with(&format!("{scope}/"))
             || scope.starts_with(&format!("{path}/"))
     })
-}
-
-fn graph_diff_changed_file_paths(diff: &djinn_mcp::bridge::GraphDiff) -> Vec<String> {
-    let mut changed = std::collections::BTreeSet::new();
-
-    for node in diff.added_nodes.iter().chain(diff.removed_nodes.iter()) {
-        if node.kind == "file"
-            && let Some(path) = node.key.strip_prefix("file:")
-        {
-            changed.insert(path.to_string());
-        }
-    }
-
-    for edge in diff.added_edges.iter().chain(diff.removed_edges.iter()) {
-        for endpoint in [&edge.from, &edge.to] {
-            if let Some(path) = endpoint.strip_prefix("file:") {
-                changed.insert(path.to_string());
-            }
-        }
-    }
-
-    changed.into_iter().collect()
 }
 
 pub(crate) async fn build_planner_patrol_context(
@@ -879,11 +835,6 @@ pub(crate) async fn build_planner_patrol_context(
     }
 
     let graph_ops = app_state.repo_graph_ops.clone()?;
-    let diff = graph_ops
-        .diff(project_path, Some("previous"))
-        .await
-        .ok()
-        .flatten();
     let ranked = graph_ops
         .ranked(project_path, Some("file"), Some("pagerank"), 20)
         .await
@@ -915,20 +866,13 @@ pub(crate) async fn build_planner_patrol_context(
         .collect::<Vec<_>>();
 
     let mut documented_paths = Vec::new();
-    let changed_paths = diff
-        .as_ref()
-        .map(graph_diff_changed_file_paths)
-        .unwrap_or_default();
     let mut stale_scoped_areas = Vec::new();
     for note in &notes {
         let scopes = parse_json_array(&note.scope_paths);
         if !scopes.is_empty() {
             let note_tags = parse_json_array(&note.tags);
-            if changed_paths
-                .iter()
-                .any(|changed| note_scope_covers_path(&scopes, changed))
-            {
-                let is_review_needed = note_tags.iter().any(|tag| tag == "review_needed");
+            let is_review_needed = note_tags.iter().any(|tag| tag == "review_needed");
+            if is_review_needed || note.confidence <= djinn_db::STALE_CITATION {
                 let scope_display = scopes
                     .iter()
                     .take(3)
@@ -940,11 +884,7 @@ pub(crate) async fn build_planner_patrol_context(
                     note.title,
                     scope_display,
                     note.confidence,
-                    if is_review_needed || note.confidence <= djinn_db::STALE_CITATION {
-                        "yes"
-                    } else {
-                        "pending decay"
-                    }
+                    if is_review_needed { "yes" } else { "pending decay" }
                 ));
             }
             documented_paths.extend(scopes);
@@ -979,49 +919,6 @@ pub(crate) async fn build_planner_patrol_context(
         ));
         lines.push(String::new());
     }
-    lines.push("### Code Graph Diff Summary".to_string());
-
-    if let Some(diff) = diff {
-        let (new_modules, removed_modules) = graph_diff_module_paths(&diff);
-        let new_modules_display = if new_modules.is_empty() {
-            "none".to_string()
-        } else {
-            new_modules
-                .iter()
-                .take(8)
-                .map(|m| format!("`{m}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let removed_modules_display = if removed_modules.is_empty() {
-            "none".to_string()
-        } else {
-            removed_modules
-                .iter()
-                .take(8)
-                .map(|m| format!("`{m}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        lines.push(format!(
-            "- Commits: {} → {}",
-            diff.base_commit.as_deref().unwrap_or("unknown"),
-            diff.head_commit.as_deref().unwrap_or("unknown")
-        ));
-        lines.push(format!("- New modules: {new_modules_display}"));
-        lines.push(format!("- Removed modules: {removed_modules_display}"));
-        lines.push(format!(
-            "- Structural delta: {} added nodes, {} removed nodes, {} added edges, {} removed edges",
-            diff.added_nodes.len(),
-            diff.removed_nodes.len(),
-            diff.added_edges.len(),
-            diff.removed_edges.len()
-        ));
-    } else {
-        lines.push("- No previous canonical graph diff is available yet.".to_string());
-    }
-
     let mut undocumented_hotspots = Vec::new();
     let mut weakly_documented_hotspots = Vec::new();
     for node in ranked.into_iter().take(12) {
@@ -1126,16 +1023,14 @@ mod tests {
     use djinn_core::models::Project;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use djinn_mcp::bridge::{
-        CycleGroup, EdgeEntry, GraphDiff, GraphDiffEdge, GraphDiffNode, GraphStatus, ImpactResult,
-        NeighborsResult, OrphanEntry, PathResult, RankedNode, RepoGraphOps, SearchHit,
-        SymbolDescription,
+        CycleGroup, EdgeEntry, GraphStatus, ImpactResult, NeighborsResult, OrphanEntry, PathResult,
+        RankedNode, RepoGraphOps, SearchHit, SymbolDescription,
     };
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     #[derive(Clone)]
     struct FakeRepoGraphOps {
-        diff: Option<GraphDiff>,
         ranked: Vec<RankedNode>,
     }
 
@@ -1225,10 +1120,6 @@ mod tests {
             Err("unused in test".into())
         }
 
-        async fn diff(&self, _: &str, _: Option<&str>) -> Result<Option<GraphDiff>, String> {
-            Ok(self.diff.clone())
-        }
-
         async fn describe(&self, _: &str, _: &str) -> Result<Option<SymbolDescription>, String> {
             Err("unused in test".into())
         }
@@ -1287,7 +1178,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn planner_patrol_context_reports_diff_and_coverage_gaps() {
+    async fn planner_patrol_context_reports_memory_and_coverage_gaps() {
         let (db, mut ctx, project, tmp) = setup_project().await;
         let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
         note_repo
@@ -1322,26 +1213,6 @@ mod tests {
             .expect("lower stale note confidence");
 
         ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
-            diff: Some(GraphDiff {
-                base_commit: Some("abc123".to_string()),
-                head_commit: Some("def456".to_string()),
-                added_nodes: vec![GraphDiffNode {
-                    key: "file:server/src/new_area.rs".to_string(),
-                    kind: "file".to_string(),
-                    display_name: "server/src/new_area.rs".to_string(),
-                }],
-                removed_nodes: vec![GraphDiffNode {
-                    key: "file:server/src/old_area.rs".to_string(),
-                    kind: "file".to_string(),
-                    display_name: "server/src/old_area.rs".to_string(),
-                }],
-                added_edges: vec![GraphDiffEdge {
-                    from: "file:server/src/new_area.rs".to_string(),
-                    to: "file:server/src/lib.rs".to_string(),
-                    edge_kind: "FileReference".to_string(),
-                }],
-                removed_edges: vec![],
-            }),
             ranked: vec![
                 RankedNode {
                     key: "file:server/src/new_area.rs".to_string(),
@@ -1372,12 +1243,8 @@ mod tests {
 
         assert!(summary.contains("Memory Health Signals"));
         assert!(summary.contains("1 low-confidence"));
-        assert!(summary.contains("Code Graph Diff Summary"));
-        assert!(summary.contains("`server/src/new_area.rs`"));
-        assert!(summary.contains("`server/src/old_area.rs`"));
         assert!(summary.contains("Weakly documented hotspots: `server/src/new_area.rs`"));
         assert!(summary.contains("`server/src/existing.rs` (score 0.750, coverage 1)"));
-        assert!(summary.contains("Stale scoped-note areas affected by changed code:"));
         assert!(summary.contains("Stale changed-area note scoped to `server/src/new_area.rs`"));
         assert!(summary.contains("Knowledge Task Guard Rails"));
         assert!(
@@ -1393,10 +1260,7 @@ mod tests {
         let (db, mut ctx, project, _tmp) = setup_project().await;
         let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
 
-        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
-            diff: None,
-            ranked: vec![],
-        }));
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps { ranked: vec![] }));
 
         task_repo
             .create_in_project(

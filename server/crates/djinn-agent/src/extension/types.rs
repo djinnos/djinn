@@ -296,8 +296,6 @@ pub(super) struct CodeGraphParams {
     #[serde(default)]
     pub to_glob: Option<String>,
     #[serde(default)]
-    pub since: Option<String>,
-    #[serde(default)]
     pub min_size: Option<usize>,
     #[serde(default)]
     pub visibility: Option<String>,

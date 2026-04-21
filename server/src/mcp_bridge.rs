@@ -11,14 +11,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_mcp::bridge::{
-    CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry, GitOps, GraphDiff,
-    GraphNeighbor, GraphStatus, ImpactEntry, ImpactResult, LspOps, LspWarning, ModelPoolStatus,
-    NeighborsResult, OrphanEntry, PathHop, PathResult, PoolStatus, RankedNode, RepoGraphOps,
-    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolDescription,
+    CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry, GitOps, GraphNeighbor,
+    GraphStatus, ImpactEntry, ImpactResult, LspOps, LspWarning, ModelPoolStatus, NeighborsResult,
+    OrphanEntry, PathHop, PathResult, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo,
+    RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolDescription,
 };
 use petgraph::visit::EdgeRef;
-
-use crate::canonical_graph::{GRAPH_CACHE, PREVIOUS_GRAPH_CACHE};
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
@@ -26,8 +24,7 @@ use djinn_agent::lsp::LspManager;
 mod graph_neighbors;
 
 use self::graph_neighbors::{
-    collect_diff_edges, collect_diff_nodes, compute_graph_diff, format_node_key,
-    group_impact_by_file, group_neighbors_by_file, resolve_node,
+    format_node_key, group_impact_by_file, group_neighbors_by_file, resolve_node,
 };
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
@@ -211,7 +208,7 @@ impl RepoGraphOps for RepoGraphBridge {
     ) -> Result<NeighborsResult, String> {
         use petgraph::Direction;
         let graph =
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let node_index = resolve_node(&graph, key)?;
         let directions: Vec<Direction> = match direction {
             Some("incoming") => vec![Direction::Incoming],
@@ -272,7 +269,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // PageRank pass and hung for 30+ s on real-world graphs even when
         // `code_graph status` reported `warmed: true`.
         let (graph, ranking, _sccs) =
-            crate::canonical_graph::build_graph_with_caches_for_project(&self.state, project_path)
+            crate::canonical_graph::load_canonical_graph(&self.state, project_path)
                 .await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
@@ -334,7 +331,7 @@ impl RepoGraphOps for RepoGraphBridge {
     ) -> Result<Vec<String>, String> {
         use crate::repo_graph::RepoGraphEdgeKind;
         let graph =
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let node_index = graph
             .symbol_node(symbol)
             .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
@@ -361,7 +358,7 @@ impl RepoGraphOps for RepoGraphBridge {
         group_by: Option<&str>,
     ) -> Result<ImpactResult, String> {
         let graph =
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let start = resolve_node(&graph, key)?;
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
@@ -416,7 +413,7 @@ impl RepoGraphOps for RepoGraphBridge {
     ) -> Result<Vec<SearchHit>, String> {
         use crate::repo_graph::RepoGraphNodeKind;
         let graph =
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -454,7 +451,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // kind-specific results.  `min_size` is applied at read time against
         // the cached set (which is materialised at `min_size = 2`).
         let (graph, _ranking, sccs) =
-            crate::canonical_graph::build_graph_with_caches_for_project(&self.state, project_path)
+            crate::canonical_graph::load_canonical_graph(&self.state, project_path)
                 .await?;
         let cached: &Vec<Vec<petgraph::graph::NodeIndex>> = match kind_filter {
             Some("file") => &sccs.file,
@@ -495,7 +492,7 @@ impl RepoGraphOps for RepoGraphBridge {
         use crate::repo_graph::RepoGraphNodeKind;
         use crate::scip_parser::ScipVisibility;
         let graph =
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -538,7 +535,7 @@ impl RepoGraphOps for RepoGraphBridge {
         max_depth: Option<usize>,
     ) -> Result<Option<PathResult>, String> {
         let graph =
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let from_idx = resolve_node(&graph, from)?;
         let to_idx = resolve_node(&graph, to)?;
         let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
@@ -578,7 +575,7 @@ impl RepoGraphOps for RepoGraphBridge {
     ) -> Result<Vec<EdgeEntry>, String> {
         use globset::Glob;
         let graph =
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let from_matcher = Glob::new(from_glob)
             .map_err(|e| format!("invalid from_glob '{from_glob}': {e}"))?
             .compile_matcher();
@@ -626,63 +623,13 @@ impl RepoGraphOps for RepoGraphBridge {
         Ok(out)
     }
 
-    async fn diff(
-        &self,
-        project_path: &str,
-        since: Option<&str>,
-    ) -> Result<Option<GraphDiff>, String> {
-        match since {
-            None | Some("previous") => {}
-            Some(other) => {
-                return Err(format!(
-                    "invalid since '{other}': only 'previous' is currently supported \
-                     (persistent cross-commit diff is not yet implemented)"
-                ));
-            }
-        }
-        // Ensure the current canonical graph for this project is built / cached.
-        let _ = crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
-
-        let current = {
-            let cache = GRAPH_CACHE.read().await;
-            cache
-                .as_ref()
-                .map(|c| (c.graph.clone(), c.git_head.clone()))
-        };
-        let previous = {
-            let cache = PREVIOUS_GRAPH_CACHE.read().await;
-            cache
-                .as_ref()
-                .map(|c| (c.graph.clone(), c.git_head.clone()))
-        };
-        let Some((current, head_commit)) = current else {
-            return Ok(None);
-        };
-        let Some((previous, base_commit)) = previous else {
-            return Ok(Some(GraphDiff {
-                base_commit: None,
-                head_commit: Some(head_commit),
-                added_nodes: collect_diff_nodes(&current),
-                removed_nodes: vec![],
-                added_edges: collect_diff_edges(&current),
-                removed_edges: vec![],
-            }));
-        };
-        Ok(Some(compute_graph_diff(
-            &previous,
-            base_commit,
-            &current,
-            head_commit,
-        )))
-    }
-
     async fn describe(
         &self,
         project_path: &str,
         key: &str,
     ) -> Result<Option<SymbolDescription>, String> {
         let graph =
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path).await?;
+            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let node_index = match resolve_node(&graph, key) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
@@ -704,10 +651,9 @@ impl RepoGraphOps for RepoGraphBridge {
     }
 
     async fn status(&self, project_path: &str) -> Result<GraphStatus, String> {
-        use djinn_db::ProjectRepository;
-        use time::format_description::well_known::Rfc3339;
+        use djinn_db::{ProjectRepository, RepoGraphCacheRepository};
 
-        let (project_root, index_tree_path) =
+        let (project_root, _index_tree_path) =
             crate::canonical_graph::normalize_graph_query_paths(project_path);
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = repo
@@ -716,31 +662,16 @@ impl RepoGraphOps for RepoGraphBridge {
             .map_err(|e| format!("resolve project: {e}"))?
             .ok_or_else(|| format!("no project registered for path '{project_path}'"))?;
 
-        let snapshot = {
-            let cache = GRAPH_CACHE.read().await;
-            cache.as_ref().and_then(|cached| {
-                if cached.project_path == index_tree_path {
-                    Some((cached.git_head.clone(), cached.last_warm_at))
-                } else {
-                    None
-                }
-            })
-        };
+        // Source of truth: the `repo_graph_cache` row written by the K8s
+        // graph warmer Job. The server process itself never rebuilds —
+        // status reports whatever the warmer has persisted.
+        let cache_repo = RepoGraphCacheRepository::new(self.state.db().clone());
+        let row = cache_repo
+            .latest_for_project(&project_id)
+            .await
+            .map_err(|e| format!("read repo_graph_cache: {e}"))?;
 
-        let Some((pinned_commit, last_warm_at)) = snapshot else {
-            // Cold cache.  ADR-051 §3 "first consumer demand" — Pulse's
-            // very first `code_graph status` call on mount is the signal
-            // we want to key off.  Kick a single-flight background warm
-            // here (non-blocking) so the next status poll a few seconds
-            // later surfaces `warmed: true` and the panels can render.
-            //
-            // Without this, Pulse would get stuck on the empty state
-            // because every other `code_graph` op is gated behind
-            // `status.warmed == true` on the frontend — `build_graph_*`
-            // (which has the sibling kicker) would never be reached.
-            crate::canonical_graph::build_graph_for_project(&self.state, project_path)
-                .await
-                .err();
+        let Some(row) = row else {
             return Ok(GraphStatus {
                 project_id,
                 warmed: false,
@@ -750,61 +681,22 @@ impl RepoGraphOps for RepoGraphBridge {
             });
         };
 
-        let last_warm_at_str = last_warm_at
-            .format(&Rfc3339)
-            .map_err(|e| format!("format last_warm_at: {e}"))?;
-
         let commits_since_pin = crate::canonical_graph::canonical_graph_count_commits_since(
             &project_root,
-            &pinned_commit,
+            &row.commit_sha,
         )
         .await;
 
         Ok(GraphStatus {
             project_id,
             warmed: true,
-            last_warm_at: Some(last_warm_at_str),
-            pinned_commit: Some(pinned_commit),
+            last_warm_at: Some(row.built_at),
+            pinned_commit: Some(row.commit_sha),
             commits_since_pin,
         })
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "mcp_bridge preserves canonical-graph facade shims during extraction"
-)]
-pub(crate) async fn ensure_canonical_graph(
-    state: &AppState,
-    project_id: &str,
-    project_root: &Path,
-) -> Result<
-    (
-        crate::index_tree::IndexTreeHandle,
-        crate::repo_graph::RepoDependencyGraph,
-    ),
-    String,
-> {
-    crate::canonical_graph::ensure_canonical_graph(state, project_id, project_root).await
-}
-
-#[expect(
-    dead_code,
-    reason = "mcp_bridge preserves canonical-graph facade shims during extraction"
-)]
-pub(crate) async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
-    crate::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
-}
-
-#[expect(
-    dead_code,
-    reason = "mcp_bridge preserves canonical-graph facade shims during extraction"
-)]
-pub(crate) async fn canonical_graph_cache_pinned_commit_for(
-    index_tree_path: &Path,
-) -> Option<String> {
-    crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
-}
 impl AppState {
     /// Build a `djinn_mcp::McpState` from this AppState, wiring all bridge impls.
     ///
@@ -1099,69 +991,4 @@ pub(crate) mod graph_bridge_tests {
         );
     }
 
-    #[test]
-    fn compute_graph_diff_reports_added_and_removed_nodes() {
-        let previous = build_test_graph();
-        let current = {
-            let new_index = ParsedScipIndex {
-                metadata: ScipMetadata::default(),
-                files: vec![ScipFile {
-                    language: "rust".to_string(),
-                    relative_path: PathBuf::from("src/new_module.rs"),
-                    definitions: vec![ScipOccurrence {
-                        symbol: "scip-rust pkg src/new_module.rs `new_sym`().".to_string(),
-                        range: ScipRange {
-                            start_line: 0,
-                            start_character: 0,
-                            end_line: 0,
-                            end_character: 6,
-                        },
-                        enclosing_range: None,
-                        roles: BTreeSet::from([ScipSymbolRole::Definition]),
-                        syntax_kind: None,
-                        override_documentation: vec![],
-                    }],
-                    references: vec![],
-                    occurrences: vec![],
-                    symbols: vec![ScipSymbol {
-                        symbol: "scip-rust pkg src/new_module.rs `new_sym`().".to_string(),
-                        kind: Some(ScipSymbolKind::Function),
-                        display_name: Some("new_sym".to_string()),
-                        signature: None,
-                        documentation: vec![],
-                        relationships: vec![],
-                        visibility: Some(crate::scip_parser::ScipVisibility::Public),
-                    }],
-                }],
-                external_symbols: vec![],
-            };
-            let mut files = crate::canonical_graph::build_test_parsed_index_fixture().files;
-            files.push(new_index.files.into_iter().next().unwrap());
-            RepoDependencyGraph::build(&[ParsedScipIndex {
-                metadata: ScipMetadata::default(),
-                files,
-                external_symbols: vec![],
-            }])
-        };
-
-        let diff = compute_graph_diff(&previous, "base".to_string(), &current, "head".to_string());
-        assert_eq!(diff.base_commit.as_deref(), Some("base"));
-        assert_eq!(diff.head_commit.as_deref(), Some("head"));
-        let added_names: Vec<String> = diff
-            .added_nodes
-            .iter()
-            .map(|n| n.display_name.clone())
-            .collect();
-        assert!(
-            added_names
-                .iter()
-                .any(|n| n.contains("new_module") || n == "new_sym"),
-            "expected new_module.rs or new_sym in added nodes, got {:?}",
-            added_names
-        );
-        assert!(
-            diff.removed_nodes.is_empty(),
-            "no nodes should be removed in this scenario"
-        );
-    }
 }

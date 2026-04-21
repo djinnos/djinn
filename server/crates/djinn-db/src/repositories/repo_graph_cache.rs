@@ -58,6 +58,31 @@ impl RepoGraphCacheRepository {
         }))
     }
 
+    /// Return the most recently warmed entry for `project_id`, regardless
+    /// of `commit_sha`. Used by server-side readers (`code_graph` mcp ops,
+    /// Pulse status) to surface the latest-available graph — even if
+    /// `origin/main` has since advanced past the pinned commit.
+    pub async fn latest_for_project(&self, project_id: &str) -> Result<Option<CachedRepoGraph>> {
+        self.db.ensure_initialized().await?;
+        use sqlx::Row;
+        Ok(sqlx::query(
+            "SELECT project_id, commit_sha, graph_blob, built_at
+             FROM repo_graph_cache
+             WHERE project_id = ?
+             ORDER BY built_at DESC
+             LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        .map(|row| CachedRepoGraph {
+            project_id: row.get("project_id"),
+            commit_sha: row.get("commit_sha"),
+            graph_blob: row.get("graph_blob"),
+            built_at: row.get("built_at"),
+        }))
+    }
+
     pub async fn upsert(&self, entry: RepoGraphCacheInsert<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
         // `built_at` defaults to "" in the schema; stamp it explicitly so the

@@ -1,9 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use djinn_mcp::bridge::{
-    FileGroupEntry, GraphDiff, GraphDiffEdge, GraphDiffNode, GraphNeighbor, ImpactEntry,
-};
-use petgraph::visit::EdgeRef;
+use djinn_mcp::bridge::{FileGroupEntry, GraphNeighbor, ImpactEntry};
 
 use crate::repo_graph::{RepoDependencyGraph, RepoGraphNode, RepoNodeKey};
 
@@ -61,121 +58,6 @@ pub(super) fn group_impact_by_file(
         }
     }
     by_file.into_values().collect()
-}
-
-pub(super) fn collect_diff_nodes(graph: &RepoDependencyGraph) -> Vec<GraphDiffNode> {
-    graph
-        .graph()
-        .node_indices()
-        .map(|idx| {
-            let node = graph.node(idx);
-            GraphDiffNode {
-                key: format_node_key(&node.id),
-                kind: format!("{:?}", node.kind).to_lowercase(),
-                display_name: node.display_name.clone(),
-            }
-        })
-        .collect()
-}
-
-pub(super) fn collect_diff_edges(graph: &RepoDependencyGraph) -> Vec<GraphDiffEdge> {
-    graph
-        .graph()
-        .edge_references()
-        .map(|edge| GraphDiffEdge {
-            from: format_node_key(&graph.node(edge.source()).id),
-            to: format_node_key(&graph.node(edge.target()).id),
-            edge_kind: format!("{:?}", edge.weight().kind),
-        })
-        .collect()
-}
-
-pub(super) fn compute_graph_diff(
-    previous: &RepoDependencyGraph,
-    base_commit: String,
-    current: &RepoDependencyGraph,
-    head_commit: String,
-) -> GraphDiff {
-    fn node_keys(graph: &RepoDependencyGraph) -> BTreeSet<String> {
-        graph
-            .graph()
-            .node_indices()
-            .map(|idx| format_node_key(&graph.node(idx).id))
-            .collect()
-    }
-
-    fn edge_keys(graph: &RepoDependencyGraph) -> BTreeSet<(String, String, String)> {
-        graph
-            .graph()
-            .edge_references()
-            .map(|edge| {
-                (
-                    format_node_key(&graph.node(edge.source()).id),
-                    format_node_key(&graph.node(edge.target()).id),
-                    format!("{:?}", edge.weight().kind),
-                )
-            })
-            .collect()
-    }
-
-    let prev_nodes = node_keys(previous);
-    let curr_nodes = node_keys(current);
-    let prev_edges = edge_keys(previous);
-    let curr_edges = edge_keys(current);
-
-    let added_nodes: Vec<GraphDiffNode> = curr_nodes
-        .difference(&prev_nodes)
-        .map(|key| graph_diff_node_for_key(current, key))
-        .collect();
-    let removed_nodes: Vec<GraphDiffNode> = prev_nodes
-        .difference(&curr_nodes)
-        .map(|key| graph_diff_node_for_key(previous, key))
-        .collect();
-    let added_edges: Vec<GraphDiffEdge> = curr_edges
-        .difference(&prev_edges)
-        .map(|(from, to, edge_kind)| GraphDiffEdge {
-            from: from.clone(),
-            to: to.clone(),
-            edge_kind: edge_kind.clone(),
-        })
-        .collect();
-    let removed_edges: Vec<GraphDiffEdge> = prev_edges
-        .difference(&curr_edges)
-        .map(|(from, to, edge_kind)| GraphDiffEdge {
-            from: from.clone(),
-            to: to.clone(),
-            edge_kind: edge_kind.clone(),
-        })
-        .collect();
-
-    GraphDiff {
-        base_commit: Some(base_commit),
-        head_commit: Some(head_commit),
-        added_nodes,
-        removed_nodes,
-        added_edges,
-        removed_edges,
-    }
-}
-
-fn graph_diff_node_for_key(graph: &RepoDependencyGraph, key: &str) -> GraphDiffNode {
-    let display = graph
-        .graph()
-        .node_indices()
-        .find(|idx| format_node_key(&graph.node(*idx).id) == key)
-        .map(|idx| {
-            let node = graph.node(idx);
-            (
-                node.display_name.clone(),
-                format!("{:?}", node.kind).to_lowercase(),
-            )
-        })
-        .unwrap_or_else(|| (key.to_string(), "unknown".to_string()));
-    GraphDiffNode {
-        key: key.to_string(),
-        kind: display.1,
-        display_name: display.0,
-    }
 }
 
 pub(super) fn format_node_key(key: &RepoNodeKey) -> String {

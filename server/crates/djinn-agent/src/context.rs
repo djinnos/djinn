@@ -11,8 +11,8 @@ use djinn_workspace::MirrorManager;
 use djinn_mcp::{
     McpState, bridge,
     bridge::{
-        CycleGroup, EdgeEntry, GraphDiff, ImpactResult, NeighborsResult, OrphanEntry, PathResult,
-        RankedNode, RepoGraphOps, SearchHit, SymbolDescription,
+        CycleGroup, EdgeEntry, ImpactResult, NeighborsResult, OrphanEntry, PathResult, RankedNode,
+        RepoGraphOps, SearchHit, SymbolDescription,
     },
     tools::task_tools::ErrorResponse,
 };
@@ -281,9 +281,6 @@ impl RepoGraphOps for StubRepoGraphOps {
         _: Option<&str>,
         _: usize,
     ) -> Result<Vec<EdgeEntry>, String> {
-        Err("code_graph not available in agent bridge — use MCP server".into())
-    }
-    async fn diff(&self, _: &str, _: Option<&str>) -> Result<Option<GraphDiff>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn describe(&self, _: &str, _: &str) -> Result<Option<SymbolDescription>, String> {

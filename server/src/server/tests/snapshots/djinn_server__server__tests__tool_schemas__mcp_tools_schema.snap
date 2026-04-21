@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 175
 expression: signatures
 ---
 [
@@ -781,12 +782,6 @@ expression: signatures
         "query": {
           "default": null,
           "description": "Substring query for `search`.",
-          "nullable": true,
-          "type": "string"
-        },
-        "since": {
-          "default": null,
-          "description": "Diff base selector for `diff`. Currently only `previous` is supported.",
           "nullable": true,
           "type": "string"
         },
