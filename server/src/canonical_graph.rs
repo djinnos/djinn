@@ -62,6 +62,46 @@ pub(crate) fn derive_graph_caches(
     (pagerank, sccs)
 }
 
+/// Public entrypoint invoked by `djinn-server --warm-graph <project_id>`
+/// (Phase 3 PR 8 §6.4).  Boots a minimal [`AppState`], resolves the
+/// project's working root from the DB, and drives a single
+/// [`ensure_canonical_graph`] pass.  Returns a human-readable error on
+/// failure so the subcommand can exit(1) with a useful message.
+///
+/// This is intentionally separate from the daemon boot path — the warm
+/// Pod is short-lived and has no inbound traffic, so spinning up the
+/// HTTP server + coordinator + RPC listener would be ~2.5s of wasted
+/// latency per warm run.
+pub async fn run_warm_graph_command(project_id: &str) -> anyhow::Result<()> {
+    use djinn_db::ProjectRepository;
+
+    let state = AppState::minimal_for_warm_only().await?;
+    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let project = repo
+        .get(project_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("lookup project {project_id}: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
+    let project_root = PathBuf::from(&project.path);
+    tracing::info!(
+        project_id,
+        project_root = %project_root.display(),
+        "run_warm_graph_command: starting warm pipeline"
+    );
+    let started = std::time::Instant::now();
+    let (_handle, graph) = ensure_canonical_graph(&state, project_id, &project_root)
+        .await
+        .map_err(|e| anyhow::anyhow!("ensure_canonical_graph failed: {e}"))?;
+    tracing::info!(
+        project_id,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        node_count = graph.node_count(),
+        edge_count = graph.edge_count(),
+        "run_warm_graph_command: warm pipeline complete"
+    );
+    Ok(())
+}
+
 pub(crate) async fn ensure_canonical_graph(
     state: &AppState,
     project_id: &str,
@@ -172,11 +212,22 @@ pub(crate) async fn ensure_canonical_graph(
         .map_err(|e| format!("create canonical-graph tempdir: {e}"))?;
     let output_dir = output_temp.path().to_path_buf();
     let target_dir = handle.target_dir().to_path_buf();
+
+    // Phase 3 PR 8: ask the DB for the detected stack and filter the SCIP
+    // indexer set to languages the project actually uses. Falls back to
+    // running every indexer when no stack has been persisted yet (fresh
+    // project, or a pre-PR-2 deployment).
+    let stack_filter = resolve_stack_indexer_filter(state, project_id).await;
+
     let t_indexers = std::time::Instant::now();
-    let run =
-        crate::repo_map::run_indexers_already_locked(handle.path(), &output_dir, Some(&target_dir))
-            .await
-            .map_err(|e| format!("run_indexers: {e}"))?;
+    let run = crate::repo_map::run_indexers_already_locked(
+        handle.path(),
+        &output_dir,
+        Some(&target_dir),
+        stack_filter.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("run_indexers: {e}"))?;
     let indexers_ms = t_indexers.elapsed().as_millis() as u64;
 
     let output_dir_for_blocking = output_dir.clone();
@@ -721,6 +772,66 @@ async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option
     raw.trim().parse::<u64>().ok()
 }
 
+/// Consult the persisted `projects.stack` JSON and translate the detected
+/// languages into the subset of [`crate::repo_map::SupportedIndexer`]
+/// variants [`crate::repo_map::run_indexers_already_locked`] should run
+/// for this project.
+///
+/// Returns `None` when:
+/// * the project row is missing,
+/// * the stack JSON is empty / the default `{}`,
+/// * no language entries map onto a known indexer.
+///
+/// The canonical-graph pipeline treats `None` as "run every known indexer"
+/// — the legacy behaviour pre-PR-8.  A non-empty `Vec` trims the indexer
+/// fan-out down to just the matched languages.
+async fn resolve_stack_indexer_filter(
+    state: &AppState,
+    project_id: &str,
+) -> Option<Vec<crate::repo_map::SupportedIndexer>> {
+    use djinn_db::ProjectRepository;
+    use djinn_stack::Stack;
+
+    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let raw = match repo.get_stack(project_id).await {
+        Ok(Some(s)) => s,
+        _ => return None,
+    };
+    if raw.trim().is_empty() || raw.trim() == "{}" {
+        return None;
+    }
+    let stack: Stack = serde_json::from_str(&raw).ok()?;
+    if stack.languages.is_empty() {
+        return None;
+    }
+
+    let mut wanted: Vec<crate::repo_map::SupportedIndexer> = Vec::new();
+    let mut push = |ind: crate::repo_map::SupportedIndexer| {
+        if !wanted.contains(&ind) {
+            wanted.push(ind);
+        }
+    };
+    for lang in &stack.languages {
+        let name = lang.name.to_ascii_lowercase();
+        match name.as_str() {
+            "rust" => push(crate::repo_map::SupportedIndexer::RustAnalyzer),
+            "typescript" | "javascript" | "tsx" | "jsx" => {
+                push(crate::repo_map::SupportedIndexer::TypeScript)
+            }
+            "python" => push(crate::repo_map::SupportedIndexer::Python),
+            "go" => push(crate::repo_map::SupportedIndexer::Go),
+            "java" | "kotlin" | "scala" => push(crate::repo_map::SupportedIndexer::Java),
+            "c" | "c++" | "cpp" | "objective-c" | "objective-c++" => {
+                push(crate::repo_map::SupportedIndexer::Clang)
+            }
+            "ruby" => push(crate::repo_map::SupportedIndexer::Ruby),
+            "c#" | "csharp" | "f#" => push(crate::repo_map::SupportedIndexer::DotNet),
+            _ => {}
+        }
+    }
+    if wanted.is_empty() { None } else { Some(wanted) }
+}
+
 pub(crate) fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathBuf) {
     let requested = PathBuf::from(project_path);
     let is_index_tree = requested.file_name() == Some(std::ffi::OsStr::new("_index"))
@@ -1216,6 +1327,71 @@ mod tests {
                 .iter()
                 .any(|tag| tag == REVIEW_NEEDED_TAG),
             "global note should not be marked review_needed"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_stack_indexer_filter_maps_languages_to_indexers() {
+        use djinn_stack::{LanguageStat, ManifestSignals, Runtimes, Stack};
+
+        let tmp = workspace_tempdir("canonical-graph-");
+        let project_root = make_project(tmp.path()).await;
+        let db = create_test_db();
+        let cancel = CancellationToken::new();
+        let state = crate::server::AppState::new(db.clone(), cancel);
+        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        let project = proj_repo
+            .create("stack-filter", project_root.to_string_lossy().as_ref())
+            .await
+            .expect("create project");
+
+        // Rust + TypeScript stack → expect two indexers.
+        let mut stack = Stack::empty();
+        stack.languages = vec![
+            LanguageStat {
+                name: "Rust".to_string(),
+                bytes: 1000,
+                pct: 60.0,
+            },
+            LanguageStat {
+                name: "TypeScript".to_string(),
+                bytes: 400,
+                pct: 24.0,
+            },
+            LanguageStat {
+                name: "Dockerfile".to_string(),
+                bytes: 50,
+                pct: 3.0,
+            },
+        ];
+        stack.primary_language = Some("Rust".to_string());
+        stack.package_managers = vec!["cargo".to_string()];
+        let _: ManifestSignals = stack.manifest_signals.clone();
+        let _: Runtimes = stack.runtimes.clone();
+        proj_repo
+            .set_stack(&project.id, &serde_json::to_string(&stack).unwrap())
+            .await
+            .expect("set stack");
+
+        let filter = resolve_stack_indexer_filter(&state, &project.id)
+            .await
+            .expect("filter is Some for non-empty stack");
+        assert!(filter.contains(&crate::repo_map::SupportedIndexer::RustAnalyzer));
+        assert!(filter.contains(&crate::repo_map::SupportedIndexer::TypeScript));
+        assert!(!filter.contains(&crate::repo_map::SupportedIndexer::Go));
+        assert_eq!(filter.len(), 2, "unknown language must not add an indexer");
+
+        // Empty stack (default) → None (fall back to all indexers).
+        let other_root = tmp.path().join("repo-empty");
+        tokio::fs::create_dir_all(&other_root).await.unwrap();
+        let project2 = proj_repo
+            .create("stack-empty", other_root.to_string_lossy().as_ref())
+            .await
+            .expect("create second project");
+        let filter_none = resolve_stack_indexer_filter(&state, &project2.id).await;
+        assert!(
+            filter_none.is_none(),
+            "empty `{{}}` stack must return None so callers run every indexer"
         );
     }
 

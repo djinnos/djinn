@@ -128,21 +128,32 @@ pub(crate) async fn run_indexers_already_locked(
     project_root: impl AsRef<Path>,
     output_root: impl AsRef<Path>,
     target_dir: Option<&Path>,
+    language_filter: Option<&[SupportedIndexer]>,
 ) -> Result<IndexingRun> {
     let _guard = target_dir.map(CargoTargetDirGuard::new);
-    run_indexers(project_root, output_root).await
+    run_indexers(project_root, output_root, language_filter).await
 }
 
 pub(crate) async fn run_indexers(
     project_root: impl AsRef<Path>,
     output_root: impl AsRef<Path>,
+    language_filter: Option<&[SupportedIndexer]>,
 ) -> Result<IndexingRun> {
     let project_root = project_root.as_ref().to_path_buf();
     let output_root = output_root.as_ref().to_path_buf();
     fs::create_dir_all(&output_root)
         .with_context(|| format!("create SCIP output dir {}", output_root.display()))?;
 
-    let available = detect_indexers();
+    // Phase 3 PR 8: filter detected indexers by the caller-supplied language
+    // set (derived from `projects.stack`). `None` keeps the legacy
+    // "run every known indexer" behaviour.
+    let available: Vec<IndexerAvailability> = detect_indexers()
+        .into_iter()
+        .filter(|a| match language_filter {
+            None => true,
+            Some(langs) => langs.contains(&a.indexer),
+        })
+        .collect();
 
     for availability in &available {
         if availability.is_available() {
@@ -701,7 +712,7 @@ mod tests {
         std::fs::create_dir_all(&project_root).unwrap();
         let output_root = tmp.path().join("scip-out");
 
-        let result = run_indexers_already_locked(&project_root, &output_root, None).await;
+        let result = run_indexers_already_locked(&project_root, &output_root, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
     }

@@ -1,6 +1,6 @@
 #![warn(unreachable_pub)]
 
-pub(crate) mod canonical_graph;
+pub mod canonical_graph;
 pub mod daemon;
 pub mod db;
 pub mod embedded;

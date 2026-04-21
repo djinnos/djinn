@@ -21,8 +21,10 @@ use djinn_db::{
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
+use djinn_k8s::{K8sGraphWarmer, KubernetesConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
+use djinn_runtime::GraphWarmerService;
 use djinn_workspace::MirrorManager;
 
 mod canonical_graph_refresh_planner;
@@ -172,6 +174,15 @@ struct Inner {
     /// `None` on dev boxes without a cluster. `shutdown_image_watcher`
     /// aborts + awaits the task on graceful shutdown.
     pub image_build_watcher: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Phase 3 PR 8 — production canonical-graph warmer.  Populated during
+    /// [`AppState::initialize`]: prefers [`K8sGraphWarmer`] when running
+    /// under `DJINN_RUNTIME=kubernetes` with a reachable `kube::Client`;
+    /// falls back to [`build_in_process_graph_warmer`] otherwise so dev
+    /// boxes and `TestRuntime` stay operational.  Read via
+    /// [`AppState::graph_warmer`]; mirror-fetcher + agent dispatch paths
+    /// dispatch through this handle rather than constructing a warmer
+    /// per-call.
+    pub graph_warmer: tokio::sync::RwLock<Option<Arc<dyn GraphWarmerService>>>,
 }
 
 impl AppState {
@@ -223,6 +234,7 @@ impl AppState {
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
                 image_controller: tokio::sync::RwLock::new(None),
                 image_build_watcher: tokio::sync::Mutex::new(None),
+                graph_warmer: tokio::sync::RwLock::new(None),
             }),
         }
     }
@@ -324,6 +336,101 @@ impl AppState {
             let _ = handle.await;
             tracing::info!("image_build_watcher: stopped");
         }
+    }
+
+    /// Return the process-wide canonical-graph warmer (Phase 3 PR 8).
+    ///
+    /// Prefers the cluster-backed [`K8sGraphWarmer`] when
+    /// [`AppState::initialize_graph_warmer`] managed to construct one;
+    /// otherwise falls back on-demand to the in-process implementation so
+    /// mirror-fetcher and agent-dispatch call sites never have to branch
+    /// on "is a warmer configured". The returned `Arc` is cheaply cloned.
+    pub async fn graph_warmer(&self) -> Arc<dyn GraphWarmerService> {
+        if let Some(warmer) = self.inner.graph_warmer.read().await.clone() {
+            return warmer;
+        }
+        // Fallback: build an in-process warmer lazily. Kept identical to
+        // the production shape so `TestRuntime` and dev boxes that never
+        // ran `initialize()` still get correct semantics.
+        Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
+    }
+
+    /// Pick the best available [`GraphWarmerService`] implementation and
+    /// cache it on [`AppState`]. Idempotent.
+    ///
+    /// Policy:
+    /// * If `DJINN_RUNTIME=kubernetes` (or unset — default) AND a
+    ///   `kube::Client` can be constructed → [`K8sGraphWarmer`].
+    /// * Otherwise (explicit `DJINN_RUNTIME=test`, local dev without a
+    ///   cluster) → in-process warmer via [`build_in_process_graph_warmer`].
+    async fn initialize_graph_warmer(&self) {
+        {
+            let existing = self.inner.graph_warmer.read().await;
+            if existing.is_some() {
+                return;
+            }
+        }
+
+        let prefer_k8s = matches!(runtime_kind(), RuntimeKind::Kubernetes);
+        let warmer: Arc<dyn GraphWarmerService> = if prefer_k8s {
+            match kube::Client::try_default().await {
+                Ok(client) => {
+                    let config = KubernetesConfig::from_env();
+                    tracing::info!(
+                        namespace = %config.namespace,
+                        "graph_warmer: wiring K8sGraphWarmer"
+                    );
+                    Arc::new(K8sGraphWarmer::new(client, config, self.db().clone()))
+                        as Arc<dyn GraphWarmerService>
+                }
+                Err(e) => {
+                    tracing::info!(
+                        error = %e,
+                        "graph_warmer: no kube::Client available; falling back to in-process warmer"
+                    );
+                    Arc::new(build_in_process_graph_warmer(self.clone()))
+                        as Arc<dyn GraphWarmerService>
+                }
+            }
+        } else {
+            tracing::debug!(
+                "graph_warmer: DJINN_RUNTIME is not kubernetes; using in-process warmer"
+            );
+            Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
+        };
+
+        let mut guard = self.inner.graph_warmer.write().await;
+        *guard = Some(warmer);
+        tracing::info!("graph_warmer: initialized");
+    }
+
+    /// Minimal constructor used by `djinn-server --warm-graph <project_id>`
+    /// (Phase 3 PR 8 §6.4).
+    ///
+    /// Boots ONLY the subsystems [`crate::canonical_graph::ensure_canonical_graph`]
+    /// needs — DB + mirror + event bus — and leaves every other service
+    /// (HTTP listener, MCP server, coordinator, RPC listener, agent
+    /// actors) uninitialised.  The warm Pod is short-lived, has no
+    /// inbound traffic, and exits after a single warm run, so the
+    /// fat-server bootstrap penalty (≈2–3s) is unnecessary.
+    ///
+    /// The returned state is wired to the normal Dolt-MySQL pool via the
+    /// environment-driven [`crate::db::runtime::DatabaseRuntimeConfig`]
+    /// so the warm Pod reads/writes the same `repo_graph_cache` rows the
+    /// full server consumes.
+    pub async fn minimal_for_warm_only() -> anyhow::Result<Self> {
+        let cancel = CancellationToken::new();
+        let db_runtime = DatabaseRuntimeManager::new(
+            crate::db::runtime::DatabaseRuntimeConfig::from_cli_and_env(None, None, None, None)
+                .map_err(|e| anyhow::anyhow!("invalid database runtime configuration: {e}"))?,
+        );
+        db_runtime
+            .ensure_runtime_available()
+            .map_err(|e| anyhow::anyhow!("ensure database runtime: {e}"))?;
+        let db = db_runtime
+            .bootstrap()
+            .map_err(|e| anyhow::anyhow!("open database runtime: {e}"))?;
+        Ok(Self::new_with_runtime(db, db_runtime, cancel))
     }
 
     /// Read-only snapshot of the active GitHub App configuration, if any.
@@ -736,6 +843,22 @@ impl AppState {
     }
 
     pub fn agent_context(&self) -> djinn_agent::context::AgentContext {
+        // Prefer the cached warmer (K8s or in-process per
+        // `initialize_graph_warmer`); fall back to a fresh in-process
+        // warmer when the cache is cold (test paths + dev boxes that
+        // skip `initialize()`).  `try_read` stays on the sync path so
+        // `agent_context()` keeps its non-async signature.
+        let graph_warmer = self
+            .inner
+            .graph_warmer
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .unwrap_or_else(|| {
+                Arc::new(build_in_process_graph_warmer(self.clone()))
+                    as Arc<dyn djinn_runtime::GraphWarmerService>
+            });
+
         djinn_agent::context::AgentContext {
             db: self.inner.db.clone(),
             event_bus: self.event_bus(),
@@ -750,10 +873,7 @@ impl AppState {
             active_tasks: self.inner.active_tasks.clone(),
             task_ops_project_path_override: None,
             working_root: None,
-            graph_warmer: Some(
-                Arc::new(build_in_process_graph_warmer(self.clone()))
-                    as Arc<dyn djinn_runtime::GraphWarmerService>,
-            ),
+            graph_warmer: Some(graph_warmer),
             repo_graph_ops: Some(Arc::new(crate::mcp_bridge::RepoGraphBridge::new(
                 self.clone(),
             ))),
@@ -821,10 +941,7 @@ impl AppState {
                 self.inner.verifying_tasks.clone(),
                 self.inner.lsp.clone(),
             )
-            .with_graph_warmer(
-                Arc::new(build_in_process_graph_warmer(self.clone()))
-                    as Arc<dyn djinn_runtime::GraphWarmerService>,
-            )
+            .with_graph_warmer(self.graph_warmer().await)
             .with_mirror(self.inner.mirror.clone()),
         );
 
@@ -949,6 +1066,13 @@ impl AppState {
         // fetcher silently skips the enqueue step when `image_controller()`
         // returns `None`.
         self.initialize_image_controller().await;
+
+        // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
+        // in-process) and cache it.  Call order: after
+        // `image_controller` because the K8s warmer reads the same
+        // `kube::Client` path and we want the info log to surface even
+        // if the controller short-circuited (e.g. env disabled).
+        self.initialize_graph_warmer().await;
     }
 
     /// Spawn `djinn_supervisor::serve_on_tcp` on the configured RPC address

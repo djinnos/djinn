@@ -39,6 +39,14 @@ pub struct KubernetesConfig {
     /// DNS address of the djinn-server RPC listener
     /// (e.g. `djinn.djinn-system.svc.cluster.local:8443`). Worker dials this.
     pub server_addr: String,
+    /// TTL (seconds) applied to completed graph-warm Jobs for auto-GC.
+    /// Shorter than task-run Jobs because warm Jobs are disposable the
+    /// moment they've populated `repo_graph_cache`.
+    pub warm_job_ttl_seconds: i32,
+    /// Maximum wall-clock seconds a warm Job may run before the kubelet
+    /// terminates it (`activeDeadlineSeconds`). Keeps a wedged indexer
+    /// subprocess from pinning a Pod indefinitely.
+    pub warm_job_timeout_seconds: i64,
 }
 
 impl KubernetesConfig {
@@ -58,6 +66,8 @@ impl KubernetesConfig {
             mirror_pvc: "djinn-mirror".into(),
             cache_pvc: "djinn-cache".into(),
             server_addr: "djinn.djinn.svc.cluster.local:8443".into(),
+            warm_job_ttl_seconds: 300,
+            warm_job_timeout_seconds: 1800,
         }
     }
 
@@ -83,6 +93,8 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_MIRROR_PVC` | `mirror_pvc` | `djinn-mirror` |
     /// | `DJINN_K8S_CACHE_PVC` | `cache_pvc` | `djinn-cache` |
     /// | `DJINN_K8S_SERVER_ADDR` | `server_addr` | `djinn.djinn.svc.cluster.local:8443` |
+    /// | `DJINN_K8S_WARM_JOB_TTL_SECONDS` | `warm_job_ttl_seconds` | `300` (parsed as `i32`) |
+    /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `1800` (parsed as `i64`) |
     ///
     /// A malformed `DJINN_K8S_TTL_SECONDS` is logged at `warn` and falls
     /// back to the default — the runtime still boots.
@@ -130,6 +142,26 @@ impl KubernetesConfig {
         }
         if let Ok(v) = std::env::var("DJINN_K8S_SERVER_ADDR") {
             cfg.server_addr = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_WARM_JOB_TTL_SECONDS") {
+            match v.parse::<i32>() {
+                Ok(n) => cfg.warm_job_ttl_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_WARM_JOB_TTL_SECONDS not a valid i32 — keeping default"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS") {
+            match v.parse::<i64>() {
+                Ok(n) => cfg.warm_job_timeout_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS not a valid i64 — keeping default"
+                ),
+            }
         }
         cfg
     }

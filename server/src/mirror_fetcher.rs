@@ -135,6 +135,12 @@ pub(crate) async fn fetch_one(
         }
     }
 
+    // Phase 3 PR 8: fire the canonical-graph warmer. The warmer's own
+    // freshness + single-flight guards make a duplicate trigger on an
+    // already-hot cache cheap. Log + swallow — warmer failure must never
+    // break the mirror fetch tick.
+    state.graph_warmer().await.trigger(project_id).await;
+
     Ok(())
 }
 

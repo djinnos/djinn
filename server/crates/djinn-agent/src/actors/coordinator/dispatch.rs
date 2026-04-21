@@ -399,6 +399,24 @@ impl CoordinatorActor {
                 continue;
             };
 
+            // Phase 3 PR 8: architect-only pre-dispatch `await_fresh` gate.
+            // Blocks up to 45s for a warm canonical graph; on timeout the
+            // warmer returns Ok and the architect proceeds best-effort.
+            // Other roles proceed immediately (per ADR: workers tolerate
+            // a stale skeleton).
+            if role == "architect"
+                && let Some(warmer) = self.graph_warmer.clone()
+            {
+                let pid = task.project_id.clone();
+                let _ = warmer
+                    .await_fresh(
+                        &pid,
+                        std::time::Duration::from_secs(300),
+                        std::time::Duration::from_secs(45),
+                    )
+                    .await;
+            }
+
             let task_id = task.id.clone();
             let project_path_owned = project_path.clone();
             let outcome = self
