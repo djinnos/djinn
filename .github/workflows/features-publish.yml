@@ -47,6 +47,12 @@ jobs:
         working-directory: server
         env:
           SQLX_OFFLINE: "true"
+          # server/.cargo/config.toml hardcodes `rustc-wrapper = "sccache"`
+          # for local dev speed. sccache isn't installed on the GitHub
+          # runner; unset the wrapper inline so cargo doesn't try to spawn
+          # a nonexistent binary.
+          RUSTC_WRAPPER: ""
+          CARGO_BUILD_RUSTC_WRAPPER: ""
         run: |
           cargo build --release \
               --target ${{ env.WORKER_TARGET }} \
@@ -104,7 +110,13 @@ jobs:
 
       - name: shellcheck install.sh + test.sh
         run: |
-          shellcheck -e SC1091 \
+          # SC1091: we intentionally `source` runtime-only files (the
+          # dev-container-features-test-lib path only exists inside the
+          # devcontainer, not in the repo) — no way to resolve statically.
+          # SC2016: test.sh wraps assertions in `bash -c '...'`; the
+          # single-quoting is intentional so the inner bash expands `$PATH`
+          # etc. at test time, not at `check` invocation time.
+          shellcheck -e SC1091,SC2016 \
               devcontainer-features/src/*/install.sh \
               devcontainer-features/test/*/test.sh \
               scripts/verify-feature-versions.sh
