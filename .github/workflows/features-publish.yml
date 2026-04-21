@@ -183,15 +183,39 @@ jobs:
       - name: Make worker binary executable
         run: chmod +x devcontainer-features/src/djinn-agent-worker/bin/djinn-agent-worker
 
-      - name: Publish via devcontainers/action
-        uses: devcontainers/action@v1
-        with:
-          publish-features: "true"
-          base-path-to-features: "./devcontainer-features/src"
-          oci-registry: "ghcr.io"
-          features-namespace: "djinnos"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install @devcontainers/cli
+        run: npm install -g @devcontainers/cli
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Publish Features to GHCR
+        # `devcontainer features publish` always ends with a
+        # collection-metadata upload that posts to
+        # `/v2/djinnos/blobs/uploads/` (namespace only, no repo name) —
+        # which GHCR rejects with NAME_INVALID, since OCI repos must be
+        # `namespace/repo` shape. That's the final step of the CLI; all
+        # individual Feature publishes (9 of them) complete successfully
+        # first. This script parses the CLI log, counts `Published
+        # feature:` lines, and only exits non-zero if a Feature actually
+        # failed to publish — treating the collection-metadata failure
+        # as cosmetic. Surfaced as an annotation so we don't forget it.
+        run: |
+          set -o pipefail
+          expected=$(find devcontainer-features/src -mindepth 2 -maxdepth 2 \
+                         -name devcontainer-feature.json | wc -l)
+          devcontainer features publish \
+              -r ghcr.io -n djinnos \
+              ./devcontainer-features/src 2>&1 | tee publish.log || true
+          published=$(grep -c 'Published feature: ' publish.log || true)
+          echo "published=$published expected=$expected"
+          if [ "$published" -ne "$expected" ]; then
+              echo "::error::only $published/$expected Features published"
+              exit 1
+          fi
+          if grep -q 'Failed to publish collection metadata' publish.log; then
+              echo "::warning::collection metadata upload failed (known GHCR NAME_INVALID interop issue — cosmetic; all $expected Features published)"
+          fi
 
       - name: Create release notes
         if: startsWith(github.ref, 'refs/tags/feature-v')
