@@ -7,7 +7,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::nomic_bert::{self, Config, NomicBertModel};
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use serde::Serialize;
-use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer};
+use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection, TruncationParams, TruncationStrategy};
 use tokio::sync::{Mutex, OnceCell};
 
 use djinn_db::{EmbeddedNote, NoteEmbeddingProvider};
@@ -316,6 +316,26 @@ impl CandleEmbeddingRuntime {
                 ..Default::default()
             }));
         }
+        // nomic-embed-text-v1.5's RoPE cache is sized to
+        // `max_position_embeddings`; longer inputs panic the model forward
+        // pass with "inconsistent last dim size in rope". Truncate at the
+        // tokenizer so notes that exceed the context window still get a
+        // best-effort embedding (first N tokens) instead of falling into
+        // the repair-loop retry pathology.
+        let max_seq_len = if config.n_positions == 0 {
+            8192
+        } else {
+            config.n_positions
+        };
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: max_seq_len,
+                strategy: TruncationStrategy::LongestFirst,
+                direction: TruncationDirection::Right,
+                stride: 0,
+            }))
+            .map_err(anyhow::Error::msg)
+            .context("enable tokenizer truncation")?;
 
         let device = Device::Cpu;
         let vb = unsafe {
