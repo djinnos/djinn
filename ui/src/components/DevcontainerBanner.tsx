@@ -78,16 +78,23 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
 
   useEffect(() => {
     let active = true;
-    void (async () => {
+    const fetchOnce = async () => {
       try {
         const next = await fetchDevcontainerStatus(projectId);
         if (active) setStatus(next);
       } catch (err) {
         console.warn("devcontainer status fetch failed", err);
       }
-    })();
+    };
+    void fetchOnce();
+    // Poll every 30s so the banner catches server-side changes (PR
+    // merged → mirror fetch on next 60s tick → stack re-detected) without
+    // requiring a page refresh. Users still get a manual "Check again"
+    // button for the impatient path.
+    const timer = setInterval(() => void fetchOnce(), 30_000);
     return () => {
       active = false;
+      clearInterval(timer);
     };
   }, [projectId]);
 
@@ -240,11 +247,23 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
             <pre className="mt-1 max-h-64 overflow-auto rounded-md border border-border/50 bg-black/30 p-3 text-xs leading-relaxed text-muted-foreground">
               <code>{state.starter}</code>
             </pre>
-            <PrButton
-              existingPr={state.status.open_setup_pr ?? null}
-              opening={openingPr}
-              onOpen={() => void handleOpenPr()}
-            />
+            <div className="mt-3 flex items-center gap-2">
+              <PrButton
+                existingPr={state.status.open_setup_pr ?? null}
+                opening={openingPr}
+                onOpen={() => void handleOpenPr()}
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1.5 px-3 text-xs"
+                onClick={() => void refresh()}
+                title="Re-check whether the repo has a devcontainer yet"
+              >
+                <HugeiconsIcon icon={RefreshIcon} size={14} />
+                Check again
+              </Button>
+            </div>
           </div>
         )}
 
@@ -308,7 +327,7 @@ function PrButton({
         href={existingPr.url}
         target="_blank"
         rel="noopener noreferrer"
-        className="mt-3 inline-flex h-8 items-center gap-1.5 rounded-md bg-amber-500/15 px-3 text-xs font-medium text-amber-200 ring-1 ring-amber-500/40 transition-colors hover:bg-amber-500/25"
+        className="inline-flex h-8 items-center gap-1.5 rounded-md bg-amber-500/15 px-3 text-xs font-medium text-amber-200 ring-1 ring-amber-500/40 transition-colors hover:bg-amber-500/25"
       >
         <HugeiconsIcon icon={GitPullRequestIcon} size={14} />
         View PR #{existingPr.number}
@@ -321,7 +340,7 @@ function PrButton({
     <Button
       variant="default"
       size="sm"
-      className="mt-3 h-8 gap-1.5 px-3 text-xs"
+      className="h-8 gap-1.5 px-3 text-xs"
       onClick={onOpen}
       disabled={opening}
     >

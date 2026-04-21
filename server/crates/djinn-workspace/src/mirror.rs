@@ -127,10 +127,26 @@ impl MirrorManager {
             return Err(MirrorError::Git(format!("git remote set-url: {stderr}")));
         }
 
+        // `git clone --bare --filter=blob:none` does NOT write a
+        // `fetch` refspec into `remote.origin`, so a plain
+        // `git fetch origin` ends up fetching objects for the default
+        // branch only and never advances any local refs. That's why a
+        // merged PR on the remote was invisible to stack detection —
+        // the mirror's `refs/heads/main` was frozen at clone time.
+        // Passing an explicit `+refs/heads/*:refs/heads/*` refspec
+        // mirrors every head on every fetch, with force-update so
+        // force-pushes and branch resets also sync. Tags follow so
+        // release-detection stays current.
         let output = Command::new("git")
             .args(["-C"])
             .arg(&mirror)
-            .args(["fetch", "--prune", "origin"])
+            .args([
+                "fetch",
+                "--prune",
+                "origin",
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+            ])
             .output()
             .await?;
         if !output.status.success() {
