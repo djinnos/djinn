@@ -60,8 +60,13 @@ RUN mkdir -p .cargo && printf '%s\n' \
 
 # Cache mounts speed up iterative rebuilds. Contents vanish after the RUN
 # step, so we copy the binary out to a regular image layer (/out).
+#
+# Cargo writes to `/app/server/target` (workspace-relative — Cargo.toml
+# lives at /app/server). The cache mount target MUST match that path or
+# every build is a cold compile. Also cache `cargo/git` for git deps.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/server/target \
     set -eux; \
     cargo build --release --locked -p djinn-server; \
     mkdir -p /out; \
