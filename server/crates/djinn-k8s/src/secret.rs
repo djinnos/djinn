@@ -90,7 +90,6 @@ pub fn job_owner_reference(job_name: &str, job_uid: &str) -> OwnerReference {
         uid: job_uid.to_string(),
         controller: Some(true),
         block_owner_deletion: Some(true),
-        ..Default::default()
     }
 }
 

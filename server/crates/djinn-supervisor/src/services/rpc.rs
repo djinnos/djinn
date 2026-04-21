@@ -83,7 +83,7 @@ pub enum ConnectTcpError {
 /// [`RpcServices::connect_tcp`] can funnel non-io handshake mishaps through
 /// the same `Io` variant without hiding the frame-codec diagnostic.
 fn io_other(msg: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, msg.into())
+    io::Error::other(msg.into())
 }
 
 // ── Real RPC client ──────────────────────────────────────────────────────────

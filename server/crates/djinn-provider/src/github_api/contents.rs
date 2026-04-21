@@ -176,6 +176,7 @@ impl GitHubApiClient {
 
     /// Create or update a single file on `branch` via the Contents API.
     /// Pass `prev_sha = None` for a create and `Some(sha)` for an update.
+    #[allow(clippy::too_many_arguments)]
     pub async fn put_file(
         &self,
         owner: &str,

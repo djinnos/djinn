@@ -169,8 +169,7 @@ impl GitHubAppClient {
 
         let first = fetch_page(1).await?;
         let total = first.total_count as usize;
-        let per_page_u = per_page as usize;
-        let total_pages = total.div_ceil(per_page_u).max(1) as u32;
+        let total_pages = total.div_ceil(per_page).max(1) as u32;
 
         let mut out: Vec<InstallationRepo> = Vec::with_capacity(total);
         out.extend(first.repositories.into_iter().map(raw_to_installation));

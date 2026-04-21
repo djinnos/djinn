@@ -129,10 +129,10 @@ pub(crate) async fn fetch_one(
 
     // Phase 3 PR 5: image-controller enqueue — fire-and-forget, log on error.
     // Absent controller (local dev without a kube::Client) is expected.
-    if let (Some(stack), Some(controller)) = (detected_stack, state.image_controller().await) {
-        if let Err(err) = controller.enqueue(project_id, &stack).await {
-            tracing::warn!(project_id, error = %err, "image-controller enqueue failed");
-        }
+    if let (Some(stack), Some(controller)) = (detected_stack, state.image_controller().await)
+        && let Err(err) = controller.enqueue(project_id, &stack).await
+    {
+        tracing::warn!(project_id, error = %err, "image-controller enqueue failed");
     }
 
     // Phase 3 PR 8: fire the canonical-graph warmer. The warmer's own

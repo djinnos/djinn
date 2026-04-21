@@ -171,12 +171,20 @@ impl KubernetesConfig {
 mod tests {
     use super::*;
 
+    // Both tests in this module mutate the same `DJINN_K8S_TTL_SECONDS`
+    // env var. `cargo test` runs tests in parallel threads within one
+    // process, so without a lock the two races: one test's set_var/
+    // remove_var can clobber the other's between set and from_env().
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// `from_env()` honors the env vars it documents.  This is a sanity
     /// check on the env-var names (regressions would silently fall back to
     /// defaults on the production path without any compile-time signal).
     #[test]
     fn from_env_reads_documented_vars() {
-        // SAFETY: single-threaded unit test, no other threads read env.
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized against sibling test via ENV_LOCK; no other
+        // threads in the test process read these env keys.
         unsafe {
             std::env::set_var("DJINN_K8S_NAMESPACE", "test-ns");
             std::env::set_var("DJINN_K8S_IMAGE", "repo/img:tag");
@@ -206,7 +214,10 @@ mod tests {
     /// if an operator typos the value.
     #[test]
     fn from_env_ttl_parse_error_falls_back_to_default() {
-        // SAFETY: single-threaded unit test; we save + restore the key.
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized against sibling test via ENV_LOCK; we save +
+        // restore the key so a concurrent `cargo test` run can't observe
+        // the transient `not-a-number` state.
         let saved = std::env::var("DJINN_K8S_TTL_SECONDS").ok();
         unsafe {
             std::env::set_var("DJINN_K8S_TTL_SECONDS", "not-a-number");

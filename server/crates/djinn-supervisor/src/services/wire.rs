@@ -51,6 +51,7 @@ pub struct Frame {
 
 /// Multiplexed payload carried on the duplex frame channel.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum FramePayload {
     /// Worker → launcher request.
     Rpc(ServiceRpcRequest),
@@ -101,6 +102,7 @@ pub struct AuthResultMsg {
 /// except `cancel()`, which is satisfied locally on the worker and does not
 /// cross the wire.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ServiceRpcRequest {
     /// [`crate::SupervisorServices::load_task`].
     LoadTask { task_id: String },
@@ -125,6 +127,7 @@ pub enum ServiceRpcRequest {
 /// error).  Semantic errors inside a call (e.g. `load_task` returning
 /// `Err("task not found")`) travel inside the matching typed variant.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ServiceRpcResponse {
     LoadTask(Result<Task, String>),
     ExecuteStage(Result<StageOutcome, StageError>),

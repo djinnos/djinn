@@ -30,7 +30,7 @@
 //!    the project's `is_default = 1` row for the RoleKind's `base_role`.
 //!    That row carries the project-wide prompt extensions + learned_prompt
 //!    + MCP/skill defaults.  Missing rows just yield empty defaults — the
-//!    stage still runs against the code-level `AgentRole` template.
+//!      stage still runs against the code-level `AgentRole` template.
 //!
 //! Every DB failure is non-fatal: we log + return defaults so the stage
 //! keeps running rather than failing a task-run on a transient DB blip.

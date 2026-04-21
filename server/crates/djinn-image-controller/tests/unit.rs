@@ -137,10 +137,11 @@ fn build_job_labels_and_envs_match_plan() {
         Some(cfg.buildkitd_host.as_str())
     );
 
-    // The volume set includes the mirror PVC (read-only) and the
-    // registry-auth Secret.
+    // Volumes carry a writable workspace (emptyDir) plus the registry-auth
+    // and build-token Secrets. The mirror PVC was dropped in 89f054af2
+    // (build Job now clones upstream directly) so no PVC is expected.
     let volumes = pod.volumes.as_ref().unwrap();
-    assert!(volumes.iter().any(|v| v.persistent_volume_claim.is_some()));
+    assert!(volumes.iter().any(|v| v.empty_dir.is_some()));
     assert!(volumes.iter().any(|v| v.secret.is_some()));
 }
 

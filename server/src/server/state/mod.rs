@@ -789,10 +789,10 @@ impl AppState {
         match std::env::var("DJINN_VECTOR_BACKEND") {
             Ok(value) if value.eq_ignore_ascii_case("qdrant") => {
                 let mut config = QdrantConfig::default();
-                if let Ok(url) = std::env::var("QDRANT_URL") {
-                    if !url.is_empty() {
-                        config.url = url;
-                    }
+                if let Ok(url) = std::env::var("QDRANT_URL")
+                    && !url.is_empty()
+                {
+                    config.url = url;
                 }
                 Arc::new(QdrantNoteVectorStore::new(config)) as Arc<dyn NoteVectorStore>
             }
