@@ -957,8 +957,9 @@ impl AppState {
 
         self.apply_runtime_settings_from_db().await;
 
-        // Coordinator starts paused — require explicit `execution_start` to begin dispatching.
-        tracing::info!("coordinator spawned (paused — awaiting explicit execution_start)");
+        // Coordinator is always-on in K8s mode; dispatch is gated per-project
+        // by the image-ready + graph-warmed readiness check in `dispatch.rs`.
+        tracing::info!("coordinator spawned (always dispatching; gated by project readiness)");
     }
 
     /// Load custom providers from DB into the catalog and trigger a background
