@@ -198,8 +198,29 @@ impl ImageController {
         let job = build_image_build_job(&self.config, project_id, hash_prefix, &image_tag);
 
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
-        match jobs.create(&PostParams::default(), &job).await {
-            Ok(created) => {
+        let job_name = job
+            .metadata
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("djinn-build-{project_id}-{hash_prefix}"));
+
+        // Guard against a prior process (or prior tick) having already
+        // submitted this exact Job: check existence first, then create.
+        // Avoids the race where `create` fails with 409 AlreadyExists and
+        // prevents the controller from getting wedged behind a hash-matching
+        // row whose Job is still in flight.
+        match jobs.get_opt(&job_name).await? {
+            Some(_) => {
+                info!(
+                    project_id,
+                    hash = %hash_prefix,
+                    job = %job_name,
+                    namespace = %self.config.namespace,
+                    "image_controller: build Job already exists — leaving it running"
+                );
+            }
+            None => {
+                let created = jobs.create(&PostParams::default(), &job).await?;
                 info!(
                     project_id,
                     hash = %hash_prefix,
@@ -208,18 +229,6 @@ impl ImageController {
                     "image_controller: build Job created"
                 );
             }
-            // A previous tick (or a previous server process) already created
-            // the Job for this hash. Treat as a successful no-op — the
-            // image_build_watcher will drive the DB status on Job completion.
-            Err(kube::Error::Api(err)) if err.code == 409 => {
-                info!(
-                    project_id,
-                    hash = %hash_prefix,
-                    namespace = %self.config.namespace,
-                    "image_controller: build Job already exists — leaving it running"
-                );
-            }
-            Err(e) => return Err(e.into()),
         }
         drop(permit);
 
