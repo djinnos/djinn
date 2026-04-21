@@ -102,6 +102,10 @@ langfuse:
 # Zot PVC to it so `kind` clusters bind without hunting for the cluster
 # default, and drop the size way down so the whole stack fits on a laptop.
 imagePipeline:
+  # Local-built builder image (see Tiltfile's djinn-image-builder-image
+  # resource). ghcr.io/djinnos/djinn-image-builder:latest is org-private;
+  # anonymous pulls 401 inside kind. Override to the in-cluster registry.
+  builderImage: "localhost:5001/djinn-image-builder:dev"
   zot:
     storage:
       storageClassName: standard

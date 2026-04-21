@@ -29,6 +29,7 @@ CLUSTER  = 'kind-djinn'
 NS       = 'djinn'
 REGISTRY = 'localhost:5001'
 AGENT_RUNTIME_REF = '{}/djinn-agent-runtime:dev'.format(REGISTRY)
+IMAGE_BUILDER_REF = '{}/djinn-image-builder:dev'.format(REGISTRY)
 
 # --- kind cluster + registry ---------------------------------------------
 # Bootstrap runs at Tiltfile parse (blocking, idempotent) so the cluster
@@ -73,6 +74,21 @@ local_resource(
     ]),
     deps=['server', 'server/docker/djinn-agent-runtime.Dockerfile'],
     ignore=['server/target', 'server/.sqlx/cache'],
+    labels=['build'],
+)
+
+# --- djinn-image-builder image ------------------------------------------
+# Same reasoning as djinn-agent-runtime: referenced by the controller in
+# Job PodSpecs it creates at runtime, not by any chart template. Build +
+# push under a stable :dev tag; values.local.yaml points the server's
+# DJINN_IMAGE_BUILDER_IMAGE env at localhost:5001/djinn-image-builder:dev.
+local_resource(
+    'djinn-image-builder-image',
+    cmd=' && '.join([
+        'docker build -f server/docker/djinn-image-builder.Dockerfile -t {ref} .'.format(ref=IMAGE_BUILDER_REF),
+        'docker push {ref}'.format(ref=IMAGE_BUILDER_REF),
+    ]),
+    deps=['server/docker/djinn-image-builder.Dockerfile'],
     labels=['build'],
 )
 

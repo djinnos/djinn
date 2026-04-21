@@ -96,6 +96,8 @@ spec:
             # the in-process TestRuntime.
             - name: DJINN_RUNTIME
               value: "kubernetes"
+            - name: DJINN_IMAGE_BUILDER_IMAGE
+              value: {{ .Values.imagePipeline.builderImage | quote }}
             - name: DJINN_VAULT_KEY_PATH
               value: /var/run/secrets/djinn/vault.key
             - name: GITHUB_APP_PRIVATE_KEY_PATH
