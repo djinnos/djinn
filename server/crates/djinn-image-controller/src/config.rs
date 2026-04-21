@@ -7,7 +7,7 @@ const DEFAULT_BUILDKITD_HOST: &str = "tcp://djinn-buildkitd.djinn.svc.cluster.lo
 /// Default Zot registry DNS (matches `zot-service.yaml` shipped in PR 4).
 const DEFAULT_REGISTRY_HOST: &str = "djinn-zot.djinn.svc.cluster.local:5000";
 /// Default djinn-image-builder image (Dockerfile shipped in PR 4).
-const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/djinnos/djinn-image-builder:dev";
+const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/djinnos/djinn-image-builder:latest";
 /// Default namespace for build Jobs + registry-auth Secret lookup.
 const DEFAULT_NAMESPACE: &str = "djinn";
 /// Default registry-auth Secret name referenced by the build-Job Pod spec.
