@@ -116,8 +116,13 @@ devcontainer build \
             name: VOLUME_REGISTRY_AUTH.to_string(),
             secret: Some(SecretVolumeSource {
                 secret_name: Some(config.registry_auth_secret.clone()),
+                // The chart's `registry-auth-secret.yaml` stores the docker
+                // auth file under key `config.json` (matching what buildkitd
+                // already consumes), not the dockerconfigjson-typed key.
+                // Keep both names the same here so the mount lands at
+                // `/root/.docker/config.json` inside the builder Pod.
                 items: Some(vec![KeyToPath {
-                    key: ".dockerconfigjson".to_string(),
+                    key: "config.json".to_string(),
                     path: "config.json".to_string(),
                     ..KeyToPath::default()
                 }]),
