@@ -1,0 +1,26 @@
+{
+  "id": "djinn-typescript",
+  "version": "1.0.0",
+  "name": "Djinn TypeScript / JavaScript",
+  "description": "Node.js (via nvm) + typescript-language-server + scip-typescript + the user's chosen package manager.",
+  "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-typescript",
+  "options": {
+    "node_version": {
+      "type": "string",
+      "default": "24",
+      "description": "Node.js version passed to `nvm install`. Node 24 is the active LTS as of 2026. Accepts anything nvm understands: `24`, `24.5.0`, `lts/jod`, `lts/*`."
+    },
+    "pm": {
+      "type": "string",
+      "default": "pnpm",
+      "description": "Package manager. One of: pnpm | yarn | bun | deno | npm. Installed via corepack or the PM's own installer."
+    }
+  },
+  "installsAfter": [
+    "ghcr.io/djinnos/djinn-agent-worker"
+  ],
+  "containerEnv": {
+    "NVM_DIR": "/usr/local/nvm",
+    "PATH": "/usr/local/nvm/current/bin:${PATH}"
+  }
+}

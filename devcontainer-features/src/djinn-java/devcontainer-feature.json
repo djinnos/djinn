@@ -1,0 +1,26 @@
+{
+  "id": "djinn-java",
+  "version": "1.0.0",
+  "name": "Djinn Java",
+  "description": "JDK (via SDKMAN) + jdtls (Eclipse JDT language server) + scip-java. Pick gradle or maven as the build tool.",
+  "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-java",
+  "options": {
+    "jdk_version": {
+      "type": "string",
+      "default": "25-tem",
+      "description": "SDKMAN identifier for the JDK. 25-tem (Temurin 25) is the current LTS as of September 2025. Accepts anything SDKMAN knows: `25-tem`, `21-tem`, `17.0.11-zulu`, etc."
+    },
+    "build_tool": {
+      "type": "string",
+      "default": "gradle",
+      "description": "Build tool. One of: gradle | maven."
+    }
+  },
+  "installsAfter": [
+    "ghcr.io/djinnos/djinn-agent-worker"
+  ],
+  "containerEnv": {
+    "SDKMAN_DIR": "/usr/local/sdkman",
+    "PATH": "/usr/local/sdkman/candidates/java/current/bin:/usr/local/sdkman/candidates/gradle/current/bin:/usr/local/sdkman/candidates/maven/current/bin:/opt/djinn-java/bin:${PATH}"
+  }
+}

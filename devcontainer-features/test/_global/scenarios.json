@@ -1,0 +1,64 @@
+{
+  "djinn-agent-worker": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {}
+    }
+  },
+  "djinn-rust": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {},
+      "djinn-rust": { "toolchain": "stable" }
+    }
+  },
+  "djinn-typescript": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {},
+      "djinn-typescript": { "node_version": "24", "pm": "pnpm" }
+    }
+  },
+  "djinn-python": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {},
+      "djinn-python": { "version": "3.14", "pm": "uv" }
+    }
+  },
+  "djinn-go": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {},
+      "djinn-go": { "version": "1.26.2" }
+    }
+  },
+  "djinn-java": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {},
+      "djinn-java": { "jdk_version": "25-tem", "build_tool": "gradle" }
+    }
+  },
+  "djinn-clang": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {},
+      "djinn-clang": { "version": "22" }
+    }
+  },
+  "djinn-ruby": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {},
+      "djinn-ruby": { "version": "3.4" }
+    }
+  },
+  "djinn-dotnet": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "features": {
+      "djinn-agent-worker": {},
+      "djinn-dotnet": { "sdk_version": "10.0" }
+    }
+  }
+}

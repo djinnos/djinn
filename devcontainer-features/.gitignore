@@ -1,0 +1,8 @@
+# The djinn-agent-worker binary is produced by CI (from server/crates/djinn-agent-worker)
+# and copied into src/djinn-agent-worker/bin/ just before the Feature is published.
+# Never commit it.
+src/djinn-agent-worker/bin/djinn-agent-worker
+
+# Test artifacts produced by @devcontainers/cli features test.
+.devcontainer/
+**/node_modules/

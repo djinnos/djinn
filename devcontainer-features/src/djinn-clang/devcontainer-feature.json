@@ -1,0 +1,20 @@
+{
+  "id": "djinn-clang",
+  "version": "1.0.0",
+  "name": "Djinn Clang / C / C++",
+  "description": "clang + clangd + scip-clang (for C, C++, Objective-C, CUDA). scip-clang binary is pulled from GitHub releases.",
+  "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-clang",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "22",
+      "description": "clang/LLVM major version. 22 is the current stable (April 2026). Accepts anything apt/apk/dnf package groups support (`20`, `21`, `22`)."
+    }
+  },
+  "installsAfter": [
+    "ghcr.io/djinnos/djinn-agent-worker"
+  ],
+  "containerEnv": {
+    "PATH": "/opt/djinn-clang/bin:${PATH}"
+  }
+}
