@@ -242,7 +242,7 @@ describe("Pulse architect proposal workflow", () => {
     render(<Sidebar />, {
       wrapperOptions: {
         routerProps: {
-          initialEntries: ["/projects/project-a/pulse"],
+          initialEntries: ["/pulse"],
         },
       },
     });

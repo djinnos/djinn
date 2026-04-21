@@ -96,7 +96,7 @@ describe('Sidebar component', () => {
     render(<Sidebar />, {
       wrapperOptions: {
         routerProps: {
-          initialEntries: ['/projects/project-a/pulse'],
+          initialEntries: ['/pulse'],
         },
       },
     });

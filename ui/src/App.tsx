@@ -31,7 +31,7 @@ function MainLayout() {
         <div className="flex min-h-0 flex-1 flex-col">
           <ConnectionBanner />
           <Routes>
-            {/* Global views (All Projects) */}
+            {/* Views — project selection lives in the projectStore, not the URL */}
             <Route path="/kanban" element={<KanbanPage />} />
             <Route path="/roadmap" element={<RoadmapPage />} />
             <Route path="/chat" element={<ChatPage />} />
@@ -40,16 +40,6 @@ function MainLayout() {
             <Route path="/memory" element={<MemoryPage />} />
             <Route path="/pulse" element={<PulsePage />} />
             <Route path="/metrics" element={<Navigate to="/agents" replace />} />
-
-            {/* Project-scoped views */}
-            <Route path="/projects/:projectId/kanban" element={<KanbanPage />} />
-            <Route path="/projects/:projectId/roadmap" element={<RoadmapPage />} />
-            <Route path="/projects/:projectId/chat" element={<ChatPage />} />
-            <Route path="/projects/:projectId/chat/:sessionId" element={<ChatPage />} />
-            <Route path="/projects/:projectId/agents" element={<AgentsPage />} />
-            <Route path="/projects/:projectId/memory" element={<MemoryPage />} />
-            <Route path="/projects/:projectId/pulse" element={<PulsePage />} />
-            <Route path="/projects/:projectId/metrics" element={<Navigate to="../agents" replace />} />
 
             {/* Task session (global) */}
             <Route path="/task/:taskId" element={<TaskSessionPage />} />
