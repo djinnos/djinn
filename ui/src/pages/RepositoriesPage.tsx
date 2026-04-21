@@ -29,7 +29,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDialog';
-import { DevcontainerBanner } from '@/components/DevcontainerBanner';
+import { DevcontainerStatusBadge } from '@/components/DevcontainerStatusBadge';
 import { EmptyState } from '@/components/EmptyState';
 import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
 import { projectStore } from '@/stores/projectStore';
@@ -233,6 +233,12 @@ function RepositoryRow({
         <BranchPicker project={project} />
       </td>
       <td className="px-4 py-3">
+        <DevcontainerStatusBadge
+          projectId={project.id}
+          projectName={project.name}
+        />
+      </td>
+      <td className="px-4 py-3">
         <div
           className="flex items-center justify-end gap-1.5"
           onClick={(e) => e.stopPropagation()}
@@ -306,21 +312,13 @@ export function RepositoriesPage() {
             />
           ) : (
             <>
-              <div className="flex flex-col gap-2">
-                {projects.map((project) => (
-                  <DevcontainerBanner
-                    key={`devcontainer-${project.id}`}
-                    projectId={project.id}
-                    projectName={project.name}
-                  />
-                ))}
-              </div>
-              <div className="mt-4 overflow-hidden rounded-md border">
+              <div className="overflow-hidden rounded-md border">
                 <table className="w-full text-left">
                   <thead className="bg-white/[0.02]">
                     <tr className="border-b text-xs uppercase tracking-wide text-muted-foreground">
                       <th className="px-4 py-2.5 font-medium">Repository</th>
                       <th className="px-4 py-2.5 font-medium">Branch</th>
+                      <th className="px-4 py-2.5 font-medium">Status</th>
                       <th className="px-4 py-2.5 text-right font-medium">Actions</th>
                     </tr>
                   </thead>

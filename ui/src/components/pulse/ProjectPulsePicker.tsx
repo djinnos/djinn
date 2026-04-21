@@ -29,12 +29,12 @@ function describeWarmState(status: DevcontainerStatus | undefined): WarmDescript
   }
 }
 
-const toneStyles: Record<WarmTone, { dot: string; text: string }> = {
-  ready: { dot: "bg-emerald-400", text: "text-emerald-300" },
-  running: { dot: "bg-amber-400 animate-pulse", text: "text-amber-300" },
-  pending: { dot: "bg-muted-foreground/60", text: "text-muted-foreground" },
-  failed: { dot: "bg-red-500", text: "text-red-400" },
-  unknown: { dot: "bg-muted-foreground/30", text: "text-muted-foreground" },
+const toneDot: Record<WarmTone, string> = {
+  ready: "bg-emerald-400/90",
+  running: "bg-amber-400/90 animate-pulse [animation-duration:2s]",
+  pending: "bg-muted-foreground/50",
+  failed: "bg-red-400/90",
+  unknown: "bg-muted-foreground/30",
 };
 
 export function ProjectPulsePicker() {
@@ -71,7 +71,6 @@ export function ProjectPulsePicker() {
         {projects.map((project) => {
           const isSelected = project.id === selectedProjectId;
           const descriptor = describeWarmState(statusById.get(project.id));
-          const tone = toneStyles[descriptor.tone];
           return (
             <button
               key={project.id}
@@ -80,15 +79,17 @@ export function ProjectPulsePicker() {
               className={cn(
                 "group flex shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors",
                 isSelected
-                  ? "border-primary/40 bg-primary/10 text-foreground"
+                  ? "border-border bg-white/[0.06] text-foreground"
                   : "border-border/60 bg-background text-muted-foreground hover:border-border hover:bg-white/[0.03] hover:text-foreground"
               )}
               aria-pressed={isSelected}
               title={`${project.name} — ${descriptor.label}`}
             >
-              <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", tone.dot)} aria-hidden />
+              <span
+                className={cn("h-1.5 w-1.5 shrink-0 rounded-full", toneDot[descriptor.tone])}
+                aria-hidden
+              />
               <span className="truncate max-w-[12rem]">{project.name}</span>
-              <span className={cn("text-[11px] leading-none", tone.text)}>{descriptor.label}</span>
             </button>
           );
         })}

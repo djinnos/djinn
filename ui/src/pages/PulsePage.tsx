@@ -133,7 +133,7 @@ function NotWarmedView({
       return (
         <CenteredMessage
           title="Pulse not ready"
-          description="This project has no devcontainer.json yet. Commit one (use the banner on the Repositories page) and Pulse will warm automatically."
+          description="This project has no devcontainer.json yet. Commit one (use the status badge on the Repositories page) and Pulse will warm automatically."
         />
       );
     }
@@ -141,7 +141,7 @@ function NotWarmedView({
       return (
         <CenteredMessage
           title="Pulse not ready"
-          description="The devcontainer image build failed. Fix it from the Repositories banner and Pulse will warm once the rebuild lands."
+          description="The devcontainer image build failed. Fix it from the Repositories status badge and Pulse will warm once the rebuild lands."
         />
       );
     }

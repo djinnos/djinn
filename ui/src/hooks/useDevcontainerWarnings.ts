@@ -10,7 +10,7 @@ import { useProjects } from '@/stores/useProjectStore';
  * generating one mechanically requires the devcontainers CLI which we
  * don't ship on the server.
  *
- * Mirrors the triage logic in {@link DevcontainerBanner.deriveState}.
+ * Mirrors the triage logic in {@link DevcontainerStatusBadge.deriveState}.
  */
 export function useDevcontainerWarnings(): { count: number } {
   const projects = useProjects();
