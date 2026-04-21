@@ -26,33 +26,28 @@
 #                         crates recompile).
 #   - Cargo.toml/lock   → planner emits a new recipe.json, `chef cook` layer
 #                         busts and rebuilds all deps from scratch.
+#
+# Env notes:
+#   The host workspace's .cargo/config.toml sets `rustc-wrapper = "sccache"`,
+#   which would crash any cargo invocation in this image (no sccache binary).
+#   `RUSTC_WRAPPER=` + `CARGO_BUILD_RUSTC_WRAPPER=` override that. They live
+#   on the chef base so planner inherits them too — without that, even
+#   `cargo chef prepare` (just `cargo metadata`) crashes with "container
+#   process is already dead" when cargo tries to spawn the missing wrapper.
 ###############################################################################
 
 FROM rust:1.82-slim-bookworm AS chef
-ENV CARGO_TERM_COLOR=always
-RUN cargo install cargo-chef --locked --version 0.1.68
-WORKDIR /app
-
-###############################################################################
-# Planner stage: extract dep info into recipe.json. Source is copied so chef
-# can read every Cargo.toml in the workspace, but the actual build does NOT
-# happen here — only `prepare` runs.
-###############################################################################
-FROM chef AS planner
-COPY server /app/server
-WORKDIR /app/server
-RUN cargo chef prepare --recipe-path recipe.json
-
-###############################################################################
-# Builder stage: cook deps from recipe.json, then build the binary from source.
-###############################################################################
-FROM chef AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    CARGO_TERM_COLOR=always \
     SQLX_OFFLINE=true \
     RUSTC_WRAPPER= \
     CARGO_BUILD_RUSTC_WRAPPER=
 
+# System deps live on the chef base so both planner and builder inherit.
+# Planner needs `git` (cargo's git-fetch-with-cli) and a working CC; builder
+# additionally uses clang+mold for linking, libssl-dev/protobuf for crate
+# build scripts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libssl-dev \
@@ -66,18 +61,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         mold \
     && rm -rf /var/lib/apt/lists/*
 
-# Cargo config one level above the workspace so `COPY server` below doesn't
-# overwrite it. Cargo walks parent dirs looking for .cargo/config.toml.
-RUN mkdir -p /app/.cargo && printf '%s\n' \
-    '[build]' \
-    '' \
-    '[target.x86_64-unknown-linux-gnu]' \
-    'linker = "clang"' \
-    'rustflags = ["-C", "link-arg=-fuse-ld=mold"]' \
-    '' \
-    '[net]' \
-    'git-fetch-with-cli = true' \
-    > /app/.cargo/config.toml
+RUN cargo install cargo-chef --locked --version 0.1.68
+WORKDIR /app
+
+###############################################################################
+# Planner stage: extract dep info into recipe.json. Source is copied so chef
+# can read every Cargo.toml in the workspace, but no compilation happens here.
+###############################################################################
+FROM chef AS planner
+COPY server /app/server
+WORKDIR /app/server
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo chef prepare --recipe-path recipe.json
+
+###############################################################################
+# Builder stage: cook deps from recipe.json, then build the binary from source.
+# Inherits all system + cargo + env config from chef.
+###############################################################################
+FROM chef AS builder
 
 WORKDIR /app/server
 
