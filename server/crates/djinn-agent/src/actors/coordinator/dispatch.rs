@@ -316,9 +316,6 @@ impl CoordinatorActor {
             {
                 continue;
             }
-            if !self.is_project_dispatch_enabled(&task.project_id) {
-                continue;
-            }
             // Detect rapid failure: if this task was dispatched very recently and
             // is already back as ready, it failed lifecycle early → add to cooldown.
             if let Some(last) = self.last_dispatched.get(&task.id)
@@ -604,10 +601,6 @@ impl CoordinatorActor {
                 {
                     continue;
                 }
-                if !self.is_project_dispatch_enabled(&task.project_id) {
-                    continue;
-                }
-
                 let has_session = match self.pool.has_session(&task.id).await {
                     Ok(b) => b,
                     Err(PoolError::ActorDead) => {
@@ -704,9 +697,6 @@ impl CoordinatorActor {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
             {
-                continue;
-            }
-            if !self.is_project_dispatch_enabled(&task.project_id) {
                 continue;
             }
 
@@ -1073,11 +1063,8 @@ impl CoordinatorActor {
                 return;
             }
         };
-        let Some(active_project) = projects
-            .iter()
-            .find(|p| self.is_project_dispatch_enabled(&p.id))
-        else {
-            tracing::debug!("CoordinatorActor: patrol — no dispatch-enabled projects, skipping");
+        let Some(active_project) = projects.first() else {
+            tracing::debug!("CoordinatorActor: patrol — no projects, skipping");
             return;
         };
         let project_id = active_project.id.clone();
@@ -1329,9 +1316,6 @@ impl CoordinatorActor {
         };
 
         for task in tasks {
-            if !self.is_project_dispatch_enabled(&task.project_id) {
-                continue;
-            }
 
             // Simple-lifecycle tasks normally close directly, but sessions that
             // produced durable artifacts (file changes, memory writes, or task

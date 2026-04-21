@@ -20,18 +20,13 @@ pub(super) async fn board_health_impl(
                     parsed.memory_health = Some(memory_health);
                 }
 
-                // Surface any project health issues from the coordinator.
+                // Surface aggregate coordinator metrics (throughput + PR errors).
                 if let Some(coordinator) = server.state.coordinator().await
                     && let Ok(status) = coordinator.get_status()
                 {
-                    if !status.unhealthy_projects.is_empty() {
-                        parsed.project_issues = Some(status.unhealthy_projects);
-                    }
-                    // Surface epic throughput data for the Architect.
                     if !status.epic_throughput.is_empty() {
                         parsed.epic_throughput = Some(status.epic_throughput);
                     }
-                    // Surface PR creation errors (e.g. org OAuth restrictions).
                     if !status.pr_errors.is_empty() {
                         parsed.pr_errors = Some(status.pr_errors);
                     }

@@ -142,12 +142,8 @@ pub enum CoordinatorError {
 /// Snapshot of coordinator runtime state (returned by `CoordinatorHandle::get_status`).
 #[derive(Debug, Clone)]
 pub struct CoordinatorStatus {
-    pub paused: bool,
     pub tasks_dispatched: u64,
     pub sessions_recovered: u64,
-    /// Per-project health errors (project_id → error message).
-    /// Only populated when queried for a specific project.
-    pub unhealthy_projects: HashMap<String, String>,
     /// Tasks merged per hour per epic (rolling 1-hour window).
     pub epic_throughput: HashMap<String, usize>,
     /// Per-project PR creation errors (project_id → error message).
@@ -161,9 +157,6 @@ pub struct CoordinatorStatus {
 /// never queue behind long-running dispatch passes.
 #[derive(Debug, Clone)]
 pub(super) struct SharedCoordinatorState {
-    pub(super) paused_projects: HashSet<String>,
-    pub(super) unhealthy_project_ids: HashSet<String>,
-    pub(super) unhealthy_project_errors: HashMap<String, String>,
     pub(super) dispatched: u64,
     pub(super) recovered: u64,
     /// Tasks merged per hour per epic (rolling window snapshot).
@@ -174,44 +167,12 @@ pub(super) struct SharedCoordinatorState {
 }
 
 impl SharedCoordinatorState {
-    pub(super) fn to_status(&self, project_id: Option<&str>) -> CoordinatorStatus {
-        let paused = match project_id {
-            Some(id) => {
-                self.unhealthy_project_ids.contains(id) || self.paused_projects.contains(id)
-            }
-            None => !self.paused_projects.is_empty(),
-        };
-        let unhealthy_projects = match project_id {
-            Some(id) => self
-                .unhealthy_project_errors
-                .get(id)
-                .map(|err| {
-                    let mut m = HashMap::new();
-                    m.insert(id.to_string(), err.clone());
-                    m
-                })
-                .unwrap_or_default(),
-            None => self.unhealthy_project_errors.clone(),
-        };
-        let pr_errors = match project_id {
-            Some(id) => self
-                .pr_errors
-                .get(id)
-                .map(|err| {
-                    let mut m = HashMap::new();
-                    m.insert(id.to_string(), err.clone());
-                    m
-                })
-                .unwrap_or_default(),
-            None => self.pr_errors.clone(),
-        };
+    pub(super) fn to_status(&self) -> CoordinatorStatus {
         CoordinatorStatus {
-            paused,
             tasks_dispatched: self.dispatched,
             sessions_recovered: self.recovered,
-            unhealthy_projects,
             epic_throughput: self.epic_throughput.clone(),
-            pr_errors,
+            pr_errors: self.pr_errors.clone(),
             rate_limited_until: self.rate_limited_until,
         }
     }

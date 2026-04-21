@@ -689,9 +689,6 @@ mod tests {
             },
         );
         let (status_tx, _) = tokio::sync::watch::channel(SharedCoordinatorState {
-            paused_projects: HashSet::new(),
-            unhealthy_project_ids: HashSet::new(),
-            unhealthy_project_errors: HashMap::new(),
             dispatched: 0,
             recovered: 0,
             epic_throughput: HashMap::new(),
@@ -754,9 +751,6 @@ mod tests {
             },
         );
         let (status_tx, _) = tokio::sync::watch::channel(SharedCoordinatorState {
-            paused_projects: HashSet::new(),
-            unhealthy_project_ids: HashSet::new(),
-            unhealthy_project_errors: HashMap::new(),
             dispatched: 0,
             recovered: 0,
             epic_throughput: HashMap::new(),

@@ -52,7 +52,7 @@ async fn chat_uses_router_derived_tool_schemas() {
 
     assert!(names.contains("credential_set"));
     assert!(names.contains("project_list"));
-    assert!(names.contains("execution_start"));
+    assert!(names.contains("execution_kill_task"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -77,9 +77,10 @@ async fn mcp_tools_list_schemas_do_not_use_nonstandard_uint_or_nullable_without_
 
                 if matches!(map.get("nullable"), Some(Value::Bool(true)))
                     && !matches!(map.get("type"), Some(Value::String(_)))
+                    && !matches!(map.get("const"), Some(Value::Null))
                 {
                     bad_nullable.push(format!(
-                        "{tool_name} {schema_kind} {path} has nullable=true without a type"
+                        "{tool_name} {schema_kind} {path} has nullable=true without a type or const=null"
                     ));
                 }
 

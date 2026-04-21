@@ -991,142 +991,6 @@ export namespace ExecutionKillTaskOutputSchema {
 
 }
 export type ExecutionKillTaskOutput = ExecutionKillTaskOutputSchema.ExecutionKillTaskOutput;
-export namespace ExecutionPauseInputSchema {
-  export interface ExecutionPauseInput {
-  /**
-   * Pause mode: "graceful" (default) or "immediate".
-   */
-  mode?: string
-  /**
-   * Optional project path for project-scoped execution pause.
-   */
-  project?: string
-  /**
-   * Optional reason used when mode is "immediate".
-   */
-  reason?: string
-  [k: string]: any
-  }
-
-}
-export type ExecutionPauseInput = ExecutionPauseInputSchema.ExecutionPauseInput;
-export namespace ExecutionPauseOutputSchema {
-  export interface ExecutionPauseOutput {
-  error?: string
-  mode?: string
-  ok: boolean
-  project_id?: string
-  scope?: string
-  state?: string
-  [k: string]: any
-  }
-
-}
-export type ExecutionPauseOutput = ExecutionPauseOutputSchema.ExecutionPauseOutput;
-export namespace ExecutionResumeInputSchema {
-  export interface ExecutionResumeInput {
-  /**
-   * Optional project path for project-scoped execution resume.
-   */
-  project?: string
-  [k: string]: any
-  }
-
-}
-export type ExecutionResumeInput = ExecutionResumeInputSchema.ExecutionResumeInput;
-export namespace ExecutionResumeOutputSchema {
-  export interface ExecutionResumeOutput {
-  error?: string
-  ok: boolean
-  project_id?: string
-  scope?: string
-  state?: string
-  [k: string]: any
-  }
-
-}
-export type ExecutionResumeOutput = ExecutionResumeOutputSchema.ExecutionResumeOutput;
-export namespace ExecutionStartInputSchema {
-  export interface ExecutionStartInput {
-  /**
-   * Optional project path for project-scoped execution start.
-   */
-  project?: string
-  [k: string]: any
-  }
-
-}
-export type ExecutionStartInput = ExecutionStartInputSchema.ExecutionStartInput;
-export namespace ExecutionStartOutputSchema {
-  export interface ExecutionStartOutput {
-  error?: string
-  ok: boolean
-  project_id?: string
-  resumed?: boolean
-  scope?: string
-  state?: string
-  [k: string]: any
-  }
-
-}
-export type ExecutionStartOutput = ExecutionStartOutputSchema.ExecutionStartOutput;
-export namespace ExecutionStatusInputSchema {
-  export interface ExecutionStatusInput {
-  /**
-   * Optional project path for project-scoped execution status.
-   */
-  project?: string
-  [k: string]: any
-  }
-
-}
-export type ExecutionStatusInput = ExecutionStatusInputSchema.ExecutionStatusInput;
-export namespace ExecutionStatusOutputSchema {
-  export interface ExecutionStatusOutput {
-  capacity?: {
-  [k: string]: ExecutionStatusCapacity
-  }
-  error?: string
-  max_sessions?: number
-  metrics: ExecutionStatusMetrics
-  ok: boolean
-  project_id?: string
-  /**
-   * Per-project health issues blocking execution (project_id -> error message).
-   */
-  project_issues?: {
-  [k: string]: string
-  }
-  running_sessions?: number
-  scope?: string
-  sessions?: ExecutionStatusSession[]
-  state?: string
-  [k: string]: any
-  }
-  export interface ExecutionStatusCapacity {
-  active: number
-  max: number
-  [k: string]: any
-  }
-  export interface ExecutionStatusMetrics {
-  sessions_recovered: number
-  tasks_dispatched: number
-  [k: string]: any
-  }
-  export interface ExecutionStatusSession {
-  duration_seconds: number
-  model_id: string
-  session_id: string
-  task_id: string
-  /**
-   * Workspace path resolved from the session's attached `task_run`.
-   */
-  workspace_path?: string
-  [k: string]: any
-  }
-
-}
-export type ExecutionStatusOutput = ExecutionStatusOutputSchema.ExecutionStatusOutput;
 export namespace GetProjectDevcontainerStatusInputSchema {
   export interface GetProjectDevcontainerStatusInput {
   /**
@@ -3934,7 +3798,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "devcontainer_open_pr" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "devcontainer_open_pr" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3959,10 +3823,6 @@ export interface McpToolMap {
   "epic_tasks": { input: EpicTasksInput; output: EpicTasksOutput };
   "epic_update": { input: EpicUpdateInput; output: EpicUpdateOutput };
   "execution_kill_task": { input: ExecutionKillTaskInput; output: ExecutionKillTaskOutput };
-  "execution_pause": { input: ExecutionPauseInput; output: ExecutionPauseOutput };
-  "execution_resume": { input: ExecutionResumeInput; output: ExecutionResumeOutput };
-  "execution_start": { input: ExecutionStartInput; output: ExecutionStartOutput };
-  "execution_status": { input: ExecutionStatusInput; output: ExecutionStatusOutput };
   "get_project_devcontainer_status": { input: GetProjectDevcontainerStatusInput; output: GetProjectDevcontainerStatusOutput };
   "get_project_stack": { input: GetProjectStackInput; output: GetProjectStackOutput };
   "github_app_install_url": { input: GithubAppInstallUrlInput; output: GithubAppInstallUrlOutput };

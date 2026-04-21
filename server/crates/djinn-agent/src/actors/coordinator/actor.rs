@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant as StdInstant};
+use std::time::Duration;
+use std::time::Instant as StdInstant;
 
 use ::time::OffsetDateTime;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -44,16 +45,14 @@ pub(super) struct CoordinatorActor {
     pub(super) health: HealthTracker,
     pub(super) role_registry: Arc<RoleRegistry>,
     pub(super) lsp: crate::lsp::LspManager,
-    // Sender clone for background tasks to send results back.
+    /// Sender clone retained for background tasks that may post results back.
+    #[allow(dead_code)]
     pub(super) self_sender: mpsc::Sender<CoordinatorMessage>,
     // Watch channel for lock-free status reads.
     pub(super) status_tx: watch::Sender<SharedCoordinatorState>,
     // State
-    pub(super) paused_projects: HashSet<String>,
     pub(super) dispatch_limit: usize,
     pub(super) model_priorities: HashMap<String, Vec<String>>,
-    // Per-project health: project_id → error message (only unhealthy projects appear here).
-    pub(super) unhealthy_projects: HashMap<String, String>,
     /// Per-project PR creation errors (project_id → error message).
     pub(super) pr_errors: HashMap<String, String>,
     /// Per-task dispatch tracking: task UUID → last dispatch instant.
@@ -170,10 +169,8 @@ impl CoordinatorActor {
             lsp,
             self_sender,
             status_tx,
-            paused_projects: HashSet::new(),
             dispatch_limit: 50,
             model_priorities: HashMap::new(),
-            unhealthy_projects: HashMap::new(),
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
@@ -214,25 +211,6 @@ impl CoordinatorActor {
                 suggested_max_sessions = mem.suggested_max_sessions(),
                 "CoordinatorActor: system memory detected"
             );
-        }
-
-        // Always start with execution paused for all projects.
-        #[cfg(not(test))]
-        {
-            let repo = djinn_db::ProjectRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            );
-            if let Ok(projects) = repo.list().await {
-                for p in projects {
-                    self.paused_projects.insert(p.id);
-                }
-            }
-            tracing::info!(
-                count = self.paused_projects.len(),
-                "CoordinatorActor: all projects start paused"
-            );
-            self.publish_status();
         }
 
         loop {
@@ -369,9 +347,6 @@ impl CoordinatorActor {
     /// Publish current state to the watch channel for lock-free status reads.
     pub(super) fn publish_status(&self) {
         let _ = self.status_tx.send(SharedCoordinatorState {
-            paused_projects: self.paused_projects.clone(),
-            unhealthy_project_ids: self.unhealthy_projects.keys().cloned().collect(),
-            unhealthy_project_errors: self.unhealthy_projects.clone(),
             dispatched: self.dispatched,
             recovered: self.recovered,
             epic_throughput: self.throughput_snapshot(),
@@ -462,61 +437,6 @@ impl CoordinatorActor {
             CoordinatorMessage::TriggerProjectDispatch { project_id } => {
                 self.dispatch_ready_tasks(Some(&project_id)).await;
             }
-            CoordinatorMessage::Pause {
-                interrupt_active,
-                reason,
-            } => {
-                // Global pause = pause every known project individually.
-                let repo = djinn_db::ProjectRepository::new(
-                    self.db.clone(),
-                    crate::events::event_bus_for(&self.events_tx),
-                );
-                if let Ok(projects) = repo.list().await {
-                    for p in projects {
-                        self.paused_projects.insert(p.id);
-                    }
-                }
-                tracing::info!(
-                    count = self.paused_projects.len(),
-                    "CoordinatorActor: paused all projects"
-                );
-                self.publish_status();
-                if interrupt_active && let Err(e) = self.pool.interrupt_all(&reason).await {
-                    tracing::warn!(error = %e, "CoordinatorActor: failed to interrupt sessions on pause");
-                }
-            }
-            CoordinatorMessage::PauseProject {
-                project_id,
-                interrupt_active,
-                reason,
-            } => {
-                self.paused_projects.insert(project_id.clone());
-                self.publish_status();
-                if interrupt_active
-                    && let Err(e) = self.pool.interrupt_project(&project_id, &reason).await
-                {
-                    tracing::warn!(
-                        project_id = %project_id,
-                        error = %e,
-                        "CoordinatorActor: failed to interrupt project sessions on pause"
-                    );
-                }
-            }
-            CoordinatorMessage::Resume => {
-                // Global resume = unpause every project and dispatch.
-                self.paused_projects.clear();
-                tracing::info!("CoordinatorActor: resumed all projects");
-                self.detect_and_recover_stuck_filtered(None).await;
-                self.dispatch_ready_tasks(None).await;
-                self.publish_status();
-            }
-            CoordinatorMessage::ResumeProject { project_id } => {
-                self.paused_projects.remove(&project_id);
-                self.detect_and_recover_stuck_filtered(Some(&project_id))
-                    .await;
-                self.dispatch_ready_tasks(Some(&project_id)).await;
-                self.publish_status();
-            }
             CoordinatorMessage::TriggerStuckScan => {
                 self.detect_and_recover_stuck_filtered(None).await;
             }
@@ -534,44 +454,6 @@ impl CoordinatorActor {
             CoordinatorMessage::UpdateModelPriorities { priorities } => {
                 self.model_priorities = priorities;
                 tracing::info!("CoordinatorActor: updated per-role model priorities");
-            }
-            CoordinatorMessage::ValidateProjectHealth { project_id_filter } => {
-                self.validate_all_project_health(project_id_filter).await;
-            }
-            CoordinatorMessage::SetProjectHealth {
-                project_id,
-                healthy,
-                error,
-            } => {
-                let was_unhealthy = self.unhealthy_projects.contains_key(&project_id);
-                if healthy {
-                    self.unhealthy_projects.remove(&project_id);
-                    tracing::info!(project_id = %project_id, "CoordinatorActor: project health check passed");
-                } else {
-                    let err = error.clone().unwrap_or_default();
-                    tracing::warn!(
-                        project_id = %project_id,
-                        error = %err,
-                        "CoordinatorActor: project health check failed — skipping dispatch for project"
-                    );
-                    self.unhealthy_projects.insert(project_id.clone(), err);
-                }
-                // Emit SSE event on health change.
-                let changed = healthy && was_unhealthy || !healthy && !was_unhealthy;
-                if changed {
-                    let _ = self
-                        .events_tx
-                        .send(DjinnEventEnvelope::project_health_changed(
-                            &project_id,
-                            healthy,
-                            error.as_deref(),
-                        ));
-                }
-                self.publish_status();
-                // If project just became healthy and dispatch is enabled, trigger a dispatch pass.
-                if healthy && self.is_project_dispatch_enabled(&project_id) {
-                    self.dispatch_ready_tasks(Some(&project_id)).await;
-                }
             }
             #[cfg(test)]
             CoordinatorMessage::TriggerPlannerPatrol => {
@@ -618,22 +500,6 @@ impl CoordinatorActor {
         match (envelope.entity_type, envelope.action) {
             ("activity", "logged") => {
                 self.handle_task_outcome_activity(&envelope).await;
-            }
-            // A task became dispatch-ready for any role → check dispatch.
-            // is_project_dispatch_enabled() handles global-pause + per-project
-            // resume, so we don't bail early here — a project-resumed project
-            // must still react to events even when globally paused.
-            // New projects start paused — must be explicitly resumed.
-            ("project", "created") => {
-                let Some(p) = envelope.parse_payload::<djinn_core::models::Project>() else {
-                    return;
-                };
-                self.paused_projects.insert(p.id.clone());
-                tracing::info!(
-                    project_id = %p.id,
-                    "CoordinatorActor: new project starts paused"
-                );
-                self.publish_status();
             }
             // Epic created → create a planning task for the Planner (wave 1),
             // but only if the epic is already open (not drafting).
@@ -863,11 +729,6 @@ impl CoordinatorActor {
         Ok(())
     }
 
-    pub(super) fn is_project_dispatch_enabled(&self, project_id: &str) -> bool {
-        !self.unhealthy_projects.contains_key(project_id)
-            && !self.paused_projects.contains(project_id)
-    }
-
     /// ADR-051 §3 proactive canonical-graph staleness refresh.
     ///
     /// Iterates every dispatch-enabled project and fires
@@ -901,9 +762,6 @@ impl CoordinatorActor {
 
         let mut considered = 0usize;
         for project in projects {
-            if !self.is_project_dispatch_enabled(&project.id) {
-                continue;
-            }
             considered += 1;
             warmer.trigger(&project.id).await;
         }

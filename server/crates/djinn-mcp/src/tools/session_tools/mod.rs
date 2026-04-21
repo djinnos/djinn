@@ -335,8 +335,6 @@ impl DjinnMcpServer {
                 let mut recovery_triggered = false;
                 if !stale_sessions.is_empty()
                     && let Some(coordinator) = coordinator
-                    && let Ok(status) = coordinator.get_project_status(&project_id)
-                    && !status.paused
                     && coordinator
                         .trigger_dispatch_for_project(&project_id)
                         .await

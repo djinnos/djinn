@@ -21,10 +21,8 @@ pub struct SemanticQueryEmbedding {
 
 #[derive(Debug, Clone)]
 pub struct CoordinatorStatus {
-    pub paused: bool,
     pub tasks_dispatched: u64,
     pub sessions_recovered: u64,
-    pub unhealthy_projects: HashMap<String, String>,
     /// Tasks merged per hour per epic in the past hour (epic_id → count).
     pub epic_throughput: HashMap<String, usize>,
     /// Per-project PR creation errors (e.g. org OAuth restrictions).
@@ -68,16 +66,8 @@ pub struct LspWarning {
 
 #[async_trait]
 pub trait CoordinatorOps: Send + Sync {
-    async fn resume_project(&self, project_id: &str) -> Result<(), String>;
-    async fn resume(&self) -> Result<(), String>;
-    async fn pause_project(&self, project_id: &str) -> Result<(), String>;
-    async fn pause_project_immediate(&self, project_id: &str, reason: &str) -> Result<(), String>;
-    async fn pause_immediate(&self, reason: &str) -> Result<(), String>;
     fn get_status(&self) -> Result<CoordinatorStatus, String>;
-    fn get_project_status(&self, project_id: &str) -> Result<CoordinatorStatus, String>;
-    async fn validate_project_health(&self, project_id: Option<String>) -> Result<(), String>;
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String>;
-    async fn pause(&self) -> Result<(), String>;
 }
 
 // ── Slot pool ───────────────────────────────────────────────────────────────────

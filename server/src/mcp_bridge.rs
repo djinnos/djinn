@@ -40,70 +40,14 @@ struct LspBridge(pub LspManager);
 
 #[async_trait]
 impl CoordinatorOps for CoordinatorBridge {
-    async fn resume_project(&self, project_id: &str) -> Result<(), String> {
-        self.0
-            .resume_project(project_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn resume(&self) -> Result<(), String> {
-        self.0.resume().await.map_err(|e| e.to_string())
-    }
-
-    async fn pause_project(&self, project_id: &str) -> Result<(), String> {
-        self.0
-            .pause_project(project_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn pause_project_immediate(&self, project_id: &str, reason: &str) -> Result<(), String> {
-        self.0
-            .pause_project_immediate(project_id, reason)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn pause_immediate(&self, reason: &str) -> Result<(), String> {
-        self.0
-            .pause_immediate(reason)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
     fn get_status(&self) -> Result<CoordinatorStatus, String> {
         let s = self.0.get_status().map_err(|e| e.to_string())?;
         Ok(CoordinatorStatus {
-            paused: s.paused,
             tasks_dispatched: s.tasks_dispatched,
             sessions_recovered: s.sessions_recovered,
-            unhealthy_projects: s.unhealthy_projects,
             epic_throughput: s.epic_throughput,
             pr_errors: s.pr_errors,
         })
-    }
-
-    fn get_project_status(&self, project_id: &str) -> Result<CoordinatorStatus, String> {
-        let s = self
-            .0
-            .get_project_status(project_id)
-            .map_err(|e| e.to_string())?;
-        Ok(CoordinatorStatus {
-            paused: s.paused,
-            tasks_dispatched: s.tasks_dispatched,
-            sessions_recovered: s.sessions_recovered,
-            unhealthy_projects: s.unhealthy_projects,
-            epic_throughput: s.epic_throughput,
-            pr_errors: s.pr_errors,
-        })
-    }
-
-    async fn validate_project_health(&self, project_id: Option<String>) -> Result<(), String> {
-        self.0
-            .validate_project_health(project_id)
-            .await
-            .map_err(|e| e.to_string())
     }
 
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String> {
@@ -111,10 +55,6 @@ impl CoordinatorOps for CoordinatorBridge {
             .trigger_dispatch_for_project(project_id)
             .await
             .map_err(|e| e.to_string())
-    }
-
-    async fn pause(&self) -> Result<(), String> {
-        self.0.pause().await.map_err(|e| e.to_string())
     }
 }
 

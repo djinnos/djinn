@@ -206,6 +206,7 @@ pub struct DevcontainerPrRef {
     /// Full `html_url` of the PR on GitHub.
     pub url: String,
     /// PR number within the repo.
+    #[schemars(with = "i64")]
     pub number: u64,
 }
 

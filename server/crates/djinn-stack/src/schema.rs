@@ -55,6 +55,7 @@ pub struct Stack {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LanguageStat {
     pub name: String,
+    #[schemars(with = "i64")]
     pub bytes: u64,
     pub pct: f64,
 }

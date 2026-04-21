@@ -17,16 +17,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
-use tokio::sync::broadcast;
-
 use crate::actors::slot::{PoolError, SlotPoolHandle};
-use djinn_core::events::DjinnEventEnvelope;
-use djinn_db::GitSettingsRepository;
 use djinn_db::ProjectRepository;
 use djinn_db::SessionRepository;
 use djinn_db::{ActivityQuery, ReadyQuery, TaskRepository};
 // These additional imports are only used by `#[cfg(test)]` blocks in child
 // submodules (rules, health, prompt_eval, etc.) via `use super::*;`.
+#[cfg(test)]
+use djinn_core::events::DjinnEventEnvelope;
 #[cfg(test)]
 use djinn_db::Database;
 #[cfg(test)]
@@ -53,7 +51,6 @@ pub use types::{CoordinatorDeps, CoordinatorError, CoordinatorStatus, Verificati
 
 // Re-export internal types for sibling submodules that use `use super::*;`.
 use actor::CoordinatorActor;
-use messages::CoordinatorMessage;
 use types::*;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -341,9 +338,6 @@ mod tests {
             lsp: crate::lsp::LspManager::new(),
             self_sender: tokio::sync::mpsc::channel(1).0,
             status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
-                paused_projects: HashSet::new(),
-                unhealthy_project_ids: HashSet::new(),
-                unhealthy_project_errors: HashMap::new(),
                 dispatched: 0,
                 recovered: 0,
                 epic_throughput: HashMap::new(),
@@ -351,10 +345,8 @@ mod tests {
                 rate_limited_until: None,
             })
             .0,
-            paused_projects: HashSet::new(),
             dispatch_limit: 50,
             model_priorities: HashMap::new(),
-            unhealthy_projects: HashMap::new(),
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
@@ -740,78 +732,14 @@ mod tests {
     // ── Status ───────────────────────────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn initial_status_is_active() {
+    async fn initial_status_is_zero() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
         let handle = spawn_coordinator(&db, &tx);
 
         let status = handle.get_status().unwrap();
-        assert!(
-            !status.paused,
-            "coordinator should start active (no global pause state)"
-        );
         assert_eq!(status.tasks_dispatched, 0);
         assert_eq!(status.sessions_recovered, 0);
-    }
-
-    // ── Pause / Resume ───────────────────────────────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pause_project_and_resume_toggle_state() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let handle = spawn_coordinator(&db, &tx);
-
-        let project_id = "test-project-id";
-
-        // Pausing a project marks it paused in project-scoped status.
-        handle.pause_project(project_id).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                if handle.get_project_status(project_id).unwrap().paused {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("timed out waiting for paused project status");
-        assert!(handle.get_project_status(project_id).unwrap().paused);
-
-        // Resuming removes it from the paused set.
-        handle.resume_project(project_id).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                if !handle.get_project_status(project_id).unwrap().paused {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("timed out waiting for resumed project status");
-        assert!(!handle.get_project_status(project_id).unwrap().paused);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn trigger_dispatch_while_project_paused_is_a_noop() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-        let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        repo.create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
-            .await
-            .unwrap();
-
-        let handle = spawn_coordinator(&db, &tx);
-        handle.pause_project(&epic.project_id).await.unwrap();
-        handle
-            .trigger_dispatch_for_project(&epic.project_id)
-            .await
-            .unwrap();
-        // Give the actor a moment to process; dispatched count stays 0.
-        tokio::task::yield_now().await;
-        assert_eq!(handle.get_status().unwrap().tasks_dispatched, 0);
     }
 
     // ── Dispatch on open-task event ──────────────────────────────────────────

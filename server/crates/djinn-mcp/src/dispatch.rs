@@ -11,10 +11,7 @@ use crate::tools::epic_tools::{
     EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams, EpicListParams,
     EpicReopenParams, EpicShowParams, EpicTasksParams, EpicUpdateParams,
 };
-use crate::tools::execution_tools::{
-    ExecutionKillTaskParams, ExecutionPauseParams, ExecutionResumeParams, ExecutionStartParams,
-    ExecutionStatusParams, SessionForTaskParams,
-};
+use crate::tools::execution_tools::{ExecutionKillTaskParams, SessionForTaskParams};
 use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
 use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
 use crate::tools::graph_tools::CodeGraphParams;
@@ -182,30 +179,6 @@ impl DjinnMcpServer {
                 name,
                 self.epic_count(Parameters(decode_args::<EpicCountParams>(name, args)?))
                     .await,
-            ),
-            "execution_start" => map_json(
-                name,
-                self.execution_start(Parameters(decode_args::<ExecutionStartParams>(name, args)?))
-                    .await,
-            ),
-            "execution_pause" => map_json(
-                name,
-                self.execution_pause(Parameters(decode_args::<ExecutionPauseParams>(name, args)?))
-                    .await,
-            ),
-            "execution_resume" => map_json(
-                name,
-                self.execution_resume(Parameters(decode_args::<ExecutionResumeParams>(
-                    name, args,
-                )?))
-                .await,
-            ),
-            "execution_status" => map_json(
-                name,
-                self.execution_status(Parameters(decode_args::<ExecutionStatusParams>(
-                    name, args,
-                )?))
-                .await,
             ),
             "execution_kill_task" => map_json(
                 name,

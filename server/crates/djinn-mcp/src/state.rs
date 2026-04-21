@@ -151,34 +151,10 @@ pub(crate) mod stubs {
     pub struct StubCoordinatorOps;
     #[async_trait]
     impl CoordinatorOps for StubCoordinatorOps {
-        async fn resume_project(&self, _: &str) -> Result<(), String> {
-            Err("coordinator not initialized".into())
-        }
-        async fn resume(&self) -> Result<(), String> {
-            Err("coordinator not initialized".into())
-        }
-        async fn pause_project(&self, _: &str) -> Result<(), String> {
-            Err("coordinator not initialized".into())
-        }
-        async fn pause_project_immediate(&self, _: &str, _: &str) -> Result<(), String> {
-            Err("coordinator not initialized".into())
-        }
-        async fn pause_immediate(&self, _: &str) -> Result<(), String> {
-            Err("coordinator not initialized".into())
-        }
         fn get_status(&self) -> Result<crate::bridge::CoordinatorStatus, String> {
             Err("coordinator not initialized".into())
         }
-        fn get_project_status(&self, _: &str) -> Result<crate::bridge::CoordinatorStatus, String> {
-            Err("coordinator not initialized".into())
-        }
-        async fn validate_project_health(&self, _: Option<String>) -> Result<(), String> {
-            Ok(())
-        }
         async fn trigger_dispatch_for_project(&self, _: &str) -> Result<(), String> {
-            Err("coordinator not initialized".into())
-        }
-        async fn pause(&self) -> Result<(), String> {
             Err("coordinator not initialized".into())
         }
     }

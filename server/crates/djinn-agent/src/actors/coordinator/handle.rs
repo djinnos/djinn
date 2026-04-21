@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
@@ -22,9 +22,6 @@ impl CoordinatorHandle {
     pub fn spawn(deps: CoordinatorDeps) -> Self {
         let (sender, receiver) = mpsc::channel(32);
         let initial_state = SharedCoordinatorState {
-            paused_projects: HashSet::new(),
-            unhealthy_project_ids: HashSet::new(),
-            unhealthy_project_errors: HashMap::new(),
             dispatched: 0,
             recovered: 0,
             epic_throughput: HashMap::new(),
@@ -75,68 +72,9 @@ impl CoordinatorHandle {
         .await
     }
 
-    /// Pause dispatch (no new sessions will start).
-    pub async fn pause(&self) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::Pause {
-            interrupt_active: false,
-            reason: "session interrupted by coordinator pause".to_string(),
-        })
-        .await
-    }
-
-    pub async fn pause_project(&self, project_id: &str) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::PauseProject {
-            project_id: project_id.to_owned(),
-            interrupt_active: false,
-            reason: String::new(),
-        })
-        .await
-    }
-
-    pub async fn pause_project_immediate(
-        &self,
-        project_id: &str,
-        reason: &str,
-    ) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::PauseProject {
-            project_id: project_id.to_owned(),
-            interrupt_active: true,
-            reason: reason.to_owned(),
-        })
-        .await
-    }
-
-    /// Pause dispatch and interrupt active sessions immediately.
-    pub async fn pause_immediate(&self, reason: &str) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::Pause {
-            interrupt_active: true,
-            reason: reason.to_owned(),
-        })
-        .await
-    }
-
-    /// Resume dispatch and immediately run a dispatch pass.
-    pub async fn resume(&self) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::Resume).await
-    }
-
-    pub async fn resume_project(&self, project_id: &str) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::ResumeProject {
-            project_id: project_id.to_owned(),
-        })
-        .await
-    }
-
     /// Return the current coordinator status snapshot (lock-free read via watch channel).
     pub fn get_status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
-        Ok(self.status_rx.borrow().to_status(None))
-    }
-
-    pub fn get_project_status(
-        &self,
-        project_id: &str,
-    ) -> Result<CoordinatorStatus, CoordinatorError> {
-        Ok(self.status_rx.borrow().to_status(Some(project_id)))
+        Ok(self.status_rx.borrow().to_status())
     }
 
     /// Trigger an immediate stuck-task detection pass.
@@ -161,15 +99,6 @@ impl CoordinatorHandle {
             .await
     }
 
-    /// Trigger background project health validation on execution_start (ADR-014).
-    /// Scoped to `project_id_filter` if provided, otherwise validates all projects.
-    pub async fn validate_project_health(
-        &self,
-        project_id_filter: Option<String>,
-    ) -> Result<(), CoordinatorError> {
-        self.send(CoordinatorMessage::ValidateProjectHealth { project_id_filter })
-            .await
-    }
     /// Wait until the coordinator status satisfies the given predicate.
     /// For use in tests where we need to observe the effect of a sent message.
     #[cfg(test)]
@@ -180,34 +109,13 @@ impl CoordinatorHandle {
         let mut rx = self.status_rx.clone();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            if predicate(&rx.borrow().to_status(None)) {
+            if predicate(&rx.borrow().to_status()) {
                 return;
             }
             match tokio::time::timeout_at(deadline, rx.changed()).await {
                 Ok(Ok(())) => continue,
                 Ok(Err(_)) => panic!("watch channel closed"),
                 Err(_) => panic!("timed out waiting for coordinator status condition"),
-            }
-        }
-    }
-
-    /// Like `wait_for_status` but evaluates the predicate against project-scoped status.
-    #[cfg(test)]
-    pub async fn wait_for_project_status<F>(&self, project_id: &str, predicate: F)
-    where
-        F: Fn(&CoordinatorStatus) -> bool,
-    {
-        let project_id = project_id.to_owned();
-        let mut rx = self.status_rx.clone();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            if predicate(&rx.borrow().to_status(Some(&project_id))) {
-                return;
-            }
-            match tokio::time::timeout_at(deadline, rx.changed()).await {
-                Ok(Ok(())) => continue,
-                Ok(Err(_)) => panic!("watch channel closed"),
-                Err(_) => panic!("timed out waiting for coordinator project status condition"),
             }
         }
     }

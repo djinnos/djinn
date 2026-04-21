@@ -60,12 +60,8 @@ vi.mock("@/components/pulse/PulseSettingsSheet", () => ({
   PulseSettingsSheet: () => <div data-testid="pulse-settings-sheet" />,
 }));
 
-vi.mock("@/hooks/useExecutionStatus", () => ({
-  useExecutionStatus: () => ({ state: "idle", refresh: vi.fn() }),
-}));
-
 vi.mock("@/hooks/useExecutionControl", () => ({
-  useExecutionControl: () => ({ start: vi.fn(), pause: vi.fn(), resume: vi.fn() }),
+  useExecutionControl: () => ({ busy: false, killTask: vi.fn() }),
 }));
 
 describe("Pulse architect proposal workflow", () => {

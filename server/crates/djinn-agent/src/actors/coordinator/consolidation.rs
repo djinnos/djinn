@@ -434,9 +434,6 @@ mod tests {
             lsp: crate::lsp::LspManager::new(),
             self_sender: tokio::sync::mpsc::channel(1).0,
             status_tx: tokio::sync::watch::channel(SharedCoordinatorState {
-                paused_projects: std::collections::HashSet::new(),
-                unhealthy_project_ids: std::collections::HashSet::new(),
-                unhealthy_project_errors: std::collections::HashMap::new(),
                 dispatched: 0,
                 recovered: 0,
                 epic_throughput: std::collections::HashMap::new(),
@@ -444,10 +441,8 @@ mod tests {
                 rate_limited_until: None,
             })
             .0,
-            paused_projects: std::collections::HashSet::new(),
             dispatch_limit: 50,
             model_priorities: std::collections::HashMap::new(),
-            unhealthy_projects: std::collections::HashMap::new(),
             pr_errors: std::collections::HashMap::new(),
             last_dispatched: std::collections::HashMap::new(),
             dispatch_cooldowns: std::collections::HashMap::new(),
