@@ -704,23 +704,23 @@ impl ProjectRepository {
     ) -> Result<Option<ProjectDispatchReadiness>> {
         self.db.ensure_initialized().await?;
         use sqlx::Row;
-        // Format the timestamp as ISO-8601 UTC server-side so sqlx decodes it
-        // as `Option<String>` instead of a platform-dependent TIMESTAMP type.
+        // `graph_warmed_at` is a VARCHAR(64) RFC3339 string matching the
+        // schema-wide timestamp convention (see migration 2). An empty
+        // string means "never warmed".
         let row = sqlx::query(
-            "SELECT image_status,
-                    DATE_FORMAT(graph_warmed_at, '%Y-%m-%dT%H:%i:%s.%fZ')
-                        AS graph_warmed_at_iso
-               FROM projects WHERE id = ?",
+            "SELECT image_status, graph_warmed_at FROM projects WHERE id = ?",
         )
         .bind(project_id)
         .fetch_optional(self.db.pool())
         .await?;
-        Ok(row.map(|r| ProjectDispatchReadiness {
-            image_status: r.get::<String, _>("image_status"),
-            graph_warmed_at: r
-                .try_get::<Option<String>, _>("graph_warmed_at_iso")
-                .ok()
-                .flatten(),
+        Ok(row.map(|r| {
+            let stamp = r
+                .try_get::<String, _>("graph_warmed_at")
+                .unwrap_or_default();
+            ProjectDispatchReadiness {
+                image_status: r.get::<String, _>("image_status"),
+                graph_warmed_at: if stamp.is_empty() { None } else { Some(stamp) },
+            }
         }))
     }
 

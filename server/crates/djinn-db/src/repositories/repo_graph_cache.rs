@@ -81,10 +81,14 @@ impl RepoGraphCacheRepository {
         // cache write, so we log and continue. Uses the non-macro
         // `sqlx::query` form so builds work on databases that haven't yet
         // applied migration 9.
-        if let Err(e) = sqlx::query("UPDATE projects SET graph_warmed_at = NOW(3) WHERE id = ?")
-            .bind(entry.project_id)
-            .execute(self.db.pool())
-            .await
+        if let Err(e) = sqlx::query(
+            "UPDATE projects
+               SET graph_warmed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
+        )
+        .bind(entry.project_id)
+        .execute(self.db.pool())
+        .await
         {
             tracing::warn!(
                 project_id = %entry.project_id,
