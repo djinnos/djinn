@@ -42,23 +42,18 @@ local('bash scripts/kind/setup-kind.sh', quiet=False, echo_off=True)
 allow_k8s_contexts(CLUSTER)
 
 # --- djinn-server image --------------------------------------------------
-# Use the literal localhost:5001 ref so Tilt's image-injection matches the
-# Deployment PodSpec's `localhost:5001/djinn-server:dev` unambiguously and
-# pushes to the in-cluster registry kind is wired to pull from.
-docker_build(
-    ref='{}/djinn-server'.format(REGISTRY),
-    context='.',
-    dockerfile='server/docker/djinn-server.Dockerfile',
-    ignore=[
-        'server/target',
-        'server/.sqlx/cache',
-        'ui',
-        'deploy',
-        '.claude',
-        # Do NOT exclude markdown files: several crates (djinn-provider)
-        # `include_str!` prompt `.md` files at compile time, and excluding
-        # them makes the build fail with "No such file or directory".
-    ],
+# BuildKit's cargo target cache-mount was wedging such that source edits to
+# server/** weren't producing new binaries — Tilt "builds" completed in 1s
+# by reusing the cached target dir. Switched to a local_resource that runs
+# cargo build on the host and wraps the fresh binary in a thin runtime
+# image. Shells to scripts/tilt/build-server-image.sh so the logic is
+# testable outside Tilt.
+local_resource(
+    'djinn-server-image',
+    cmd='bash scripts/tilt/build-server-image.sh',
+    deps=['server/src', 'server/crates', 'server/Cargo.toml', 'server/Cargo.lock'],
+    ignore=['server/target', 'server/.sqlx/cache'],
+    labels=['build'],
 )
 
 # --- djinn-agent-runtime image -------------------------------------------
