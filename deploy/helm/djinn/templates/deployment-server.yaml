@@ -212,32 +212,14 @@ spec:
             initialDelaySeconds: 30
       volumes:
         - name: mirrors
-          {{- if .Values.storage.mirrors.hostPath }}
-          hostPath:
-            path: {{ .Values.storage.mirrors.hostPath | quote }}
-            type: DirectoryOrCreate
-          {{- else }}
           persistentVolumeClaim:
             claimName: {{ include "djinn.pvcName.mirrors" . }}
-          {{- end }}
         - name: cache
-          {{- if .Values.storage.cache.hostPath }}
-          hostPath:
-            path: {{ .Values.storage.cache.hostPath | quote }}
-            type: DirectoryOrCreate
-          {{- else }}
           persistentVolumeClaim:
             claimName: {{ include "djinn.pvcName.cache" . }}
-          {{- end }}
         - name: projects
-          {{- if .Values.storage.projects.hostPath }}
-          hostPath:
-            path: {{ .Values.storage.projects.hostPath | quote }}
-            type: DirectoryOrCreate
-          {{- else }}
           persistentVolumeClaim:
             claimName: {{ include "djinn.pvcName.projects" . }}
-          {{- end }}
         - name: vault-key
           secret:
             secretName: {{ include "djinn.secretName.vaultKey" . }}

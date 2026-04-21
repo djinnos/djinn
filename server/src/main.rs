@@ -171,6 +171,22 @@ async fn async_main() {
         std::process::exit(1);
     });
 
+    // Apply schema migrations eagerly. sqlx's Database::ensure_initialized
+    // is lazy — without this, migration mismatches (e.g. the binary was
+    // compiled before a migration the live DB has already applied) surface
+    // as scattered warnings from every background task that hits the DB,
+    // and the server limps along in a half-broken state until something
+    // downstream finally crashes. Fail fast with a clear message.
+    if let Err(e) = db.ensure_initialized().await {
+        tracing::error!(
+            error = %e,
+            "schema migration failed — binary is likely out of date \
+             (or a committed migration file was mutated). Refusing to \
+             start in a half-migrated state."
+        );
+        std::process::exit(1);
+    }
+
     let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
     djinn_server::housekeeping::spawn(state.clone());
     djinn_server::mirror_fetcher::spawn(state.clone());

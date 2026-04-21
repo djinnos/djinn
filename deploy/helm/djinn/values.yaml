@@ -82,21 +82,20 @@ resources:
 # writes mirror clones and task-run Job Pods read from them. The cache PVC is
 # similarly RWX so cargo/pnpm/pip caches survive across task runs.
 storage:
+  # Mirrors are shared between the server (writer) and image-build + task-run
+  # Jobs (readers). In prod this requires RWX storage; on single-node clusters
+  # like kind, RWO PVCs work because RWO is enforced per-node, not per-pod.
   mirrors:
     size: 50Gi
-    storageClassName: ""   # "" → use cluster default. Must satisfy RWX.
+    storageClassName: ""   # "" → use cluster default. Must satisfy RWX on multi-node.
     accessMode: ReadWriteMany
     # Set to reuse a pre-existing PVC instead of rendering one from this chart.
     existingClaim: ""
-    # Set to mount a hostPath from the node instead of a PVC. Only safe on
-    # single-node clusters (kind). When non-empty, pvc-mirror.yaml is skipped.
-    hostPath: ""
   cache:
     size: 20Gi
     storageClassName: ""
     accessMode: ReadWriteMany
     existingClaim: ""
-    hostPath: ""
   # Reference working clones populated by `project_add_from_github`. Mounted
   # at /var/lib/djinn/projects and referenced by project.path in Dolt, so it
   # must survive pod restarts. Only the server Pod reads/writes it —
@@ -106,7 +105,6 @@ storage:
     storageClassName: ""
     accessMode: ReadWriteOnce
     existingClaim: ""
-    hostPath: ""
 
 # -----------------------------------------------------------------------------
 # Secrets

@@ -1,4 +1,4 @@
-{{- if and (not .Values.storage.mirrors.existingClaim) (not .Values.storage.mirrors.hostPath) -}}
+{{- if not .Values.storage.mirrors.existingClaim -}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

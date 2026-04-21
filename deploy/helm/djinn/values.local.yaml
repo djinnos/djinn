@@ -16,19 +16,23 @@ image:
   runtime: localhost:5001/djinn-agent-runtime:dev
   pullPolicy: IfNotPresent
 
-# Kind is single-node so RWX is irrelevant — hostPath volumes are the most
-# predictable thing to use here. Templates fall back to hostPath when .hostPath
-# is non-empty on either storage.mirrors or storage.cache.
+# Kind uses rancher.io/local-path as the default storage class, which
+# dynamically provisions hostPath-backed PVs under the kind node. Since
+# kind is single-node, ReadWriteOnce PVCs can be shared across the server
+# Pod and any build/task-run Jobs (RWO is enforced per-node, not per-pod).
+# Using real PVCs here keeps the local chart shape identical to prod —
+# every consumer (server Deployment, image-build Job, task-run Job)
+# mounts via claimName, no hostPath branches in code.
 storage:
   mirrors:
-    hostPath: /var/lib/djinn/mirrors
     accessMode: ReadWriteOnce
+    size: 10Gi
   cache:
-    hostPath: /var/lib/djinn/cache
     accessMode: ReadWriteOnce
+    size: 5Gi
   projects:
-    hostPath: /var/lib/djinn/projects
     accessMode: ReadWriteOnce
+    size: 10Gi
 
 ingress:
   enabled: false

@@ -1,4 +1,4 @@
-{{- if and (not .Values.storage.cache.existingClaim) (not .Values.storage.cache.hostPath) -}}
+{{- if not .Values.storage.cache.existingClaim -}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
