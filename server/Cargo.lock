@@ -1172,6 +1172,7 @@ dependencies = [
  "djinn-db",
  "djinn-runtime",
  "djinn-stack",
+ "djinn-workspace",
  "futures",
  "git2",
  "hex",

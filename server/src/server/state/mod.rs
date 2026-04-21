@@ -25,7 +25,7 @@ use djinn_k8s::{K8sGraphWarmer, KubernetesConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_runtime::GraphWarmerService;
-use djinn_workspace::MirrorManager;
+use djinn_workspace::{MirrorManager, mirrors_root};
 
 mod canonical_graph_refresh_planner;
 mod settings;
@@ -39,21 +39,6 @@ use canonical_graph_refresh_planner::{
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
-
-/// Resolve the bare-mirror root directory, mirroring `vault_key_path`:
-/// `$DJINN_HOME/mirrors` if set, else `$HOME/.djinn/mirrors`. Directory is
-/// created on first mirror write (MirrorManager::ensure_mirror).
-fn mirrors_root() -> PathBuf {
-    if let Ok(djinn_home) = std::env::var("DJINN_HOME")
-        && !djinn_home.is_empty()
-    {
-        return PathBuf::from(djinn_home).join("mirrors");
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".djinn")
-        .join("mirrors")
-}
 
 fn canonical_view_resolution(
     active_task_count: usize,

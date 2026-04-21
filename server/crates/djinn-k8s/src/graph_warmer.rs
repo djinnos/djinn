@@ -267,14 +267,7 @@ impl K8sGraphWarmer {
 /// mirror, `git` failure, mal-parsed output). The `K8sGraphWarmer`
 /// treats `None` as "cache unknown" → it proceeds to trigger + wait.
 async fn discover_mirror_main_tip(project_id: &str) -> Option<String> {
-    let mirrors_root = match std::env::var_os("DJINN_HOME") {
-        Some(v) if !v.is_empty() => std::path::PathBuf::from(v).join("mirrors"),
-        _ => {
-            let home = std::env::var_os("HOME")?;
-            std::path::PathBuf::from(home).join(".djinn").join("mirrors")
-        }
-    };
-    let mirror_path = mirrors_root.join(project_id);
+    let mirror_path = djinn_workspace::mirror_path_for(project_id);
     let output = tokio::process::Command::new("git")
         .current_dir(&mirror_path)
         .args(["rev-parse", "refs/heads/main"])

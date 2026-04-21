@@ -38,6 +38,7 @@ use tracing::{debug, info, warn};
 use crate::build_job::{build_image_build_job, sanitize_id};
 use crate::config::ImageControllerConfig;
 use crate::hash::compute_devcontainer_hash;
+use djinn_workspace::mirror_path_for;
 
 /// How many hex characters of the devcontainer hash to include in the
 /// image tag and Job name suffix. 12 is enough to be globally unique
@@ -211,23 +212,8 @@ impl ImageController {
     }
 
     fn resolve_mirror_path(&self, project_id: &str) -> std::path::PathBuf {
-        // Mirrors live under `$DJINN_HOME/mirrors/<project_id>` (or
-        // `$HOME/.djinn/mirrors/...` when unset). Resolution mirrors the
-        // server's `mirrors_root()` helper; duplicating it here avoids a
-        // dep on `djinn-server`.
-        let root = match std::env::var("DJINN_HOME") {
-            Ok(v) if !v.is_empty() => std::path::PathBuf::from(v).join("mirrors"),
-            _ => dirs_home().join(".djinn").join("mirrors"),
-        };
-        root.join(project_id)
+        mirror_path_for(project_id)
     }
-}
-
-/// `$HOME` fallback (matches server-side behaviour).
-fn dirs_home() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
 }
 
 /// Build the content-addressable image tag.

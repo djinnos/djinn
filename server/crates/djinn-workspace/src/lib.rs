@@ -15,5 +15,5 @@
 pub mod mirror;
 pub mod workspace;
 
-pub use mirror::{MirrorError, MirrorManager};
+pub use mirror::{MirrorError, MirrorManager, mirror_path_for, mirrors_root};
 pub use workspace::{GitIdentity, Workspace, WorkspaceError};

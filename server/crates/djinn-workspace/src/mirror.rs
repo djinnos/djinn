@@ -10,6 +10,35 @@ use tracing::{debug, info};
 
 use crate::workspace::Workspace;
 
+/// Resolve the bare-mirror root directory from environment:
+/// `$DJINN_HOME/mirrors` if set, else `$HOME/.djinn/mirrors`
+/// (falling back to `/tmp/.djinn/mirrors` if `$HOME` is unset).
+///
+/// This is the canonical resolver. Every crate that needs a mirror path
+/// must go through this helper (or [`MirrorManager::mirror_path`]) — do
+/// NOT re-implement it locally, or the `.git` suffix will drift.
+pub fn mirrors_root() -> PathBuf {
+    if let Ok(djinn_home) = std::env::var("DJINN_HOME")
+        && !djinn_home.is_empty()
+    {
+        return PathBuf::from(djinn_home).join("mirrors");
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".djinn")
+        .join("mirrors")
+}
+
+/// Canonical on-disk path of a project's bare mirror: `{mirrors_root}/{project_id}.git`.
+///
+/// Use this from downstream crates (image-controller, k8s warmer) instead of
+/// reconstructing the path by hand; this was the source of the "Cold forever"
+/// bug where the suffix was dropped in two copies.
+pub fn mirror_path_for(project_id: &str) -> PathBuf {
+    mirrors_root().join(format!("{project_id}.git"))
+}
+
 #[derive(Debug, Error)]
 pub enum MirrorError {
     #[error("i/o: {0}")]

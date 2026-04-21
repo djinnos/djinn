@@ -11,6 +11,7 @@ djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-runtime = { path = "../djinn-runtime" }
 djinn-stack = { path = "../djinn-stack" }
+djinn-workspace = { path = "../djinn-workspace" }
 anyhow = "1"
 async-trait = "0.1"
 futures = "0.3"
