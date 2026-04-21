@@ -29,8 +29,13 @@ pub const COMPONENT_IMAGE_BUILD: &str = "image-build";
 /// Mount path for the shared bare-mirror PVC (same as task-run Jobs in
 /// `djinn-k8s::job`).
 pub const MIRROR_MOUNT_DIR: &str = "/mirror";
-/// Mount path where the registry-auth Secret is staged inside the builder.
-pub const REGISTRY_AUTH_MOUNT_DIR: &str = "/root/.docker";
+/// Mount path where the registry-auth Secret is staged. Kept separate from
+/// `/root/.docker` so `docker buildx create` can write its
+/// `/root/.docker/buildx/` state — mounting the Secret directly there
+/// would make the whole dir read-only and `buildx create` fails with
+/// `mkdir /root/.docker/buildx: read-only file system`. Docker CLI picks
+/// up this path via the `DOCKER_CONFIG` env.
+pub const REGISTRY_AUTH_MOUNT_DIR: &str = "/etc/djinn/docker";
 
 const VOLUME_MIRROR: &str = "mirror";
 const VOLUME_REGISTRY_AUTH: &str = "registry-auth";
@@ -77,6 +82,7 @@ devcontainer build \
         image: Some(config.builder_image.clone()),
         env: Some(vec![
             env_var("DOCKER_HOST", &config.buildkitd_host),
+            env_var("DOCKER_CONFIG", REGISTRY_AUTH_MOUNT_DIR),
             env_var("REGISTRY_HOST", &config.registry_host),
             env_var("PROJECT_ID", project_id),
             env_var(
