@@ -43,6 +43,14 @@ jobs:
               musl-tools pkg-config
           rustup target add ${{ env.WORKER_TARGET }}
 
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: worker-${{ env.WORKER_TARGET }}
+          cache-targets: "true"
+          cache-on-failure: "true"
+
       - name: Cargo build
         working-directory: server
         env:
@@ -119,6 +127,7 @@ jobs:
           shellcheck -e SC1091,SC2016 \
               devcontainer-features/src/*/install.sh \
               devcontainer-features/test/*/test.sh \
+              devcontainer-features/test/_global/*.sh \
               scripts/verify-feature-versions.sh
 
   verify-versions:
@@ -194,23 +203,40 @@ jobs:
         # collection-metadata upload that posts to
         # `/v2/djinnos/blobs/uploads/` (namespace only, no repo name) —
         # which GHCR rejects with NAME_INVALID, since OCI repos must be
-        # `namespace/repo` shape. That's the final step of the CLI; all
-        # individual Feature publishes (9 of them) complete successfully
-        # first. This script parses the CLI log, counts `Published
-        # feature:` lines, and only exits non-zero if a Feature actually
-        # failed to publish — treating the collection-metadata failure
-        # as cosmetic. Surfaced as an annotation so we don't forget it.
+        # `namespace/repo` shape. That's the final step of the CLI, and
+        # it makes the CLI exit non-zero even though the individual
+        # Feature publishes completed successfully first.
+        #
+        # We swallow the CLI exit and instead verify each expected
+        # Feature+version manifest is actually on GHCR (we're already
+        # `docker login`'d from the previous step). This is more
+        # reliable than parsing the CLI log: earlier versions printed
+        # `Published feature: <id>` which we grep'd, but current
+        # versions don't — they just print the final JSON result, which
+        # never gets printed if the collection-metadata push throws.
         run: |
           set -o pipefail
-          expected=$(find devcontainer-features/src -mindepth 2 -maxdepth 2 \
-                         -name devcontainer-feature.json | wc -l)
           devcontainer features publish \
               -r ghcr.io -n djinnos \
               ./devcontainer-features/src 2>&1 | tee publish.log || true
-          published=$(grep -c 'Published feature: ' publish.log || true)
+          expected=0
+          published=0
+          while IFS= read -r -d '' f; do
+              expected=$((expected + 1))
+              id=$(jq -r .id "$f")
+              version=$(jq -r .version "$f")
+              ref="ghcr.io/djinnos/${id}:${version}"
+              if docker manifest inspect "$ref" >/dev/null 2>&1; then
+                  published=$((published + 1))
+                  echo "verified: $ref"
+              else
+                  echo "::error::$ref not found on GHCR"
+              fi
+          done < <(find devcontainer-features/src -mindepth 2 -maxdepth 2 \
+                       -name devcontainer-feature.json -print0)
           echo "published=$published expected=$expected"
           if [ "$published" -ne "$expected" ]; then
-              echo "::error::only $published/$expected Features published"
+              echo "::error::only $published/$expected Features verified on GHCR"
               exit 1
           fi
           if grep -q 'Failed to publish collection metadata' publish.log; then
