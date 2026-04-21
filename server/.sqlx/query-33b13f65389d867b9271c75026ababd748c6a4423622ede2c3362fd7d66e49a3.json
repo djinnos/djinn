@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE notes SET access_count = 10 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "33b13f65389d867b9271c75026ababd748c6a4423622ede2c3362fd7d66e49a3"
+}

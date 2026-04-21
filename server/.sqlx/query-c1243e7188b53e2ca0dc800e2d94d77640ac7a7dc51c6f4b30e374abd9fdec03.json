@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE tasks SET agent_type = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c1243e7188b53e2ca0dc800e2d94d77640ac7a7dc51c6f4b30e374abd9fdec03"
+}

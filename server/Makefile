@@ -6,7 +6,7 @@ INSTALL_PATH := $(INSTALL_DIR)/$(BINARY)
 UI_DIR := $(CURDIR)/../ui
 DAEMON_FILE := $(HOME)/.djinn/daemon.json
 
-.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt langfuse-up langfuse-down verify test-db-clean help
+.PHONY: build release run dev test check clippy fmt clean install restart run-all reset stop halt langfuse-up langfuse-down verify test-db-clean sqlx-prepare help
 
 build: ## Build debug binary
 	cargo build
@@ -114,6 +114,23 @@ test-db-clean: ## Drop all ephemeral `t_*` branches from the test Dolt's djinn_t
 			fi; \
 		done
 	@echo "Ephemeral t_* branches dropped from djinn_test."
+
+sqlx-prepare: ## Regenerate .sqlx/ offline cache (requires dev Dolt on :3306)
+	@rm -rf /tmp/sqlx-prepare && mkdir -p /tmp/sqlx-prepare
+	@# Force macro re-execution: touch every file with a sqlx::query! so
+	@# cargo re-runs the proc-macro. A plain `cargo check` after a clean
+	@# build would be a no-op and leave SQLX_OFFLINE_DIR empty.
+	@grep -rl --include='*.rs' 'sqlx::query' crates/ 2>/dev/null | xargs -r touch
+	@DATABASE_URL=mysql://root@127.0.0.1:3306/djinn \
+		SQLX_OFFLINE_DIR=/tmp/sqlx-prepare \
+		cargo check --workspace --all-targets --all-features
+	@if [ -z "$$(ls -A /tmp/sqlx-prepare 2>/dev/null)" ]; then \
+		echo "ERROR: /tmp/sqlx-prepare is empty — refusing to replace .sqlx/."; \
+		echo "       Try 'cargo clean -p djinn-db' and rerun."; \
+		exit 1; \
+	fi
+	@rm -rf .sqlx && mv /tmp/sqlx-prepare .sqlx
+	@echo ".sqlx/ regenerated ($$(ls .sqlx | wc -l) entries) — run 'git add server/.sqlx' and commit."
 
 langfuse-up: ## Start Langfuse stack (dashboard at http://localhost:3000)
 	docker compose -f docker/docker-compose.langfuse.yml up -d

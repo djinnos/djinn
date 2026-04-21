@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT created_by_user_id FROM tasks WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_by_user_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 144
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "acb143f046253ff71a2d0ae7f288a322435bd712fbd797fdb9f76454313839c8"
+}

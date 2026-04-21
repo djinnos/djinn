@@ -14,22 +14,25 @@ cargo install sqlx-cli --no-default-features --features mysql,rustls
 
 ## Regenerate `.sqlx/` metadata
 
-Run from the workspace root with Dolt running locally:
+With the dev Dolt running on :3306, run from `server/`:
 
 ```
-DATABASE_URL=mysql://root@127.0.0.1:3306/djinn cargo sqlx prepare --workspace
+make sqlx-prepare
 ```
 
-This scans every crate's `query!`/`query_as!` call, asks the DB for schema info,
-and writes one JSON file per query into `.sqlx/`. Commit the results.
+This invokes `cargo check --workspace --all-targets --all-features` with
+`SQLX_OFFLINE_DIR` pointing at a tmpdir, so every `query!`/`query_as!` call —
+including those inside `#[cfg(test)]` blocks — writes a JSON into the cache.
+The tmpdir then replaces `.sqlx/` atomically.
+
+Do **not** use `cargo sqlx prepare --workspace` directly: as of sqlx-cli 0.8.6
+it doesn't compile test targets, so queries inside `#[cfg(test)]` modules silently
+miss the cache and break CI's offline build.
 
 Regenerate `.sqlx/` whenever you:
 
 - Add or change a `query_as!` / `query!` call.
 - Alter schema (new migrations, column renames, type changes).
-
-CI should run `cargo sqlx prepare --workspace --check` to fail if metadata is
-stale.
 
 ## Offline mode at build time
 
