@@ -2290,6 +2290,259 @@
     {
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project": {
+            "description": "Project UUID whose devcontainer + image status should be returned.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "GetProjectDevcontainerStatusParams",
+        "type": "object"
+      },
+      "name": "get_project_devcontainer_status",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Snapshot of a project's devcontainer + image-build state, used by the\nUI onboarding banner.",
+        "properties": {
+          "error": {
+            "description": "Populated on lookup failures; clients should surface this verbatim.",
+            "nullable": true,
+            "type": "string"
+          },
+          "has_devcontainer": {
+            "description": "True when the mirror's HEAD contains `.devcontainer/devcontainer.json`.",
+            "type": "boolean"
+          },
+          "has_devcontainer_lock": {
+            "description": "True when the mirror's HEAD also contains `.devcontainer/devcontainer-lock.json`.",
+            "type": "boolean"
+          },
+          "image_last_error": {
+            "description": "Human-readable error from the most recent failed build, if any.",
+            "nullable": true,
+            "type": "string"
+          },
+          "image_status": {
+            "description": "One of `none | building | ready | failed`.",
+            "type": "string"
+          },
+          "image_tag": {
+            "description": "Content-addressable image tag from the last successful build, or\n`None` when no build has completed.",
+            "nullable": true,
+            "type": "string"
+          },
+          "starter_json": {
+            "description": "Generated starter `devcontainer.json` (pretty-printed). Populated\nwhen `has_devcontainer == false` so the UI can show a copyable\ntemplate.",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "has_devcontainer",
+          "has_devcontainer_lock",
+          "image_status"
+        ],
+        "title": "GetProjectDevcontainerStatusResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project": {
+            "description": "Project UUID whose detected stack should be returned.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "GetProjectStackParams",
+        "type": "object"
+      },
+      "name": "get_project_stack",
+      "output_schema": {
+        "$defs": {
+          "LanguageStat": {
+            "properties": {
+              "bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "pct": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "bytes",
+              "pct"
+            ],
+            "type": "object"
+          },
+          "ManifestSignals": {
+            "properties": {
+              "has_cargo_toml": {
+                "type": "boolean"
+              },
+              "has_devcontainer": {
+                "type": "boolean"
+              },
+              "has_devcontainer_lock": {
+                "type": "boolean"
+              },
+              "has_go_mod": {
+                "type": "boolean"
+              },
+              "has_package_json": {
+                "type": "boolean"
+              },
+              "has_pnpm_workspace": {
+                "type": "boolean"
+              },
+              "has_pyproject_toml": {
+                "type": "boolean"
+              },
+              "has_turbo_json": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "has_package_json",
+              "has_cargo_toml",
+              "has_pyproject_toml",
+              "has_go_mod",
+              "has_pnpm_workspace",
+              "has_turbo_json",
+              "has_devcontainer",
+              "has_devcontainer_lock"
+            ],
+            "type": "object"
+          },
+          "Runtimes": {
+            "properties": {
+              "go": {
+                "nullable": true,
+                "type": "string"
+              },
+              "node": {
+                "nullable": true,
+                "type": "string"
+              },
+              "python": {
+                "nullable": true,
+                "type": "string"
+              },
+              "rust": {
+                "nullable": true,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "Stack": {
+            "description": "Top-level stack descriptor — one per project, recomputed on every\nmirror fetch.",
+            "properties": {
+              "detected_at": {
+                "description": "Wall-clock timestamp of the detection pass.",
+                "type": "string"
+              },
+              "frameworks": {
+                "description": "Slugs: `react`, `next`, `vue`, `svelte`, `axum`, `actix`,\n`rocket`, `fastapi`, `flask`, `django`, `rails`, `spring`.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "is_monorepo": {
+                "description": "Derived: `monorepo_tools` is non-empty.",
+                "type": "boolean"
+              },
+              "languages": {
+                "description": "Languages detected by extension, sorted descending by byte share.",
+                "items": {
+                  "$ref": "#/$defs/LanguageStat"
+                },
+                "type": "array"
+              },
+              "manifest_signals": {
+                "$ref": "#/$defs/ManifestSignals",
+                "description": "Boolean presence flags for the manifests / top-level files the\ndownstream consumers care about. Drives the UI devcontainer\nbanner."
+              },
+              "monorepo_tools": {
+                "description": "Slugs: `pnpm-workspaces`, `yarn-workspaces`, `npm-workspaces`,\n`turbo`, `nx`, `lerna`, `cargo-workspace`, `go-workspace`.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "package_managers": {
+                "description": "Canonical slugs: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `uv`,\n`poetry`, `pdm`, `pip`, `go-mod`, `gradle`, `maven`, `bundler`.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "primary_language": {
+                "description": "The single language with the largest byte share (first entry of\n`languages` by construction), or `None` for an empty repo.",
+                "nullable": true,
+                "type": "string"
+              },
+              "runtimes": {
+                "$ref": "#/$defs/Runtimes",
+                "description": "Declared runtime versions (e.g. `{\"node\": \"22\"}`). `None` when\nthe manifest exists but the field is absent."
+              },
+              "test_runners": {
+                "description": "Slugs: `vitest`, `jest`, `mocha`, `playwright`, `nextest`,\n`pytest`, `go-test`, `junit`, `rspec`.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "detected_at",
+              "languages",
+              "package_managers",
+              "monorepo_tools",
+              "is_monorepo",
+              "test_runners",
+              "frameworks",
+              "runtimes",
+              "manifest_signals"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "error": {
+            "description": "Populated on lookup / deserialization failures; clients should\nsurface this verbatim.",
+            "nullable": true,
+            "type": "string"
+          },
+          "stack": {
+            "$ref": "#/$defs/Stack",
+            "description": "Detected stack metadata, or `None` when the project exists but no\ndetection has run yet (default `{}` in the DB) or when the\npersisted JSON fails to deserialize.",
+            "nullable": true
+          }
+        },
+        "title": "GetProjectStackResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "GithubAppInstallUrlParams",
         "type": "object"
       },
@@ -5923,6 +6176,40 @@
           "http_status"
         ],
         "title": "ProviderValidateResponse",
+        "type": "object"
+      }
+    },
+    {
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project": {
+            "description": "Project UUID whose image should be rebuilt on the next mirror-fetch tick.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "RetriggerImageBuildParams",
+        "type": "object"
+      },
+      "name": "retrigger_image_build",
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "RetriggerImageBuildResponse",
         "type": "object"
       }
     },

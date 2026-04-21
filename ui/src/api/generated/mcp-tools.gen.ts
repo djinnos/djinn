@@ -1080,6 +1080,163 @@ export namespace ExecutionStatusOutputSchema {
 
 }
 export type ExecutionStatusOutput = ExecutionStatusOutputSchema.ExecutionStatusOutput;
+export namespace GetProjectDevcontainerStatusInputSchema {
+  export interface GetProjectDevcontainerStatusInput {
+  /**
+   * Project UUID whose devcontainer + image status should be returned.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type GetProjectDevcontainerStatusInput = GetProjectDevcontainerStatusInputSchema.GetProjectDevcontainerStatusInput;
+export namespace GetProjectDevcontainerStatusOutputSchema {
+  /**
+   * Snapshot of a project's devcontainer + image-build state, used by the
+   * UI onboarding banner.
+   */
+  export interface GetProjectDevcontainerStatusOutput {
+  /**
+   * Populated on lookup failures; clients should surface this verbatim.
+   */
+  error?: string
+  /**
+   * True when the mirror's HEAD contains `.devcontainer/devcontainer.json`.
+   */
+  has_devcontainer: boolean
+  /**
+   * True when the mirror's HEAD also contains `.devcontainer/devcontainer-lock.json`.
+   */
+  has_devcontainer_lock: boolean
+  /**
+   * Human-readable error from the most recent failed build, if any.
+   */
+  image_last_error?: string
+  /**
+   * One of `none | building | ready | failed`.
+   */
+  image_status: string
+  /**
+   * Content-addressable image tag from the last successful build, or
+   * `None` when no build has completed.
+   */
+  image_tag?: string
+  /**
+   * Generated starter `devcontainer.json` (pretty-printed). Populated
+   * when `has_devcontainer == false` so the UI can show a copyable
+   * template.
+   */
+  starter_json?: string
+  [k: string]: any
+  }
+
+}
+export type GetProjectDevcontainerStatusOutput = GetProjectDevcontainerStatusOutputSchema.GetProjectDevcontainerStatusOutput;
+export namespace GetProjectStackInputSchema {
+  export interface GetProjectStackInput {
+  /**
+   * Project UUID whose detected stack should be returned.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type GetProjectStackInput = GetProjectStackInputSchema.GetProjectStackInput;
+export namespace GetProjectStackOutputSchema {
+  export interface GetProjectStackOutput {
+  /**
+   * Populated on lookup / deserialization failures; clients should
+   * surface this verbatim.
+   */
+  error?: string
+  stack?: Stack
+  [k: string]: any
+  }
+  /**
+   * Detected stack metadata, or `None` when the project exists but no
+   * detection has run yet (default `{}` in the DB) or when the
+   * persisted JSON fails to deserialize.
+   */
+  export interface Stack {
+  /**
+   * Wall-clock timestamp of the detection pass.
+   */
+  detected_at: string
+  /**
+   * Slugs: `react`, `next`, `vue`, `svelte`, `axum`, `actix`,
+   * `rocket`, `fastapi`, `flask`, `django`, `rails`, `spring`.
+   */
+  frameworks: string[]
+  /**
+   * Derived: `monorepo_tools` is non-empty.
+   */
+  is_monorepo: boolean
+  /**
+   * Languages detected by extension, sorted descending by byte share.
+   */
+  languages: LanguageStat[]
+  manifest_signals: ManifestSignals
+  /**
+   * Slugs: `pnpm-workspaces`, `yarn-workspaces`, `npm-workspaces`,
+   * `turbo`, `nx`, `lerna`, `cargo-workspace`, `go-workspace`.
+   */
+  monorepo_tools: string[]
+  /**
+   * Canonical slugs: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `uv`,
+   * `poetry`, `pdm`, `pip`, `go-mod`, `gradle`, `maven`, `bundler`.
+   */
+  package_managers: string[]
+  /**
+   * The single language with the largest byte share (first entry of
+   * `languages` by construction), or `None` for an empty repo.
+   */
+  primary_language?: string
+  runtimes: Runtimes
+  /**
+   * Slugs: `vitest`, `jest`, `mocha`, `playwright`, `nextest`,
+   * `pytest`, `go-test`, `junit`, `rspec`.
+   */
+  test_runners: string[]
+  [k: string]: any
+  }
+  export interface LanguageStat {
+  bytes: number
+  name: string
+  pct: number
+  [k: string]: any
+  }
+  /**
+   * Boolean presence flags for the manifests / top-level files the
+   * downstream consumers care about. Drives the UI devcontainer
+   * banner.
+   */
+  export interface ManifestSignals {
+  has_cargo_toml: boolean
+  has_devcontainer: boolean
+  has_devcontainer_lock: boolean
+  has_go_mod: boolean
+  has_package_json: boolean
+  has_pnpm_workspace: boolean
+  has_pyproject_toml: boolean
+  has_turbo_json: boolean
+  [k: string]: any
+  }
+  /**
+   * Declared runtime versions (e.g. `{"node": "22"}`). `None` when
+   * the manifest exists but the field is absent.
+   */
+  export interface Runtimes {
+  go?: string
+  node?: string
+  python?: string
+  rust?: string
+  [k: string]: any
+  }
+
+}
+export type GetProjectStackOutput = GetProjectStackOutputSchema.GetProjectStackOutput;
 export namespace GithubAppInstallUrlInputSchema {
   export interface GithubAppInstallUrlInput {
   [k: string]: any
@@ -2744,6 +2901,26 @@ export namespace ProviderValidateOutputSchema {
 
 }
 export type ProviderValidateOutput = ProviderValidateOutputSchema.ProviderValidateOutput;
+export namespace RetriggerImageBuildInputSchema {
+  export interface RetriggerImageBuildInput {
+  /**
+   * Project UUID whose image should be rebuilt on the next mirror-fetch tick.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type RetriggerImageBuildInput = RetriggerImageBuildInputSchema.RetriggerImageBuildInput;
+export namespace RetriggerImageBuildOutputSchema {
+  export interface RetriggerImageBuildOutput {
+  error?: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type RetriggerImageBuildOutput = RetriggerImageBuildOutputSchema.RetriggerImageBuildOutput;
 export namespace SessionActiveInputSchema {
   export interface SessionActiveInput {
   /**
@@ -3685,7 +3862,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "execution_pause" | "execution_resume" | "execution_start" | "execution_status" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_logs" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3713,6 +3890,8 @@ export interface McpToolMap {
   "execution_resume": { input: ExecutionResumeInput; output: ExecutionResumeOutput };
   "execution_start": { input: ExecutionStartInput; output: ExecutionStartOutput };
   "execution_status": { input: ExecutionStatusInput; output: ExecutionStatusOutput };
+  "get_project_devcontainer_status": { input: GetProjectDevcontainerStatusInput; output: GetProjectDevcontainerStatusOutput };
+  "get_project_stack": { input: GetProjectStackInput; output: GetProjectStackOutput };
   "github_app_install_url": { input: GithubAppInstallUrlInput; output: GithubAppInstallUrlOutput };
   "github_app_installations": { input: GithubAppInstallationsInput; output: GithubAppInstallationsOutput };
   "github_fetch_file": { input: GithubFetchFileInput; output: GithubFetchFileOutput };
@@ -3759,6 +3938,7 @@ export interface McpToolMap {
   "provider_oauth_start": { input: ProviderOauthStartInput; output: ProviderOauthStartOutput };
   "provider_remove": { input: ProviderRemoveInput; output: ProviderRemoveOutput };
   "provider_validate": { input: ProviderValidateInput; output: ProviderValidateOutput };
+  "retrigger_image_build": { input: RetriggerImageBuildInput; output: RetriggerImageBuildOutput };
   "session_active": { input: SessionActiveInput; output: SessionActiveOutput };
   "session_for_task": { input: SessionForTaskInput; output: SessionForTaskOutput };
   "session_list": { input: SessionListInput; output: SessionListOutput };

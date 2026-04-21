@@ -1,11 +1,9 @@
 /**
  * Devcontainer / stack MCP tool wrappers (Phase 3 PR 6).
  *
- * The generated `mcp-tools.gen.ts` lags behind the server until the
- * snapshot regen path is wired back up. Until then we call the three new
- * tools (`get_project_stack`, `get_project_devcontainer_status`,
- * `retrigger_image_build`) with `@ts-expect-error` casts so the UI can
- * ship without hand-editing the generated file.
+ * The three underlying MCP tools (`get_project_stack`,
+ * `get_project_devcontainer_status`, `retrigger_image_build`) are
+ * type-checked against the generated `mcp-tools.gen.ts`.
  */
 import { callMcpTool } from "@/api/mcpClient";
 
@@ -65,7 +63,6 @@ export interface RetriggerImageBuildResponse {
 export async function fetchProjectStack(
   projectId: string,
 ): Promise<GetProjectStackResponse> {
-  // @ts-expect-error — tool not yet in mcp-tools.gen.ts; safe to skip.
   return callMcpTool("get_project_stack", { project: projectId });
 }
 
@@ -75,7 +72,6 @@ export async function fetchProjectStack(
 export async function fetchDevcontainerStatus(
   projectId: string,
 ): Promise<DevcontainerStatus> {
-  // @ts-expect-error — tool not yet in mcp-tools.gen.ts; safe to skip.
   return callMcpTool("get_project_devcontainer_status", { project: projectId });
 }
 
@@ -96,6 +92,5 @@ export async function generateStarterJson(projectId: string): Promise<string | n
 export async function retriggerImageBuild(
   projectId: string,
 ): Promise<RetriggerImageBuildResponse> {
-  // @ts-expect-error — tool not yet in mcp-tools.gen.ts; safe to skip.
   return callMcpTool("retrigger_image_build", { project: projectId });
 }
