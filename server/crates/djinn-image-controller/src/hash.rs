@@ -34,21 +34,16 @@ pub const DEVCONTAINER_LOCK_PATH: &str = ".devcontainer/devcontainer-lock.json";
 /// - `Err(..)` on unrecoverable git errors (repo can't be opened, HEAD
 ///   missing). Transient — the next mirror-fetch tick retries.
 pub fn compute_devcontainer_hash(mirror_path: &Path) -> Result<Option<String>> {
+    // Validate the mirror and whether HEAD resolves. git2 handles this fine
+    // even for partial clones — HEAD is a ref, not a blob.
     let repo = git2::Repository::open(mirror_path).with_context(|| {
         format!(
             "compute_devcontainer_hash: open bare mirror at {}",
             mirror_path.display()
         )
     })?;
-
-    let head_tree = match repo.head() {
-        Ok(head) => head.peel_to_tree().with_context(|| {
-            format!(
-                "compute_devcontainer_hash: peel HEAD to tree at {}",
-                mirror_path.display()
-            )
-        })?,
-        // Empty / no-HEAD repos: treat as "no devcontainer yet".
+    match repo.head() {
+        Ok(_) => {}
         Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(None),
         Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(None),
         Err(e) => {
@@ -58,11 +53,17 @@ pub fn compute_devcontainer_hash(mirror_path: &Path) -> Result<Option<String>> {
             )));
         }
     };
+    drop(repo);
 
-    let Some(devcontainer_bytes) = read_blob(&repo, &head_tree, DEVCONTAINER_PATH)? else {
+    // Blob reads go through `git cat-file`, which understands promisor
+    // remotes. The mirror is cloned with `--filter=blob:none`, so the
+    // blobs we want aren't local until `cat-file` triggers a partial
+    // fetch from origin. git2's `entry.to_object()` doesn't do this —
+    // it fails with "object not found" and Pulse stays cold forever.
+    let Some(devcontainer_bytes) = cat_blob_at_head(mirror_path, DEVCONTAINER_PATH)? else {
         return Ok(None);
     };
-    let lock_bytes = read_blob(&repo, &head_tree, DEVCONTAINER_LOCK_PATH)?;
+    let lock_bytes = cat_blob_at_head(mirror_path, DEVCONTAINER_LOCK_PATH)?;
 
     let mut hasher = Sha256::new();
     // Length-prefix each blob so (a, b) and (a+b, empty) never collide.
@@ -82,28 +83,45 @@ pub fn compute_devcontainer_hash(mirror_path: &Path) -> Result<Option<String>> {
     Ok(Some(hex::encode(hasher.finalize())))
 }
 
-/// Read the blob at `rel_path` under `tree`. Returns `Ok(None)` if the
-/// path isn't present; `Err(..)` only on unrecoverable git errors.
-fn read_blob(
-    repo: &git2::Repository,
-    tree: &git2::Tree<'_>,
-    rel_path: &str,
-) -> Result<Option<Vec<u8>>> {
-    let entry = match tree.get_path(Path::new(rel_path)) {
-        Ok(e) => e,
-        Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::Error::new(e)
-                .context(format!("tree.get_path({rel_path})")))
-        }
-    };
-    let object = entry
-        .to_object(repo)
-        .with_context(|| format!("blob object for {rel_path}"))?;
-    let blob = object
-        .into_blob()
-        .map_err(|_| anyhow::anyhow!("{rel_path}: expected blob"))?;
-    Ok(Some(blob.content().to_vec()))
+/// Read the blob at `HEAD:<rel_path>` via `git cat-file`.
+///
+/// Returns `Ok(None)` when the path is absent at HEAD (the usual
+/// "project has no devcontainer committed yet" case). `Err` only for
+/// unexpected git failures — the caller treats them as transient and
+/// retries on the next mirror-fetcher tick.
+fn cat_blob_at_head(mirror_path: &Path, rel_path: &str) -> Result<Option<Vec<u8>>> {
+    let target = format!("HEAD:{rel_path}");
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(mirror_path)
+        .args(["cat-file", "blob", &target])
+        .output()
+        .with_context(|| {
+            format!(
+                "git cat-file {target} in {}",
+                mirror_path.display()
+            )
+        })?;
+
+    if output.status.success() {
+        return Ok(Some(output.stdout));
+    }
+
+    // `git cat-file` returns non-zero for every failure mode — path
+    // missing, HEAD unborn, object truly absent. Distinguish "missing"
+    // (expected) from real errors by looking at stderr.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let missing = stderr.contains("does not exist")
+        || stderr.contains("exists on disk, but not in")
+        || stderr.contains("path not in tree");
+    if missing {
+        return Ok(None);
+    }
+    Err(anyhow::anyhow!(
+        "git cat-file {target} in {}: {}",
+        mirror_path.display(),
+        stderr.trim()
+    ))
 }
 
 #[cfg(test)]

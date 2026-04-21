@@ -8,7 +8,8 @@ use tokio::fs;
 use crate::server::DjinnMcpServer;
 use djinn_core::auth_context::current_user_token;
 use djinn_db::{
-    OrgConfigRepository, ProjectImage, ProjectImageStatus, ProjectRepository, VerificationRule,
+    OrgConfigRepository, ProjectImage, ProjectImageStatus, ProjectRepository,
+    RepoGraphCacheRepository, VerificationRule,
 };
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient};
 use djinn_stack::{Stack, generate_starter};
@@ -1219,12 +1220,28 @@ impl DjinnMcpServer {
         // Graph-warm status: derived from the dispatch-readiness row so the
         // banner can surface a distinct progress row alongside image state.
         // Errors are swallowed — banner shows `pending` on lookup failure.
-        let graph_warmed_at = repo
+        //
+        // Fall back to `repo_graph_cache.built_at` when `projects.graph_warmed_at`
+        // is missing: the stamp is best-effort (the cache upsert logs a warning
+        // and continues on failure), and rows written before migration 9
+        // landed never got stamped. Treating a present cache row as "warmed"
+        // keeps the banner honest when the two sources drift.
+        let stamp_from_project = repo
             .get_dispatch_readiness(&input.project)
             .await
             .ok()
             .flatten()
             .and_then(|r| r.graph_warmed_at);
+
+        let graph_warmed_at = match stamp_from_project {
+            Some(v) => Some(v),
+            None => RepoGraphCacheRepository::new(self.state.db().clone())
+                .latest_for_project(&input.project)
+                .await
+                .ok()
+                .flatten()
+                .map(|row| row.built_at),
+        };
 
         let graph_warm_status = derive_graph_warm_status(&image.status, &graph_warmed_at);
 
