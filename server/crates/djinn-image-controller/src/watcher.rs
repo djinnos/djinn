@@ -53,7 +53,8 @@ use djinn_db::{Database, ProjectImage, ProjectImageStatus, ProjectRepository};
 use djinn_runtime::GraphWarmerService;
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
-use kube::api::Api;
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::{Api, ListParams, LogParams};
 use kube::runtime::watcher;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -74,6 +75,17 @@ const DEDUPE_CAP: usize = 1024;
 /// value only gates how fast we re-enter the match loop after a hard
 /// break.
 const POST_ERROR_SLEEP: Duration = Duration::from_secs(2);
+
+/// Maximum number of characters of captured Pod log output to stash in
+/// `projects.last_error` when a build Job fails. The DB column is a
+/// `TEXT` but the field is also fanned out over SSE and shown in the UI
+/// banner, so we keep it small enough to be human-scannable while still
+/// carrying the meaningful tail of a build failure.
+const FAILURE_LOG_CHAR_LIMIT: usize = 2000;
+/// Number of trailing log lines to request from the builder Pod.
+/// devcontainer-cli / buildkit failures surface the root cause in the
+/// last screen or two of output — well within 80 lines.
+const FAILURE_LOG_TAIL_LINES: i64 = 80;
 
 /// Background task that watches image-build Jobs to completion.
 ///
@@ -112,7 +124,7 @@ async fn run_loop(
     graph_warmer: Option<Arc<dyn GraphWarmerService>>,
     cancel: CancellationToken,
 ) {
-    let jobs: Api<Job> = Api::namespaced(client, &config.namespace);
+    let jobs: Api<Job> = Api::namespaced(client.clone(), &config.namespace);
     let watch_cfg = watcher::Config::default().labels(&format!("{}=true", LABEL_BUILD));
 
     let mut seen: HashSet<String> = HashSet::new();
@@ -140,6 +152,7 @@ async fn run_loop(
                                 &config,
                                 &repo,
                                 &event_bus,
+                                Some(&client),
                                 graph_warmer.as_ref(),
                                 &mut seen,
                                 ev,
@@ -177,13 +190,14 @@ pub async fn __test_handle_event(
     ev: watcher::Event<Job>,
 ) {
     let repo = ProjectRepository::new(db.clone(), event_bus.clone());
-    handle_event(config, &repo, event_bus, None, seen, ev).await;
+    handle_event(config, &repo, event_bus, None, None, seen, ev).await;
 }
 
 async fn handle_event(
     config: &ImageControllerConfig,
     repo: &ProjectRepository,
     event_bus: &EventBus,
+    client: Option<&kube::Client>,
     graph_warmer: Option<&Arc<dyn GraphWarmerService>>,
     seen: &mut HashSet<String>,
     ev: watcher::Event<Job>,
@@ -253,7 +267,16 @@ async fn handle_event(
             }
         }
         JobOutcome::Failed => {
-            apply_failure(repo, event_bus, &project_id, &hash_prefix, &job_name).await;
+            apply_failure(
+                config,
+                repo,
+                event_bus,
+                client,
+                &project_id,
+                &hash_prefix,
+                &job_name,
+            )
+            .await;
         }
     }
 
@@ -320,15 +343,34 @@ async fn apply_success(
 }
 
 async fn apply_failure(
+    config: &ImageControllerConfig,
     repo: &ProjectRepository,
     event_bus: &EventBus,
+    client: Option<&kube::Client>,
     project_id: &str,
     hash_prefix: &str,
     job_name: &str,
 ) {
-    let last_error = format!(
-        "build Job {job_name} failed; see kubectl logs job/{job_name}"
-    );
+    let header = format!("build Job {job_name} failed");
+    let last_error = match client {
+        Some(c) => match fetch_job_pod_logs(c, &config.namespace, job_name).await {
+            Ok(Some(log_tail)) => format!("{header}:\n{log_tail}"),
+            // Logs unavailable (pod GC'd by TTL, deadline-killed with no
+            // captured output, etc.) — fall back to the pointer so the
+            // operator knows where to look.
+            Ok(None) => format!("{header}; see kubectl logs job/{job_name}"),
+            Err(e) => {
+                debug!(
+                    project_id,
+                    job = %job_name,
+                    error = %e,
+                    "image_build_watcher: fetching Pod logs for failed build Job failed"
+                );
+                format!("{header}; see kubectl logs job/{job_name}")
+            }
+        },
+        None => format!("{header}; see kubectl logs job/{job_name}"),
+    };
 
     let previous = repo.get_project_image(project_id).await.ok().flatten();
     let image = ProjectImage {
@@ -374,6 +416,75 @@ async fn apply_failure(
         None,
         job_name,
     ));
+}
+
+/// Pull the tail of builder-Pod logs so `projects.last_error` carries the
+/// real failure signature instead of a `kubectl logs` pointer.
+///
+/// Strategy: list Pods labelled `job-name=<job>` (Kubernetes' built-in
+/// Job→Pod correlator), grab the newest Pod's logs, truncate to the tail
+/// so the DB column stays bounded. Returns `Ok(None)` when the Pod has
+/// been GC'd or produced no output — the caller falls back to a
+/// diagnostic pointer.
+async fn fetch_job_pod_logs(
+    client: &kube::Client,
+    namespace: &str,
+    job_name: &str,
+) -> Result<Option<String>, kube::Error> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let lp = ListParams::default().labels(&format!("job-name={job_name}"));
+    let list = pods.list(&lp).await?;
+
+    // Jobs typically retain one Pod but `backoffLimit>0` can leave
+    // multiple. Take the most recently created one — that's the attempt
+    // whose failure cascaded into the Job's terminal status.
+    let Some(pod) = list
+        .items
+        .into_iter()
+        .max_by_key(|p| p.metadata.creation_timestamp.clone())
+    else {
+        return Ok(None);
+    };
+    let Some(pod_name) = pod.metadata.name else {
+        return Ok(None);
+    };
+
+    let log_params = LogParams {
+        tail_lines: Some(FAILURE_LOG_TAIL_LINES),
+        ..LogParams::default()
+    };
+    let logs = match pods.logs(&pod_name, &log_params).await {
+        Ok(s) => s,
+        // Pod may have been GC'd between the list and the fetch, or the
+        // container never started (ImagePullBackOff, etc.).
+        Err(e) => {
+            debug!(
+                pod = %pod_name,
+                error = %e,
+                "image_build_watcher: pods.logs failed"
+            );
+            return Ok(None);
+        }
+    };
+
+    let trimmed = logs.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(truncate_from_end(trimmed, FAILURE_LOG_CHAR_LIMIT)))
+}
+
+/// Keep the *tail* of `s` within `limit` characters, prefixing with an
+/// ellipsis when truncation happens so operators know output was cut.
+/// Char-aware (multi-byte safe) — the input may contain any UTF-8.
+fn truncate_from_end(s: &str, limit: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= limit {
+        return s.to_string();
+    }
+    let skip = char_count - limit;
+    let tail: String = s.chars().skip(skip).collect();
+    format!("…{tail}")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -518,6 +629,28 @@ mod tests {
             envelope.payload.get("image_hash").and_then(|v| v.as_str()),
             Some("1a2b3c4d5e6f")
         );
+    }
+
+    #[test]
+    fn truncate_from_end_keeps_tail_and_ellipsizes() {
+        // Under the cap: unchanged.
+        assert_eq!(truncate_from_end("short", 16), "short");
+        // Over the cap: keep the TAIL (failure root cause lives at the end).
+        let long = "0123456789abcdef".repeat(10); // 160 chars
+        let t = truncate_from_end(&long, 10);
+        assert_eq!(t.chars().count(), 11); // 10 + leading "…"
+        assert!(t.starts_with('…'));
+        assert!(t.ends_with("6789abcdef"));
+    }
+
+    #[test]
+    fn truncate_from_end_is_multibyte_safe() {
+        // Two 3-byte UTF-8 chars per cycle; verify char-count-based slicing
+        // doesn't hit a byte boundary that splits a codepoint.
+        let s = "αβγδεζηθικλμ"; // 12 Greek letters
+        let t = truncate_from_end(s, 5);
+        assert_eq!(t.chars().count(), 6); // 5 + '…'
+        assert!(t.starts_with('…'));
     }
 
     #[test]

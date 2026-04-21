@@ -28,14 +28,22 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use djinn_db::{Database, ProjectImage, ProjectImageStatus, ProjectRepository};
 use djinn_stack::Stack;
 use k8s_openapi::api::batch::v1::Job;
-use kube::api::{Api, PostParams};
+use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::api::{Api, Patch, PatchParams, PostParams};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, info, warn};
 
-use crate::build_job::{build_image_build_job, sanitize_id};
+use crate::build_job::{
+    build_image_build_job, build_token_secret_name, sanitize_id, BUILD_TOKEN_SECRET_KEY_URL,
+    LABEL_COMPONENT, LABEL_PROJECT_ID,
+};
 use crate::config::ImageControllerConfig;
 use crate::hash::compute_devcontainer_hash;
 use djinn_workspace::mirror_path_for;
@@ -58,6 +66,8 @@ pub enum ImageControllerError {
     Db(#[from] djinn_db::Error),
     #[error("kubernetes api error: {0}")]
     Kube(#[from] kube::Error),
+    #[error("read clone URL from mirror config at {path}: {reason}")]
+    CloneUrl { path: String, reason: String },
 }
 
 type Result<T> = std::result::Result<T, ImageControllerError>;
@@ -197,6 +207,15 @@ impl ImageController {
         let image_tag = format_image_tag(&self.config.registry_host, project_id, hash_prefix);
         let job = build_image_build_job(&self.config, project_id, hash_prefix, &image_tag);
 
+        // Upsert the per-project clone-URL Secret *before* creating the
+        // Job so the Pod's Secret mount is satisfiable at startup. The
+        // Secret is mutated in place each enqueue so the most recent
+        // installation token is live — older Pods still running see the
+        // file update via kubelet's periodic re-sync.
+        let mirror_path = self.resolve_mirror_path(project_id);
+        let clone_url = read_clone_url_from_mirror(&mirror_path)?;
+        self.upsert_build_token_secret(project_id, &clone_url).await?;
+
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let job_name = job
             .metadata
@@ -251,6 +270,103 @@ impl ImageController {
     fn resolve_mirror_path(&self, project_id: &str) -> std::path::PathBuf {
         mirror_path_for(project_id)
     }
+
+    /// Create (or overwrite) the per-project clone-URL Secret the build
+    /// Job's script reads at startup.
+    ///
+    /// Per-project (not per-Job): keeps the cluster object count flat, and
+    /// leaves the token live for any in-flight Pods to re-read via kubelet's
+    /// mount refresh when it rotates.
+    ///
+    /// Uses server-side apply (`patch` verb) so the same call covers both
+    /// create and rotate paths, and stays within the RBAC we already have
+    /// (no `update` verb needed).
+    ///
+    /// TODO(cleanup): when a project is deleted, the Secret lingers. Wire
+    /// a delete hook into the project-removal path so we clean up.
+    async fn upsert_build_token_secret(
+        &self,
+        project_id: &str,
+        clone_url: &str,
+    ) -> Result<()> {
+        let secrets: Api<Secret> =
+            Api::namespaced(self.client.clone(), &self.config.namespace);
+        let name = build_token_secret_name(project_id);
+
+        let mut labels = BTreeMap::new();
+        labels.insert(LABEL_COMPONENT.to_string(), "build-token".to_string());
+        labels.insert(LABEL_PROJECT_ID.to_string(), sanitize_id(project_id));
+
+        let mut string_data = BTreeMap::new();
+        // `stringData` takes raw values and lets the apiserver do the
+        // base64 encoding into `data`. Keeps the patch JSON small and
+        // avoids an in-process base64 dependency.
+        string_data.insert(BUILD_TOKEN_SECRET_KEY_URL.to_string(), clone_url.to_string());
+
+        let secret = Secret {
+            metadata: ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(self.config.namespace.clone()),
+                labels: Some(labels),
+                ..ObjectMeta::default()
+            },
+            type_: Some("Opaque".to_string()),
+            string_data: Some(string_data),
+            ..Secret::default()
+        };
+
+        // Server-side apply: idempotent create-or-update, uses `patch`
+        // verb only. `force` wins conflicts against any other field
+        // manager that might touch this Secret.
+        let params = PatchParams::apply("djinn-image-controller").force();
+        secrets
+            .patch(&name, &params, &Patch::Apply(&secret))
+            .await?;
+        debug!(project_id, secret = %name, "image_controller: build-token secret applied");
+        Ok(())
+    }
+}
+
+/// Read the clone URL (including the rotating installation token) out of
+/// the bare mirror's git config. Runs in-process as UID 10001 against a
+/// file the same user owns — no safe.directory drama.
+fn read_clone_url_from_mirror(mirror_path: &Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(mirror_path)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .map_err(|e| ImageControllerError::CloneUrl {
+            path: mirror_path.display().to_string(),
+            reason: format!("spawning `git config`: {e}"),
+        })?;
+
+    if !output.status.success() {
+        return Err(ImageControllerError::CloneUrl {
+            path: mirror_path.display().to_string(),
+            reason: format!(
+                "`git config` exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+
+    let url = String::from_utf8(output.stdout)
+        .map_err(|e| ImageControllerError::CloneUrl {
+            path: mirror_path.display().to_string(),
+            reason: format!("URL was not valid UTF-8: {e}"),
+        })?
+        .trim()
+        .to_string();
+
+    if url.is_empty() {
+        return Err(ImageControllerError::CloneUrl {
+            path: mirror_path.display().to_string(),
+            reason: "remote.origin.url is empty".to_string(),
+        });
+    }
+    Ok(url)
 }
 
 /// Build the content-addressable image tag.
