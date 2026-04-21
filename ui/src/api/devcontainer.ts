@@ -42,6 +42,11 @@ export interface GetProjectStackResponse {
   error?: string | null;
 }
 
+export interface DevcontainerPrRef {
+  url: string;
+  number: number;
+}
+
 export interface DevcontainerStatus {
   has_devcontainer: boolean;
   has_devcontainer_lock: boolean;
@@ -49,11 +54,23 @@ export interface DevcontainerStatus {
   image_status: "none" | "building" | "ready" | "failed" | string;
   image_last_error?: string | null;
   starter_json?: string | null;
+  /**
+   * Already-open setup PR on the `djinn/setup-devcontainer` branch, if
+   * any. Present means the banner should show "View PR"; absent means
+   * the "Open PR" CTA is the right affordance.
+   */
+  open_setup_pr?: DevcontainerPrRef | null;
   error?: string | null;
 }
 
 export interface RetriggerImageBuildResponse {
   status: string;
+  error?: string | null;
+}
+
+export interface DevcontainerOpenPrResponse {
+  pr?: DevcontainerPrRef | null;
+  already_open: boolean;
   error?: string | null;
 }
 
@@ -93,4 +110,18 @@ export async function retriggerImageBuild(
   projectId: string,
 ): Promise<RetriggerImageBuildResponse> {
   return callMcpTool("retrigger_image_build", { project: projectId });
+}
+
+/**
+ * Open (or return the already-open) PR that adds a starter
+ * `.devcontainer/devcontainer.json` to the project's default branch.
+ *
+ * Idempotent: a second call while a PR on `djinn/setup-devcontainer`
+ * is still open returns that PR with `already_open: true` rather than
+ * opening a duplicate.
+ */
+export async function openDevcontainerPr(
+  projectId: string,
+): Promise<DevcontainerOpenPrResponse> {
+  return callMcpTool("devcontainer_open_pr", { project: projectId });
 }

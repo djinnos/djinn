@@ -20,6 +20,8 @@ import { useProviderGateStore } from "@/stores/providerGateStore";
 import { ProviderOnboarding } from "@/components/ProviderOnboarding";
 import { useModelGateStore } from "@/stores/modelGateStore";
 import { ModelOnboarding } from "@/components/ModelOnboarding";
+import { useProjectGateStore } from "@/stores/projectGateStore";
+import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
 
 function MainLayout() {
   return (
@@ -73,6 +75,7 @@ function AuthenticatedApp() {
   const selectedProjectId = useSelectedProjectId();
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
   const { hasModels, refresh: refreshModelGate } = useModelGateStore();
+  const { hasProject, refresh: refreshProjectGate } = useProjectGateStore();
   const hasConnectedOnce = useRef(false);
 
   useProjectsBootstrap(status);
@@ -83,8 +86,9 @@ function AuthenticatedApp() {
       hasConnectedOnce.current = true;
       void refreshGate();
       void refreshModelGate();
+      void refreshProjectGate();
     }
-  }, [status, refreshGate, refreshModelGate]);
+  }, [status, refreshGate, refreshModelGate, refreshProjectGate]);
 
   // If the server has been reached once and then drops, keep rendering the
   // shell so the ConnectionBanner can surface the outage without forcing the
@@ -99,6 +103,10 @@ function AuthenticatedApp() {
 
   if (hasModels === false) {
     return <ModelOnboarding />;
+  }
+
+  if (hasProject === false) {
+    return <RepositoryOnboarding />;
   }
 
   return <MainLayout />;

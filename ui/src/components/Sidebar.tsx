@@ -23,6 +23,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
+import { useDevcontainerWarnings } from '@/hooks/useDevcontainerWarnings';
 import { showToast } from '@/lib/toast';
 import {
   markProposalDraftNotified,
@@ -34,14 +35,19 @@ interface NavItemProps {
   icon: React.ReactNode;
   label: string;
   badgeCount?: number;
+  warningCount?: number;
+  warningLabel?: string;
   isActive: boolean;
   onClick: () => void;
 }
 
-function NavItem({ icon, label, badgeCount, isActive, onClick }: NavItemProps) {
-  const pendingProposalLabel =
+function NavItem({ icon, label, badgeCount, warningCount, warningLabel, isActive, onClick }: NavItemProps) {
+  const hasWarning = typeof warningCount === 'number' && warningCount > 0;
+  const ariaLabel =
     typeof badgeCount === 'number' && badgeCount > 0
       ? `${label} has ${badgeCount} pending proposals`
+      : hasWarning
+      ? `${label} — ${warningCount} ${warningLabel ?? 'items need attention'}`
       : undefined;
 
   return (
@@ -49,7 +55,7 @@ function NavItem({ icon, label, badgeCount, isActive, onClick }: NavItemProps) {
       variant={isActive ? 'secondary' : 'ghost'}
       size="default"
       onClick={onClick}
-      aria-label={pendingProposalLabel}
+      aria-label={ariaLabel}
       className={cn(
         'w-full justify-start gap-3 transition-all duration-200',
         'h-9 px-3',
@@ -63,6 +69,13 @@ function NavItem({ icon, label, badgeCount, isActive, onClick }: NavItemProps) {
       {typeof badgeCount === 'number' && badgeCount > 0 ? (
         <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[11px] font-semibold leading-none text-primary-foreground">
           {badgeCount}
+        </span>
+      ) : hasWarning ? (
+        <span
+          className="inline-flex min-w-5 items-center justify-center rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-amber-300 ring-1 ring-amber-500/40"
+          title={warningLabel ?? 'Needs attention'}
+        >
+          {warningCount}
         </span>
       ) : null}
     </Button>
@@ -116,6 +129,7 @@ export function Sidebar() {
     enabled: !!selectedProjectPath,
   });
   const pulseProposalCount = selectedProjectPath ? (pulseProposalsQuery.data?.length ?? 0) : 0;
+  const { count: devcontainerWarningCount } = useDevcontainerWarnings();
 
   // Sync active section from URL
   useEffect(() => {
@@ -207,6 +221,8 @@ export function Sidebar() {
         <NavItem
           icon={<HugeiconsIcon icon={GithubIcon} className="h-4 w-4" />}
           label="Repositories"
+          warningCount={devcontainerWarningCount}
+          warningLabel="need devcontainer setup"
           isActive={activeSection === 'repositories'}
           onClick={() => navigate('/repositories')}
         />

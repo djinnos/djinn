@@ -134,11 +134,33 @@ impl NoteRepository {
         let id = uuid::Uuid::now_v7().to_string();
         let mut tx = self.db.pool().begin().await?;
 
+        // UPSERT on the `uq_notes_project_permalink` unique key. Two
+        // concurrent reindex runs (KB watcher firing while the startup
+        // scan is still in flight, or back-to-back debouncer callbacks
+        // overlapping on a slow Dolt) both observe an empty
+        // `existing_by_permalink` snapshot for a new file and race into
+        // this path. Plain INSERT would let one succeed and the other
+        // hit the unique constraint at COMMIT time — and in Dolt that
+        // surfaces as a merge-conflict rollback that can take 60–90s
+        // per failed transaction, which in turn starves the shared
+        // connection pool for every other caller. ON DUPLICATE KEY
+        // UPDATE makes the "loser" overwrite the existing row's
+        // content fields instead; since both threads scanned the same
+        // on-disk state, the update is a no-op semantically.
         sqlx::query!(
             "INSERT INTO notes
                 (id, project_id, permalink, title, file_path,
                  storage, note_type, folder, tags, content)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                title     = VALUES(title),
+                file_path = VALUES(file_path),
+                storage   = VALUES(storage),
+                note_type = VALUES(note_type),
+                folder    = VALUES(folder),
+                tags      = VALUES(tags),
+                content   = VALUES(content),
+                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')",
             id,
             project_id,
             scanned_note.permalink,
@@ -153,17 +175,32 @@ impl NoteRepository {
         .execute(&mut *tx)
         .await?;
 
-        index_links_for_note(&mut tx, &id, project_id, &scanned_note.content).await?;
+        // The upsert may have landed on a pre-existing row (race with a
+        // peer reindex), in which case our generated `id` is NOT the
+        // row's id. Fetch by the unique key so the link-indexing + the
+        // returned Note reflect whichever id won.
+        let real_id: String = sqlx::query_scalar!(
+            "SELECT id FROM notes
+             WHERE project_id = ? AND permalink = ?",
+            project_id,
+            scanned_note.permalink
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+
+        index_links_for_note(&mut tx, &real_id, project_id, &scanned_note.content).await?;
         resolve_links_for_note(
             &mut tx,
-            &id,
+            &real_id,
             &scanned_note.title,
             &scanned_note.permalink,
             project_id,
         )
         .await?;
 
-        let note = super::note_select_where_id!(id).fetch_one(&mut *tx).await?;
+        let note = super::note_select_where_id!(real_id)
+            .fetch_one(&mut *tx)
+            .await?;
 
         tx.commit().await?;
         self.sync_note_embedding(

@@ -261,6 +261,22 @@ impl ProjectRepository {
         Ok(row.flatten().map(|v| v as u64))
     }
 
+    /// Resolve the default branch persisted for a project.
+    ///
+    /// Returns `Ok(None)` when the project row is unknown or the column
+    /// is unset (legacy host-path rows written before Migration 2). The
+    /// column is populated at clone time from the GitHub API response.
+    pub async fn get_default_branch(&self, project_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<Option<String>> = sqlx::query_scalar!(
+            "SELECT default_branch FROM projects WHERE id = ?",
+            project_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row.flatten().filter(|s| !s.is_empty()))
+    }
+
     /// Find a project by its GitHub owner/repo coordinates.
     ///
     /// Returns `Ok(None)` if no project row has both columns set to the
@@ -574,8 +590,24 @@ impl ProjectRepository {
     /// argument must be a serialized `djinn_stack::Stack`; any non-empty
     /// JSON object is accepted by the column, but the MCP tool returning
     /// it expects the `Stack` shape.
-    pub async fn set_stack(&self, project_id: &str, stack_json: &str) -> Result<()> {
+    ///
+    /// Returns `true` if the row was updated, `false` if the incoming JSON
+    /// was identical to what was already persisted. The mirror fetcher
+    /// fires every ~60s and stack detection almost always returns the
+    /// same result between ticks, so skipping the UPDATE when unchanged
+    /// avoids a no-op write per project per tick — critical on Dolt where
+    /// that write can take 30–60s under contention.
+    pub async fn set_stack(&self, project_id: &str, stack_json: &str) -> Result<bool> {
         self.db.ensure_initialized().await?;
+        let current: Option<String> = sqlx::query_scalar!(
+            "SELECT stack FROM projects WHERE id = ?",
+            project_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
+        if matches!(&current, Some(existing) if existing == stack_json) {
+            return Ok(false);
+        }
         sqlx::query!(
             "UPDATE projects SET stack = ? WHERE id = ?",
             stack_json,
@@ -583,7 +615,7 @@ impl ProjectRepository {
         )
         .execute(self.db.pool())
         .await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Fetch the raw `stack` JSON string for a project.

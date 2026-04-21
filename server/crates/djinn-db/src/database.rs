@@ -128,7 +128,13 @@ impl Database {
     /// Open a database using an explicit backend selection seam.
     pub fn open_with_config(config: DatabaseConnectConfig) -> DbResult<Self> {
         match config {
-            DatabaseConnectConfig::Mysql(mysql) => Self::open_mysql(&mysql, 8),
+            // Dolt COMMITs can take 30–90s under write contention (merge-based
+            // commit path is O(working-set)), so a connection is held ~10×
+            // longer per write than a plain MySQL one. A pool of 8 starves
+            // almost immediately when mirror-fetcher + KB watcher + MCP tools
+            // all have a write in flight. 32 gives reads + concurrent writers
+            // headroom without blowing past Dolt's own connection cap.
+            DatabaseConnectConfig::Mysql(mysql) => Self::open_mysql(&mysql, 32),
         }
     }
 
@@ -221,6 +227,12 @@ impl Database {
         });
         let pool = MySqlPoolOptions::new()
             .max_connections(max_connections)
+            // Dolt COMMITs can run 30–90s under write contention; the sqlx
+            // default acquire_timeout of 30s causes every UI/MCP request
+            // queued behind a slow write to hard-fail with "pool timed out"
+            // even though the DB is healthy. Raise the ceiling so queued
+            // requests wait it out instead of cascading into retry storms.
+            .acquire_timeout(std::time::Duration::from_secs(120))
             .after_connect(move |conn, _meta| {
                 let use_branch_stmt = use_branch_stmt.clone();
                 Box::pin(async move {

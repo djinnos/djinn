@@ -10,11 +10,14 @@ import {
   RefreshIcon,
   FileValidationIcon,
   LinkSquare02Icon,
+  GitPullRequestIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   fetchDevcontainerStatus,
+  openDevcontainerPr,
   retriggerImageBuild,
+  type DevcontainerPrRef,
   type DevcontainerStatus,
 } from "@/api/devcontainer";
 import { useClipboard } from "@/hooks/useClipboard";
@@ -33,9 +36,6 @@ type BannerState =
   | { kind: "failed"; status: DevcontainerStatus }
   | { kind: "ready" }
   | { kind: "unknown" };
-
-// TODO: replace with the final public docs URL once the user publishes it.
-const DOCS_URL = "https://docs.djinnos.dev/devcontainer-setup";
 
 function deriveState(status: DevcontainerStatus | null): BannerState {
   if (!status) return { kind: "unknown" };
@@ -63,6 +63,7 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
   const [status, setStatus] = useState<DevcontainerStatus | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [openingPr, setOpeningPr] = useState(false);
   const { copy, copied } = useClipboard();
 
   const refresh = useCallback(async () => {
@@ -94,6 +95,30 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
   useEffect(() => setDismissed(false), [projectId]);
 
   const state = useMemo(() => deriveState(status), [status]);
+
+  const handleOpenPr = useCallback(async () => {
+    setOpeningPr(true);
+    try {
+      const response = await openDevcontainerPr(projectId);
+      if (response.error || !response.pr) {
+        showToast.error("Could not open devcontainer PR", {
+          description: response.error ?? undefined,
+        });
+        return;
+      }
+      showToast.success(
+        response.already_open ? "PR already open" : "PR opened",
+        { description: response.pr.url },
+      );
+      window.open(response.pr.url, "_blank", "noopener,noreferrer");
+      await refresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to open PR";
+      showToast.error("Could not open devcontainer PR", { description: message });
+    } finally {
+      setOpeningPr(false);
+    }
+  }, [projectId, refresh]);
 
   const handleRebuild = useCallback(async () => {
     setRebuilding(true);
@@ -215,6 +240,11 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
             <pre className="mt-1 max-h-64 overflow-auto rounded-md border border-border/50 bg-black/30 p-3 text-xs leading-relaxed text-muted-foreground">
               <code>{state.starter}</code>
             </pre>
+            <PrButton
+              existingPr={state.status.open_setup_pr ?? null}
+              opening={openingPr}
+              onOpen={() => void handleOpenPr()}
+            />
           </div>
         )}
 
@@ -227,42 +257,80 @@ export function DevcontainerBanner({ projectId, projectName }: DevcontainerBanne
           </div>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-2 pl-11">
-          <a href={DOCS_URL} target="_blank" rel="noopener noreferrer">
-            <Button variant="outline" size="sm" className="h-7 gap-1.5 px-3 text-xs">
-              <HugeiconsIcon icon={LinkSquare02Icon} size={14} />
-              Setup docs
-            </Button>
-          </a>
-          {state.kind === "failed" && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1.5 px-3 text-xs"
-              onClick={() => void handleRebuild()}
-              disabled={rebuilding}
-            >
-              {rebuilding ? (
-                <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
-              ) : (
+        {(state.kind === "failed" || state.kind === "building") && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 pl-11">
+            {state.kind === "failed" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-3 text-xs"
+                onClick={() => void handleRebuild()}
+                disabled={rebuilding}
+              >
+                {rebuilding ? (
+                  <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
+                ) : (
+                  <HugeiconsIcon icon={RefreshIcon} size={14} />
+                )}
+                Rebuild
+              </Button>
+            )}
+            {state.kind === "building" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-3 text-xs"
+                onClick={() => void refresh()}
+              >
                 <HugeiconsIcon icon={RefreshIcon} size={14} />
-              )}
-              Rebuild
-            </Button>
-          )}
-          {state.kind === "building" && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1.5 px-3 text-xs"
-              onClick={() => void refresh()}
-            >
-              <HugeiconsIcon icon={RefreshIcon} size={14} />
-              Refresh
-            </Button>
-          )}
-        </div>
+                Refresh
+              </Button>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+function PrButton({
+  existingPr,
+  opening,
+  onOpen,
+}: {
+  existingPr: DevcontainerPrRef | null;
+  opening: boolean;
+  onOpen: () => void;
+}) {
+  if (existingPr) {
+    return (
+      <a
+        href={existingPr.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-3 inline-flex h-8 items-center gap-1.5 rounded-md bg-amber-500/15 px-3 text-xs font-medium text-amber-200 ring-1 ring-amber-500/40 transition-colors hover:bg-amber-500/25"
+      >
+        <HugeiconsIcon icon={GitPullRequestIcon} size={14} />
+        View PR #{existingPr.number}
+        <HugeiconsIcon icon={LinkSquare02Icon} size={12} />
+      </a>
+    );
+  }
+
+  return (
+    <Button
+      variant="default"
+      size="sm"
+      className="mt-3 h-8 gap-1.5 px-3 text-xs"
+      onClick={onOpen}
+      disabled={opening}
+    >
+      {opening ? (
+        <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
+      ) : (
+        <HugeiconsIcon icon={GitPullRequestIcon} size={14} />
+      )}
+      {opening ? "Opening PR…" : "Open PR"}
+    </Button>
   );
 }

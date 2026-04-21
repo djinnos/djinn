@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDialog';
 import { DevcontainerBanner } from '@/components/DevcontainerBanner';
+import { EmptyState } from '@/components/EmptyState';
 import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
 import { projectStore } from '@/stores/projectStore';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
@@ -296,17 +297,13 @@ export function RepositoriesPage() {
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-5xl">
           {projects.length === 0 ? (
-            <div className="flex flex-col items-center gap-3 rounded-md border border-dashed px-6 py-16 text-center">
-              <HugeiconsIcon icon={GithubIcon} className="h-8 w-8 text-muted-foreground" />
-              <h3 className="text-sm font-semibold">No repositories yet</h3>
-              <p className="max-w-sm text-sm text-muted-foreground">
-                Add a repository from GitHub to start managing it with Djinn.
-              </p>
-              <Button variant="secondary" onClick={() => setDialogOpen(true)}>
-                <HugeiconsIcon icon={PlusSignIcon} className="h-4 w-4" />
-                Add repository
-              </Button>
-            </div>
+            <EmptyState
+              title="No repositories yet"
+              message="Add a repository from GitHub to start managing it with Djinn."
+              actionLabel="Add repository"
+              onAction={() => setDialogOpen(true)}
+              illustration={<HugeiconsIcon icon={GithubIcon} className="h-10 w-10" />}
+            />
           ) : (
             <>
               <div className="flex flex-col gap-2">

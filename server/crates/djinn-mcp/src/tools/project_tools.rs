@@ -10,7 +10,15 @@ use djinn_core::auth_context::current_user_token;
 use djinn_db::{
     OrgConfigRepository, ProjectImage, ProjectImageStatus, ProjectRepository, VerificationRule,
 };
+use djinn_provider::github_api::{CreatePrParams, GitHubApiClient};
 use djinn_stack::{Stack, generate_starter};
+
+/// Stable branch name used for the one-click devcontainer PR. Reusing the
+/// same ref across attempts keeps PR creation idempotent — a second click
+/// after the first PR was closed without merging is handled by returning
+/// the still-open PR (if any) or updating the file on the existing branch.
+const DEVCONTAINER_PR_BRANCH: &str = "djinn/setup-devcontainer";
+const DEVCONTAINER_PATH: &str = ".devcontainer/devcontainer.json";
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
@@ -181,7 +189,42 @@ pub struct GetProjectDevcontainerStatusResponse {
     /// template.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub starter_json: Option<String>,
+    /// Reference to an already-open PR on the `djinn/setup-devcontainer`
+    /// branch, when one exists. The UI uses this to swap the "Open PR"
+    /// button to "View PR" without a second round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_setup_pr: Option<DevcontainerPrRef>,
     /// Populated on lookup failures; clients should surface this verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Minimal reference to a devcontainer setup PR — enough for the UI to
+/// render a "View PR" link and navigate the user to GitHub.
+#[derive(Serialize, JsonSchema)]
+pub struct DevcontainerPrRef {
+    /// Full `html_url` of the PR on GitHub.
+    pub url: String,
+    /// PR number within the repo.
+    pub number: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DevcontainerOpenPrParams {
+    /// Project UUID to open a devcontainer PR on.
+    pub project: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct DevcontainerOpenPrResponse {
+    /// PR that was opened or is already open. `None` only on error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<DevcontainerPrRef>,
+    /// True when a PR with the setup head branch was already open prior
+    /// to this call — the server did not push a new commit.
+    pub already_open: bool,
+    /// Populated on any failure along the path (missing coords, API
+    /// error, etc.); the client surfaces this verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -301,6 +344,29 @@ fn parse_branch_list(stdout: &str) -> Vec<String> {
         .filter(|l| !l.is_empty() && !l.starts_with('('))
         .map(|l| l.to_string())
         .collect()
+}
+
+/// Look up an open PR on the `djinn/setup-devcontainer` branch for a
+/// project. Silently returns `None` when the project has no GitHub coords,
+/// no cached installation id, or when the GitHub API call fails — the
+/// caller treats this as "no PR open, show the create button".
+async fn find_open_setup_pr(
+    repo: &ProjectRepository,
+    project_id: &str,
+) -> Option<DevcontainerPrRef> {
+    let (owner, repo_name) = repo.get_github_coords(project_id).await.ok()??;
+    let installation_id = repo.get_installation_id(project_id).await.ok()??;
+
+    let client = GitHubApiClient::for_installation(installation_id);
+    let head = format!("{owner}:{DEVCONTAINER_PR_BRANCH}");
+    let prs = client
+        .list_pulls_by_head_with_state(&owner, &repo_name, &head, "open")
+        .await
+        .ok()?;
+    prs.into_iter().next().map(|pr| DevcontainerPrRef {
+        url: pr.html_url,
+        number: pr.number,
+    })
 }
 
 /// Parse a JSON-encoded `verification_rules` string into `Vec<VerificationRuleDto>`.
@@ -1032,6 +1098,7 @@ impl DjinnMcpServer {
                     image_status: ProjectImageStatus::NONE.to_string(),
                     image_last_error: None,
                     starter_json: None,
+                    open_setup_pr: None,
                     error: Some(format!("project not found: {}", input.project)),
                 });
             }
@@ -1043,6 +1110,7 @@ impl DjinnMcpServer {
                     image_status: ProjectImageStatus::NONE.to_string(),
                     image_last_error: None,
                     starter_json: None,
+                    open_setup_pr: None,
                     error: Some(format!("stack lookup failed: {err}")),
                 });
             }
@@ -1064,6 +1132,7 @@ impl DjinnMcpServer {
                         image_status: ProjectImageStatus::NONE.to_string(),
                         image_last_error: None,
                         starter_json: None,
+                        open_setup_pr: None,
                         error: Some(format!("stack JSON deserialize failed: {err}")),
                     });
                 }
@@ -1104,9 +1173,20 @@ impl DjinnMcpServer {
                     image_status: ProjectImageStatus::NONE.to_string(),
                     image_last_error: None,
                     starter_json,
+                    open_setup_pr: None,
                     error: Some(format!("image state lookup failed: {err}")),
                 });
             }
+        };
+
+        // Only bother checking GitHub for an open setup PR when the user
+        // would actually see the button (i.e. `has_devcontainer == false`).
+        // Failures here are non-fatal — the banner still works, the button
+        // just falls back to "Open PR" and retries on click.
+        let open_setup_pr = if has_devcontainer {
+            None
+        } else {
+            find_open_setup_pr(&repo, &input.project).await
         };
 
         Json(GetProjectDevcontainerStatusResponse {
@@ -1116,6 +1196,7 @@ impl DjinnMcpServer {
             image_status: image.status,
             image_last_error: image.last_error,
             starter_json,
+            open_setup_pr,
             error: None,
         })
     }
@@ -1170,6 +1251,231 @@ impl DjinnMcpServer {
                 error: Some(format!("failed to flag image for rebuild: {err}")),
             }),
         }
+    }
+
+    /// Open (or return the existing) PR that adds a starter
+    /// `.devcontainer/devcontainer.json` to the project's default branch.
+    ///
+    /// The server:
+    ///   1. Looks up an already-open PR on the stable
+    ///      `djinn/setup-devcontainer` head branch and returns it verbatim
+    ///      if found (idempotent on double-clicks).
+    ///   2. Otherwise creates/updates that branch from the default branch
+    ///      via GitHub's Git Refs + Contents APIs — no local worktree
+    ///      needed.
+    ///   3. Opens the PR against the default branch and returns the URL.
+    ///
+    /// All work is performed with a GitHub App installation token cached
+    /// on the project row, so the commit is attributed to `djinn-bot[bot]`
+    /// rather than the invoking user.
+    #[tool(
+        description = "Open a PR adding .devcontainer/devcontainer.json to the project's repo using the detected stack. Returns the URL of a new or already-open PR on the djinn/setup-devcontainer branch."
+    )]
+    pub async fn devcontainer_open_pr(
+        &self,
+        Parameters(input): Parameters<DevcontainerOpenPrParams>,
+    ) -> Json<DevcontainerOpenPrResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        // ── Resolve project coords + installation ────────────────────────
+        let (owner, repo_name) = match repo.get_github_coords(&input.project).await {
+            Ok(Some(coords)) => coords,
+            Ok(None) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(
+                        "project has no GitHub owner/repo — was it added via GitHub?".into(),
+                    ),
+                });
+            }
+            Err(err) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(format!("coord lookup failed: {err}")),
+                });
+            }
+        };
+
+        let installation_id = match repo.get_installation_id(&input.project).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(
+                        "project has no cached GitHub App installation id — reinstall the Djinn App".into(),
+                    ),
+                });
+            }
+            Err(err) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(format!("installation lookup failed: {err}")),
+                });
+            }
+        };
+
+        let default_branch = match repo.get_default_branch(&input.project).await {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some("project row is missing a default branch".into()),
+                });
+            }
+            Err(err) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(format!("default branch lookup failed: {err}")),
+                });
+            }
+        };
+
+        let client = GitHubApiClient::for_installation(installation_id);
+
+        // ── Short-circuit when a PR is already open ──────────────────────
+        let head_filter = format!("{owner}:{DEVCONTAINER_PR_BRANCH}");
+        match client
+            .list_pulls_by_head_with_state(&owner, &repo_name, &head_filter, "open")
+            .await
+        {
+            Ok(prs) => {
+                if let Some(pr) = prs.into_iter().next() {
+                    return Json(DevcontainerOpenPrResponse {
+                        pr: Some(DevcontainerPrRef {
+                            url: pr.html_url,
+                            number: pr.number,
+                        }),
+                        already_open: true,
+                        error: None,
+                    });
+                }
+            }
+            Err(err) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(format!("failed to query existing PRs: {err}")),
+                });
+            }
+        }
+
+        // ── Build the starter JSON from the detected stack ───────────────
+        let stack_raw = repo.get_stack(&input.project).await.unwrap_or_default();
+        let stack: Option<Stack> = stack_raw
+            .as_deref()
+            .filter(|s| !s.trim().is_empty() && s.trim() != "{}")
+            .and_then(|s| serde_json::from_str(s).ok());
+        let starter = match stack.as_ref() {
+            Some(s) => generate_starter(s),
+            None => generate_starter(&Stack::empty()),
+        };
+
+        // ── Branch off the default branch (idempotent) ───────────────────
+        let base_ref = format!("heads/{default_branch}");
+        let base_sha = match client.get_ref(&owner, &repo_name, &base_ref).await {
+            Ok(Some(sha)) => sha,
+            Ok(None) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(format!(
+                        "default branch {default_branch:?} not found on GitHub"
+                    )),
+                });
+            }
+            Err(err) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(format!("default branch lookup failed: {err}")),
+                });
+            }
+        };
+
+        let new_ref = format!("refs/heads/{DEVCONTAINER_PR_BRANCH}");
+        if let Err(err) = client
+            .create_ref(&owner, &repo_name, &new_ref, &base_sha)
+            .await
+        {
+            return Json(DevcontainerOpenPrResponse {
+                pr: None,
+                already_open: false,
+                error: Some(format!("failed to create setup branch: {err}")),
+            });
+        }
+
+        // ── Write the starter file on the setup branch ───────────────────
+        // If the branch already existed from a prior attempt and the file
+        // is present, update by its blob SHA rather than creating.
+        let prev_sha = client
+            .get_file_sha(&owner, &repo_name, DEVCONTAINER_PATH, DEVCONTAINER_PR_BRANCH)
+            .await
+            .ok()
+            .flatten();
+        if let Err(err) = client
+            .put_file(
+                &owner,
+                &repo_name,
+                DEVCONTAINER_PATH,
+                DEVCONTAINER_PR_BRANCH,
+                "Add Djinn devcontainer config",
+                starter.as_bytes(),
+                prev_sha.as_deref(),
+            )
+            .await
+        {
+            return Json(DevcontainerOpenPrResponse {
+                pr: None,
+                already_open: false,
+                error: Some(format!("failed to commit devcontainer.json: {err}")),
+            });
+        }
+
+        // ── Open the PR ─────────────────────────────────────────────────
+        let body = "Adds a starter `.devcontainer/devcontainer.json` generated by Djinn from \
+             this repo's detected stack. Djinn needs this committed before it can \
+             run tasks in a sandboxed devcontainer.\n\n\
+             Review the features and base image and edit as needed before merging.\n\n\
+             _Opened by djinn-bot via the Djinn UI._";
+        let pr = match client
+            .create_pull_request(
+                &owner,
+                &repo_name,
+                CreatePrParams {
+                    title: "Add Djinn devcontainer config".into(),
+                    body: body.into(),
+                    head: DEVCONTAINER_PR_BRANCH.into(),
+                    base: default_branch,
+                    maintainer_can_modify: Some(true),
+                    draft: None,
+                },
+            )
+            .await
+        {
+            Ok(pr) => pr,
+            Err(err) => {
+                return Json(DevcontainerOpenPrResponse {
+                    pr: None,
+                    already_open: false,
+                    error: Some(format!("failed to open PR: {err}")),
+                });
+            }
+        };
+
+        Json(DevcontainerOpenPrResponse {
+            pr: Some(DevcontainerPrRef {
+                url: pr.html_url,
+                number: pr.number,
+            }),
+            already_open: false,
+            error: None,
+        })
     }
 
     #[tool(description = "Validate .djinn/settings.json syntax and schema in a worktree.")]

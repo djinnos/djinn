@@ -988,6 +988,76 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "project": {
+          "description": "Project UUID to open a devcontainer PR on.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "DevcontainerOpenPrParams",
+      "type": "object"
+    },
+    "name": "devcontainer_open_pr",
+    "output_schema": {
+      "$defs": {
+        "DevcontainerPrRef": {
+          "description": "Minimal reference to a devcontainer setup PR — enough for the UI to\nrender a \"View PR\" link and navigate the user to GitHub.",
+          "properties": {
+            "number": {
+              "description": "PR number within the repo.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "url": {
+              "description": "Full `html_url` of the PR on GitHub.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "number"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "already_open": {
+          "description": "True when a PR with the setup head branch was already open prior\nto this call — the server did not push a new commit.",
+          "type": "boolean"
+        },
+        "error": {
+          "description": "Populated on any failure along the path (missing coords, API\nerror, etc.); the client surfaces this verbatim.",
+          "nullable": true,
+          "type": "string"
+        },
+        "pr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DevcontainerPrRef"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "PR that was opened or is already open. `None` only on error."
+        }
+      },
+      "required": [
+        "already_open"
+      ],
+      "title": "DevcontainerOpenPrResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
         "id": {
           "description": "Epic UUID or short_id.",
           "type": "string"
@@ -2307,6 +2377,28 @@ expression: signatures
     },
     "name": "get_project_devcontainer_status",
     "output_schema": {
+      "$defs": {
+        "DevcontainerPrRef": {
+          "description": "Minimal reference to a devcontainer setup PR — enough for the UI to\nrender a \"View PR\" link and navigate the user to GitHub.",
+          "properties": {
+            "number": {
+              "description": "PR number within the repo.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "url": {
+              "description": "Full `html_url` of the PR on GitHub.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "number"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Snapshot of a project's devcontainer + image-build state, used by the\nUI onboarding banner.",
       "properties": {
@@ -2336,6 +2428,18 @@ expression: signatures
           "description": "Content-addressable image tag from the last successful build, or\n`None` when no build has completed.",
           "nullable": true,
           "type": "string"
+        },
+        "open_setup_pr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DevcontainerPrRef"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Reference to an already-open PR on the `djinn/setup-devcontainer`\nbranch, when one exists. The UI uses this to swap the \"Open PR\"\nbutton to \"View PR\" without a second round-trip."
         },
         "starter_json": {
           "description": "Generated starter `devcontainer.json` (pretty-printed). Populated\nwhen `has_devcontainer == false` so the UI can show a copyable\ntemplate.",

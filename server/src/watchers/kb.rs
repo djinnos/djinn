@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use notify_debouncer_mini::{DebouncedEventKind, Debouncer, new_debouncer};
@@ -125,6 +126,21 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
     // callback runs on notify's own thread which has no Tokio reactor.
     let rt_handle = tokio::runtime::Handle::current();
 
+    // Per-project single-flight gate. Notify-debouncer fires one callback
+    // per 2s burst, but while a reindex is in flight (especially on Dolt,
+    // where a large reindex can take tens of seconds), the NEXT burst will
+    // fire a second callback and spawn a second reindex. Those racing
+    // reindexes read the same "existing notes" snapshot and both decide to
+    // INSERT for a freshly-created file, which triggers the Dolt
+    // unique-constraint conflict at COMMIT time (up to 90s rollback per
+    // failed commit — pool starvation). The upsert in `insert_index_entry`
+    // handles the race correctly; this flag also prevents doing the
+    // redundant work in the first place. The pending-flag lets one
+    // rerun queue after the current one, so file changes that arrived
+    // mid-scan aren't lost.
+    let running = Arc::new(AtomicBool::new(false));
+    let pending = Arc::new(AtomicBool::new(false));
+
     let debouncer = new_debouncer(
         DEBOUNCE,
         move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
@@ -141,40 +157,84 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
                         return;
                     }
 
+                    // If a reindex is already running for this project,
+                    // mark that another run is needed and bail — the
+                    // in-flight task will re-run before exiting.
+                    if running
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                    {
+                        pending.store(true, Ordering::Release);
+                        return;
+                    }
+
                     let db = db.clone();
                     let events_tx = events_tx.clone();
                     let project_id = project_id.clone();
                     let project_path = project_path_owned.clone();
                     let embedding_service = embedding_service.clone();
+                    let running = running.clone();
+                    let pending = pending.clone();
 
                     // Spawn reindex on the captured runtime handle — safe to call
                     // from non-Tokio threads (notify's debouncer thread).
                     rt_handle.spawn(async move {
-                        let note_repo = NoteRepository::new(db, events_tx)
-                            .with_embedding_provider(Some(Arc::new(embedding_service)));
-                        match note_repo
-                            .reindex_from_disk(&project_id, &project_path)
-                            .await
-                        {
-                            Ok(summary) => {
-                                if summary.created > 0 || summary.updated > 0 || summary.deleted > 0
-                                {
-                                    tracing::info!(
+                        loop {
+                            let note_repo = NoteRepository::new(db.clone(), events_tx.clone())
+                                .with_embedding_provider(Some(Arc::new(
+                                    embedding_service.clone(),
+                                )));
+                            match note_repo
+                                .reindex_from_disk(&project_id, &project_path)
+                                .await
+                            {
+                                Ok(summary) => {
+                                    if summary.created > 0
+                                        || summary.updated > 0
+                                        || summary.deleted > 0
+                                    {
+                                        tracing::info!(
+                                            project = %project_path.display(),
+                                            created = summary.created,
+                                            updated = summary.updated,
+                                            deleted = summary.deleted,
+                                            "KB watcher triggered reindex"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
                                         project = %project_path.display(),
-                                        created = summary.created,
-                                        updated = summary.updated,
-                                        deleted = summary.deleted,
-                                        "KB watcher triggered reindex"
+                                        error = %e,
+                                        "KB watcher reindex failed"
                                     );
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    project = %project_path.display(),
-                                    error = %e,
-                                    "KB watcher reindex failed"
-                                );
+
+                            // If a burst arrived while we were running,
+                            // drain the pending flag and loop. Otherwise
+                            // drop the running flag and exit. Checking
+                            // the flag *before* clearing `running` would
+                            // race with the callback; the double-check
+                            // after release-store is the canonical
+                            // pattern for this producer/consumer setup.
+                            if pending.swap(false, Ordering::AcqRel) {
+                                continue;
                             }
+                            running.store(false, Ordering::Release);
+                            if pending.swap(false, Ordering::AcqRel)
+                                && running
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
+                            {
+                                continue;
+                            }
+                            break;
                         }
                     });
                 }

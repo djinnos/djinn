@@ -27,6 +27,7 @@
 //! `429 Too Many Requests`.
 
 mod checks;
+mod contents;
 mod pull_requests;
 mod reviews;
 pub mod search;

@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT default_branch FROM projects WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "default_branch",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "00e3b66f0be2d601c8366ac34f9b3cddd0490e1090a2a3ace8d75872128f8e69"
+}
