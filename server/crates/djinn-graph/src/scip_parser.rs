@@ -14,14 +14,14 @@ use crate::repo_map::ScipArtifact;
 
 /// Normalized SCIP payload ready for graph construction without exposing protobuf details.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedScipIndex {
+pub struct ParsedScipIndex {
     pub metadata: ScipMetadata,
     pub files: Vec<ScipFile>,
     pub external_symbols: Vec<ScipSymbol>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct ScipMetadata {
+pub struct ScipMetadata {
     pub project_root: Option<String>,
     pub tool_name: Option<String>,
     pub tool_version: Option<String>,
@@ -29,7 +29,7 @@ pub(crate) struct ScipMetadata {
 
 /// A source file and the structural symbol data SCIP reported for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScipFile {
+pub struct ScipFile {
     pub language: String,
     pub relative_path: PathBuf,
     pub definitions: Vec<ScipOccurrence>,
@@ -40,7 +40,7 @@ pub(crate) struct ScipFile {
 
 /// A normalized occurrence of a symbol in a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScipOccurrence {
+pub struct ScipOccurrence {
     pub symbol: String,
     pub range: ScipRange,
     pub enclosing_range: Option<ScipRange>,
@@ -51,7 +51,7 @@ pub(crate) struct ScipOccurrence {
 
 /// Expanded source range. SCIP stores 3- or 4-element packed ranges.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScipRange {
+pub struct ScipRange {
     pub start_line: i32,
     pub start_character: i32,
     pub end_line: i32,
@@ -60,7 +60,7 @@ pub(crate) struct ScipRange {
 
 /// A symbol defined or declared in a file, with outbound semantic relationships.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScipSymbol {
+pub struct ScipSymbol {
     pub symbol: String,
     pub kind: Option<ScipSymbolKind>,
     pub display_name: Option<String>,
@@ -79,14 +79,14 @@ pub(crate) struct ScipSymbol {
 /// `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ScipVisibility {
+pub enum ScipVisibility {
     Public,
     Private,
     Unknown,
 }
 
 impl ScipVisibility {
-    pub(crate) fn from_symbol_identifier(symbol: &str) -> Self {
+    pub fn from_symbol_identifier(symbol: &str) -> Self {
         if symbol.is_empty() {
             ScipVisibility::Unknown
         } else if symbol.starts_with("local ") {
@@ -96,7 +96,7 @@ impl ScipVisibility {
         }
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ScipVisibility::Public => "public",
             ScipVisibility::Private => "private",
@@ -106,14 +106,14 @@ impl ScipVisibility {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScipRelationship {
+pub struct ScipRelationship {
     pub source_symbol: String,
     pub target_symbol: String,
     pub kinds: BTreeSet<ScipRelationshipKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ScipRelationshipKind {
+pub enum ScipRelationshipKind {
     Reference,
     Implementation,
     TypeDefinition,
@@ -121,7 +121,7 @@ pub(crate) enum ScipRelationshipKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ScipSymbolRole {
+pub enum ScipSymbolRole {
     Definition,
     Import,
     WriteAccess,
@@ -132,7 +132,7 @@ pub(crate) enum ScipSymbolRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ScipSymbolKind {
+pub enum ScipSymbolKind {
     Package,
     Namespace,
     Type,
@@ -159,20 +159,20 @@ pub(crate) enum ScipSymbolKind {
     Unknown(i32),
 }
 
-pub(crate) fn parse_scip_artifacts(artifacts: &[ScipArtifact]) -> Result<Vec<ParsedScipIndex>> {
+pub fn parse_scip_artifacts(artifacts: &[ScipArtifact]) -> Result<Vec<ParsedScipIndex>> {
     artifacts
         .iter()
         .map(|artifact| parse_scip_file(&artifact.path))
         .collect()
 }
 
-pub(crate) fn parse_scip_file(path: impl AsRef<Path>) -> Result<ParsedScipIndex> {
+pub fn parse_scip_file(path: impl AsRef<Path>) -> Result<ParsedScipIndex> {
     let path = path.as_ref();
     let bytes = fs::read(path).with_context(|| format!("read SCIP file {}", path.display()))?;
     parse_scip_bytes(&bytes).with_context(|| format!("parse SCIP file {}", path.display()))
 }
 
-pub(crate) fn parse_scip_bytes(bytes: &[u8]) -> Result<ParsedScipIndex> {
+pub fn parse_scip_bytes(bytes: &[u8]) -> Result<ParsedScipIndex> {
     let index = Index::parse_from_bytes(bytes).context("decode SCIP protobuf payload")?;
     parse_index(index)
 }

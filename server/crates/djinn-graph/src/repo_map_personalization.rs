@@ -2,7 +2,16 @@ use std::collections::BTreeSet;
 
 use djinn_core::models::{NoteSearchResult, Task};
 
-use crate::task_confidence::parse_task_memory_refs;
+/// Local copy of `djinn-server::task_confidence::parse_task_memory_refs` —
+/// the original lives in `djinn-server` and we don't want this crate to
+/// depend on the full server.  Keep the two in sync; this is a strict
+/// parser of a JSON string-of-strings with a warn-and-empty fallback.
+fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(memory_refs).unwrap_or_else(|_| {
+        tracing::warn!(memory_refs = %memory_refs, "invalid memory_refs JSON for repo-map personalization");
+        Vec::new()
+    })
+}
 
 const MIN_IDENTIFIER_LEN: usize = 3;
 const MAX_IDENTIFIER_LEN: usize = 64;

@@ -208,7 +208,7 @@ impl RepoGraphOps for RepoGraphBridge {
     ) -> Result<NeighborsResult, String> {
         use petgraph::Direction;
         let graph =
-            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let node_index = resolve_node(&graph, key)?;
         let directions: Vec<Direction> = match direction {
             Some("incoming") => vec![Direction::Incoming],
@@ -263,13 +263,13 @@ impl RepoGraphOps for RepoGraphBridge {
         sort_by: Option<&str>,
         limit: usize,
     ) -> Result<Vec<RankedNode>, String> {
-        use crate::repo_graph::RepoGraphNodeKind;
+        use djinn_graph::repo_graph::RepoGraphNodeKind;
         // Read the cached PageRank populated by `ensure_canonical_graph`
         // during warm.  Without this cache, every `ranked` call re-ran a full
         // PageRank pass and hung for 30+ s on real-world graphs even when
         // `code_graph status` reported `warmed: true`.
         let (graph, ranking, _sccs) =
-            crate::canonical_graph::load_canonical_graph(&self.state, project_path)
+            djinn_graph::canonical_graph::load_canonical_graph(&self.state, project_path)
                 .await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
@@ -329,9 +329,9 @@ impl RepoGraphOps for RepoGraphBridge {
         project_path: &str,
         symbol: &str,
     ) -> Result<Vec<String>, String> {
-        use crate::repo_graph::RepoGraphEdgeKind;
+        use djinn_graph::repo_graph::RepoGraphEdgeKind;
         let graph =
-            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let node_index = graph
             .symbol_node(symbol)
             .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
@@ -358,7 +358,7 @@ impl RepoGraphOps for RepoGraphBridge {
         group_by: Option<&str>,
     ) -> Result<ImpactResult, String> {
         let graph =
-            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let start = resolve_node(&graph, key)?;
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
@@ -411,9 +411,9 @@ impl RepoGraphOps for RepoGraphBridge {
         kind_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>, String> {
-        use crate::repo_graph::RepoGraphNodeKind;
+        use djinn_graph::repo_graph::RepoGraphNodeKind;
         let graph =
-            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -451,7 +451,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // kind-specific results.  `min_size` is applied at read time against
         // the cached set (which is materialised at `min_size = 2`).
         let (graph, _ranking, sccs) =
-            crate::canonical_graph::load_canonical_graph(&self.state, project_path)
+            djinn_graph::canonical_graph::load_canonical_graph(&self.state, project_path)
                 .await?;
         let cached: &Vec<Vec<petgraph::graph::NodeIndex>> = match kind_filter {
             Some("file") => &sccs.file,
@@ -489,10 +489,10 @@ impl RepoGraphOps for RepoGraphBridge {
         visibility: Option<&str>,
         limit: usize,
     ) -> Result<Vec<OrphanEntry>, String> {
-        use crate::repo_graph::RepoGraphNodeKind;
-        use crate::scip_parser::ScipVisibility;
+        use djinn_graph::repo_graph::RepoGraphNodeKind;
+        use djinn_graph::scip_parser::ScipVisibility;
         let graph =
-            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -535,7 +535,7 @@ impl RepoGraphOps for RepoGraphBridge {
         max_depth: Option<usize>,
     ) -> Result<Option<PathResult>, String> {
         let graph =
-            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let from_idx = resolve_node(&graph, from)?;
         let to_idx = resolve_node(&graph, to)?;
         let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
@@ -575,7 +575,7 @@ impl RepoGraphOps for RepoGraphBridge {
     ) -> Result<Vec<EdgeEntry>, String> {
         use globset::Glob;
         let graph =
-            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let from_matcher = Glob::new(from_glob)
             .map_err(|e| format!("invalid from_glob '{from_glob}': {e}"))?
             .compile_matcher();
@@ -629,7 +629,7 @@ impl RepoGraphOps for RepoGraphBridge {
         key: &str,
     ) -> Result<Option<SymbolDescription>, String> {
         let graph =
-            crate::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
         let node_index = match resolve_node(&graph, key) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
@@ -654,7 +654,7 @@ impl RepoGraphOps for RepoGraphBridge {
         use djinn_db::{ProjectRepository, RepoGraphCacheRepository};
 
         let (project_root, _index_tree_path) =
-            crate::canonical_graph::normalize_graph_query_paths(project_path);
+            djinn_graph::canonical_graph::normalize_graph_query_paths(project_path);
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = repo
             .resolve(project_root.to_string_lossy().as_ref())
@@ -681,7 +681,7 @@ impl RepoGraphOps for RepoGraphBridge {
             });
         };
 
-        let commits_since_pin = crate::canonical_graph::canonical_graph_count_commits_since(
+        let commits_since_pin = djinn_graph::canonical_graph::canonical_graph_count_commits_since(
             &project_root,
             &row.commit_sha,
         )
@@ -731,8 +731,8 @@ impl AppState {
 #[cfg(test)]
 pub(crate) mod graph_bridge_tests {
     use super::*;
-    use crate::repo_graph::{RepoDependencyGraph, RepoNodeKey};
-    use crate::scip_parser::{
+    use djinn_graph::repo_graph::{RepoDependencyGraph, RepoNodeKey};
+    use djinn_graph::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
         ScipRelationshipKind, ScipSymbol, ScipSymbolKind, ScipSymbolRole,
     };
@@ -748,7 +748,7 @@ pub(crate) mod graph_bridge_tests {
             signature: Some("fn helper()".to_string()),
             documentation: vec![],
             relationships: vec![],
-            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
         };
         let trait_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -757,7 +757,7 @@ pub(crate) mod graph_bridge_tests {
             signature: None,
             documentation: vec![],
             relationships: vec![],
-            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
         };
         let main_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -770,7 +770,7 @@ pub(crate) mod graph_bridge_tests {
                 target_symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
                 kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
             }],
-            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
         };
         ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -942,7 +942,7 @@ pub(crate) mod graph_bridge_tests {
             .edges_directed(node_index, petgraph::Direction::Incoming)
         {
             if edge.weight().kind
-                == crate::repo_graph::RepoGraphEdgeKind::SymbolRelationshipImplementation
+                == djinn_graph::repo_graph::RepoGraphEdgeKind::SymbolRelationshipImplementation
             {
                 let source_node = graph.node(edge.source());
                 if let Some(sym) = &source_node.symbol {

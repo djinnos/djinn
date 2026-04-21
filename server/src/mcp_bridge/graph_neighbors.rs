@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use djinn_mcp::bridge::{FileGroupEntry, GraphNeighbor, ImpactEntry};
 
-use crate::repo_graph::{RepoDependencyGraph, RepoGraphNode, RepoNodeKey};
+use djinn_graph::repo_graph::{RepoDependencyGraph, RepoGraphNode, RepoNodeKey};
 
 pub(super) fn group_neighbors_by_file(
     neighbors: &[(&RepoGraphNode, GraphNeighbor)],

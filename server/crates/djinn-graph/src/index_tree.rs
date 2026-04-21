@@ -157,10 +157,24 @@ pub struct IndexTree;
 impl IndexTree {
     /// Ensure the index tree exists for `project_id` rooted at `project_root`.
     /// Creates `.djinn/worktrees/_index/` via `git worktree add` on first use.
+    ///
+    /// When `DJINN_PROJECT_ROOT` is set (the K8s warm-Pod path: the Pod
+    /// clones the mirror directly into an emptyDir workspace before
+    /// invoking the binary), we treat `project_root` as the canonical
+    /// index location and skip the `.djinn/worktrees/_index` worktree
+    /// dance entirely. Pod-per-task isolation makes the nested worktree
+    /// redundant — the Pod's whole filesystem is already the "index
+    /// tree" for the warm run.
     pub async fn ensure(project_id: &str, project_root: &Path) -> Result<IndexTreeHandle> {
         let worktrees_dir = project_root.join(".djinn").join("worktrees");
-        let index_tree_path = worktrees_dir.join(INDEX_TREE_DIR_NAME);
         let target_dir = worktrees_dir.join(INDEX_TREE_TARGET_DIR_NAME);
+
+        let pod_workspace_mode = std::env::var("DJINN_PROJECT_ROOT").is_ok();
+        let index_tree_path = if pod_workspace_mode {
+            project_root.to_path_buf()
+        } else {
+            worktrees_dir.join(INDEX_TREE_DIR_NAME)
+        };
 
         // Serialise concurrent `ensure` calls for the same project so we
         // do not race the initial `git worktree add`.  Different projects
@@ -168,7 +182,17 @@ impl IndexTree {
         let lock = ensure_lock_for(project_id).await;
         let _permit = lock.lock().await;
 
-        if !index_tree_path.join(".git").exists() {
+        if pod_workspace_mode {
+            // Validate that the caller did actually clone into this path.
+            // If not, fail clearly instead of silently running against an
+            // empty directory.
+            if !index_tree_path.join(".git").exists() {
+                return Err(anyhow!(
+                    "DJINN_PROJECT_ROOT={} has no .git directory — the warm Pod's clone step must run before the binary",
+                    index_tree_path.display()
+                ));
+            }
+        } else if !index_tree_path.join(".git").exists() {
             tokio::fs::create_dir_all(&worktrees_dir)
                 .await
                 .with_context(|| format!("create {}", worktrees_dir.display()))?;
@@ -250,7 +274,7 @@ async fn read_head_sha(path: &Path) -> Result<String> {
 /// Test-only helper to clear the process-wide last-fetch map between
 /// independent test cases.
 #[cfg(test)]
-pub(crate) fn reset_last_fetch_for_tests() {
+pub fn reset_last_fetch_for_tests() {
     last_fetch_map().lock().expect("poisoned fetch map").clear();
 }
 

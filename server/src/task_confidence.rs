@@ -4,17 +4,7 @@ use djinn_core::models::Task;
 use djinn_db::{ActivityQuery, NoteRepository, TaskRepository};
 use serde::{Deserialize, Serialize};
 
-#[allow(unreachable_pub)]
-#[cfg(test)]
-pub fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(memory_refs).unwrap_or_else(|_| {
-        tracing::warn!(memory_refs = %memory_refs, "invalid memory_refs JSON for task completion signal");
-        Vec::new()
-    })
-}
-
-#[cfg(not(test))]
-pub(crate) fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
+fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(memory_refs).unwrap_or_else(|_| {
         tracing::warn!(memory_refs = %memory_refs, "invalid memory_refs JSON for task completion signal");
         Vec::new()

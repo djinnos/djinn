@@ -64,7 +64,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use djinn_core::events::EventBus;
+use djinn_db::{Database, DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig};
 use djinn_runtime::{RoleKind, TaskRunOutcome, TaskRunReport, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices};
 use djinn_workspace::Workspace;
@@ -72,18 +74,46 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-/// Command-line arguments for the worker binary.
+/// Top-level arg parser for the worker binary.
+///
+/// The default mode (no subcommand) runs the existing K8s task-run wire
+/// handshake.  The `warm-graph` subcommand reuses the binary as the
+/// per-project warm Pod entrypoint previously served by
+/// `djinn-server --warm-graph`; `djinn-agent-worker` is the only image the
+/// K8s launcher puts in warm Pods, so collapsing the two saves a
+/// per-cluster image footprint.
+#[derive(Debug, Parser)]
+#[command(
+    name = "djinn-agent-worker",
+    about = "In-Pod task-run supervisor (Phase 2 K8s) + warm-graph driver"
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+
+    #[command(flatten)]
+    default_args: Option<WorkerDefaultArgs>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Cmd {
+    /// Run the canonical-graph warm pipeline for a specific project and
+    /// exit. The launcher invokes this via `djinn-agent-worker warm-graph
+    /// <project_id>` in the per-project warm Pod.
+    WarmGraph {
+        /// Project id (matches `projects.id`). Positional.
+        project_id: String,
+    },
+}
+
+/// Arguments for the default mode (no subcommand).
 ///
 /// Every field is environment-driven so the production Pod manifest can
 /// populate them without having to author a bespoke `command:` argv; the
 /// same arguments are also exposed as long-form flags so out-of-cluster
 /// integration tests can call the binary with `--server-addr ...` etc.
-#[derive(Debug, Parser)]
-#[command(
-    name = "djinn-agent-worker",
-    about = "In-Pod task-run supervisor (Phase 2 K8s PR 2 — TCP + AuthHello wire)"
-)]
-struct WorkerArgs {
+#[derive(Debug, clap::Args)]
+struct WorkerDefaultArgs {
     /// `host:port` of the djinn-server ClusterIP Service (usually
     /// `djinn.<namespace>.svc.cluster.local:8443`).
     #[arg(long, env = "DJINN_SERVER_ADDR")]
@@ -119,6 +149,31 @@ struct WorkerArgs {
     workspace_path: PathBuf,
 }
 
+/// Local [`djinn_graph::WarmContext`] implementation for the worker binary.
+///
+/// Mirrors the subset of `djinn-server::AppState::minimal_for_warm_only`
+/// the warm pipeline actually consumes — a shared `Database`, a no-op
+/// `EventBus` (nothing subscribes in the warm Pod), and a per-process
+/// `indexer_lock` mutex (single-flight SCIP subprocess fan-out).
+struct WorkerWarmContext {
+    db: Database,
+    indexer_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl djinn_graph::WarmContext for WorkerWarmContext {
+    fn db(&self) -> &Database {
+        &self.db
+    }
+
+    fn event_bus(&self) -> EventBus {
+        EventBus::noop()
+    }
+
+    fn indexer_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.indexer_lock.clone()
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let exit = run().await;
@@ -137,7 +192,15 @@ async fn run() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let args = WorkerArgs::parse();
+    let cli = Cli::parse();
+
+    if let Some(Cmd::WarmGraph { project_id }) = cli.cmd {
+        return run_warm_graph(&project_id).await;
+    }
+
+    let args = cli
+        .default_args
+        .ok_or_else(|| anyhow::anyhow!("missing default-mode arguments (use `warm-graph` subcommand or pass --server-addr / --task-run-id / env vars)"))?;
     info!(
         server = %args.server_addr,
         spec = %args.spec_path.display(),
@@ -266,6 +329,67 @@ async fn drive_placeholder(
         outcome: TaskRunOutcome::Interrupted,
         stages_completed: Vec::<RoleKind>::new(),
     })
+}
+
+/// Drive the `warm-graph <project_id>` subcommand end-to-end.
+///
+/// Mirrors what `djinn-server --warm-graph` used to do: build a minimal
+/// `WarmContext` backed by the same Dolt/MySQL pool the server hits, then
+/// run `djinn_graph::canonical_graph::run_warm_graph_command` once and
+/// exit.  The heavy pipeline's progress lands in shared DB caches that
+/// the server process reads on subsequent graph queries.
+async fn run_warm_graph(project_id: &str) -> Result<()> {
+    let db = bootstrap_warm_database()?;
+    let ctx = WorkerWarmContext {
+        db,
+        indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    djinn_graph::canonical_graph::run_warm_graph_command(&ctx, project_id)
+        .await
+        .with_context(|| format!("run_warm_graph_command({project_id})"))
+}
+
+/// Replicates `AppState::minimal_for_warm_only`'s DB resolution — the
+/// warm Pod shares the same env-var contract as djinn-server so operators
+/// only manage one configuration surface:
+///
+/// * `DJINN_DB_BACKEND` — `mysql` | `dolt` (defaults to `dolt`).
+/// * `DJINN_MYSQL_URL` — full DSN (defaults to
+///   `mysql://root@127.0.0.1:3306/djinn` under `dolt`).
+/// * `DJINN_MYSQL_FLAVOR` — `mysql` | `dolt` (defaults to the backend).
+fn bootstrap_warm_database() -> Result<Database> {
+    let backend = std::env::var("DJINN_DB_BACKEND").ok();
+    let backend = backend
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("dolt")
+        .to_ascii_lowercase();
+
+    let flavor_raw = std::env::var("DJINN_MYSQL_FLAVOR").ok();
+    let flavor = match flavor_raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(backend.as_str())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mysql" => MysqlBackendFlavor::Mysql,
+        "dolt" => MysqlBackendFlavor::Dolt,
+        other => anyhow::bail!("unknown DJINN_MYSQL_FLAVOR `{other}`; expected `mysql` or `dolt`"),
+    };
+
+    let url = std::env::var("DJINN_MYSQL_URL")
+        .ok()
+        .or_else(|| match flavor {
+            MysqlBackendFlavor::Dolt => Some("mysql://root@127.0.0.1:3306/djinn".to_owned()),
+            MysqlBackendFlavor::Mysql => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("DJINN_MYSQL_URL must be set when DJINN_MYSQL_FLAVOR=mysql"))?;
+
+    let connect = DatabaseConnectConfig::Mysql(MysqlDatabaseConfig { url, flavor });
+    Database::open_with_config(connect).context("open warm worker database")
 }
 
 /// Compile-time sanity: the paths the worker contract publishes to the

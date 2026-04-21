@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::server::AppState;
+use crate::WarmContext;
 
 /// Output bundle of the CPU-bound canonical graph build pipeline,
 /// produced on a `spawn_blocking` thread and consumed by the async tail that
@@ -25,24 +25,24 @@ type CanonicalGraphBuildOutput = (
 
 /// Pre-computed strongly-connected components, one set per `kind_filter`
 /// variant the `cycles` op exposes (`None` / `File` / `Symbol`).
-pub(crate) struct CachedSccs {
-    pub(crate) full: Vec<Vec<petgraph::graph::NodeIndex>>,
-    pub(crate) file: Vec<Vec<petgraph::graph::NodeIndex>>,
-    pub(crate) symbol: Vec<Vec<petgraph::graph::NodeIndex>>,
+pub struct CachedSccs {
+    pub full: Vec<Vec<petgraph::graph::NodeIndex>>,
+    pub file: Vec<Vec<petgraph::graph::NodeIndex>>,
+    pub symbol: Vec<Vec<petgraph::graph::NodeIndex>>,
 }
 
-pub(crate) struct CachedGraph {
-    pub(crate) graph: crate::repo_graph::RepoDependencyGraph,
-    pub(crate) project_path: PathBuf,
-    pub(crate) git_head: String,
-    pub(crate) pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
-    pub(crate) sccs: Arc<CachedSccs>,
+pub struct CachedGraph {
+    pub graph: crate::repo_graph::RepoDependencyGraph,
+    pub project_path: PathBuf,
+    pub git_head: String,
+    pub pagerank: Arc<crate::repo_graph::RepoGraphRanking>,
+    pub sccs: Arc<CachedSccs>,
 }
 
-pub(crate) static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
+pub static GRAPH_CACHE: std::sync::LazyLock<RwLock<Option<CachedGraph>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
 
-pub(crate) fn derive_graph_caches(
+pub fn derive_graph_caches(
     graph: &crate::repo_graph::RepoDependencyGraph,
 ) -> (Arc<crate::repo_graph::RepoGraphRanking>, Arc<CachedSccs>) {
     use crate::repo_graph::RepoGraphNodeKind;
@@ -55,34 +55,49 @@ pub(crate) fn derive_graph_caches(
     (pagerank, sccs)
 }
 
-/// Public entrypoint invoked by `djinn-server --warm-graph <project_id>`
-/// (Phase 3 PR 8 §6.4).  Boots a minimal [`AppState`], resolves the
-/// project's working root from the DB, and drives a single
-/// [`ensure_canonical_graph`] pass.  Returns a human-readable error on
-/// failure so the subcommand can exit(1) with a useful message.
+/// Public entrypoint invoked by `djinn-agent-worker warm-graph
+/// <project_id>` (Phase 3 PR 8 §6.4).  The caller provides a minimal
+/// [`WarmContext`] (DB + event bus + indexer lock); this function
+/// resolves the project's working root from the DB, then drives a
+/// single [`ensure_canonical_graph`] pass.  Returns a human-readable
+/// error on failure so the subcommand can exit(1) with a useful
+/// message.
 ///
 /// This is intentionally separate from the daemon boot path — the warm
 /// Pod is short-lived and has no inbound traffic, so spinning up the
 /// HTTP server + coordinator + RPC listener would be ~2.5s of wasted
 /// latency per warm run.
-pub async fn run_warm_graph_command(project_id: &str) -> anyhow::Result<()> {
+pub async fn run_warm_graph_command<C: WarmContext>(ctx: &C, project_id: &str) -> anyhow::Result<()> {
     use djinn_db::ProjectRepository;
 
-    let state = AppState::minimal_for_warm_only().await?;
-    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
     let project = repo
         .get(project_id)
         .await
         .map_err(|e| anyhow::anyhow!("lookup project {project_id}: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
-    let project_root = PathBuf::from(&project.path);
+    // When `DJINN_PROJECT_ROOT` is set (K8s warm path) the caller has
+    // already cloned the mirror into a Pod-local workspace — the DB's
+    // `projects.path` points at a server-local directory that isn't
+    // available in the warm Pod, so we honor the override.
+    let project_root = match std::env::var("DJINN_PROJECT_ROOT") {
+        Ok(v) if !v.is_empty() => {
+            tracing::info!(
+                project_id,
+                project_root = %v,
+                "run_warm_graph_command: DJINN_PROJECT_ROOT override in effect"
+            );
+            PathBuf::from(v)
+        }
+        _ => PathBuf::from(&project.path),
+    };
     tracing::info!(
         project_id,
         project_root = %project_root.display(),
         "run_warm_graph_command: starting warm pipeline"
     );
     let started = std::time::Instant::now();
-    let (_handle, graph) = ensure_canonical_graph(&state, project_id, &project_root)
+    let (_handle, graph) = ensure_canonical_graph(ctx, project_id, &project_root)
         .await
         .map_err(|e| anyhow::anyhow!("ensure_canonical_graph failed: {e}"))?;
     tracing::info!(
@@ -95,8 +110,8 @@ pub async fn run_warm_graph_command(project_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) async fn ensure_canonical_graph(
-    state: &AppState,
+pub async fn ensure_canonical_graph<C: WarmContext>(
+    ctx: &C,
     project_id: &str,
     project_root: &Path,
 ) -> Result<
@@ -117,7 +132,7 @@ pub(crate) async fn ensure_canonical_graph(
     let _ = handle.reset_to_origin_main().await;
 
     let commit_sha = handle.commit_sha().to_string();
-    let cache_repo = RepoGraphCacheRepository::new(state.db().clone());
+    let cache_repo = RepoGraphCacheRepository::new(ctx.db().clone());
 
     {
         let cache = GRAPH_CACHE.read().await;
@@ -133,7 +148,7 @@ pub(crate) async fn ensure_canonical_graph(
         match load_cached_artifact(row.graph_blob).await {
             Ok((graph, pagerank, sccs)) => {
                 install_as_canonical(
-                    state,
+                    ctx,
                     project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
@@ -155,7 +170,7 @@ pub(crate) async fn ensure_canonical_graph(
         }
     }
 
-    let lock = state.indexer_lock();
+    let lock = ctx.indexer_lock();
     let _permit = lock.lock().await;
 
     {
@@ -171,7 +186,7 @@ pub(crate) async fn ensure_canonical_graph(
         match load_cached_artifact(row.graph_blob).await {
             Ok((graph, pagerank, sccs)) => {
                 install_as_canonical(
-                    state,
+                    ctx,
                     project_id,
                     handle.path().to_path_buf(),
                     commit_sha.clone(),
@@ -210,7 +225,7 @@ pub(crate) async fn ensure_canonical_graph(
     // indexer set to languages the project actually uses. Falls back to
     // running every indexer when no stack has been persisted yet (fresh
     // project, or a pre-PR-2 deployment).
-    let stack_filter = resolve_stack_indexer_filter(state, project_id).await;
+    let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
 
     let t_indexers = std::time::Instant::now();
     let run = crate::repo_map::run_indexers_already_locked(
@@ -295,7 +310,7 @@ pub(crate) async fn ensure_canonical_graph(
     );
 
     persist_canonical_skeleton(
-        state,
+        ctx,
         project_id,
         project_root,
         &commit_sha,
@@ -316,7 +331,7 @@ pub(crate) async fn ensure_canonical_graph(
     }
 
     install_as_canonical(
-        state,
+        ctx,
         project_id,
         handle.path().to_path_buf(),
         commit_sha.clone(),
@@ -328,8 +343,8 @@ pub(crate) async fn ensure_canonical_graph(
     Ok((handle, graph))
 }
 
-async fn persist_canonical_skeleton(
-    state: &AppState,
+async fn persist_canonical_skeleton<C: WarmContext>(
+    ctx: &C,
     project_id: &str,
     project_root: &Path,
     commit_sha: &str,
@@ -339,7 +354,7 @@ async fn persist_canonical_skeleton(
     use djinn_db::{NoteRepository, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository};
 
     let project_path = project_root.to_string_lossy().into_owned();
-    let cache_repo = RepoMapCacheRepository::new(state.db().clone());
+    let cache_repo = RepoMapCacheRepository::new(ctx.db().clone());
     if let Err(e) = cache_repo
         .insert(RepoMapCacheInsert {
             key: RepoMapCacheKey {
@@ -363,7 +378,7 @@ async fn persist_canonical_skeleton(
         );
     }
 
-    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    let note_repo = NoteRepository::new(ctx.db().clone(), ctx.event_bus());
     if let Err(e) =
         crate::repo_map::persist_repo_map_note(&note_repo, project_id, commit_sha, rendered).await
     {
@@ -376,14 +391,14 @@ async fn persist_canonical_skeleton(
     }
 }
 
-pub(crate) async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
+pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool {
     let cache = GRAPH_CACHE.read().await;
     cache
         .as_ref()
         .is_some_and(|cached| cached.project_path == index_tree_path)
 }
 
-pub(crate) async fn canonical_graph_cache_pinned_commit_for(
+pub async fn canonical_graph_cache_pinned_commit_for(
     index_tree_path: &Path,
 ) -> Option<String> {
     let cache = GRAPH_CACHE.read().await;
@@ -393,15 +408,15 @@ pub(crate) async fn canonical_graph_cache_pinned_commit_for(
         .map(|cached| cached.git_head.clone())
 }
 
-pub(crate) async fn canonical_graph_count_commits_since(
+pub async fn canonical_graph_count_commits_since(
     project_root: &Path,
     pinned_commit: &str,
 ) -> Option<u64> {
     count_commits_since(project_root, pinned_commit).await
 }
 
-async fn install_as_canonical(
-    _state: &AppState,
+async fn install_as_canonical<C: WarmContext>(
+    _ctx: &C,
     _project_id: &str,
     project_path: PathBuf,
     git_head: String,
@@ -448,10 +463,10 @@ const GRAPH_NOT_WARMED_ERR: &str =
 /// Tries the in-process RAM cache first; on miss, deserializes the most
 /// recent entry from `repo_graph_cache` and installs it in RAM. Never
 /// rebuilds — that is exclusively the K8s graph warmer's job (the warm
-/// Pod runs `djinn-server --warm-graph <project_id>` which goes through
+/// Pod runs `djinn-agent-worker warm-graph <project_id>` which goes through
 /// [`ensure_canonical_graph`]).
-pub(crate) async fn load_canonical_graph(
-    state: &AppState,
+pub async fn load_canonical_graph<C: WarmContext>(
+    ctx: &C,
     project_path: &str,
 ) -> Result<
     (
@@ -479,14 +494,14 @@ pub(crate) async fn load_canonical_graph(
         }
     }
 
-    let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let project_repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
     let project_id = project_repo
         .resolve_id_by_path_fuzzy(project_path)
         .await
         .map_err(|e| format!("resolve project id for '{project_path}': {e}"))?
         .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?;
 
-    let cache_repo = RepoGraphCacheRepository::new(state.db().clone());
+    let cache_repo = RepoGraphCacheRepository::new(ctx.db().clone());
     let row = cache_repo
         .latest_for_project(&project_id)
         .await
@@ -495,7 +510,7 @@ pub(crate) async fn load_canonical_graph(
 
     let (graph, pagerank, sccs) = load_cached_artifact(row.graph_blob).await?;
     install_as_canonical(
-        state,
+        ctx,
         &project_id,
         index_tree_path,
         row.commit_sha,
@@ -508,11 +523,11 @@ pub(crate) async fn load_canonical_graph(
 }
 
 /// Thin wrapper for callers that only need the graph.
-pub(crate) async fn load_canonical_graph_only(
-    state: &AppState,
+pub async fn load_canonical_graph_only<C: WarmContext>(
+    ctx: &C,
     project_path: &str,
 ) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
-    let (graph, _pagerank, _sccs) = load_canonical_graph(state, project_path).await?;
+    let (graph, _pagerank, _sccs) = load_canonical_graph(ctx, project_path).await?;
     Ok(graph)
 }
 
@@ -547,14 +562,14 @@ async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option
 /// The canonical-graph pipeline treats `None` as "run every known indexer"
 /// — the legacy behaviour pre-PR-8.  A non-empty `Vec` trims the indexer
 /// fan-out down to just the matched languages.
-async fn resolve_stack_indexer_filter(
-    state: &AppState,
+async fn resolve_stack_indexer_filter<C: WarmContext>(
+    ctx: &C,
     project_id: &str,
 ) -> Option<Vec<crate::repo_map::SupportedIndexer>> {
     use djinn_db::ProjectRepository;
     use djinn_stack::Stack;
 
-    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
     let raw = match repo.get_stack(project_id).await {
         Ok(Some(s)) => s,
         _ => return None,
@@ -594,7 +609,7 @@ async fn resolve_stack_indexer_filter(
     if wanted.is_empty() { None } else { Some(wanted) }
 }
 
-pub(crate) fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathBuf) {
+pub fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathBuf) {
     let requested = PathBuf::from(project_path);
     let is_index_tree = requested.file_name() == Some(std::ffi::OsStr::new("_index"))
         && requested.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("worktrees"))
@@ -619,13 +634,13 @@ pub(crate) fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathB
 }
 
 #[cfg(test)]
-pub(crate) async fn clear_test_caches() {
+pub async fn clear_test_caches() {
     let mut cache = GRAPH_CACHE.write().await;
     *cache = None;
 }
 
 #[cfg(test)]
-pub(crate) fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex {
+pub fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex {
     use crate::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
         ScipRelationshipKind, ScipSymbol, ScipSymbolKind, ScipSymbolRole,
@@ -727,19 +742,18 @@ pub(crate) fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedSci
 }
 
 #[cfg(test)]
-pub(crate) fn build_test_graph_fixture() -> crate::repo_graph::RepoDependencyGraph {
+pub fn build_test_graph_fixture() -> crate::repo_graph::RepoDependencyGraph {
     crate::repo_graph::RepoDependencyGraph::build(&[build_test_parsed_index_fixture()])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::create_test_db;
-    use crate::test_helpers::workspace_tempdir;
+    use crate::test_helpers::{TestWarmContext, create_test_db, workspace_tempdir};
+    use djinn_core::events::EventBus;
     use djinn_db::{
         ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository, RepoMapCacheRepository,
     };
-    use tokio_util::sync::CancellationToken;
 
     async fn make_project(tmp: &std::path::Path) -> std::path::PathBuf {
         let project_root = tmp.join("repo");
@@ -772,9 +786,8 @@ mod tests {
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
             .create("test-canonical", project_root.to_string_lossy().as_ref())
             .await
@@ -800,7 +813,7 @@ mod tests {
             .await
             .expect("seed cache");
 
-        let result = ensure_canonical_graph(&state, &project.id, &project_root).await;
+        let result = ensure_canonical_graph(&ctx, &project.id, &project_root).await;
         assert!(result.is_ok(), "expected cache-hit success, got {result:?}");
         let (_handle, returned_graph) = result.unwrap();
         let _ = head_sha;
@@ -812,9 +825,8 @@ mod tests {
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
             .create(
                 "test-canonical-stale",
@@ -841,7 +853,7 @@ mod tests {
             .await
             .expect("seed cache");
 
-        let result = ensure_canonical_graph(&state, &project.id, &project_root).await;
+        let result = ensure_canonical_graph(&ctx, &project.id, &project_root).await;
         if let Err(msg) = &result {
             assert!(
                 !msg.contains("deserialize cached graph")
@@ -856,9 +868,8 @@ mod tests {
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let _ = ProjectRepository::new(db.clone(), state.event_bus())
+        let ctx = TestWarmContext::new(db.clone());
+        let _ = ProjectRepository::new(db.clone(), EventBus::noop())
             .create(
                 "test-cache-only-readers",
                 project_root.to_string_lossy().as_ref(),
@@ -884,10 +895,10 @@ mod tests {
         };
 
         let project_root_str = project_root.to_string_lossy().into_owned();
-        let graph_only = load_canonical_graph_only(&state, &project_root_str)
+        let graph_only = load_canonical_graph_only(&ctx, &project_root_str)
             .await
             .expect("cache-only reader must succeed without warming");
-        let (graph_with_caches, pagerank, _sccs) = load_canonical_graph(&state, &project_root_str)
+        let (graph_with_caches, pagerank, _sccs) = load_canonical_graph(&ctx, &project_root_str)
             .await
             .expect("cache-only reader (with caches) must succeed without warming");
 
@@ -903,9 +914,8 @@ mod tests {
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
             .create(
                 "test-canonical-persist",
@@ -931,7 +941,7 @@ mod tests {
         .expect("render repo map");
 
         persist_canonical_skeleton(
-            &state,
+            &ctx,
             &project.id,
             &project_root,
             &head_sha,
@@ -964,9 +974,8 @@ mod tests {
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = crate::server::AppState::new(db.clone(), cancel);
-        let proj_repo = ProjectRepository::new(db.clone(), state.event_bus());
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
             .create("stack-filter", project_root.to_string_lossy().as_ref())
             .await
@@ -1000,7 +1009,7 @@ mod tests {
             .await
             .expect("set stack");
 
-        let filter = resolve_stack_indexer_filter(&state, &project.id)
+        let filter = resolve_stack_indexer_filter(&ctx, &project.id)
             .await
             .expect("filter is Some for non-empty stack");
         assert!(filter.contains(&crate::repo_map::SupportedIndexer::RustAnalyzer));
@@ -1015,7 +1024,7 @@ mod tests {
             .create("stack-empty", other_root.to_string_lossy().as_ref())
             .await
             .expect("create second project");
-        let filter_none = resolve_stack_indexer_filter(&state, &project2.id).await;
+        let filter_none = resolve_stack_indexer_filter(&ctx, &project2.id).await;
         assert!(
             filter_none.is_none(),
             "empty `{{}}` stack must return None so callers run every indexer"

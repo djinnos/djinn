@@ -6,7 +6,7 @@ use djinn_db::{
     RepoMapCacheRepository, TaskRepository,
 };
 
-use crate::repo_map::persist_repo_map_note;
+use djinn_graph::repo_map::persist_repo_map_note;
 use crate::server::AppState;
 
 pub(super) const REPO_MAP_SYSTEM_HEADER: &str = "## Repository Map";
@@ -146,7 +146,7 @@ pub(super) async fn build_repo_map_context_block(
         &note_repo,
         &project.id,
         &commit_sha,
-        &crate::repo_map::RenderedRepoMap {
+        &djinn_graph::repo_map::RenderedRepoMap {
             content: cached.rendered_map.clone(),
             token_estimate: cached.token_estimate as usize,
             included_entries: cached.included_entries as usize,

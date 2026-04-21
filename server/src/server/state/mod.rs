@@ -396,10 +396,13 @@ impl AppState {
         tracing::info!("graph_warmer: initialized");
     }
 
-    /// Minimal constructor used by `djinn-server --warm-graph <project_id>`
-    /// (Phase 3 PR 8 §6.4).
+    /// Minimal constructor used by out-of-process test callers that need an
+    /// `AppState` without the full bootstrap (originally used by
+    /// `djinn-server --warm-graph`, now retained for tests only — the warm
+    /// path lives in `djinn-agent-worker warm-graph`, which bootstraps its
+    /// own `djinn_graph::WarmContext` implementation).
     ///
-    /// Boots ONLY the subsystems [`crate::canonical_graph::ensure_canonical_graph`]
+    /// Boots ONLY the subsystems [`djinn_graph::canonical_graph::ensure_canonical_graph`]
     /// needs — DB + mirror + event bus — and leaves every other service
     /// (HTTP listener, MCP server, coordinator, RPC listener, agent
     /// actors) uninitialised.  The warm Pod is short-lived, has no
@@ -1289,6 +1292,24 @@ impl AppState {
     }
 }
 
+/// Bridge the server's `AppState` onto the `djinn_graph::WarmContext`
+/// seam.  All three accessors already exist on `AppState` — we just
+/// delegate through the trait so `djinn_graph::canonical_graph::*`
+/// functions can drive the pipeline without taking `&AppState` directly.
+impl djinn_graph::WarmContext for AppState {
+    fn db(&self) -> &djinn_db::Database {
+        AppState::db(self)
+    }
+
+    fn event_bus(&self) -> djinn_core::events::EventBus {
+        AppState::event_bus(self)
+    }
+
+    fn indexer_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        AppState::indexer_lock(self)
+    }
+}
+
 /// Refresh probe used by the `CanonicalGraphRefreshPlanner`.  Unchanged from
 /// the pre-PR-7 shape — the planner stays in place to drive the decision
 /// tree for "cold / pinned-commit-unavailable / current / stale" before we
@@ -1298,15 +1319,15 @@ struct AppStateCanonicalGraphRefreshProbe;
 #[async_trait::async_trait]
 impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
     async fn cache_has_entry_for(&self, index_tree_path: &Path) -> bool {
-        crate::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
+        djinn_graph::canonical_graph::canonical_graph_cache_has_entry_for(index_tree_path).await
     }
 
     async fn pinned_commit_for(&self, index_tree_path: &Path) -> Option<String> {
-        crate::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
+        djinn_graph::canonical_graph::canonical_graph_cache_pinned_commit_for(index_tree_path).await
     }
 
     async fn commits_since(&self, project_root: &Path, pinned_commit: &str) -> Option<u64> {
-        crate::canonical_graph::canonical_graph_count_commits_since(project_root, pinned_commit)
+        djinn_graph::canonical_graph::canonical_graph_count_commits_since(project_root, pinned_commit)
             .await
     }
 }
@@ -1345,7 +1366,7 @@ fn build_in_process_graph_warmer(
             let index_tree_path = project_root.join(".djinn").join("worktrees").join("_index");
             let planner = CanonicalGraphRefreshPlanner;
             let warm_plan = planner.plan_warm(WarmPlanInputs {
-                cache_has_entry: crate::canonical_graph::canonical_graph_cache_has_entry_for(
+                cache_has_entry: djinn_graph::canonical_graph::canonical_graph_cache_has_entry_for(
                     &index_tree_path,
                 )
                 .await,
@@ -1384,7 +1405,7 @@ fn build_in_process_graph_warmer(
             );
             tokio::spawn(async move {
                 let started = std::time::Instant::now();
-                let result = crate::canonical_graph::ensure_canonical_graph(
+                let result = djinn_graph::canonical_graph::ensure_canonical_graph(
                     &state,
                     &project_id_owned,
                     &project_root_owned,

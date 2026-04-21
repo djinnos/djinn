@@ -1083,6 +1083,8 @@ dependencies = [
  "bincode",
  "clap",
  "djinn-core",
+ "djinn-db",
+ "djinn-graph",
  "djinn-runtime",
  "djinn-supervisor",
  "djinn-workspace",
@@ -1159,6 +1161,33 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-graph"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "djinn-core",
+ "djinn-db",
+ "djinn-stack",
+ "futures",
+ "hex",
+ "petgraph",
+ "protobuf",
+ "scip",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -1316,6 +1345,7 @@ dependencies = [
  "djinn-daemon",
  "djinn-db",
  "djinn-git",
+ "djinn-graph",
  "djinn-image-controller",
  "djinn-k8s",
  "djinn-mcp",

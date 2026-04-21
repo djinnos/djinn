@@ -43,13 +43,13 @@ fn note_missing_indexer_once(project_root: &Path, indexer: SupportedIndexer) -> 
 const DEFAULT_MAX_FILES: usize = 12;
 const DEFAULT_MAX_SYMBOLS_PER_FILE: usize = 4;
 const DEFAULT_MAX_RELATIONSHIPS_PER_FILE: usize = 3;
-pub(crate) const REPO_MAP_NOTE_TYPE: &str = "repo_map";
-pub(crate) const REPO_MAP_NOTE_FOLDER: &str = "reference/repo-maps";
-pub(crate) const REPO_MAP_NOTE_TAG: &str = "repo-map";
+pub const REPO_MAP_NOTE_TYPE: &str = "repo_map";
+pub const REPO_MAP_NOTE_FOLDER: &str = "reference/repo-maps";
+pub const REPO_MAP_NOTE_TAG: &str = "repo-map";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum SupportedIndexer {
+pub enum SupportedIndexer {
     RustAnalyzer,
     TypeScript,
     Python,
@@ -61,7 +61,7 @@ pub(crate) enum SupportedIndexer {
 }
 
 impl SupportedIndexer {
-    pub(crate) const ALL: [Self; 8] = [
+    pub const ALL: [Self; 8] = [
         Self::RustAnalyzer,
         Self::TypeScript,
         Self::Python,
@@ -72,7 +72,7 @@ impl SupportedIndexer {
         Self::DotNet,
     ];
 
-    pub(crate) fn binary_name(self) -> &'static str {
+    pub fn binary_name(self) -> &'static str {
         match self {
             Self::RustAnalyzer => "rust-analyzer",
             Self::TypeScript => "scip-typescript",
@@ -85,7 +85,7 @@ impl SupportedIndexer {
         }
     }
 
-    pub(crate) fn language(self) -> &'static str {
+    pub fn language(self) -> &'static str {
         match self {
             Self::RustAnalyzer => "rust",
             Self::TypeScript => "typescript",
@@ -154,33 +154,33 @@ impl SupportedIndexer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct DiscoveredWorkspace {
-    pub(crate) indexer: SupportedIndexer,
-    pub(crate) root: PathBuf,
-    pub(crate) slug: String,
+pub struct DiscoveredWorkspace {
+    pub indexer: SupportedIndexer,
+    pub root: PathBuf,
+    pub slug: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct IndexerAvailability {
-    pub(crate) indexer: SupportedIndexer,
-    pub(crate) binary: String,
-    pub(crate) path: Option<PathBuf>,
+pub struct IndexerAvailability {
+    pub indexer: SupportedIndexer,
+    pub binary: String,
+    pub path: Option<PathBuf>,
 }
 
 impl IndexerAvailability {
-    pub(crate) fn is_available(&self) -> bool {
+    pub fn is_available(&self) -> bool {
         self.path.is_some()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PlannedIndexerCommand {
-    pub(crate) indexer: SupportedIndexer,
-    pub(crate) binary_path: PathBuf,
-    pub(crate) args: Vec<String>,
-    pub(crate) working_directory: PathBuf,
-    pub(crate) workspace_root: PathBuf,
-    pub(crate) output_path: PathBuf,
+pub struct PlannedIndexerCommand {
+    pub indexer: SupportedIndexer,
+    pub binary_path: PathBuf,
+    pub args: Vec<String>,
+    pub working_directory: PathBuf,
+    pub workspace_root: PathBuf,
+    pub output_path: PathBuf,
 }
 
 impl PlannedIndexerCommand {
@@ -201,25 +201,25 @@ impl PlannedIndexerCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExecutedIndexerCommand {
-    pub(crate) plan: PlannedIndexerCommand,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
+pub struct ExecutedIndexerCommand {
+    pub plan: PlannedIndexerCommand,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ScipArtifact {
-    pub(crate) path: PathBuf,
-    pub(crate) indexer: Option<SupportedIndexer>,
+pub struct ScipArtifact {
+    pub path: PathBuf,
+    pub indexer: Option<SupportedIndexer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct IndexingRun {
-    pub(crate) project_root: PathBuf,
-    pub(crate) output_root: PathBuf,
-    pub(crate) commands: Vec<ExecutedIndexerCommand>,
-    pub(crate) artifacts: Vec<ScipArtifact>,
+pub struct IndexingRun {
+    pub project_root: PathBuf,
+    pub output_root: PathBuf,
+    pub commands: Vec<ExecutedIndexerCommand>,
+    pub artifacts: Vec<ScipArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

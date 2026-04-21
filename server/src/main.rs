@@ -63,21 +63,6 @@ struct Cli {
     /// Flavor of the MySQL-compatible backend: mysql or dolt.
     #[arg(long, env = "DJINN_MYSQL_FLAVOR")]
     mysql_flavor: Option<String>,
-
-    #[command(subcommand)]
-    cmd: Option<Cmd>,
-}
-
-/// Top-level subcommands. Absent (`None`) → run the daemon as usual.
-#[derive(clap::Subcommand)]
-enum Cmd {
-    /// Run the canonical-graph warm pipeline for a specific project and
-    /// exit. Used by `djinn-k8s::K8sGraphWarmer` as the per-project warm
-    /// Pod entrypoint.
-    WarmGraph {
-        /// Project id (matches `projects.id`). Positional.
-        project_id: String,
-    },
 }
 
 fn main() {
@@ -99,14 +84,6 @@ async fn async_main() {
     let _log_guards = init_logging();
 
     let cli = Cli::parse();
-
-    if let Some(Cmd::WarmGraph { project_id }) = cli.cmd.as_ref() {
-        if let Err(e) = run_warm_graph(project_id).await {
-            tracing::error!(error = %e, project_id, "djinn-server --warm-graph failed");
-            std::process::exit(1);
-        }
-        return;
-    }
 
     if cli.ensure_daemon {
         if let Err(e) = ensure_daemon_running(cli.port, cli.db_path.as_deref()).await {
@@ -374,16 +351,6 @@ fn wait_for_dolt_reachable(target: &str) {
     );
 }
 
-/// Drive the `djinn-server --warm-graph <project_id>` subcommand.
-///
-/// Delegates to [`djinn_server::canonical_graph::run_warm_graph_command`],
-/// which owns the minimal-AppState boot + warm-pipeline call. Keeps the
-/// binary entry thin so fresh agent contexts can exercise the warm path
-/// in isolation.
-async fn run_warm_graph(project_id: &str) -> anyhow::Result<()> {
-    djinn_server::canonical_graph::run_warm_graph_command(project_id).await
-}
-
 async fn ensure_daemon_running(port: u16, db_path: Option<&std::path::Path>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("resolve current exe: {e}"))?;
     // On Linux, /proc/self/exe resolves with a trailing " (deleted)" suffix
@@ -477,33 +444,6 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
-    }
-}
-
-#[cfg(test)]
-mod cli_tests {
-    use super::*;
-    use clap::Parser;
-
-    /// `djinn-server --warm-graph <id>` uses the `WarmGraph` subcommand
-    /// shape — assert clap parses it into the expected enum variant with
-    /// the project id preserved verbatim.
-    #[test]
-    fn warm_graph_subcommand_parses() {
-        let cli = Cli::try_parse_from(["djinn-server", "warm-graph", "proj-xyz"])
-            .expect("warm-graph parses");
-        match cli.cmd {
-            Some(Cmd::WarmGraph { project_id }) => assert_eq!(project_id, "proj-xyz"),
-            other => panic!("expected WarmGraph, got {:?}", other.is_some()),
-        }
-    }
-
-    /// Default invocation (no subcommand) keeps `cmd = None` so the
-    /// daemon path runs unchanged.
-    #[test]
-    fn no_subcommand_defaults_to_daemon_path() {
-        let cli = Cli::try_parse_from(["djinn-server"]).expect("default parses");
-        assert!(cli.cmd.is_none());
     }
 }
 
