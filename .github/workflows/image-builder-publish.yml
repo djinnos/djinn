@@ -1,0 +1,98 @@
+name: Build + publish djinn-image-builder
+
+# Builds server/docker/djinn-image-builder.Dockerfile and pushes the result
+# to ghcr.io/djinnos/djinn-image-builder. The image-controller (running
+# inside djinn-server) consumes this image as the Pod template for per-
+# project devcontainer build Jobs — see
+# server/crates/djinn-image-controller/src/{config.rs,build_job.rs}, where
+# DJINN_IMAGE_BUILDER_IMAGE / Helm `imagePipeline.builderImage` resolves to
+# this exact tag.
+#
+# Triggers:
+#   * push to main where the Dockerfile (or this workflow) changes — keeps
+#     `:latest` and `:sha-<short>` floating with main.
+#   * tag matching `image-builder-v*` — publishes the matching SemVer tag
+#     (and `:latest`).
+#   * workflow_dispatch — manual rebuild with an optional explicit tag.
+#
+# Platform: linux/amd64 only for v1. Multi-arch deferred until the image-
+# controller's build Pods need ARM hosts.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "image-builder-v*"
+    paths:
+      - "server/docker/djinn-image-builder.Dockerfile"
+      - ".github/workflows/image-builder-publish.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra tag to publish (e.g. v1.2.3). `latest` and `sha-<short>` are always pushed."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: djinnos/djinn-image-builder
+
+jobs:
+  build-and-push:
+    name: Build + push djinn-image-builder
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag policy:
+          #  * `latest` only when building from main (or a tag push, where
+          #    `latest=auto` lights it up too).
+          #  * `sha-<short>` always — gives Helm a way to pin a build
+          #    without cutting a tag.
+          #  * SemVer tags from `image-builder-v*` refs (raw + major/minor
+          #    rollups so `:1` and `:1.2` work).
+          #  * Free-form `workflow_dispatch` tag input when provided.
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short
+            type=match,pattern=image-builder-v(.*),group=1
+            type=match,pattern=image-builder-v(\d+),group=1
+            type=match,pattern=image-builder-v(\d+\.\d+),group=1
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+          flavor: |
+            latest=auto
+
+      - name: Build + push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/docker/djinn-image-builder.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GHA cache so day-to-day pushes (only the Dockerfile changed)
+          # avoid re-downloading the apt + npm layers.
+          cache-from: type=gha,scope=djinn-image-builder
+          cache-to: type=gha,scope=djinn-image-builder,mode=max
