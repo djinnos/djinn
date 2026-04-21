@@ -24,31 +24,6 @@ pub fn setup_log_dir_and_retention() {
     }
 }
 
-pub fn latest_log_file_path() -> Option<PathBuf> {
-    let dir = logs_dir();
-    let entries = fs::read_dir(dir).ok()?;
-
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let file_name = path.file_name()?.to_str()?;
-            if !file_name.starts_with(LOG_FILE_PREFIX) {
-                return None;
-            }
-
-            let modified = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-
-            Some((modified, path))
-        })
-        .max_by_key(|(modified, _)| *modified)
-        .map(|(_, path)| path)
-}
-
 pub fn file_prefix() -> &'static str {
     LOG_FILE_PREFIX
 }

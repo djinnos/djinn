@@ -39,7 +39,6 @@ use crate::tools::session_tools::{
     TaskTimelineParams,
 };
 use crate::tools::settings_tools::{SettingsGetParams, SettingsResetParams, SettingsSetParams};
-use crate::tools::system_tools::SystemLogsInput;
 use crate::tools::task_tools::{
     BoardHealthParams, BoardReconcileParams, ErrorOr, TaskActivityListParams,
     TaskBlockedListParams, TaskBlockersListParams, TaskClaimParams, TaskCommentAddParams,
@@ -328,11 +327,6 @@ impl DjinnMcpServer {
                     .await,
             ),
             "system_ping" => map_json(name, self.system_ping().await),
-            "system_logs" => map_json(
-                name,
-                self.system_logs(Parameters(decode_args::<SystemLogsInput>(name, args)?))
-                    .await,
-            ),
             "memory_read" => map_json(
                 name,
                 self.memory_read(Parameters(decode_args::<ReadParams>(name, args)?))

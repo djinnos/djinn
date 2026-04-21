@@ -6636,53 +6636,6 @@ expression: signatures
   },
   {
     "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "level": {
-          "nullable": true,
-          "type": "string"
-        },
-        "lines": {
-          "format": "int64",
-          "nullable": true,
-          "type": "integer"
-        }
-      },
-      "title": "SystemLogsInput",
-      "type": "object"
-    },
-    "name": "system_logs",
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "file": {
-          "type": "string"
-        },
-        "filtered": {
-          "type": "boolean"
-        },
-        "lines": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "file",
-        "lines",
-        "filtered"
-      ],
-      "title": "SystemLogsResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
       "properties": {},
       "type": "object"
     },

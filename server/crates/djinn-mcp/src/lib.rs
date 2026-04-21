@@ -2,7 +2,6 @@
 
 pub mod bridge;
 pub mod dispatch;
-pub mod logs;
 pub mod process;
 pub mod server;
 pub mod state;
