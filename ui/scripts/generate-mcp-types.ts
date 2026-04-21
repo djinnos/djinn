@@ -51,7 +51,8 @@ function parseArgs(): Options {
   );
   const snapshotFile = path.resolve(
     uiRoot,
-    get("--snapshot") ?? "../server/tests/fixtures/mcp_tools_schema_snapshot.json"
+    get("--snapshot") ??
+      "../server/src/server/tests/snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap"
   );
   const mcpUrl = get("--url") ?? process.env.DJINN_MCP_URL;
 
@@ -148,7 +149,29 @@ function normalizeSchema(raw: JsonSchema | undefined): JsonSchema {
 
 async function loadToolsFromSnapshot(snapshotFile: string): Promise<ToolSchema[]> {
   const raw = await readFile(snapshotFile, "utf8");
-  const parsed = JSON.parse(raw) as ToolListResult;
+
+  // Insta snapshots have YAML frontmatter delimited by `---` lines, followed
+  // by the serialized body. Detect and strip the frontmatter if present.
+  //
+  // Layout:
+  //   ---
+  //   source: ...
+  //   expression: ...
+  //   ---
+  //   <json body>
+  let body = raw;
+  if (raw.startsWith("---")) {
+    const parts = raw.split(/^---\s*$/m);
+    // parts[0] is "" (before first ---), parts[1] is frontmatter, parts[2]+ is body.
+    if (parts.length >= 3) {
+      body = parts.slice(2).join("---").trimStart();
+    }
+  }
+
+  const parsed = JSON.parse(body) as ToolListResult | ToolSchema[];
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
   return parsed.tools ?? [];
 }
 

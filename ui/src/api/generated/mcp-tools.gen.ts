@@ -1151,13 +1151,17 @@ export namespace GetProjectStackOutputSchema {
    * surface this verbatim.
    */
   error?: string
-  stack?: Stack
-  [k: string]: any
-  }
   /**
    * Detected stack metadata, or `None` when the project exists but no
    * detection has run yet (default `{}` in the DB) or when the
    * persisted JSON fails to deserialize.
+   */
+  stack?: (Stack | null)
+  [k: string]: any
+  }
+  /**
+   * Top-level stack descriptor — one per project, recomputed on every
+   * mirror fetch.
    */
   export interface Stack {
   /**
