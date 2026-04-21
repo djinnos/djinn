@@ -103,6 +103,9 @@ jobs:
         working-directory: server
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # No Dolt service in this job (it only compiles, --no-run).
+      # Force sqlx to read from the committed `.sqlx/` offline cache.
+      SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
 
