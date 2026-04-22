@@ -204,11 +204,7 @@ mod tests {
             .update_memory_refs(&task.id, &memory_refs)
             .await
             .unwrap();
-        sqlx::query("UPDATE notes SET confidence = 0.5 WHERE id = ?")
-            .bind(&note.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
+        note_repo.set_confidence(&note.id, 0.5).await.unwrap();
         (task, note)
     }
 

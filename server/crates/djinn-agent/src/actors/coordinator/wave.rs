@@ -322,16 +322,19 @@ mod tests {
             .await
             .unwrap();
 
-        let session_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO sessions (id, project_id, task_id, model_id, agent_type, status, started_at)
-             VALUES (?, ?, NULL, 'test/mock', 'planner', 'running', DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))",
-        )
-        .bind(&session_id)
-        .bind(&project.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        let session_repo =
+            djinn_db::SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &project.id,
+                task_id: None,
+                model: "test/mock",
+                agent_type: "planner",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
 
         let handle = spawn_coordinator_with_planner(&db, &tx);
         handle.trigger_planner_patrol().await.unwrap();
@@ -535,16 +538,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        sqlx::query("UPDATE epics SET status = 'open' WHERE id = ?")
-            .bind(&epic.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
-        let promoted: djinn_core::models::Epic = sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at, auto_breakdown, originating_adr_id FROM epics WHERE id = ?")
-            .bind(&epic.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+        let promoted = epic_repo.set_status_raw(&epic.id, "open").await.unwrap();
         let _ = tx.send(DjinnEventEnvelope::epic_updated(&promoted));
 
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
@@ -580,16 +574,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        sqlx::query("UPDATE epics SET status = 'open' WHERE id = ?")
-            .bind(&epic.id)
-            .execute(db.pool())
-            .await
-            .unwrap();
-        let promoted: djinn_core::models::Epic = sqlx::query_as("SELECT id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, closed_at, created_at, updated_at, auto_breakdown, originating_adr_id FROM epics WHERE id = ?")
-            .bind(&epic.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+        let promoted = epic_repo.set_status_raw(&epic.id, "open").await.unwrap();
         let _ = tx.send(DjinnEventEnvelope::epic_updated(&promoted));
 
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;

@@ -430,6 +430,21 @@ impl SessionRepository {
         Ok(())
     }
 
+    /// Return the raw `event_taxonomy` column for a session, as stored JSON.
+    ///
+    /// `Ok(None)` means either the session doesn't exist or the column is
+    /// `NULL`. Callers that need a deserialized `Value` should parse it
+    /// themselves; this method deliberately returns the raw string so tests
+    /// can assert on the on-disk representation.
+    pub async fn get_event_taxonomy_json(&self, id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<Option<String>> =
+            sqlx::query_scalar!("SELECT event_taxonomy FROM sessions WHERE id = ?", id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        Ok(row.flatten())
+    }
+
     /// Return the most recent non-null event taxonomy JSON for a task.
     pub async fn latest_event_taxonomy_for_task(&self, task_id: &str) -> Result<Option<Value>> {
         self.db.ensure_initialized().await?;

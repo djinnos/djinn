@@ -279,11 +279,7 @@ mod tests {
             .await
             .unwrap();
         if let Some(at) = agent_type {
-            sqlx::query!("UPDATE tasks SET agent_type = ? WHERE id = ?", at, task.id)
-                .execute(db.pool())
-                .await
-                .unwrap();
-            repo.get(&task.id).await.unwrap().unwrap()
+            repo.update_agent_type(&task.id, Some(at)).await.unwrap()
         } else {
             task
         }
@@ -322,13 +318,10 @@ mod tests {
         let role_repo = AgentRepository::new(db.clone(), EventBus::noop());
         // Clear the auto-seeded worker row so we can install one with real
         // overrides in its place.
-        sqlx::query!(
-            "DELETE FROM agents WHERE project_id = ? AND base_role = 'worker'",
-            project_id
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        role_repo
+            .delete_for_base_role(&project_id, "worker")
+            .await
+            .unwrap();
         role_repo
             .create_for_project(
                 &project_id,
@@ -421,14 +414,10 @@ mod tests {
             .unwrap();
         // Customise the auto-seeded default planner row so we can verify the
         // planner-stage fallback reads from it.
-        sqlx::query!(
-            "UPDATE agents SET system_prompt_extensions = 'default-planner-ext'
-             WHERE project_id = ? AND base_role = 'planner' AND is_default = 1",
-            project_id
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        role_repo
+            .set_default_system_prompt_extensions(&project_id, "planner", "default-planner-ext")
+            .await
+            .unwrap();
 
         let task = make_task(&db, &project_id, Some("rust-expert")).await;
         let ctx = agent_context(db);
@@ -445,14 +434,11 @@ mod tests {
         let project_id = setup_project(&db).await;
         // Customise the auto-seeded default worker row so the fallback has
         // something non-empty to assert against.
-        sqlx::query!(
-            "UPDATE agents SET system_prompt_extensions = 'default-worker-ext'
-             WHERE project_id = ? AND base_role = 'worker' AND is_default = 1",
-            project_id
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        let role_repo = AgentRepository::new(db.clone(), EventBus::noop());
+        role_repo
+            .set_default_system_prompt_extensions(&project_id, "worker", "default-worker-ext")
+            .await
+            .unwrap();
         // task.agent_type points at a name that does not exist.
         let task = make_task(&db, &project_id, Some("nonexistent-expert")).await;
         let ctx = agent_context(db);

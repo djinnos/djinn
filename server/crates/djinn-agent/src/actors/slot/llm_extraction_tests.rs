@@ -450,12 +450,10 @@ async fn llm_extracted_notes_have_confidence_0_5() {
         assert!((note.confidence - 0.5).abs() < 1e-9);
     }
 
-    let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
-            .bind(&fixture.session_id)
-            .fetch_one(fixture.db.pool())
-            .await
-            .expect("query session event_taxonomy after llm extraction");
+    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+        .get_event_taxonomy_json(&fixture.session_id)
+        .await
+        .expect("query session event_taxonomy after llm extraction");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
         .expect("deserialize stored taxonomy after llm extraction");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 3);
@@ -639,12 +637,10 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         .expect("existing note after run");
     assert!(updated_existing.confidence > starting_confidence);
 
-    let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
-            .bind(&fixture.session_id)
-            .fetch_one(fixture.db.pool())
-            .await
-            .expect("query session event_taxonomy after merge outcome");
+    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+        .get_event_taxonomy_json(&fixture.session_id)
+        .await
+        .expect("query session event_taxonomy after merge outcome");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
         .expect("deserialize stored taxonomy after merge outcome");
     assert_eq!(stored_taxonomy.extraction_quality.merged, 1);
@@ -765,12 +761,10 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
         "downgraded notes should not become durable extracted notes"
     );
 
-    let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
-            .bind(&fixture.session_id)
-            .fetch_one(fixture.db.pool())
-            .await
-            .expect("query session event_taxonomy after downgrade");
+    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+        .get_event_taxonomy_json(&fixture.session_id)
+        .await
+        .expect("query session event_taxonomy after downgrade");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
         .expect("deserialize stored taxonomy after downgrade");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
@@ -838,12 +832,10 @@ async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
         "notes missing ADR-054 sections should not become durable extracted notes"
     );
 
-    let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
-            .bind(&fixture.session_id)
-            .fetch_one(fixture.db.pool())
-            .await
-            .expect("query session event_taxonomy after template downgrade");
+    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+        .get_event_taxonomy_json(&fixture.session_id)
+        .await
+        .expect("query session event_taxonomy after template downgrade");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
         .expect("deserialize stored taxonomy after template downgrade");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
@@ -905,12 +897,10 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
         .ensure_initialized()
         .await
         .expect("db initialized");
-    let stored_json: Option<String> =
-        sqlx::query_scalar("SELECT event_taxonomy FROM sessions WHERE id = ?")
-            .bind(&fixture.session_id)
-            .fetch_one(fixture.db.pool())
-            .await
-            .expect("query session event_taxonomy");
+    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+        .get_event_taxonomy_json(&fixture.session_id)
+        .await
+        .expect("query session event_taxonomy");
 
     assert!(stored_json.is_some());
     let stored_taxonomy: SessionTaxonomy =

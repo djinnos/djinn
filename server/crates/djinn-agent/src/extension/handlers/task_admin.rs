@@ -195,23 +195,14 @@ pub(super) async fn call_task_reset_counters(
     let Some(task) = repo.resolve(&p.id).await.map_err(|e| e.to_string())? else {
         return Ok(serde_json::json!({ "error": format!("task not found: {}", p.id) }));
     };
-    sqlx::query(
-        "UPDATE tasks SET reopen_count = 0, continuation_count = 0, intervention_count = intervention_count + 1, last_intervention_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'), updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?"
-    )
-    .bind(&task.id)
-    .execute(state.db.pool())
-    .await
-    .map_err(|e| e.to_string())?;
     let updated = repo
-        .get(&task.id)
+        .reset_intervention_counters(&task.id)
         .await
-        .map_err(|e| e.to_string())?
-        .unwrap_or(task.clone());
-    state
-        .event_bus
-        .send(djinn_core::events::DjinnEventEnvelope::task_updated(
-            &updated, false,
-        ));
+        .map_err(|e| e.to_string())?;
+    // `reset_intervention_counters` already broadcasts `task_updated`, but
+    // the legacy caller also emitted one via `state.event_bus`. Keep a
+    // single canonical emit via the repo.
+    let _ = &updated;
     Ok(
         serde_json::json!({ "ok": true, "task_id": task.short_id, "reopen_count": 0, "continuation_count": 0 }),
     )

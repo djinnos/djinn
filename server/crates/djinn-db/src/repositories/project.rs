@@ -189,6 +189,61 @@ impl ProjectRepository {
         )
     }
 
+    /// Insert a project row with a caller-chosen id.
+    ///
+    /// Tests that need a stable, well-known id (e.g. to satisfy a
+    /// foreign-key reference from `verification_cache` seeded under the
+    /// same id) use this instead of [`Self::create`]'s generated UUID.
+    /// Production code should always use [`Self::create`]; mismatched ids
+    /// break downstream consumers that expect UUIDv7.
+    pub async fn create_with_id(&self, id: &str, name: &str, path: &str) -> Result<Project> {
+        self.db.ensure_initialized().await?;
+        let id_owned = id.to_owned();
+        let name_owned = name.to_owned();
+        let path_owned = path.to_owned();
+
+        let project: Project = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let name = name_owned.clone();
+                let path = path_owned.clone();
+                async move {
+                    let mut tx = self.db.pool().begin().await?;
+                    sqlx::query!(
+                        "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+                        id,
+                        name,
+                        path,
+                        "[]"
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    let project = sqlx::query_as!(
+                        Project,
+                        r#"SELECT id, name, path, created_at, target_branch,
+                                auto_merge AS "auto_merge!: bool",
+                                sync_enabled AS "sync_enabled!: bool",
+                                sync_remote
+                         FROM projects WHERE id = ?"#,
+                        id
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                    Ok::<_, crate::Error>(project)
+                }
+            },
+        )
+        .await?;
+
+        self.seed_default_roles(&project.id).await?;
+
+        self.events
+            .send(DjinnEventEnvelope::project_created(&project));
+        Ok(project)
+    }
+
     pub async fn create(&self, name: &str, path: &str) -> Result<Project> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();

@@ -198,30 +198,23 @@ mod tests {
     }
 
     async fn set_task_ac(db: &djinn_db::Database, task_id: &str, ac_json: &str) {
-        sqlx::query("UPDATE tasks SET acceptance_criteria = ? WHERE id = ?")
-            .bind(ac_json)
-            .bind(task_id)
-            .execute(db.pool())
+        TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .set_acceptance_criteria(task_id, ac_json)
             .await
             .expect("update AC");
     }
 
     async fn set_continuation_count(db: &djinn_db::Database, task_id: &str, count: i64) {
-        sqlx::query("UPDATE tasks SET continuation_count = ? WHERE id = ?")
-            .bind(count)
-            .bind(task_id)
-            .execute(db.pool())
+        TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .set_continuation_count(task_id, count)
             .await
             .expect("update continuation_count");
     }
 
     async fn insert_review_snapshot(db: &djinn_db::Database, task_id: &str, ac_json: &str) {
         let payload = serde_json::json!({"to_status":"in_task_review","ac_snapshot":serde_json::from_str::<serde_json::Value>(ac_json).expect("valid ac json")}).to_string();
-        sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES (?, ?, 'test', 'system', 'status_changed', ?)")
-            .bind(uuid::Uuid::now_v7().to_string())
-            .bind(task_id)
-            .bind(payload)
-            .execute(db.pool())
+        TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .log_activity(Some(task_id), "test", "system", "status_changed", &payload)
             .await
             .expect("insert snapshot");
     }

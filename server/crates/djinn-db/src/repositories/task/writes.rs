@@ -475,6 +475,142 @@ impl TaskRepository {
         Ok(task)
     }
 
+    /// Replace the `acceptance_criteria` JSON on a task.
+    ///
+    /// Focused setter used by the reviewer finalize path (which rewrites the
+    /// whole AC array after a `submit_review` tool call) and by tests that
+    /// seed AC directly. Production writes that merge AC into a wider
+    /// update should go through [`Self::update`].
+    pub async fn set_acceptance_criteria(&self, id: &str, ac_json: &str) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+        let id_owned = id.to_owned();
+        let ac_owned = ac_json.to_owned();
+
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let ac = ac_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET acceptance_criteria = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        ac,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
+        )
+        .await?;
+
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
+        Ok(task)
+    }
+
+    /// Force-set `continuation_count` on a task.
+    ///
+    /// Used by tests that need to seed a specific continuation value;
+    /// production code mutates this through [`Self::increment_continuation_count`].
+    pub async fn set_continuation_count(&self, id: &str, count: i64) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let id_owned = id.to_owned();
+
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET continuation_count = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        count,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Force-set `verification_failure_count` on a task.
+    ///
+    /// Used by tests that drive the verification-failure accounting pipeline;
+    /// production code increments this through the transition path.
+    pub async fn set_verification_failure_count(&self, id: &str, count: i64) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let id_owned = id.to_owned();
+
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET verification_failure_count = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        count,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Reset the reopen/continuation counters and bump intervention counters
+    /// atomically. Used by the `task_reset_counters` admin tool when a human
+    /// intervenes on a stuck task.
+    pub async fn reset_intervention_counters(&self, id: &str) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+        let id_owned = id.to_owned();
+
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET
+                            reopen_count = 0,
+                            continuation_count = 0,
+                            intervention_count = intervention_count + 1,
+                            last_intervention_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
+        )
+        .await?;
+
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
+        Ok(task)
+    }
+
     /// Replace the `memory_refs` JSON array on a task.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;

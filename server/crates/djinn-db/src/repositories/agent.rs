@@ -423,6 +423,48 @@ impl AgentRepository {
         Ok(())
     }
 
+    /// Delete every agent row matching `(project_id, base_role)`.
+    ///
+    /// Used by tests that clear the auto-seeded default rows so they can
+    /// install a bespoke one in its place. Emits no events — the test is
+    /// about to create a replacement.
+    pub async fn delete_for_base_role(&self, project_id: &str, base_role: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query!(
+            "DELETE FROM agents WHERE project_id = ? AND base_role = ?",
+            project_id,
+            base_role
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Update `system_prompt_extensions` on the default agent row for
+    /// `(project_id, base_role)`. Tests use this to customise the auto-
+    /// seeded default when they need a non-empty override to assert on
+    /// without creating a whole new agent.
+    pub async fn set_default_system_prompt_extensions(
+        &self,
+        project_id: &str,
+        base_role: &str,
+        extensions: &str,
+    ) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query!(
+            "UPDATE agents SET system_prompt_extensions = ?,
+                    updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE project_id = ? AND base_role = ? AND is_default = 1",
+            extensions,
+            project_id,
+            base_role
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+
     pub async fn list_for_project(&self, query: AgentListQuery) -> Result<AgentListResult> {
         self.db.ensure_initialized().await?;
 

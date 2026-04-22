@@ -660,11 +660,12 @@ mod tests {
             ),
             (&note_c.id, "Use idempotent jobs plus exponential backoff."),
         ] {
-            sqlx::query("UPDATE notes SET abstract = ?, overview = ? WHERE id = ?")
-                .bind("Retry storms amplify duplicate work during recovery.")
-                .bind(overview)
-                .bind(note_id)
-                .execute(db.pool())
+            note_repo
+                .update_summaries(
+                    note_id,
+                    Some("Retry storms amplify duplicate work during recovery."),
+                    Some(overview),
+                )
                 .await
                 .unwrap();
         }
@@ -846,11 +847,12 @@ mod tests {
                 "A later session found the same retry pattern independently.",
             ),
         ] {
-            sqlx::query("UPDATE notes SET abstract = ?, overview = ? WHERE id = ?")
-                .bind("Retry storms amplify duplicate work during recovery.")
-                .bind(overview)
-                .bind(note_id)
-                .execute(db.pool())
+            note_repo
+                .update_summaries(
+                    note_id,
+                    Some("Retry storms amplify duplicate work during recovery."),
+                    Some(overview),
+                )
                 .await
                 .unwrap();
         }

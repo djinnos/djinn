@@ -352,6 +352,41 @@ impl EpicRepository {
         .await?)
     }
 
+    /// Force-set `status` on an epic without transition validation.
+    ///
+    /// Unlike [`Self::close`] / [`Self::reopen`], this skips the current-
+    /// status precondition. Intended for tests that seed a specific status
+    /// (e.g. promoting a `drafting` epic straight to `open`). Production
+    /// callers should prefer the transition-checked methods.
+    pub async fn set_status_raw(&self, id: &str, status: &str) -> Result<Epic> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE epics SET `status` = ?,
+                    closed_at = CASE WHEN ? = 'closed' THEN COALESCE(closed_at, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')) ELSE NULL END,
+                    updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?",
+            status,
+            status,
+            id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let epic: Epic = sqlx::query_as!(
+            Epic,
+            r#"SELECT id, project_id, short_id, title, description, emoji, color,
+                    `status` AS "status!", owner, created_at, updated_at, closed_at,
+                    memory_refs, auto_breakdown AS "auto_breakdown!: bool",
+                    originating_adr_id
+             FROM epics WHERE id = ?"#,
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+
+        self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        Ok(epic)
+    }
+
     /// Reopen a closed epic: set status=open, clear closed_at.
     pub async fn reopen(&self, id: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;

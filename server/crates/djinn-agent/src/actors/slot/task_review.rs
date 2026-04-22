@@ -79,11 +79,8 @@ mod transition_tests {
 
     async fn insert_review_snapshot(db: &djinn_db::Database, task_id: &str, ac_json: &str) {
         let payload = serde_json::json!({"to_status":"in_task_review","ac_snapshot":serde_json::from_str::<serde_json::Value>(ac_json).expect("valid ac json")}).to_string();
-        sqlx::query("INSERT INTO activity_log (id, task_id, actor_id, actor_role, event_type, payload) VALUES (?, ?, 'test', 'system', 'status_changed', ?)")
-            .bind(uuid::Uuid::now_v7().to_string())
-            .bind(task_id)
-            .bind(payload)
-            .execute(db.pool())
+        djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .log_activity(Some(task_id), "test", "system", "status_changed", &payload)
             .await
             .expect("insert snapshot");
     }

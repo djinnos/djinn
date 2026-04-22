@@ -118,16 +118,10 @@ mod tests {
         db.ensure_initialized().await.expect("init schema");
         let name = format!("test-project-{project_id}");
         let path = format!("/tmp/{project_id}");
-        sqlx::query(
-            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
-        )
-        .bind(project_id)
-        .bind(&name)
-        .bind(&path)
-        .bind("[]")
-        .execute(db.pool())
-        .await
-        .expect("seed project row for FK");
+        djinn_db::ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .create_with_id(project_id, &name, &path)
+            .await
+            .expect("seed project row for FK");
     }
 
     fn write_settings(dir: &Path, setup_json: &str) {
