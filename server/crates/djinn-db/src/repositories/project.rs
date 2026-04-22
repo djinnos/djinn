@@ -192,25 +192,49 @@ impl ProjectRepository {
     pub async fn create(&self, name: &str, path: &str) -> Result<Project> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query!(
-            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
-            id,
-            name,
-            path,
-            "[]"
+        let name_owned = name.to_owned();
+        let path_owned = path.to_owned();
+
+        // create_test_project fires this function from ~every test; under
+        // concurrent nextest load Dolt's commit-time conflict detection
+        // rejects a fraction of the INSERTs with 1213. Wrap the
+        // INSERT+SELECT in a single transaction so a failure rolls back
+        // both and the retry's fresh transaction sees a clean slate
+        // (otherwise a committed INSERT + failed SELECT on a retry would
+        // hit a UNIQUE-constraint violation on `projects.id`).
+        let project: Project = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id.clone();
+                let name = name_owned.clone();
+                let path = path_owned.clone();
+                async move {
+                    let mut tx = self.db.pool().begin().await?;
+                    sqlx::query!(
+                        "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+                        id,
+                        name,
+                        path,
+                        "[]"
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    let project = sqlx::query_as!(
+                        Project,
+                        r#"SELECT id, name, path, created_at, target_branch,
+                                auto_merge AS "auto_merge!: bool",
+                                sync_enabled AS "sync_enabled!: bool",
+                                sync_remote
+                         FROM projects WHERE id = ?"#,
+                        id
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                    Ok::<_, crate::Error>(project)
+                }
+            },
         )
-        .execute(self.db.pool())
-        .await?;
-        let project = sqlx::query_as!(
-            Project,
-            r#"SELECT id, name, path, created_at, target_branch,
-                    auto_merge AS "auto_merge!: bool",
-                    sync_enabled AS "sync_enabled!: bool",
-                    sync_remote
-             FROM projects WHERE id = ?"#,
-            id
-        )
-        .fetch_one(self.db.pool())
         .await?;
 
         self.seed_default_roles(&id).await?;

@@ -527,36 +527,44 @@ impl NoteRepository {
         let folder = folder_for_type(&note_type).to_owned();
         let tags = tags.to_owned();
 
-        let mut tx = self.db.pool().begin().await?;
-
         let content_hash = note_content_hash(&content);
+        let empty_scope = "[]".to_string();
 
-        let empty_scope = "[]";
-        sqlx::query!(
-            "INSERT INTO notes
-                (id, project_id, permalink, title, file_path,
-                 storage, note_type, folder, tags, content, content_hash, scope_paths)
-             VALUES (?, ?, ?, ?, '', 'db', ?, ?, ?, ?, ?, ?)",
-            id,
-            project_id,
-            permalink,
-            title,
-            note_type,
-            folder,
-            tags,
-            content,
-            content_hash,
-            empty_scope
+        // Retry on Dolt 1213 — same rationale as `create_internal`.
+        let note: Note = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || async {
+                let mut tx = self.db.pool().begin().await?;
+
+                sqlx::query!(
+                    "INSERT INTO notes
+                        (id, project_id, permalink, title, file_path,
+                         storage, note_type, folder, tags, content, content_hash, scope_paths)
+                     VALUES (?, ?, ?, ?, '', 'db', ?, ?, ?, ?, ?, ?)",
+                    id,
+                    project_id,
+                    permalink,
+                    title,
+                    note_type,
+                    folder,
+                    tags,
+                    content,
+                    content_hash,
+                    empty_scope
+                )
+                .execute(&mut *tx)
+                .await?;
+
+                index_links_for_note(&mut tx, &id, &project_id, &content).await?;
+                resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
+
+                let note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+
+                tx.commit().await?;
+                Ok::<_, crate::Error>(note)
+            },
         )
-        .execute(&mut *tx)
         .await?;
-
-        index_links_for_note(&mut tx, &id, &project_id, &content).await?;
-        resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
-
-        let note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
-
-        tx.commit().await?;
         self.sync_note_embedding(
             &note.id,
             &note.title,
@@ -767,38 +775,46 @@ impl NoteRepository {
 
         let content_hash = note_content_hash(&content);
 
-        let note_result: Result<Note> = async {
-            let mut tx = self.db.pool().begin().await?;
+        // Retry the INSERT + link-indexing transaction on Dolt 1213
+        // serialization failures. Notes + note_links are hot tables during
+        // concurrent test runs and the conflict is benign — the committed
+        // peer has already persisted, the retry reopens a fresh tx and
+        // succeeds.
+        let note_result: Result<Note> = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || async {
+                let mut tx = self.db.pool().begin().await?;
 
-            sqlx::query!(
-                "INSERT INTO notes
-                    (id, project_id, permalink, title, file_path,
-                     storage, note_type, folder, tags, content, content_hash, scope_paths)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                id,
-                project_id,
-                permalink,
-                title,
-                file_path_str,
-                storage,
-                note_type,
-                folder,
-                tags,
-                content,
-                content_hash,
-                scope_paths
-            )
-            .execute(&mut *tx)
-            .await?;
+                sqlx::query!(
+                    "INSERT INTO notes
+                        (id, project_id, permalink, title, file_path,
+                         storage, note_type, folder, tags, content, content_hash, scope_paths)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    id,
+                    project_id,
+                    permalink,
+                    title,
+                    file_path_str,
+                    storage,
+                    note_type,
+                    folder,
+                    tags,
+                    content,
+                    content_hash,
+                    scope_paths
+                )
+                .execute(&mut *tx)
+                .await?;
 
-            index_links_for_note(&mut tx, &id, &project_id, &content).await?;
-            resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
+                index_links_for_note(&mut tx, &id, &project_id, &content).await?;
+                resolve_links_for_note(&mut tx, &id, &title, &permalink, &project_id).await?;
 
-            let note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
+                let note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
-            tx.commit().await?;
-            Ok(note)
-        }
+                tx.commit().await?;
+                Ok::<_, crate::Error>(note)
+            },
+        )
         .await;
 
         let note = note_result.inspect_err(|_e| {
@@ -1194,9 +1210,23 @@ impl NoteRepository {
         let id_owned = id.to_owned();
         let id_for_event = id.to_owned();
 
-        sqlx::query!("DELETE FROM notes WHERE id = ?", id_owned)
-            .execute(self.db.pool())
-            .await?;
+        // Dolt's commit machinery surfaces 1213 on the single-statement
+        // autocommit DELETE when another writer commits to an overlapping
+        // branch at the same moment. Retry the DELETE (idempotent) before
+        // giving up.
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id_owned = id_owned.clone();
+                async move {
+                    sqlx::query!("DELETE FROM notes WHERE id = ?", id_owned)
+                        .execute(self.db.pool())
+                        .await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
+        )
+        .await?;
 
         if let Err(error) = self.delete_embedding(&id_owned).await {
             tracing::warn!(note_id = %id_owned, %error, "failed to delete note embedding during note removal");

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE agents SET system_prompt_extensions = 'default-planner-ext'\n             WHERE project_id = ? AND base_role = 'planner' AND is_default = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "867dd618ce98983728d911bfb8b3023c431e241c559340a10e4bf92059756bfb"
+}

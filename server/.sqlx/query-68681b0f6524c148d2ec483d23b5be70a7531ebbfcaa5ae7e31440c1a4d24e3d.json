@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO sessions (\n            id,\n            project_id,\n            task_id,\n            model_id,\n            agent_type,\n            started_at,\n            status,\n            tokens_in,\n            tokens_out\n        )\n        VALUES (\n            ?,\n            ?,\n            ?,\n            'test-model',\n            'worker',\n            DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),\n            'completed',\n            0,\n            0\n        )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "68681b0f6524c148d2ec483d23b5be70a7531ebbfcaa5ae7e31440c1a4d24e3d"
+}
