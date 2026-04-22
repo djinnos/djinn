@@ -1000,7 +1000,13 @@ impl CoordinatorActor {
         // Check pool: all slots must be idle (no active sessions).
         let pool_status = match self.pool.get_status().await {
             Ok(s) => s,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CoordinatorActor: skipping idle consolidation — pool.get_status failed"
+                );
+                return;
+            }
         };
         if pool_status.active_slots > 0 {
             return;
@@ -1017,7 +1023,13 @@ impl CoordinatorActor {
             .await
         {
             Ok(tasks) => !tasks.is_empty(),
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CoordinatorActor: skipping idle consolidation — list_ready failed"
+                );
+                return;
+            }
         };
         if has_ready {
             return;

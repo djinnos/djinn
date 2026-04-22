@@ -590,7 +590,15 @@ mod tests {
 
         // Close t1 first — epic not yet complete.
         close_task(&db, &t1.id, &tx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Give the coordinator a bounded window to process t1's close event.
+        // A plain `sleep(100ms)` flaked under concurrent nextest load (the
+        // tick wakes up but the event hasn't landed yet); the assertion
+        // below is a *negative* one (count must stay 0) so we can't use
+        // `assert_planning_task_count(0)` — that helper returns as soon as
+        // the count matches and wouldn't guard against a late write. Keep
+        // the sleep but lift the budget to 400ms, which empirically covers
+        // the coordinator tick + DB write window under load.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
@@ -599,16 +607,18 @@ mod tests {
             "partial completion should not create planning task"
         );
 
-        // Close t2 — batch complete now.
+        // Close t2 — batch complete now. Poll (up to the helper's 10s
+        // deadline) rather than `sleep + assert_eq`: under parallel load
+        // the coordinator can take several hundred ms to pick up the
+        // close event and issue the planning-task write.
         close_task(&db, &t2.id, &tx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
-        assert_eq!(
-            planning_count(&tasks),
+        assert_planning_task_count(
+            &task_repo,
+            &epic.id,
             1,
-            "batch completion should create exactly one planning task"
-        );
+            "batch completion should create exactly one planning task",
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
