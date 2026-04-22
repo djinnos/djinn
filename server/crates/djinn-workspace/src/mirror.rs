@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use djinn_git::run_git_command;
 use tempfile::TempDir;
 use thiserror::Error;
-use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -49,6 +49,23 @@ pub enum MirrorError {
 
     #[error("mirror for {0} does not exist; call ensure_mirror first")]
     Missing(String),
+}
+
+/// Convert a [`djinn_git::GitError`] into the legacy `MirrorError::Git(String)`
+/// shape used by this module's public API. `op` is the high-level operation
+/// label (e.g. `"git clone --bare"`) — matches the pre-refactor wording so
+/// callers' log-greps keep working.
+///
+/// We pull `stderr` directly out of [`djinn_git::GitError::CommandFailed`] to
+/// preserve the old `"{op}: {stderr}"` format; other variants fall back to
+/// the full `Display`.
+fn git_err_to_mirror(op: &str, err: djinn_git::GitError) -> MirrorError {
+    match err {
+        djinn_git::GitError::CommandFailed { stderr, .. } => {
+            MirrorError::Git(format!("{op}: {stderr}"))
+        }
+        other => MirrorError::Git(format!("{op}: {other}")),
+    }
 }
 
 /// Owns the on-disk directory of per-project bare mirrors.
@@ -115,15 +132,20 @@ impl MirrorManager {
         }
 
         info!(project_id, path = ?mirror, "cloning bare mirror");
-        let output = Command::new("git")
-            .args(["clone", "--bare", "--filter=blob:none", origin_url])
-            .arg(&mirror)
-            .output()
-            .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(MirrorError::Git(format!("git clone --bare: {stderr}")));
-        }
+        // cwd = self.root — just created above by create_dir_all, and the
+        // destination `mirror` does not yet exist so it cannot itself be cwd.
+        run_git_command(
+            self.root.clone(),
+            vec![
+                "clone".into(),
+                "--bare".into(),
+                "--filter=blob:none".into(),
+                origin_url.to_string(),
+                mirror.display().to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| git_err_to_mirror("git clone --bare", e))?;
         Ok(mirror)
     }
 
@@ -145,16 +167,17 @@ impl MirrorManager {
         let _held = lock.lock().await;
 
         debug!(project_id, "fetching mirror");
-        let set_url = Command::new("git")
-            .args(["-C"])
-            .arg(&mirror)
-            .args(["remote", "set-url", "origin", origin_url])
-            .output()
-            .await?;
-        if !set_url.status.success() {
-            let stderr = String::from_utf8_lossy(&set_url.stderr);
-            return Err(MirrorError::Git(format!("git remote set-url: {stderr}")));
-        }
+        run_git_command(
+            mirror.clone(),
+            vec![
+                "remote".into(),
+                "set-url".into(),
+                "origin".into(),
+                origin_url.to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| git_err_to_mirror("git remote set-url", e))?;
 
         // `git clone --bare --filter=blob:none` does NOT write a
         // `fetch` refspec into `remote.origin`, so a plain
@@ -166,22 +189,18 @@ impl MirrorManager {
         // mirrors every head on every fetch, with force-update so
         // force-pushes and branch resets also sync. Tags follow so
         // release-detection stays current.
-        let output = Command::new("git")
-            .args(["-C"])
-            .arg(&mirror)
-            .args([
-                "fetch",
-                "--prune",
-                "origin",
-                "+refs/heads/*:refs/heads/*",
-                "+refs/tags/*:refs/tags/*",
-            ])
-            .output()
-            .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(MirrorError::Git(format!("git fetch: {stderr}")));
-        }
+        run_git_command(
+            mirror.clone(),
+            vec![
+                "fetch".into(),
+                "--prune".into(),
+                "origin".into(),
+                "+refs/heads/*:refs/heads/*".into(),
+                "+refs/tags/*:refs/tags/*".into(),
+            ],
+        )
+        .await
+        .map_err(|e| git_err_to_mirror("git fetch", e))?;
         Ok(())
     }
 
@@ -203,16 +222,22 @@ impl MirrorManager {
         let dir = TempDir::new()?;
 
         debug!(project_id, branch, path = ?dir.path(), "cloning ephemeral workspace");
-        let output = Command::new("git")
-            .args(["clone", "--local", "--shared", "--branch", branch])
-            .arg(&mirror)
-            .arg(dir.path())
-            .output()
-            .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(MirrorError::Git(format!("git clone --local: {stderr}")));
-        }
+        // cwd = self.root (exists; mirrors dir). Explicit src/dst args are
+        // absolute paths so cwd does not influence resolution.
+        run_git_command(
+            self.root.clone(),
+            vec![
+                "clone".into(),
+                "--local".into(),
+                "--shared".into(),
+                "--branch".into(),
+                branch.to_string(),
+                mirror.display().to_string(),
+                dir.path().display().to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| git_err_to_mirror("git clone --local", e))?;
 
         Ok(Workspace::new(dir, branch.to_string()))
     }

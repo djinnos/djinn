@@ -8,6 +8,7 @@ doctest = false
 
 [dependencies]
 anyhow = "1"
+djinn-git = { path = "../djinn-git" }
 git2 = "0.20"
 tempfile = "3"
 thiserror = "2"

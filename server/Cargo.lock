@@ -1438,6 +1438,7 @@ name = "djinn-workspace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "djinn-git",
  "git2",
  "tempfile",
  "thiserror 2.0.18",
