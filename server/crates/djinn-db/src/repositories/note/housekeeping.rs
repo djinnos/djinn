@@ -144,6 +144,39 @@ impl NoteRepository {
         Ok(repaired)
     }
 
+    /// Set `content_hash = NULL` for a single note.
+    ///
+    /// Exists as a deliberate test fixture: simulates a legacy row that was
+    /// inserted before `content_hash` was introduced so callers can exercise
+    /// [`Self::rebuild_missing_content_hashes`]. Production writes should
+    /// instead go through `update`/`create*` which compute the hash.
+    pub async fn clear_content_hash(&self, note_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query!(
+            "UPDATE notes SET content_hash = NULL WHERE id = ?",
+            note_id
+        )
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    /// Total number of notes in a project.
+    pub async fn count_by_project(&self, project_id: &str) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+
+        let count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM notes WHERE project_id = ?",
+            project_id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+
+        Ok(count)
+    }
+
     async fn best_broken_link_repair(
         &self,
         project_id: &str,
