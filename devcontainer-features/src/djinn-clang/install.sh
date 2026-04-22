@@ -38,8 +38,10 @@ install_clang() {
         apt)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y
+            # `software-properties-common` ships `add-apt-repository`,
+            # which the llvm.org installer invokes internally.
             apt-get install -y --no-install-recommends \
-                ca-certificates curl gnupg lsb-release
+                ca-certificates curl gnupg lsb-release software-properties-common
             # Use llvm.org apt repo for the requested major version.
             curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
             chmod +x /tmp/llvm.sh

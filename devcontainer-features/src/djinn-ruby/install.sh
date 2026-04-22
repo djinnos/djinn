@@ -69,9 +69,23 @@ install_rbenv() {
 }
 
 install_ruby() {
-    log "installing ruby ${VERSION}"
-    "${RBENV_ROOT}/bin/rbenv" install -s "${VERSION}"
-    "${RBENV_ROOT}/bin/rbenv" global "${VERSION}"
+    # ruby-build definitions are patch-level (`3.4.4`, `3.3.7`…); a
+    # bare `3.4` is not a valid definition and errors with "definition
+    # not found". Resolve major.minor to the latest known patch if the
+    # caller passed a short form.
+    local rb="${RBENV_ROOT}/plugins/ruby-build/bin/ruby-build"
+    local resolved="${VERSION}"
+    if ! "$rb" --definitions | grep -qxF "${VERSION}"; then
+        resolved="$("$rb" --definitions | grep -E "^${VERSION//./\\.}\.[0-9]+$" | sort -V | tail -1)"
+        if [[ -z "$resolved" ]]; then
+            warn "ruby-build has no definition matching '${VERSION}'; aborting"
+            return 1
+        fi
+        log "resolved ruby ${VERSION} to ${resolved}"
+    fi
+    log "installing ruby ${resolved}"
+    "${RBENV_ROOT}/bin/rbenv" install -s "${resolved}"
+    "${RBENV_ROOT}/bin/rbenv" global "${resolved}"
     "${RBENV_ROOT}/shims/gem" update --system --no-document || true
     chmod -R a+rX "${RBENV_ROOT}"
 }
