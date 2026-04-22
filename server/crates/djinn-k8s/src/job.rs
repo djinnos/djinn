@@ -95,6 +95,17 @@ pub fn build_task_run_job(
         name: "worker".to_string(),
         image: Some(project_image_tag.to_string()),
         image_pull_policy: Some(config.image_pull_policy.clone()),
+        // The per-project devcontainer image inherits its ENTRYPOINT from
+        // the devcontainer base (typically `/bin/sh`), not from the
+        // `djinn-agent-worker` Feature (which only installs the binary
+        // and does not set ENTRYPOINT). We invoke the worker explicitly
+        // so the task-run path is independent of base-image conventions;
+        // `task-run` is the subcommand that consumes the DJINN_SERVER_ADDR /
+        // DJINN_TASK_RUN_ID envs below.
+        command: Some(vec![
+            crate::warm_job::WARM_COMMAND_BIN.to_string(),
+            "task-run".to_string(),
+        ]),
         env: Some(vec![
             env_var("DJINN_SERVER_ADDR", &config.server_addr),
             env_var("DJINN_SPEC_PATH", SPEC_MOUNT_FILE),
@@ -305,6 +316,18 @@ mod tests {
         let container = &pod.containers[0];
         assert_eq!(container.name, "worker");
         assert_eq!(container.image.as_deref(), Some(project_image));
+
+        // The task-run Pod must invoke the worker binary + `task-run`
+        // subcommand explicitly — the per-project devcontainer image has
+        // no relevant ENTRYPOINT (the Feature only installs the binary).
+        let cmd = container.command.as_ref().expect("container.command set");
+        assert_eq!(
+            cmd.as_slice(),
+            &[
+                crate::warm_job::WARM_COMMAND_BIN.to_string(),
+                "task-run".to_string(),
+            ]
+        );
 
         // Env vars — require the two load-bearing ones, and confirm the
         // task-run id made it through.

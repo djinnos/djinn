@@ -75,12 +75,15 @@ use tracing_subscriber::EnvFilter;
 
 /// Top-level arg parser for the worker binary.
 ///
-/// The default mode (no subcommand) runs the existing K8s task-run wire
-/// handshake.  The `warm-graph` subcommand reuses the binary as the
-/// per-project warm Pod entrypoint previously served by
-/// `djinn-server --warm-graph`; `djinn-agent-worker` is the only image the
-/// K8s launcher puts in warm Pods, so collapsing the two saves a
-/// per-cluster image footprint.
+/// Every invocation picks a subcommand. `task-run` runs the K8s task-run
+/// wire handshake (default in-Pod supervisor); `warm-graph` reuses the
+/// binary as the per-project warm Pod entrypoint previously served by
+/// `djinn-server --warm-graph`. The two paths have disjoint required
+/// args, so they live behind disjoint subcommands — a single `Cli`
+/// wrapper with `#[command(flatten)] Option<Args>` doesn't work: clap
+/// validates the flattened required args *before* dispatching to the
+/// subcommand, so the warm Pod (which has no DJINN_SERVER_ADDR /
+/// DJINN_TASK_RUN_ID) would fail argv parsing at launch.
 #[derive(Debug, Parser)]
 #[command(
     name = "djinn-agent-worker",
@@ -88,14 +91,17 @@ use tracing_subscriber::EnvFilter;
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Option<Cmd>,
-
-    #[command(flatten)]
-    default_args: Option<WorkerDefaultArgs>,
+    cmd: Cmd,
 }
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Run the default K8s task-run worker loop: attach to the mounted
+    /// workspace, dial djinn-server over the authenticated TCP listener,
+    /// drive the supervisor to completion, and emit the terminal report.
+    /// Invoked by `build_task_run_job` in `djinn-k8s`.
+    TaskRun(WorkerDefaultArgs),
+
     /// Run the canonical-graph warm pipeline for a specific project and
     /// exit. The launcher invokes this via `djinn-agent-worker warm-graph
     /// <project_id>` in the per-project warm Pod.
@@ -105,7 +111,7 @@ enum Cmd {
     },
 }
 
-/// Arguments for the default mode (no subcommand).
+/// Arguments for the `task-run` subcommand.
 ///
 /// Every field is environment-driven so the production Pod manifest can
 /// populate them without having to author a bespoke `command:` argv; the
@@ -195,13 +201,13 @@ async fn run() -> Result<()> {
 
     let cli = Cli::parse();
 
-    if let Some(Cmd::WarmGraph { project_id }) = cli.cmd {
-        return run_warm_graph(&project_id).await;
+    match cli.cmd {
+        Cmd::TaskRun(args) => run_task_run(args).await,
+        Cmd::WarmGraph { project_id } => run_warm_graph(&project_id).await,
     }
+}
 
-    let args = cli
-        .default_args
-        .ok_or_else(|| anyhow::anyhow!("missing default-mode arguments (use `warm-graph` subcommand or pass --server-addr / --task-run-id / env vars)"))?;
+async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     info!(
         server = %args.server_addr,
         spec = %args.spec_path.display(),

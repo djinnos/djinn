@@ -47,6 +47,19 @@ pub struct KubernetesConfig {
     /// terminates it (`activeDeadlineSeconds`). Keeps a wedged indexer
     /// subprocess from pinning a Pod indefinitely.
     pub warm_job_timeout_seconds: i64,
+    /// Database DSN forwarded to the warm Pod so `djinn-agent-worker
+    /// warm-graph` can reuse the server's backing Dolt/MySQL instance.
+    /// `None` leaves the warm binary to fall back to its built-in default
+    /// (`mysql://root@127.0.0.1:3306/djinn`), which only works in single-
+    /// process local test setups.
+    pub database_url: Option<String>,
+    /// Matches `DJINN_DB_BACKEND` on djinn-server (`mysql` | `dolt`).
+    /// Forwarded so the warm Pod bootstraps an identical `Database` pool.
+    pub database_backend: Option<String>,
+    /// Matches `DJINN_MYSQL_FLAVOR` on djinn-server. Usually equal to
+    /// `database_backend`; kept distinct because the warm binary accepts
+    /// independent values (e.g. talking MySQL protocol to a Dolt server).
+    pub database_flavor: Option<String>,
 }
 
 impl KubernetesConfig {
@@ -68,6 +81,9 @@ impl KubernetesConfig {
             server_addr: "djinn.djinn.svc.cluster.local:8443".into(),
             warm_job_ttl_seconds: 300,
             warm_job_timeout_seconds: 1800,
+            database_url: None,
+            database_backend: None,
+            database_flavor: None,
         }
     }
 
@@ -95,6 +111,15 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_SERVER_ADDR` | `server_addr` | `djinn.djinn.svc.cluster.local:8443` |
     /// | `DJINN_K8S_WARM_JOB_TTL_SECONDS` | `warm_job_ttl_seconds` | `300` (parsed as `i32`) |
     /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `1800` (parsed as `i64`) |
+    /// | `DJINN_MYSQL_URL` | `database_url` | _(unset → warm Pod uses default `mysql://root@127.0.0.1:3306/djinn`)_ |
+    /// | `DJINN_DB_BACKEND` | `database_backend` | _(unset)_ |
+    /// | `DJINN_MYSQL_FLAVOR` | `database_flavor` | _(unset)_ |
+    ///
+    /// The three DB vars are read from djinn-server's own environment (the
+    /// Helm chart projects them via `envFrom: configMap djinn-config`) and
+    /// are forwarded onto the warm Pod container so `warm-graph` talks to
+    /// the same backing store. Task-run Pods don't need them — they speak
+    /// to djinn-server over RPC, not the DB directly.
     ///
     /// A malformed `DJINN_K8S_TTL_SECONDS` is logged at `warn` and falls
     /// back to the default — the runtime still boots.
@@ -163,6 +188,15 @@ impl KubernetesConfig {
                 ),
             }
         }
+        cfg.database_url = std::env::var("DJINN_MYSQL_URL")
+            .ok()
+            .filter(|v| !v.is_empty());
+        cfg.database_backend = std::env::var("DJINN_DB_BACKEND")
+            .ok()
+            .filter(|v| !v.is_empty());
+        cfg.database_flavor = std::env::var("DJINN_MYSQL_FLAVOR")
+            .ok()
+            .filter(|v| !v.is_empty());
         cfg
     }
 }
@@ -190,6 +224,12 @@ mod tests {
             std::env::set_var("DJINN_K8S_IMAGE", "repo/img:tag");
             std::env::set_var("DJINN_K8S_SERVER_ADDR", "djinn:9000");
             std::env::set_var("DJINN_K8S_TTL_SECONDS", "600");
+            std::env::set_var(
+                "DJINN_MYSQL_URL",
+                "mysql://root@djinn-dolt:3306/djinn",
+            );
+            std::env::set_var("DJINN_DB_BACKEND", "dolt");
+            std::env::set_var("DJINN_MYSQL_FLAVOR", "dolt");
         }
         let cfg = KubernetesConfig::from_env();
         assert_eq!(cfg.namespace, "test-ns");
@@ -198,6 +238,13 @@ mod tests {
         assert_eq!(cfg.ttl_seconds_after_finished, 600);
         // Unset vars fall back to `for_testing` defaults.
         assert_eq!(cfg.service_account, "djinn-taskrun");
+        // DB vars forwarded as-is for warm Pod env projection.
+        assert_eq!(
+            cfg.database_url.as_deref(),
+            Some("mysql://root@djinn-dolt:3306/djinn")
+        );
+        assert_eq!(cfg.database_backend.as_deref(), Some("dolt"));
+        assert_eq!(cfg.database_flavor.as_deref(), Some("dolt"));
 
         // Reset so we don't leak into other tests that might touch
         // overlapping env keys via `from_env()`.
@@ -206,6 +253,9 @@ mod tests {
             std::env::remove_var("DJINN_K8S_IMAGE");
             std::env::remove_var("DJINN_K8S_SERVER_ADDR");
             std::env::remove_var("DJINN_K8S_TTL_SECONDS");
+            std::env::remove_var("DJINN_MYSQL_URL");
+            std::env::remove_var("DJINN_DB_BACKEND");
+            std::env::remove_var("DJINN_MYSQL_FLAVOR");
         }
     }
 

@@ -47,8 +47,12 @@ pub const WORKSPACE_MOUNT_DIR: &str = "/workspace";
 pub const VOLUME_WORKSPACE: &str = "workspace";
 
 /// Binary path inside the devcontainer image. The `djinn-agent-worker`
-/// Feature installs the worker binary at `/opt/djinn/bin/djinn-agent-worker`;
-/// the binary exposes a `warm-graph <project-id>` subcommand.
+/// Feature installs the worker binary at `/opt/djinn/bin/djinn-agent-worker`.
+/// Both the warm Pod (`warm-graph <project-id>`) and the task-run Pod
+/// (`task-run`, see [`crate::job::build_task_run_job`]) invoke this path
+/// explicitly rather than relying on the image ENTRYPOINT — the
+/// devcontainer base image's ENTRYPOINT typically launches a shell, not
+/// the worker binary.
 pub const WARM_COMMAND_BIN: &str = "/opt/djinn/bin/djinn-agent-worker";
 
 /// Build the Job manifest dispatched for one graph-warm run.
@@ -95,27 +99,36 @@ exec {bin} warm-graph "{project_id}"
         project_id = project_id,
     );
 
+    let mut env = vec![
+        env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
+        env_var("DJINN_WARM_PROJECT_ID", project_id),
+        // run_warm_graph_command picks this up when set and uses it as
+        // the canonical project root, bypassing the DB's server-local
+        // `projects.path`.
+        env_var("DJINN_PROJECT_ROOT", &project_root),
+    ];
+    // Forward the server's DB configuration so `bootstrap_warm_database`
+    // in djinn-agent-worker connects to the same Dolt/MySQL instance as
+    // the server. Without these, the warm binary falls back to
+    // `mysql://root@127.0.0.1:3306/djinn` and fails with connection
+    // refused inside the Pod. DJINN_SERVER_ADDR is intentionally absent
+    // — `warm-graph` doesn't dial djinn-server.
+    if let Some(url) = config.database_url.as_deref() {
+        env.push(env_var("DJINN_MYSQL_URL", url));
+    }
+    if let Some(backend) = config.database_backend.as_deref() {
+        env.push(env_var("DJINN_DB_BACKEND", backend));
+    }
+    if let Some(flavor) = config.database_flavor.as_deref() {
+        env.push(env_var("DJINN_MYSQL_FLAVOR", flavor));
+    }
+
     let container = Container {
         name: "warmer".to_string(),
         image: Some(project_image_tag.to_string()),
         image_pull_policy: Some(config.image_pull_policy.clone()),
         command: Some(vec!["/bin/bash".to_string(), "-c".to_string(), cmd]),
-        env: Some(vec![
-            // Deliberately DO NOT set DJINN_SERVER_ADDR. The warm-graph
-            // subcommand doesn't dial djinn-server, but clap parses
-            // env-bound args eagerly even on subcommand paths, and
-            // `WorkerDefaultArgs::server_addr: SocketAddr` rejects the
-            // DNS-name `djinn-server.djinn.svc.cluster.local:8443` at
-            // parse time. Any other default-mode env var would
-            // similarly trip clap; only mirror/project-root (specific
-            // to the warm path) are set here.
-            env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
-            env_var("DJINN_WARM_PROJECT_ID", project_id),
-            // run_warm_graph_command picks this up when set and uses it
-            // as the canonical project root, bypassing the DB's
-            // server-local `projects.path`.
-            env_var("DJINN_PROJECT_ROOT", &project_root),
-        ]),
+        env: Some(env),
         volume_mounts: Some(vec![
             VolumeMount {
                 name: VOLUME_MIRROR.to_string(),
@@ -229,7 +242,10 @@ mod tests {
 
     #[test]
     fn builds_warm_job_manifest_with_expected_shape() {
-        let cfg = KubernetesConfig::for_testing();
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.database_url = Some("mysql://root@djinn-dolt:3306/djinn".into());
+        cfg.database_backend = Some("dolt".into());
+        cfg.database_flavor = Some("dolt".into());
         let job = build_warm_job(&cfg, "proj-xyz", "reg.example:5000/djinn-project-p:abc123");
 
         let meta = &job.metadata;
@@ -279,14 +295,23 @@ mod tests {
             .collect();
         assert_eq!(envs.get("DJINN_MIRROR_ROOT").copied(), Some(MIRROR_MOUNT_DIR));
         assert_eq!(envs.get("DJINN_WARM_PROJECT_ID").copied(), Some("proj-xyz"));
-        // DJINN_SERVER_ADDR is intentionally absent — see build_warm_job
-        // comment. Its presence would make clap reject the warm Pod's
-        // args.
+        // DJINN_SERVER_ADDR is intentionally absent — `warm-graph` lives
+        // on a disjoint subcommand whose `WorkerDefaultArgs` are not
+        // parsed, so any residual envs would only be noise.
         assert!(!envs.contains_key("DJINN_SERVER_ADDR"));
         assert_eq!(
             envs.get("DJINN_PROJECT_ROOT").copied(),
             Some(format!("{WORKSPACE_MOUNT_DIR}/proj-xyz").as_str()),
         );
+        // DB env forwarded from KubernetesConfig so the warm Pod shares
+        // the server's Dolt/MySQL target instead of falling back to the
+        // warm binary's 127.0.0.1:3306 default.
+        assert_eq!(
+            envs.get("DJINN_MYSQL_URL").copied(),
+            Some("mysql://root@djinn-dolt:3306/djinn"),
+        );
+        assert_eq!(envs.get("DJINN_DB_BACKEND").copied(), Some("dolt"));
+        assert_eq!(envs.get("DJINN_MYSQL_FLAVOR").copied(), Some("dolt"));
 
         let mounts = container.volume_mounts.as_ref().expect("mounts");
         assert_eq!(mounts.len(), 2);
