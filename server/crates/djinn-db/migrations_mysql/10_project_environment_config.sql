@@ -1,0 +1,31 @@
+-- Migration 10: Per-project runtime environment config — first-class JSON
+-- replacing the `.devcontainer/devcontainer.json` read path.
+--
+-- Authoritative plan: djinn-native environment_config refactor
+-- (ships across P1–P8; this is P1).
+--
+-- Schema: see `djinn_stack::environment::EnvironmentConfig` in
+-- `server/crates/djinn-stack/src/environment.rs`.
+--
+-- Populated by:
+-- * P5 boot reseed hook — seeds every project with `environment_config = '{}'`
+--   from `projects.stack` + copies `projects.verification_rules` verbatim into
+--   `environment_config.verification.rules`.
+-- * P6 MCP tool `project_environment_config_set` — user edits from the UI.
+--
+-- Consumers (all post-cut-over, P5+):
+-- * `djinn-image-controller` — reads this to compute the image hash + generate
+--   the Dockerfile via `djinn-image-builder`. Any write nulls `image_hash`,
+--   which re-triggers a build.
+-- * `djinn-k8s` — mounts the value as a ConfigMap at
+--   `/etc/djinn/environment.json` on warm + task-run Pods.
+-- * `djinn-agent-worker` lifecycle runner — loads it at Pod start and executes
+--   the `pre_warm` / `pre_task` phases.
+--
+-- LONGTEXT holds the JSON blob; DEFAULT `'{}'` means existing rows get an
+-- empty config after this migration applies. The P5 reseed hook uses that
+-- emptiness as its trigger — any row where the column is still `'{}'` gets
+-- auto-seeded from the stack detector on first boot after cut-over.
+
+ALTER TABLE projects
+    ADD COLUMN environment_config LONGTEXT NOT NULL DEFAULT '{}';
