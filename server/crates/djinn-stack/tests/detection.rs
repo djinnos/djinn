@@ -43,8 +43,6 @@ struct ExpectedSignals {
     has_go_mod: bool,
     has_pnpm_workspace: bool,
     has_turbo_json: bool,
-    has_devcontainer: bool,
-    has_devcontainer_lock: bool,
 }
 
 fn fixtures_root() -> PathBuf {
@@ -90,8 +88,6 @@ async fn assert_fixture(name: &str) {
     assert_eq!(got.has_go_mod, expected.manifest_signals.has_go_mod);
     assert_eq!(got.has_pnpm_workspace, expected.manifest_signals.has_pnpm_workspace);
     assert_eq!(got.has_turbo_json, expected.manifest_signals.has_turbo_json);
-    assert_eq!(got.has_devcontainer, expected.manifest_signals.has_devcontainer);
-    assert_eq!(got.has_devcontainer_lock, expected.manifest_signals.has_devcontainer_lock);
 }
 
 #[tokio::test]

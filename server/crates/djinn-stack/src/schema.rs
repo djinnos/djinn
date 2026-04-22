@@ -143,8 +143,6 @@ pub struct ManifestSignals {
     pub has_go_mod: bool,
     pub has_pnpm_workspace: bool,
     pub has_turbo_json: bool,
-    pub has_devcontainer: bool,
-    pub has_devcontainer_lock: bool,
 }
 
 impl Stack {

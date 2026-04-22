@@ -1,7 +1,0 @@
-{
-  "name": "ts-pnpm-fixture",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
-  }
-}

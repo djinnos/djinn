@@ -35,10 +35,6 @@ const MANIFEST_FILENAMES: &[&str] = &[
     "build.gradle.kts",
     "pnpm-workspace.yaml",
     "turbo.json",
-    ".devcontainer/devcontainer.json",
-    ".devcontainer/devcontainer-lock.json",
-    "devcontainer.json",
-    "devcontainer-lock.json",
 ];
 
 /// Directories we never descend into during the filesystem walk.
@@ -222,8 +218,8 @@ fn read_manifest_bodies_git(root: &Path, wanted: &BTreeSet<&str>) -> Result<Hash
 }
 
 fn is_interesting_manifest(path: &str, wanted: &BTreeSet<&str>) -> bool {
-    // Exact match on the well-known manifest filenames (root-relative
-    // or `.devcontainer/…`), plus `.config/nextest.toml`.
+    // Exact match on the well-known manifest filenames, plus
+    // `.config/nextest.toml`.
     if wanted.contains(path) {
         return true;
     }
@@ -236,12 +232,9 @@ fn is_interesting_manifest(path: &str, wanted: &BTreeSet<&str>) -> bool {
     let basename = path.rsplit('/').next().unwrap_or(path);
     if wanted.contains(basename) {
         // Only treat as manifest if it sits at the repository root
-        // (no slashes in the path) or under `.devcontainer/`.
+        // (no slashes in the path).
         let depth = path.matches('/').count();
         if depth == 0 {
-            return true;
-        }
-        if path.starts_with(".devcontainer/") && depth == 1 {
             return true;
         }
     }
@@ -465,9 +458,6 @@ fn manifest_signals(files: &[FileEntry], _bodies: &HashMap<String, String>) -> M
         has_go_mod: has("go.mod"),
         has_pnpm_workspace: has("pnpm-workspace.yaml"),
         has_turbo_json: has("turbo.json"),
-        has_devcontainer: has(".devcontainer/devcontainer.json") || has("devcontainer.json"),
-        has_devcontainer_lock: has(".devcontainer/devcontainer-lock.json")
-            || has("devcontainer-lock.json"),
     }
 }
 
