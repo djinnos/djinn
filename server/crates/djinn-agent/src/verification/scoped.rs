@@ -1,29 +1,38 @@
-/// Scoped verification command resolution.
-///
-/// Resolves which verification commands should run for the current state of the
-/// branch by diffing against the target branch and matching changed files against
-/// the project's `verification_rules` glob patterns.
+//! Scoped verification command resolution.
+//!
+//! Resolves which verification commands should run for the current state of
+//! the branch by diffing against the target branch and matching changed files
+//! against the project's `verification.rules` glob patterns from
+//! `projects.environment_config` in Dolt.
+
 use std::path::Path;
 
-use super::settings::{VerificationRule, load_settings};
+use djinn_db::Database;
+use djinn_stack::environment::{Verification, VerificationRule};
+
+use super::environment::verification_for_path;
 
 /// Resolve the set of verification commands to run for the current branch.
 ///
 /// Resolution order (highest to lowest priority):
 /// 1. If `role_verification_override` is `Some(cmd)` → return `vec![cmd]`.
-/// 2. Run `git diff --name-only <target_branch>..HEAD` to get changed files.
-/// 3. Match each changed file against `verification_rules` glob patterns (in
-///    config order).  Collect + deduplicate commands from all matching rules.
-/// 4. If no rules are configured, or no changed file matches any rule, fall
-///    back to the full-project verification commands from `.djinn/settings.json`.
+/// 2. Fetch `environment_config.verification` from Dolt for the project that
+///    owns `worktree_path` (fuzzy prefix match).
+/// 3. Run `git diff --name-only <target_branch>..HEAD` to get changed files.
+/// 4. Match each changed file against `verification.rules` glob patterns
+///    (in config order). Collect + deduplicate commands from all matching
+///    rules.
 ///
-/// Returns an empty `Vec` when no verification commands are configured at all.
-pub fn resolve_scoped_commands(
+/// Returns an empty `Vec` when no verification commands are configured at
+/// all, no rules match, or the project row / environment_config can't be
+/// found (see [`crate::verification::environment`] for soft-failure rules).
+pub async fn resolve_scoped_commands(
+    db: &Database,
     worktree_path: &Path,
     target_branch: &str,
     role_verification_override: Option<&str>,
 ) -> Vec<String> {
-    // AC-1: role/specialist override takes absolute priority.
+    // Role/specialist override takes absolute priority.
     if let Some(cmd) = role_verification_override {
         let trimmed = cmd.trim();
         if !trimmed.is_empty() {
@@ -35,26 +44,27 @@ pub fn resolve_scoped_commands(
         }
     }
 
-    // Load settings (rules + full-project verification commands).
-    let settings = load_settings(worktree_path).unwrap_or_else(|e| {
-        tracing::warn!(
-            error = %e,
-            "resolve_scoped_commands: failed to load .djinn/settings.json; using defaults"
-        );
-        Default::default()
-    });
+    let verification = verification_for_path(db, worktree_path).await;
+    resolve_scoped_commands_from_config(&verification, worktree_path, target_branch)
+}
 
-    let rules = &settings.verification_rules;
+/// Pure-function variant used by [`resolve_scoped_commands`] and by unit
+/// tests. Accepts an already-fetched [`Verification`] so the tests don't need
+/// a live Dolt instance.
+fn resolve_scoped_commands_from_config(
+    verification: &Verification,
+    worktree_path: &Path,
+    target_branch: &str,
+) -> Vec<String> {
+    let rules = &verification.rules;
 
-    // No rules configured → nothing to verify.
     if rules.is_empty() {
         tracing::debug!(
-            "resolve_scoped_commands: no verification_rules configured; skipping verification"
+            "resolve_scoped_commands: no verification.rules configured; skipping verification"
         );
         return Vec::new();
     }
 
-    // Get changed files via git diff.
     let changed_files = git_diff_changed_files(worktree_path, target_branch);
     tracing::debug!(
         target_branch = %target_branch,
@@ -69,8 +79,6 @@ pub fn resolve_scoped_commands(
         return Vec::new();
     }
 
-    // Match changed files against rules (in config order), collect commands
-    // from each matching rule, deduplicate while preserving first-seen order.
     let matched = collect_commands_for_changed_files(rules, &changed_files);
 
     if matched.is_empty() {
@@ -134,7 +142,7 @@ fn collect_commands_for_changed_files(
     let mut result = Vec::new();
 
     for rule in rules {
-        let matcher = match globset::GlobBuilder::new(&rule.pattern)
+        let matcher = match globset::GlobBuilder::new(&rule.match_pattern)
             .case_insensitive(false)
             .build()
             .and_then(|g| globset::GlobSet::builder().add(g).build())
@@ -142,7 +150,7 @@ fn collect_commands_for_changed_files(
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(
-                    pattern = %rule.pattern,
+                    pattern = %rule.match_pattern,
                     error = %e,
                     "resolve_scoped_commands: invalid glob pattern in rule; skipping"
                 );
@@ -166,16 +174,13 @@ fn collect_commands_for_changed_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::events::EventBus;
+    use djinn_db::ProjectRepository;
+    use djinn_stack::environment::{EnvironmentConfig, VerificationRule};
     use std::fs;
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
         crate::test_helpers::test_tempdir("djinn-scoped-")
-    }
-
-    fn write_settings(dir: &tempfile::TempDir, content: &str) {
-        let djinn_dir = dir.path().join(".djinn");
-        fs::create_dir_all(&djinn_dir).unwrap();
-        fs::write(djinn_dir.join("settings.json"), content).unwrap();
     }
 
     /// Initialise a git repo in `dir` with one commit on `base_branch`, then
@@ -194,9 +199,7 @@ mod tests {
         run(&["init", "-b", base_branch]);
         run(&["config", "user.email", "test@example.com"]);
         run(&["config", "user.name", "Test"]);
-        // Empty initial commit so the base branch reference exists.
         run(&["commit", "--allow-empty", "-m", "init"]);
-        // Switch to the task branch so further commits diverge from base.
         run(&["checkout", "-b", task_branch]);
         base_branch.to_string()
     }
@@ -220,63 +223,94 @@ mod tests {
             .expect("git commit");
     }
 
-    // ── AC-1: role override ───────────────────────────────────────────────────
+    fn make_verification(rules: Vec<VerificationRule>) -> Verification {
+        Verification {
+            setup: Vec::new(),
+            rules,
+        }
+    }
 
-    #[test]
-    fn role_override_returns_single_command_immediately() {
+    async fn seed_project_with_verification(
+        db: &Database,
+        id: &str,
+        path: &Path,
+        verification: Verification,
+    ) {
+        db.ensure_initialized().await.unwrap();
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        repo.create_with_id(id, &format!("p-{id}"), path.to_str().unwrap())
+            .await
+            .unwrap();
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.verification = verification;
+        let raw = serde_json::to_string(&cfg).unwrap();
+        repo.set_environment_config(id, &raw).await.unwrap();
+    }
+
+    // ── role override ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn role_override_returns_single_command_immediately() {
+        let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
-        let result = resolve_scoped_commands(dir.path(), "main", Some("cargo test --workspace"));
+        let result = resolve_scoped_commands(
+            &db,
+            dir.path(),
+            "main",
+            Some("cargo test --workspace"),
+        )
+        .await;
         assert_eq!(result, vec!["cargo test --workspace"]);
     }
 
-    #[test]
-    fn role_override_whitespace_only_falls_through_to_rules() {
+    #[tokio::test]
+    async fn role_override_whitespace_only_falls_through_to_rules() {
+        let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
-        // No settings file → no rules → no full-project commands → empty.
-        let result = resolve_scoped_commands(dir.path(), "main", Some("   "));
+        // No env config → no rules → empty.
+        let result = resolve_scoped_commands(&db, dir.path(), "main", Some("   ")).await;
         assert!(result.is_empty());
     }
 
-    // ── No rules configured → empty ────────────────────────────────────────────
+    // ── No rules configured → empty ──────────────────────────────────
 
-    #[test]
-    fn no_rules_configured_returns_empty() {
+    #[tokio::test]
+    async fn no_rules_configured_returns_empty() {
+        let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{
-                "setup": [{"name": "build", "command": "cargo build", "timeout_secs": 300}]
-            }"#,
-        );
-        let result = resolve_scoped_commands(dir.path(), "main", None);
+        seed_project_with_verification(&db, "p1", dir.path(), make_verification(vec![])).await;
+        let result = resolve_scoped_commands(&db, dir.path(), "main", None).await;
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn no_settings_file_returns_empty() {
+    #[tokio::test]
+    async fn no_project_row_returns_empty() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
         let dir = tempdir_in_tmp();
-        let result = resolve_scoped_commands(dir.path(), "main", None);
+        let result = resolve_scoped_commands(&db, dir.path(), "main", None).await;
         assert!(result.is_empty());
     }
 
-    // ── AC-2/3: rule matching ─────────────────────────────────────────────────
+    // ── rule matching (pure-function form via from_config) ─────────────
 
     #[test]
     fn single_crate_change_matches_crate_specific_rule() {
         let dir = tempdir_in_tmp();
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
-        write_settings(
-            &dir,
-            r#"{
-                "verification_rules": [
-                    {"match": "crates/djinn-mcp/**", "commands": ["cargo test -p djinn-mcp"]},
-                    {"match": "crates/djinn-core/**", "commands": ["cargo test -p djinn-core"]}
-                ]
-            }"#,
-        );
+        let verification = make_verification(vec![
+            VerificationRule {
+                match_pattern: "crates/djinn-mcp/**".into(),
+                commands: vec!["cargo test -p djinn-mcp".into()],
+            },
+            VerificationRule {
+                match_pattern: "crates/djinn-core/**".into(),
+                commands: vec!["cargo test -p djinn-core".into()],
+            },
+        ]);
         git_commit_file(dir.path(), "crates/djinn-mcp/src/lib.rs", "// mcp change");
 
-        let result = resolve_scoped_commands(dir.path(), &base, None);
+        let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
         assert_eq!(result, vec!["cargo test -p djinn-mcp"]);
     }
 
@@ -284,19 +318,20 @@ mod tests {
     fn multi_crate_change_collects_multiple_rules() {
         let dir = tempdir_in_tmp();
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
-        write_settings(
-            &dir,
-            r#"{
-                "verification_rules": [
-                    {"match": "crates/djinn-mcp/**", "commands": ["cargo test -p djinn-mcp"]},
-                    {"match": "crates/djinn-core/**", "commands": ["cargo test -p djinn-core"]}
-                ]
-            }"#,
-        );
+        let verification = make_verification(vec![
+            VerificationRule {
+                match_pattern: "crates/djinn-mcp/**".into(),
+                commands: vec!["cargo test -p djinn-mcp".into()],
+            },
+            VerificationRule {
+                match_pattern: "crates/djinn-core/**".into(),
+                commands: vec!["cargo test -p djinn-core".into()],
+            },
+        ]);
         git_commit_file(dir.path(), "crates/djinn-mcp/src/lib.rs", "// mcp");
         git_commit_file(dir.path(), "crates/djinn-core/src/lib.rs", "// core");
 
-        let result = resolve_scoped_commands(dir.path(), &base, None);
+        let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
         assert_eq!(
             result,
             vec!["cargo test -p djinn-mcp", "cargo test -p djinn-core"]
@@ -307,41 +342,55 @@ mod tests {
     fn commands_deduplicated_across_matching_rules() {
         let dir = tempdir_in_tmp();
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
-        write_settings(
-            &dir,
-            r#"{
-                "verification_rules": [
-                    {"match": "crates/djinn-mcp/**", "commands": ["cargo test --workspace"]},
-                    {"match": "crates/djinn-core/**", "commands": ["cargo test --workspace"]}
-                ]
-            }"#,
-        );
+        let verification = make_verification(vec![
+            VerificationRule {
+                match_pattern: "crates/djinn-mcp/**".into(),
+                commands: vec!["cargo test --workspace".into()],
+            },
+            VerificationRule {
+                match_pattern: "crates/djinn-core/**".into(),
+                commands: vec!["cargo test --workspace".into()],
+            },
+        ]);
         git_commit_file(dir.path(), "crates/djinn-mcp/src/lib.rs", "// mcp");
         git_commit_file(dir.path(), "crates/djinn-core/src/lib.rs", "// core");
 
-        let result = resolve_scoped_commands(dir.path(), &base, None);
+        let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
         // Same command from two matching rules should appear only once.
         assert_eq!(result, vec!["cargo test --workspace"]);
     }
-
-    // ── No rules match → empty ─────────────────────────────────────────────────
 
     #[test]
     fn no_matching_rules_returns_empty() {
         let dir = tempdir_in_tmp();
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
-        write_settings(
-            &dir,
-            r#"{
-                "verification_rules": [
-                    {"match": "crates/djinn-mcp/**", "commands": ["cargo test -p djinn-mcp"]}
-                ]
-            }"#,
-        );
-        // Change a file that doesn't match the rule.
+        let verification = make_verification(vec![VerificationRule {
+            match_pattern: "crates/djinn-mcp/**".into(),
+            commands: vec!["cargo test -p djinn-mcp".into()],
+        }]);
         git_commit_file(dir.path(), "docs/README.md", "# readme");
 
-        let result = resolve_scoped_commands(dir.path(), &base, None);
+        let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
         assert!(result.is_empty());
+    }
+
+    // ── full DB-backed flow ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn end_to_end_dolt_backed_resolution_matches_rule() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempdir_in_tmp();
+        // Retain the tempdir so the DB path row outlives the test fn.
+        let persistent = dir.keep();
+        let base = init_git_repo_with_task_branch(&persistent, "main", "task/test");
+        let verification = make_verification(vec![VerificationRule {
+            match_pattern: "crates/djinn-mcp/**".into(),
+            commands: vec!["cargo test -p djinn-mcp".into()],
+        }]);
+        seed_project_with_verification(&db, "p1", &persistent, verification).await;
+        git_commit_file(&persistent, "crates/djinn-mcp/src/lib.rs", "// mcp");
+
+        let result = resolve_scoped_commands(&db, &persistent, &base, None).await;
+        assert_eq!(result, vec!["cargo test -p djinn-mcp"]);
     }
 }

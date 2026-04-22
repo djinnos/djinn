@@ -6,7 +6,8 @@ use anyhow::Result;
 use djinn_core::commands::{CommandResult, CommandSpec};
 use djinn_db::VerificationCacheRepository;
 
-use super::settings::{load_setup_commands, verification_cache_key};
+use super::environment::{hook_commands_to_specs, verification_for_project_id};
+use super::settings::verification_cache_key;
 
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
@@ -19,7 +20,10 @@ pub struct VerificationResult {
 
 /// Run setup + verification commands for a commit.
 ///
-/// Setup commands always run (even on cache hit).
+/// Setup commands are read from Dolt's
+/// `projects.environment_config.verification.setup` column (post-P8
+/// cut-over). They always run, even on cache hit.
+///
 /// Verification commands are skipped when a passing cached result exists for
 /// `(project_id, cache_key)` where `cache_key` encodes both the commit SHA and
 /// the resolved scoped command set.
@@ -37,7 +41,8 @@ pub async fn verify_commit(
     let start = Instant::now();
     let cache_repo = VerificationCacheRepository::new(db.clone());
 
-    let setup_commands = load_setup_commands(worktree_path).map_err(anyhow::Error::msg)?;
+    let verification = verification_for_project_id(db, project_id).await;
+    let setup_commands: Vec<CommandSpec> = hook_commands_to_specs(&verification.setup);
 
     let setup_results = run_commands(&setup_commands, worktree_path)
         .await
@@ -104,8 +109,11 @@ pub async fn verify_commit(
 mod tests {
     use super::*;
     use djinn_core::commands::CommandResult;
+    use djinn_core::events::EventBus;
     use djinn_db::Database;
+    use djinn_db::ProjectRepository;
     use djinn_db::VerificationCacheRepository;
+    use djinn_stack::environment::{EnvironmentConfig, HookCommand};
 
     fn test_db() -> Database {
         Database::open_in_memory().expect("in-memory db")
@@ -124,14 +132,13 @@ mod tests {
             .expect("seed project row for FK");
     }
 
-    fn write_settings(dir: &Path, setup_json: &str) {
-        let djinn_dir = dir.join(".djinn");
-        std::fs::create_dir_all(&djinn_dir).expect("create .djinn");
-        std::fs::write(
-            djinn_dir.join("settings.json"),
-            format!(r#"{{"setup": {setup_json}}}"#),
-        )
-        .expect("write settings.json");
+    async fn seed_project_with_setup(db: &Database, project_id: &str, setup: Vec<HookCommand>) {
+        seed_project(db, project_id).await;
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.verification.setup = setup;
+        let raw = serde_json::to_string(&cfg).unwrap();
+        repo.set_environment_config(project_id, &raw).await.unwrap();
     }
 
     fn tempdir_in_tmp() -> tempfile::TempDir {
@@ -142,15 +149,13 @@ mod tests {
     async fn verify_commit_cache_miss_runs_full_pipeline_and_caches() {
         let dir = tempdir_in_tmp();
         let marker = dir.path().join("setup_ran");
-        write_settings(
-            dir.path(),
-            &format!(
-                r#"[{{"name":"setup","command":"touch {}","timeout_secs":10}}]"#,
-                marker.display()
-            ),
-        );
         let state = test_db();
-        seed_project(&state, "p1").await;
+        seed_project_with_setup(
+            &state,
+            "p1",
+            vec![HookCommand::Shell(format!("touch {}", marker.display()))],
+        )
+        .await;
         let scoped = vec!["echo ok".to_string()];
 
         let result = verify_commit("p1", "sha1", dir.path(), &state, &scoped)
@@ -174,15 +179,16 @@ mod tests {
         let dir = tempdir_in_tmp();
         let setup_marker = dir.path().join("setup_ran");
         let verify_marker = dir.path().join("verify_ran");
-        write_settings(
-            dir.path(),
-            &format!(
-                r#"[{{"name":"setup","command":"touch {}","timeout_secs":10}}]"#,
-                setup_marker.display()
-            ),
-        );
         let state = test_db();
-        seed_project(&state, "p1").await;
+        seed_project_with_setup(
+            &state,
+            "p1",
+            vec![HookCommand::Shell(format!(
+                "touch {}",
+                setup_marker.display()
+            ))],
+        )
+        .await;
         let repo = VerificationCacheRepository::new(state.clone());
         let scoped = vec![format!("touch {}", verify_marker.display())];
         let cache_key = super::super::settings::verification_cache_key("sha2", &scoped);
@@ -214,12 +220,13 @@ mod tests {
     #[tokio::test]
     async fn verify_commit_failure_is_not_cached() {
         let dir = tempdir_in_tmp();
-        write_settings(
-            dir.path(),
-            r#"[{"name":"setup","command":"echo setup","timeout_secs":10}]"#,
-        );
         let state = test_db();
-        seed_project(&state, "p1").await;
+        seed_project_with_setup(
+            &state,
+            "p1",
+            vec![HookCommand::Shell("echo setup".into())],
+        )
+        .await;
         let scoped = vec!["false".to_string()];
 
         let result = verify_commit("p1", "sha3", dir.path(), &state, &scoped)

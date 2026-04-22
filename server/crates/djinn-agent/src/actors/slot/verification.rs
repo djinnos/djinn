@@ -13,39 +13,23 @@ use super::*;
 const VERIFICATION_ESCALATION_THRESHOLD: i64 = 3;
 
 /// Minimum pipeline timeout floor — chosen to accommodate workspace-wide
-/// `cargo test` + `cargo clippy` runs on medium-sized Rust projects.  Projects
-/// with heavier verification pipelines should set `verification_timeout_secs`
-/// in `.djinn/settings.json` explicitly.
+/// `cargo test` + `cargo clippy` runs on medium-sized Rust projects.
+///
+/// Post-P8 cut-over the verification config lives in
+/// `projects.environment_config.verification`, which does not (yet) model a
+/// pipeline-level timeout. Every project falls back to this floor; when/if
+/// the schema grows an explicit field this function can start consulting it.
 const MIN_PIPELINE_TIMEOUT_SECS: u64 = 900;
-/// Extra headroom on top of the sum of per-command timeouts to account for
-/// worktree creation, cache lookup, and cleanup.
-const PIPELINE_TIMEOUT_OVERHEAD_SECS: u64 = 120;
 
-/// Compute the overall pipeline timeout from `.djinn/settings.json`.
+/// Return the fixed pipeline timeout floor.
 ///
-/// Precedence:
-/// 1. If `verification_timeout_secs` is set, use it (clamped below by the
-///    `MIN_PIPELINE_TIMEOUT_SECS` floor).
-/// 2. Otherwise fall back to `sum(setup.timeout_secs) + overhead`, also
-///    floored to `MIN_PIPELINE_TIMEOUT_SECS`.
-///
-/// Note: `verification_rules.commands` are plain strings without per-command
-/// timeouts, so they contribute nothing to the computed sum.  That is why
-/// the `MIN_PIPELINE_TIMEOUT_SECS` floor matters in practice.
-fn compute_pipeline_timeout(project_path: &str) -> std::time::Duration {
-    let path = std::path::Path::new(project_path);
-    let settings = crate::verification::settings::load_settings(path).ok();
-
-    if let Some(explicit) = settings.as_ref().and_then(|s| s.verification_timeout_secs) {
-        return std::time::Duration::from_secs(explicit.max(MIN_PIPELINE_TIMEOUT_SECS));
-    }
-
-    let sum: u64 = settings
-        .as_ref()
-        .map(|s| s.setup.iter().map(|c| c.timeout_secs.unwrap_or(300)).sum())
-        .unwrap_or(0);
-    let secs = (sum + PIPELINE_TIMEOUT_OVERHEAD_SECS).max(MIN_PIPELINE_TIMEOUT_SECS);
-    std::time::Duration::from_secs(secs)
+/// Retained as a named function so callers that previously threaded a
+/// project-specific `verification_timeout_secs` keep their signature while
+/// the environment-config schema catches up. Projects with heavier pipelines
+/// that regularly bump into the floor should file follow-up work to add a
+/// dedicated field; until then, bumping the constant is the knob.
+fn compute_pipeline_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS)
 }
 
 struct VerificationRegistrationGuard {
@@ -139,7 +123,7 @@ where
 /// 6. Cleans up the worktree
 /// 7. Triggers redispatch for the project
 pub(crate) fn spawn_verification(task_id: String, project_path: String, app_state: AgentContext) {
-    let pipeline_timeout = compute_pipeline_timeout(&project_path);
+    let pipeline_timeout = compute_pipeline_timeout();
     app_state.register_verification(&task_id);
     let task_id_for_pipeline = task_id.clone();
     let project_path_for_pipeline = project_path.clone();
@@ -235,8 +219,13 @@ async fn run_verification_pipeline(
 
     // Resolve scoped verification commands (AC-1 through AC-7).
     let role_cmd_override = role_verification_command_for_task(&task, app_state).await;
-    let scoped_commands =
-        resolve_scoped_commands(&workspace_path, &target_branch, role_cmd_override.as_deref());
+    let scoped_commands = resolve_scoped_commands(
+        &app_state.db,
+        &workspace_path,
+        &target_branch,
+        role_cmd_override.as_deref(),
+    )
+    .await;
 
     let result = verify_commit(
         &task.project_id,
@@ -473,22 +462,11 @@ mod tests {
         create_test_task, test_events,
     };
     use crate::verification::service::VerificationResult;
-    use crate::verification::settings::load_setup_commands;
     use djinn_core::commands::CommandResult;
     use djinn_core::models::TransitionAction;
     use djinn_db::TaskRepository;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
-
-    fn tempdir_in_tmp() -> tempfile::TempDir {
-        crate::test_helpers::test_tempdir("djinn-verification-")
-    }
-
-    fn write_settings(dir: &std::path::Path, body: &str) {
-        let djinn_dir = dir.join(".djinn");
-        std::fs::create_dir_all(&djinn_dir).expect("create .djinn directory");
-        std::fs::write(djinn_dir.join("settings.json"), body).expect("write settings.json");
-    }
 
     async fn tick_spawned_verification() {
         tokio::task::yield_now().await;
@@ -645,62 +623,11 @@ mod tests {
         (task_repo, task.id, app_state)
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn compute_pipeline_timeout_uses_configured_timeouts_with_overhead() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            dir.path(),
-            r#"{
-                "setup": [{"name": "fmt", "command": "cargo fmt --check", "timeout_secs": 7}]
-            }"#,
-        );
-
-        let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
-        let setup = load_setup_commands(dir.path()).expect("load settings commands");
-        let configured_timeout_secs: u64 =
-            setup.iter().map(|c| c.timeout_secs.unwrap_or(300)).sum();
-        let expected_timeout_secs = (configured_timeout_secs + PIPELINE_TIMEOUT_OVERHEAD_SECS)
-            .max(MIN_PIPELINE_TIMEOUT_SECS);
-
-        assert_eq!(timeout, Duration::from_secs(expected_timeout_secs));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn compute_pipeline_timeout_uses_minimum_when_settings_missing() {
-        let dir = tempdir_in_tmp();
-
-        let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
-
-        assert_eq!(timeout, Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn compute_pipeline_timeout_explicit_override_takes_precedence() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            dir.path(),
-            r#"{
-                "setup": [{"name": "fmt", "command": "cargo fmt --check", "timeout_secs": 7}],
-                "verification_timeout_secs": 1800
-            }"#,
-        );
-
-        let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
-        assert_eq!(timeout, Duration::from_secs(1800));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn compute_pipeline_timeout_explicit_override_clamped_to_floor() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            dir.path(),
-            r#"{
-                "setup": [],
-                "verification_timeout_secs": 10
-            }"#,
-        );
-
-        let timeout = compute_pipeline_timeout(dir.path().to_str().expect("utf8 path"));
+    #[test]
+    fn compute_pipeline_timeout_returns_minimum_floor() {
+        // Post-P8 cut-over the environment-config schema does not model a
+        // pipeline-level timeout, so every project gets the floor.
+        let timeout = compute_pipeline_timeout();
         assert_eq!(timeout, Duration::from_secs(MIN_PIPELINE_TIMEOUT_SECS));
     }
 

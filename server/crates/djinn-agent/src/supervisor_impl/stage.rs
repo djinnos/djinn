@@ -194,7 +194,6 @@ pub(crate) async fn execute_stage(
     // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's
     // parsed array (or `None` when no DB row exists).
     let McpAndSkills {
-        settings,
         effective_mcp_servers,
         effective_skills,
         mcp_registry,
@@ -212,12 +211,22 @@ pub(crate) async fn execute_stage(
     .await;
 
     // ── Setup commands + verification context ────────────────────────────────
+    // Post-P8 cut-over: the verification block lives in Dolt's
+    // `projects.environment_config`. Fetch it here and pass the parsed
+    // struct into the lifecycle helper. Missing / malformed configs degrade
+    // to an empty `Verification` (see `verification::environment`).
+    let verification =
+        crate::verification::environment::verification_for_project_id(
+            &agent_context.db,
+            &task.project_id,
+        )
+        .await;
     let SetupAndVerificationContext {
         prompt_setup_commands,
         prompt_verification_commands,
         prompt_verification_rules,
     } = match resolve_setup_and_verification_context(
-        settings,
+        verification,
         role_verification_command.as_deref(),
         worktree_path,
         &task.id,

@@ -4,8 +4,6 @@ use std::path::Path;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use djinn_core::commands::CommandSpec;
-
 /// Configuration for a single named MCP server, as discovered from `mcp.json`-style files
 /// or migrated from legacy `.djinn/settings.json` entries.
 ///
@@ -28,43 +26,26 @@ pub struct McpServerConfig {
     pub headers: HashMap<String, String>,
 }
 
-/// A single verification rule: a glob pattern matched against changed file paths,
-/// and the commands to run when any changed file matches the pattern.
+/// The non-verification subset of `.djinn/settings.json` that the agent still
+/// reads from the worktree.
 ///
-/// Example entry in `.djinn/settings.json`:
-/// ```json
-/// {"match": "crates/djinn-mcp/**", "commands": ["cargo test -p djinn-mcp", "cargo clippy -p djinn-mcp -- -D warnings"]}
-/// ```
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct VerificationRule {
-    /// Glob pattern matched against changed file paths (e.g. `"crates/djinn-mcp/**"`).
-    #[serde(rename = "match")]
-    pub pattern: String,
-    /// Commands to run when a changed file matches `pattern`.
-    pub commands: Vec<String>,
-}
-
+/// The verification-related fields — `setup`, `verification_rules`,
+/// `verification_timeout_secs` — were moved to Dolt's
+/// `projects.environment_config.verification` column as part of the P8 cut-
+/// over. What remains here is:
+///
+/// * `agent_mcp_defaults` — per-role MCP server defaults.
+/// * `global_skills` — skills injected into every agent prompt.
+///
+/// Both are still file-based pending a follow-up migration; the
+/// environment-config schema does not model them yet. When that lands, this
+/// whole struct goes away.
 #[derive(Debug, Deserialize, Default)]
 pub struct DjinnSettings {
-    #[serde(default)]
-    pub setup: Vec<CommandSpec>,
     #[serde(default)]
     pub agent_mcp_defaults: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub global_skills: Vec<String>,
-    /// File-pattern-to-command rules for scoped verification.
-    ///
-    /// Each rule maps a glob pattern to the commands that should run when any
-    /// changed file matches that pattern.
-    #[serde(default)]
-    pub verification_rules: Vec<VerificationRule>,
-    /// Overall verification pipeline timeout in seconds.  When set, replaces
-    /// the computed floor derived from `setup[*].timeout_secs`.  Needed
-    /// whenever `verification_rules` contain long-running commands (e.g.
-    /// workspace-wide `cargo test` / `cargo clippy`) that aren't otherwise
-    /// budgeted, since the per-rule command strings carry no timeout.
-    #[serde(default)]
-    pub verification_timeout_secs: Option<u64>,
 }
 
 fn dedupe_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -108,9 +89,14 @@ pub fn effective_skill_names(settings: &DjinnSettings, role_skills: &[String]) -
     )
 }
 
-/// Load the full project settings from `.djinn/settings.json` in the worktree.
+/// Load the non-verification project settings from `.djinn/settings.json` in
+/// the worktree.
 ///
-/// Returns a default (empty) `DjinnSettings` when the file is absent. Errors on malformed JSON.
+/// Returns a default (empty) `DjinnSettings` when the file is absent. Errors
+/// on malformed JSON. Verification-specific fields (setup commands, glob
+/// rules, pipeline timeout) are *not* parsed here — those live in Dolt's
+/// `environment_config.verification` column and are fetched via
+/// [`crate::verification::environment`].
 pub fn load_settings(worktree_path: &Path) -> Result<DjinnSettings, String> {
     let settings_path = worktree_path.join(".djinn/settings.json");
 
@@ -134,13 +120,6 @@ pub fn load_settings(worktree_path: &Path) -> Result<DjinnSettings, String> {
             settings_path.display()
         )),
     }
-}
-
-/// Load setup commands from `.djinn/settings.json` in the worktree.
-///
-/// Returns an empty vec when the file is absent. Errors on malformed JSON.
-pub fn load_setup_commands(worktree_path: &Path) -> Result<Vec<CommandSpec>, String> {
-    load_settings(worktree_path).map(|s| s.setup)
 }
 
 /// Load the MCP server registry from standard discovery files in the worktree.
@@ -228,63 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn load_setup_commands_uses_settings_file_when_present() {
-        let dir = tempdir_in_tmp();
-        let djinn_dir = dir.path().join(".djinn");
-        std::fs::create_dir_all(&djinn_dir).unwrap();
-        std::fs::write(
-            djinn_dir.join("settings.json"),
-            r#"{
-                "setup": [{"name": "build", "command": "cargo build", "timeout_secs": 300}]
-            }"#,
-        )
-        .unwrap();
-
-        let setup = load_setup_commands(dir.path()).expect("load commands");
-
-        assert_eq!(setup.len(), 1);
-        assert_eq!(setup[0].name, "build");
-    }
-
-    #[test]
-    fn load_setup_commands_returns_empty_when_file_missing() {
-        let dir = tempdir_in_tmp();
-
-        let setup = load_setup_commands(dir.path()).expect("load commands");
-
-        assert!(setup.is_empty());
-    }
-
-    #[test]
-    fn load_setup_commands_errors_when_file_malformed() {
-        let dir = tempdir_in_tmp();
-        let djinn_dir = dir.path().join(".djinn");
-        std::fs::create_dir_all(&djinn_dir).unwrap();
-        std::fs::write(djinn_dir.join("settings.json"), "{not valid json").unwrap();
-
-        let err = load_setup_commands(dir.path()).expect_err("malformed settings should error");
-        assert!(err.contains("invalid .djinn/settings.json"));
-    }
-
-    #[test]
-    fn djinn_settings_defaults_missing_fields_to_empty() {
-        let dir = tempdir_in_tmp();
-        let djinn_dir = dir.path().join(".djinn");
-        std::fs::create_dir_all(&djinn_dir).unwrap();
-        std::fs::write(
-            djinn_dir.join("settings.json"),
-            r#"{
-                "setup": [{"name": "build", "command": "cargo build", "timeout_secs": 300}]
-            }"#,
-        )
-        .unwrap();
-
-        let setup = load_setup_commands(dir.path()).expect("load commands");
-
-        assert_eq!(setup.len(), 1);
-    }
-
-    #[test]
     fn load_settings_parses_agent_defaults_and_global_skills() {
         let dir = tempdir_in_tmp();
         write_settings(
@@ -305,6 +227,28 @@ mod tests {
         assert_eq!(settings.agent_mcp_defaults["worker"], vec!["worker-only"]);
         assert_eq!(settings.agent_mcp_defaults["chat"], vec!["chat-web"]);
         assert_eq!(settings.global_skills, vec!["git", "rust"]);
+    }
+
+    #[test]
+    fn load_settings_ignores_unknown_fields_post_cutover() {
+        // Verification-related fields from the pre-cut-over schema are
+        // silently ignored (serde(deny_unknown_fields) is *not* set, so they
+        // deserialize as a no-op). This keeps old settings.json files from
+        // breaking the boot path while the verification config is owned by
+        // Dolt's environment_config.verification block.
+        let dir = tempdir_in_tmp();
+        write_settings(
+            &dir,
+            r#"{
+                "setup": [{"name": "legacy", "command": "true", "timeout_secs": 1}],
+                "verification_rules": [{"match": "**", "commands": ["true"]}],
+                "verification_timeout_secs": 999,
+                "global_skills": ["git"]
+            }"#,
+        );
+
+        let settings = load_settings(dir.path()).expect("settings load");
+        assert_eq!(settings.global_skills, vec!["git"]);
     }
 
     #[test]
@@ -489,80 +433,5 @@ mod tests {
             config.headers.get("Authorization").map(String::as_str),
             Some("Bearer ${DJINN_REMOTE_TOKEN}")
         );
-    }
-
-    // ── verification_rules tests ──────────────────────────────────────────────
-
-    #[test]
-    fn load_settings_parses_verification_rules() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{
-                "verification_rules": [
-                    {"match": "crates/djinn-mcp/**", "commands": ["cargo test -p djinn-mcp"]},
-                    {"match": "crates/djinn-core/**", "commands": ["cargo test -p djinn-core", "cargo clippy -p djinn-core -- -D warnings"]}
-                ]
-            }"#,
-        );
-
-        let settings = load_settings(dir.path()).expect("load settings");
-        assert_eq!(settings.verification_rules.len(), 2);
-        assert_eq!(
-            settings.verification_rules[0].pattern,
-            "crates/djinn-mcp/**"
-        );
-        assert_eq!(
-            settings.verification_rules[0].commands,
-            vec!["cargo test -p djinn-mcp"]
-        );
-        assert_eq!(
-            settings.verification_rules[1].pattern,
-            "crates/djinn-core/**"
-        );
-        assert_eq!(settings.verification_rules[1].commands.len(), 2);
-    }
-
-    #[test]
-    fn load_settings_defaults_verification_rules_to_empty() {
-        let dir = tempdir_in_tmp();
-        write_settings(&dir, r#"{"setup": [], "verification": []}"#);
-
-        let settings = load_settings(dir.path()).expect("load settings");
-        assert!(settings.verification_rules.is_empty());
-    }
-
-    #[test]
-    fn load_settings_preserves_non_mcp_fields_when_legacy_mcp_servers_present() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{
-                "setup": [{"name": "bootstrap", "command": "cargo fetch", "timeout_secs": 120}],
-                "verification_rules": [
-                    {"match": "server/**", "commands": ["cargo test -p djinn-agent"]}
-                ],
-                "verification_timeout_secs": 900,
-                "mcp_servers": {
-                    "legacy": {"url": "https://legacy.example/mcp"}
-                }
-            }"#,
-        );
-
-        let settings = load_settings(dir.path()).expect("load settings");
-
-        assert_eq!(settings.setup.len(), 1);
-        assert_eq!(settings.setup[0].name, "bootstrap");
-        assert_eq!(settings.verification_rules.len(), 1);
-        assert_eq!(settings.verification_rules[0].pattern, "server/**");
-        assert_eq!(settings.verification_timeout_secs, Some(900));
-    }
-
-    #[test]
-    fn load_settings_returns_default_when_file_missing() {
-        let dir = tempdir_in_tmp();
-        let settings = load_settings(dir.path()).expect("load settings on missing file");
-        assert!(settings.setup.is_empty());
-        assert!(settings.verification_rules.is_empty());
     }
 }

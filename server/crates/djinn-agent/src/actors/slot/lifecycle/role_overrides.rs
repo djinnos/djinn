@@ -13,7 +13,7 @@
 //! - `mcp_servers` / `skills` — per-role tool/skill lists (override project
 //!   defaults from `settings.json`).
 //! - `verification_command` — role-level override for the project's
-//!   `.djinn/settings.json` verification.
+//!   `environment_config.verification` rules (fetched from Dolt in P8+).
 //! - `model_preference` — role-level preference that dispatch uses to seed
 //!   `TaskRunSpec::model_id_per_role`.
 //!

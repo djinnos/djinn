@@ -12,7 +12,8 @@ use std::path::Path;
 use crate::actors::slot::helpers::format_command_details;
 use crate::commands::run_commands;
 use crate::context::AgentContext;
-use crate::verification::settings::DjinnSettings;
+use crate::verification::environment::hook_commands_to_specs;
+use djinn_stack::environment::Verification;
 
 /// Resolved prompt-context fragments produced after running project setup
 /// commands and resolving the verification configuration.
@@ -34,7 +35,11 @@ pub(crate) struct SetupError {
 /// Run project setup commands (if any), format them for the prompt, and
 /// resolve verification commands + rules.
 ///
-/// This mirrors the byte-for-byte behavior of the former inline block in
+/// The setup/verification config is sourced from Dolt's
+/// `projects.environment_config.verification` column (post-P8 cut-over);
+/// callers fetch it upstream and pass the [`Verification`] block in.
+///
+/// This mirrors the byte-for-byte behaviour of the former inline block in
 /// `run_task_lifecycle`:
 ///   - emits `setup_command_started` / `setup_command_finished` task-lifecycle
 ///     step events for each spec,
@@ -45,7 +50,7 @@ pub(crate) struct SetupError {
 /// The caller is responsible for all task-status transitions and worktree
 /// teardown on error — this function does not touch either.
 pub(crate) async fn resolve_setup_and_verification_context(
-    settings: DjinnSettings,
+    verification: Verification,
     role_verification_command: Option<&str>,
     worktree_path: &Path,
     task_id: &str,
@@ -60,10 +65,11 @@ pub(crate) async fn resolve_setup_and_verification_context(
             ));
     };
 
-    let setup_specs = settings.setup;
-    let verification_rules = settings.verification_rules;
+    let setup_specs = hook_commands_to_specs(&verification.setup);
+    let verification_rules = verification.rules;
     let prompt_setup_commands = format_command_details(&setup_specs);
-    // Role-level verification_command overrides .djinn/settings.json when set.
+    // Role-level verification_command overrides the project's environment
+    // config when set.
     let prompt_verification_commands = if let Some(cmd) = role_verification_command {
         if !cmd.trim().is_empty() {
             tracing::debug!(
@@ -170,7 +176,7 @@ pub(crate) async fn resolve_setup_and_verification_context(
                     .map(|c| format!("`{c}`"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("- `{}`: {}", r.pattern, cmds)
+                format!("- `{}`: {}", r.match_pattern, cmds)
             })
             .collect::<Vec<_>>()
             .join("\n");

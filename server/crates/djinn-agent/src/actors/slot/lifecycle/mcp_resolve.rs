@@ -1,10 +1,12 @@
 //! Per-session MCP server + skills resolution for the task lifecycle.
 //!
 //! This is a pure code-motion extraction from `run_task_lifecycle` (task #14
-//! preparatory work). It loads `.djinn/settings.json`, resolves the effective
-//! MCP servers and skills (role-level list merged with project defaults),
-//! connects to the resolved MCP servers (best-effort; unreachable servers are
-//! logged and skipped), and loads skill markdown files from the worktree.
+//! preparatory work). It loads the MCP/skills fields of
+//! `.djinn/settings.json` (verification config moved to Dolt in P8 — see
+//! `crate::verification::environment`), resolves the effective MCP servers
+//! and skills (role-level list merged with project defaults), connects to
+//! the resolved MCP servers (best-effort; unreachable servers are logged and
+//! skipped), and loads skill markdown files from the worktree.
 //!
 //! No failure modes here propagate errors: missing settings file, unknown
 //! server names, unreachable endpoints, and missing skill files are all
@@ -18,18 +20,22 @@ use crate::mcp_client::McpToolRegistry;
 use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
 use crate::verification::settings::{
-    DjinnSettings, effective_mcp_server_names, effective_skill_names, load_settings,
+    effective_mcp_server_names, effective_skill_names, load_settings,
 };
 
-/// Resolved MCP + skills bundle for the upcoming session, plus the parsed
-/// `DjinnSettings` (needed by downstream setup/verification resolution).
+/// Resolved MCP + skills bundle for the upcoming session.
 ///
 /// `effective_mcp_servers` / `effective_skills` are the pre-resolve *name*
 /// lists used for downstream telemetry (the reply-loop context records them
 /// for session-log provenance); `mcp_registry` / `resolved_skills` are the
 /// fully-hydrated forms used for tool dispatch / prompt building.
+///
+/// Setup / verification-rule fields previously came in on a
+/// `DjinnSettings` handle returned here; they were moved to Dolt's
+/// `projects.environment_config.verification` as part of the P8 cut-over.
+/// Downstream callers fetch that block directly via
+/// [`crate::verification::environment::verification_for_project_id`].
 pub(crate) struct McpAndSkills {
-    pub settings: DjinnSettings,
     pub effective_mcp_servers: Vec<String>,
     pub effective_skills: Vec<String>,
     pub mcp_registry: Option<McpToolRegistry>,
@@ -153,7 +159,6 @@ pub(crate) async fn resolve_mcp_and_skills(
     };
 
     McpAndSkills {
-        settings,
         effective_mcp_servers,
         effective_skills,
         mcp_registry,
