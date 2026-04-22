@@ -1,11 +1,14 @@
 use std::path::Path;
 use std::time::Duration;
 
+use djinn_core::events::EventBus;
 use djinn_core::models::Project;
-use djinn_db::{NoteRepository, ProjectRepository};
 use tokio::time::{Interval, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
 
-use crate::server::AppState;
+use crate::repositories::note::NoteRepository;
+use crate::repositories::project::ProjectRepository;
+use crate::Database;
 
 const DEFAULT_HOUSEKEEPING_INTERVAL_SECS: u64 = 60 * 60;
 const ORPHAN_TAG: &str = "orphan";
@@ -75,9 +78,13 @@ impl HousekeepingTickReport {
     }
 }
 
-pub fn spawn(state: AppState) {
+/// Spawn the periodic knowledge-base housekeeping task. Runs every
+/// `DJINN_HOUSEKEEPING_INTERVAL_SECS` seconds (default: 1 hour) until
+/// `cancel` fires. Prunes stale associations, flags orphan notes,
+/// rebuilds missing content hashes, and repairs broken wikilinks across
+/// every registered project.
+pub fn spawn(db: Database, event_bus: EventBus, cancel: CancellationToken) {
     let config = HousekeepingConfig::from_env();
-    let cancel = state.cancel().clone();
     tokio::spawn(async move {
         let mut ticker = housekeeping_ticker(config.interval);
 
@@ -85,7 +92,7 @@ pub fn spawn(state: AppState) {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = ticker.tick() => {
-                    if let Err(error) = run_tick(&state).await {
+                    if let Err(error) = run_tick(&db, &event_bus).await {
                         tracing::error!(error = %error, "housekeeping tick failed");
                     }
                 }
@@ -114,13 +121,16 @@ fn ticker_missed_tick_behavior(interval: Duration) -> MissedTickBehavior {
     ticker.missed_tick_behavior()
 }
 
-async fn run_tick(state: &AppState) -> anyhow::Result<HousekeepingTickReport> {
-    let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+async fn run_tick(
+    db: &Database,
+    event_bus: &EventBus,
+) -> anyhow::Result<HousekeepingTickReport> {
+    let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
     let projects = project_repo.list().await?;
 
     let mut project_reports = Vec::with_capacity(projects.len());
     for project in projects {
-        let report = run_project_housekeeping(state, &project).await?;
+        let report = run_project_housekeeping(db, event_bus, &project).await?;
 
         tracing::info!(
             project_id = %report.project_id,
@@ -149,11 +159,12 @@ async fn run_tick(state: &AppState) -> anyhow::Result<HousekeepingTickReport> {
 }
 
 async fn run_project_housekeeping(
-    state: &AppState,
+    db: &Database,
+    event_bus: &EventBus,
     project: &Project,
 ) -> anyhow::Result<ProjectHousekeepingReport> {
     let path = Path::new(&project.path);
-    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
+    let note_repo = NoteRepository::new(db.clone(), event_bus.clone());
     let pruned_associations = note_repo.prune_associations(&project.id).await?;
     let orphan_notes_flagged = note_repo
         .flag_orphan_notes(&project.id, path, ORPHAN_TAG)
@@ -190,9 +201,10 @@ pub(crate) fn merge_orphan_tag(tags_json: &str, orphan_tag: &str) -> String {
 mod tests {
     use std::collections::HashMap;
 
-    use djinn_db::test_support::build_multi_project_housekeeping_fixture;
+    use crate::repositories::test_support::build_multi_project_housekeeping_fixture;
+    use crate::NoteSearchParams;
+    use djinn_core::events::EventBus;
     use futures::StreamExt;
-    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -259,9 +271,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_tick_uses_exported_fixture_for_nonzero_broken_wikilink_repairs() {
-        let db = djinn_db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         let fixture = build_multi_project_housekeeping_fixture(&db).await;
-        let state = AppState::new(db.clone(), CancellationToken::new());
+        let event_bus = EventBus::noop();
 
         let before_counts: HashMap<String, i64> = fixture
             .projects
@@ -283,7 +295,7 @@ mod tests {
             .collect();
         assert!(before_counts.values().all(|count| *count > 0));
 
-        let report = run_tick(&state).await.unwrap();
+        let report = run_tick(&db, &event_bus).await.unwrap();
 
         let actual_by_project: HashMap<_, _> = report
             .project_reports
@@ -325,8 +337,8 @@ mod tests {
                     .unwrap();
 
             if project_report.repaired_broken_wikilinks == 0 {
-                let search_results = NoteRepository::new(db.clone(), state.event_bus())
-                    .search(djinn_db::NoteSearchParams {
+                let search_results = NoteRepository::new(db.clone(), event_bus.clone())
+                    .search(NoteSearchParams {
                         project_id: &fixture_project.project.id,
                         query: &repaired_target_title,
                         task_id: None,

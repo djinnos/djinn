@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod catalog;
 pub mod completion;
+pub mod embeddings;
 pub mod github_api;
 pub mod github_app;
 pub mod message;

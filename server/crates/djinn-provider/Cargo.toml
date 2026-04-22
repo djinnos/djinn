@@ -11,11 +11,16 @@ djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 anyhow = "1"
 async-stream = "0.3"
+async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 bytes = "1"
+candle-core = "0.10.2"
+candle-nn = "0.10.2"
+candle-transformers = "0.10.2"
 dirs = "6"
 futures = "0.3"
+hf-hub = "0.5.0"
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["reqwest-rustls"] }
@@ -28,6 +33,7 @@ serde_urlencoded = "0.7"
 sha2 = "0.10"
 sqlx = { version = "0.8", features = ["mysql", "runtime-tokio-rustls", "macros"] }
 thiserror = "2"
+tokenizers = "0.22.2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 tracing = "0.1"

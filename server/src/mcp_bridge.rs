@@ -156,12 +156,12 @@ impl RuntimeOps for AppState {
         query: &str,
     ) -> Result<Option<SemanticQueryEmbedding>, String> {
         match self.embedding_service().embed_query(query).await {
-            crate::semantic_memory::EmbeddingOutcome::Ready(vector) => {
+            djinn_provider::embeddings::EmbeddingOutcome::Ready(vector) => {
                 Ok(Some(SemanticQueryEmbedding {
                     values: vector.values,
                 }))
             }
-            crate::semantic_memory::EmbeddingOutcome::Degraded(_) => Ok(None),
+            djinn_provider::embeddings::EmbeddingOutcome::Degraded(_) => Ok(None),
         }
     }
 

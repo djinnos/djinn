@@ -116,7 +116,11 @@ async fn async_main() {
     }
 
     let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
-    djinn_server::housekeeping::spawn(state.clone());
+    djinn_db::background::housekeeping::spawn(
+        state.db().clone(),
+        state.event_bus(),
+        state.cancel().clone(),
+    );
     djinn_server::mirror_fetcher::spawn(state.clone());
 
     // OTLP telemetry is configured at deploy time via env (set by the Helm

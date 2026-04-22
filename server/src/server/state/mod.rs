@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
-use crate::semantic_memory::{EmbeddingService, default_embedding_cache_dir};
+use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
@@ -1061,11 +1061,11 @@ impl AppState {
         });
 
         // Watch .djinn/ directories for KB note changes and auto-reindex.
-        crate::watchers::spawn_kb_watchers(
+        djinn_db::background::watchers::spawn_kb_watchers(
             self.db().clone(),
             self.events().clone(),
             self.cancel().clone(),
-            self.embedding_service().clone(),
+            Some(Arc::new(self.embedding_service().clone())),
         );
 
         // ADR-050 Chunk C: the filesystem-watcher SCIP trigger has been

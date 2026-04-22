@@ -1,3 +1,10 @@
+//! Semantic embedding service for note/document content.
+//!
+//! Wraps a Hugging Face / Candle implementation of the Nomic-BERT embedding
+//! model. The service is loaded lazily (first use downloads + mmaps weights)
+//! and exposes a [`NoteEmbeddingProvider`] impl so `djinn-db` can persist
+//! embeddings without pulling HF/candle into the data layer.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

@@ -71,8 +71,6 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7"] }
 regex = "1.12.3"
-notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
-notify-debouncer-mini = "0.6"
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["reqwest-rustls"] }
@@ -81,11 +79,6 @@ petgraph = "0.8"
 scip = "0.7"
 globset = "0.4"
 tempfile = "3"
-candle-core = "0.10.2"
-candle-nn = "0.10.2"
-candle-transformers = "0.10.2"
-hf-hub = "0.5.0"
-tokenizers = "0.22.2"
 workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

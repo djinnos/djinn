@@ -4,13 +4,26 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use djinn_core::events::DjinnEventEnvelope;
 use notify_debouncer_mini::{DebouncedEventKind, Debouncer, new_debouncer};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::events::DjinnEventEnvelope;
-use crate::semantic_memory::EmbeddingService;
-use djinn_db::{Database, NoteRepository, ProjectRepository};
+use crate::repositories::note::{NoteEmbeddingProvider, NoteRepository};
+use crate::repositories::project::ProjectRepository;
+use crate::Database;
+use djinn_core::events::EventBus;
+
+/// Build an `EventBus` that forwards emitted events into the given
+/// broadcast sender. Repository writes inside the watcher (e.g. note
+/// reindex) reuse the same broadcast channel the rest of the server
+/// subscribes to (SSE, downstream listeners, etc.).
+fn event_bus_for(tx: &tokio::sync::broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
+    let tx = tx.clone();
+    EventBus::new(move |event| {
+        let _ = tx.send(event);
+    })
+}
 
 /// Debounce window — reindex fires this long after the last file change.
 const DEBOUNCE: Duration = Duration::from_secs(2);
@@ -20,32 +33,35 @@ struct WatcherState {
     watchers: HashMap<PathBuf, Debouncer<notify::RecommendedWatcher>>,
     db: Database,
     events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
-    embedding_service: EmbeddingService,
+    embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
 }
 
 /// Spawn a background task that watches `.djinn/` directories for all registered
 /// projects and triggers `reindex_from_disk` when note files change.
 ///
 /// Dynamically adds/removes watches when `ProjectCreated`/`ProjectDeleted` events fire.
-pub(crate) fn spawn_kb_watchers(
+///
+/// `embedding_provider` is an optional embedding backend (typically
+/// `EmbeddingService` from `djinn-provider`) used to populate note
+/// embeddings on reindex; pass `None` to skip embedding generation.
+pub fn spawn_kb_watchers(
     db: Database,
     events_tx: tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
     cancel: CancellationToken,
-    embedding_service: EmbeddingService,
+    embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
 ) {
     let state = Arc::new(Mutex::new(WatcherState {
         watchers: HashMap::new(),
         db: db.clone(),
         events_tx: events_tx.clone(),
-        embedding_service,
+        embedding_provider,
     }));
 
     let state_clone = state.clone();
     tokio::spawn(async move {
         // Initial setup: watch all existing projects.
         {
-            let project_repo =
-                ProjectRepository::new(db.clone(), crate::events::event_bus_for(&events_tx));
+            let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
             match project_repo.list().await {
                 Ok(projects) => {
                     let mut guard = state_clone.lock().await;
@@ -83,7 +99,7 @@ pub(crate) fn spawn_kb_watchers(
                             let mut guard = state_clone.lock().await;
                             // Find and remove by scanning — we don't have path from the delete event.
                             // The watcher is dropped which stops watching.
-                            let project_repo = ProjectRepository::new(guard.db.clone(), crate::events::event_bus_for(&guard.events_tx));
+                            let project_repo = ProjectRepository::new(guard.db.clone(), event_bus_for(&guard.events_tx));
                             // Project is already deleted, so we need to find which watcher to remove.
                             // We'll just try to remove any watcher whose path no longer has a project.
                             let current_projects: std::collections::HashSet<PathBuf> = match project_repo.list().await {
@@ -118,8 +134,8 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
     }
 
     let db = state.db.clone();
-    let events_tx = crate::events::event_bus_for(&state.events_tx);
-    let embedding_service = state.embedding_service.clone();
+    let events_tx = event_bus_for(&state.events_tx);
+    let embedding_provider = state.embedding_provider.clone();
     let project_id = project_id.to_string();
     let project_path_owned = project_path.to_path_buf();
     // Capture the runtime handle here (we're in async context); the debouncer
@@ -172,7 +188,7 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
                     let events_tx = events_tx.clone();
                     let project_id = project_id.clone();
                     let project_path = project_path_owned.clone();
-                    let embedding_service = embedding_service.clone();
+                    let embedding_provider = embedding_provider.clone();
                     let running = running.clone();
                     let pending = pending.clone();
 
@@ -181,9 +197,7 @@ fn add_watch(state: &mut WatcherState, project_id: &str, project_path: &Path) {
                     rt_handle.spawn(async move {
                         loop {
                             let note_repo = NoteRepository::new(db.clone(), events_tx.clone())
-                                .with_embedding_provider(Some(Arc::new(
-                                    embedding_service.clone(),
-                                )));
+                                .with_embedding_provider(embedding_provider.clone());
                             match note_repo
                                 .reindex_from_disk(&project_id, &project_path)
                                 .await
@@ -304,47 +318,27 @@ fn path_contains_segment(path: &Path, segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use tokio::sync::broadcast;
-    use tokio::time::{Duration, sleep};
-    use tokio_util::sync::CancellationToken;
 
-    use crate::events::event_bus_for;
-    use crate::test_helpers::{create_test_db, workspace_tempdir};
-    use djinn_db::ProjectRepository;
+    use crate::database::test_tempdir;
 
     use super::*;
 
-    async fn wait_for<F, Fut>(mut condition: F)
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = bool>,
-    {
-        for _ in 0..50 {
-            if condition().await {
-                return;
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-        panic!("condition not met in time");
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn add_watch_skips_missing_djinn_and_deduplicates_existing_watch() {
-        let db = create_test_db();
+        let db = Database::open_in_memory().unwrap();
         let (events_tx, _rx) = broadcast::channel(16);
         let mut state = WatcherState {
             watchers: HashMap::new(),
             db,
             events_tx,
-            embedding_service: EmbeddingService::new(
-                crate::semantic_memory::default_embedding_cache_dir(),
-            ),
+            embedding_provider: None,
         };
 
-        let missing = workspace_tempdir("watchers-kb-");
+        let missing = test_tempdir().unwrap();
         add_watch(&mut state, "project-1", missing.path());
         assert!(state.watchers.is_empty());
 
-        let project = workspace_tempdir("watchers-kb-");
+        let project = test_tempdir().unwrap();
         std::fs::create_dir_all(project.path().join(".djinn/research")).unwrap();
 
         add_watch(&mut state, "project-1", project.path());
@@ -353,94 +347,5 @@ mod tests {
         add_watch(&mut state, "project-1", project.path());
         assert_eq!(state.watchers.len(), 1);
         assert!(state.watchers.contains_key(project.path()));
-    }
-
-    // Calls `project_repo.delete(&created_project.id)`, which fans out across
-    // ~8 `ON DELETE CASCADE` FKs (epics, tasks, notes, sessions, agents,
-    // consolidation_metrics, verification_cache, task_runs) plus the 5 default
-    // agent rows seeded by `create`.  Against the current test Dolt image (port
-    // 3307) the cascade fan-out drops the connection mid-query and sqlx surfaces
-    // `Io(UnexpectedEof)`.  Same Dolt limitation as the sibling `djinn-db` test
-    // `delete_project` (server/crates/djinn-db/src/repositories/project.rs:649)
-    // and documented in the memory note `project_server_lib_test_flakes.md`.
-    // Re-enable once Dolt can execute the multi-cascade DELETE without closing
-    // the conn.
-    #[ignore = "Dolt multi-cascade DELETE drops the connection; see project_server_lib_test_flakes.md"]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn spawn_kb_watchers_tracks_project_create_and_delete_lifecycle() {
-        let db = create_test_db();
-        let (events_tx, _rx) = broadcast::channel(64);
-        let cancel = CancellationToken::new();
-
-        let initial_project_dir = workspace_tempdir("watchers-kb-");
-        std::fs::create_dir_all(initial_project_dir.path().join(".djinn/research")).unwrap();
-        let project_repo = ProjectRepository::new(db.clone(), event_bus_for(&events_tx));
-        project_repo
-            .create(
-                "initial-project",
-                &initial_project_dir.path().to_string_lossy(),
-            )
-            .await
-            .unwrap();
-
-        spawn_kb_watchers(
-            db.clone(),
-            events_tx.clone(),
-            cancel.clone(),
-            EmbeddingService::new(crate::semantic_memory::default_embedding_cache_dir()),
-        );
-
-        wait_for(|| {
-            let db = db.clone();
-            let path = initial_project_dir.path().to_path_buf();
-            async move { project_path_exists(&db, &path).await }
-        })
-        .await;
-
-        let created_project_dir = workspace_tempdir("watchers-kb-");
-        std::fs::create_dir_all(created_project_dir.path().join(".djinn/research")).unwrap();
-        let created_project = project_repo
-            .create(
-                "created-project",
-                &created_project_dir.path().to_string_lossy(),
-            )
-            .await
-            .unwrap();
-
-        wait_for(|| {
-            let db = db.clone();
-            let path = created_project_dir.path().to_path_buf();
-            async move { project_path_exists(&db, &path).await }
-        })
-        .await;
-
-        project_repo.delete(&created_project.id).await.unwrap();
-
-        wait_for(|| {
-            let db = db.clone();
-            let removed = created_project_dir.path().to_path_buf();
-            let kept = initial_project_dir.path().to_path_buf();
-            async move {
-                !project_path_exists(&db, &removed).await && project_path_exists(&db, &kept).await
-            }
-        })
-        .await;
-
-        cancel.cancel();
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    async fn project_path_exists(db: &djinn_db::Database, path: &Path) -> bool {
-        let project_repo = ProjectRepository::new(db.clone(), crate::events::EventBus::noop());
-        let target = path;
-        project_repo
-            .list()
-            .await
-            .map(|projects| {
-                projects
-                    .into_iter()
-                    .any(|p| std::path::Path::new(&p.path) == target)
-            })
-            .unwrap_or(false)
     }
 }
