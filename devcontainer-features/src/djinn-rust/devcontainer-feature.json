@@ -1,8 +1,8 @@
 {
   "id": "djinn-rust",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "name": "Djinn Rust",
-  "description": "Rust toolchain (rustup) + rust-analyzer. rust-analyzer emits SCIP natively (`rust-analyzer scip`), so no separate indexer is installed.",
+  "description": "Rust toolchain (rustup) + rust-analyzer. Installs rust-analyzer two ways: as a rustup component on the configured toolchain (for interactive IDE use) AND as a standalone binary at $CARGO_HOME/bin/rust-analyzer (bypasses rustup's per-project toolchain resolution, so `rust-analyzer scip` works regardless of what the project's rust-toolchain.toml pins).",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-rust",
   "options": {
     "toolchain": {
