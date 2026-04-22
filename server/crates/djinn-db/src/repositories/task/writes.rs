@@ -78,35 +78,85 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
-        let ac = acceptance_criteria.unwrap_or("[]");
+        let ac = acceptance_criteria.unwrap_or("[]").to_owned();
         // Phase 3B: stamp `created_by_user_id` from the task-local set at
         // the MCP dispatch root (`SESSION_USER_ID`). `None` for
         // agent/background callers with no user context — schema allows
         // NULL and Phase 4 will tighten where appropriate.
         let created_by_user_id = djinn_core::auth_context::current_user_id();
-        sqlx::query!(
-            "INSERT INTO tasks
-                (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, `status`, acceptance_criteria,
-                 created_by_user_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?)",
-            id,
-            project_id,
-            short_id,
-            epic_id,
-            title,
-            description,
-            design,
-            issue_type,
-            priority,
-            owner,
-            status,
-            ac,
-            created_by_user_id
+
+        let project_id_owned = project_id.to_owned();
+        let epic_id_owned = epic_id.map(|s| s.to_owned());
+        let title_owned = title.to_owned();
+        let description_owned = description.to_owned();
+        let design_owned = design.to_owned();
+        let issue_type_owned = issue_type.to_owned();
+        let owner_owned = owner.to_owned();
+        let status_owned = status.map(|s| s.to_owned());
+
+        // Retry on Dolt 1213: the INSERT hits the hot `tasks` table and
+        // autocommits; concurrent writers routinely trip serialization
+        // failures. The INSERT is idempotent because `id` is fixed for this
+        // call — a retry that succeeds after a prior partial commit would
+        // hit a UNIQUE violation, which `is_serialization_failure` does not
+        // match, so the original error surfaces unchanged. The follow-up
+        // SELECT is retried independently.
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id.clone();
+                let project_id = project_id_owned.clone();
+                let epic_id = epic_id_owned.clone();
+                let short_id = short_id.clone();
+                let title = title_owned.clone();
+                let description = description_owned.clone();
+                let design = design_owned.clone();
+                let issue_type = issue_type_owned.clone();
+                let owner = owner_owned.clone();
+                let status = status_owned.clone();
+                let ac = ac.clone();
+                let created_by_user_id = created_by_user_id.clone();
+                async move {
+                    sqlx::query!(
+                        "INSERT INTO tasks
+                            (id, project_id, short_id, epic_id, title, description, design,
+                             issue_type, priority, owner, `status`, acceptance_criteria,
+                             created_by_user_id)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?)",
+                        id,
+                        project_id,
+                        short_id,
+                        epic_id,
+                        title,
+                        description,
+                        design,
+                        issue_type,
+                        priority,
+                        owner,
+                        status,
+                        ac,
+                        created_by_user_id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
         )
-        .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(&id).fetch_one(self.db.pool()).await?;
+
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id.clone();
+                async move {
+                    let task: Task =
+                        task_select_where_id!(&id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
+        )
+        .await?;
 
         if let Some(epic_id) = epic_id {
             maybe_reopen_epic(&self.db, &self.events, epic_id).await?;
@@ -172,25 +222,50 @@ impl TaskRepository {
         acceptance_criteria: &str,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET
-                title = ?, description = ?, design = ?,
-                priority = ?, owner = ?, labels = ?,
-                acceptance_criteria = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            title,
-            description,
-            design,
-            priority,
-            owner,
-            labels,
-            acceptance_criteria,
-            id
+        let id_owned = id.to_owned();
+        let title_owned = title.to_owned();
+        let description_owned = description.to_owned();
+        let design_owned = design.to_owned();
+        let owner_owned = owner.to_owned();
+        let labels_owned = labels.to_owned();
+        let ac_owned = acceptance_criteria.to_owned();
+
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let title = title_owned.clone();
+                let description = description_owned.clone();
+                let design = design_owned.clone();
+                let owner = owner_owned.clone();
+                let labels = labels_owned.clone();
+                let acceptance_criteria = ac_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET
+                            title = ?, description = ?, design = ?,
+                            priority = ?, owner = ?, labels = ?,
+                            acceptance_criteria = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        title,
+                        description,
+                        design,
+                        priority,
+                        owner,
+                        labels,
+                        acceptance_criteria,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
         )
-        .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -199,9 +274,22 @@ impl TaskRepository {
 
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!("DELETE FROM tasks WHERE id = ?", id)
-            .execute(self.db.pool())
-            .await?;
+        let id_owned = id.to_owned();
+
+        // DELETE is idempotent; retry on Dolt 1213.
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                async move {
+                    sqlx::query!("DELETE FROM tasks WHERE id = ?", id)
+                        .execute(self.db.pool())
+                        .await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
+        )
+        .await?;
 
         self.events.send(DjinnEventEnvelope::task_deleted(id));
         Ok(())
@@ -210,17 +298,31 @@ impl TaskRepository {
     /// Store the squash-merge commit SHA for a task after merge completes.
     pub async fn set_merge_commit_sha(&self, id: &str, sha: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET merge_commit_sha = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            sha,
-            id
-        )
-        .execute(self.db.pool())
-        .await?;
+        let id_owned = id.to_owned();
+        let sha_owned = sha.to_owned();
 
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let sha = sha_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET merge_commit_sha = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        sha,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
+        )
+        .await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -233,17 +335,31 @@ impl TaskRepository {
     /// using the direct-push merge path.
     pub async fn set_pr_url(&self, id: &str, url: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET pr_url = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            url,
-            id
-        )
-        .execute(self.db.pool())
-        .await?;
+        let id_owned = id.to_owned();
+        let url_owned = url.to_owned();
 
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let url = url_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET pr_url = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        url,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
+        )
+        .await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -260,17 +376,31 @@ impl TaskRepository {
         metadata: Option<&str>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET merge_conflict_metadata = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            metadata,
-            id
-        )
-        .execute(self.db.pool())
-        .await?;
+        let id_owned = id.to_owned();
+        let metadata_owned = metadata.map(|s| s.to_owned());
 
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let metadata = metadata_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET merge_conflict_metadata = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        metadata,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
+        )
+        .await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -280,13 +410,25 @@ impl TaskRepository {
     /// Increment `continuation_count` by 1 (used by compaction).
     pub async fn increment_continuation_count(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET continuation_count = continuation_count + 1,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            id
+        let id_owned = id.to_owned();
+
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET continuation_count = continuation_count + 1,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
         )
-        .execute(self.db.pool())
         .await?;
 
         let task = self
@@ -302,16 +444,31 @@ impl TaskRepository {
     /// Set or clear the `agent_type` specialist name on a task.
     pub async fn update_agent_type(&self, id: &str, agent_type: Option<&str>) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET agent_type = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            agent_type,
-            id
+        let id_owned = id.to_owned();
+        let agent_type_owned = agent_type.map(|s| s.to_owned());
+
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let agent_type = agent_type_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET agent_type = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        agent_type,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
         )
-        .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -321,16 +478,31 @@ impl TaskRepository {
     /// Replace the `memory_refs` JSON array on a task.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET memory_refs = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            memory_refs_json,
-            id
+        let id_owned = id.to_owned();
+        let memory_refs_owned = memory_refs_json.to_owned();
+
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let memory_refs_json = memory_refs_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET memory_refs = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        memory_refs_json,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
         )
-        .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));

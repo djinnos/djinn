@@ -10,47 +10,66 @@ impl TaskRepository {
             return Err(Error::Internal("task cannot block itself".into()));
         }
         self.db.ensure_initialized().await?;
-        let mut tx = self.db.pool().begin().await?;
-        // Cycle detection: check if task_id already (transitively) blocks blocking_id.
-        // If so, adding "blocking_id blocks task_id" would form a cycle.
-        let would_cycle = sqlx::query_scalar!(
-            r#"WITH RECURSIVE reach(id) AS (
-                 SELECT task_id FROM blockers WHERE blocking_task_id = ?
-                 UNION
-                 SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
-             )
-             SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?) AS "exists!: i64""#,
-            task_id,
-            blocking_id
+
+        let task_id_owned = task_id.to_owned();
+        let blocking_id_owned = blocking_id.to_owned();
+
+        // Retry on Dolt 1213: concurrent edits to `blockers` (plus the CTE
+        // walk over `blockers`) are the exact overlap that trips MVCC
+        // serialization failures; the transaction is idempotent modulo the
+        // duplicate-INSERT branch which is already handled below.
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let task_id = task_id_owned.clone();
+                let blocking_id = blocking_id_owned.clone();
+                async move {
+                    let mut tx = self.db.pool().begin().await?;
+                    // Cycle detection: check if task_id already (transitively) blocks blocking_id.
+                    // If so, adding "blocking_id blocks task_id" would form a cycle.
+                    let would_cycle = sqlx::query_scalar!(
+                        r#"WITH RECURSIVE reach(id) AS (
+                             SELECT task_id FROM blockers WHERE blocking_task_id = ?
+                             UNION
+                             SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
+                         )
+                         SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?) AS "exists!: i64""#,
+                        task_id,
+                        blocking_id
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if would_cycle > 0 {
+                        return Err(Error::Internal(
+                            "would create circular blocker dependency".into(),
+                        ));
+                    }
+                    let result = sqlx::query!(
+                        "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?, ?)",
+                        task_id,
+                        blocking_id
+                    )
+                    .execute(&mut *tx)
+                    .await;
+                    match result {
+                        Ok(_) => {}
+                        Err(sqlx::Error::Database(ref e))
+                            if e.message().contains("UNIQUE constraint failed") =>
+                        {
+                            // Duplicate blocker — idempotent, silently skip.
+                        }
+                        Err(e) => {
+                            return Err(Error::Internal(format!(
+                                "failed to add blocker {blocking_id} → {task_id}: {e}"
+                            )));
+                        }
+                    }
+                    tx.commit().await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
         )
-        .fetch_one(&mut *tx)
         .await?;
-        if would_cycle > 0 {
-            return Err(Error::Internal(
-                "would create circular blocker dependency".into(),
-            ));
-        }
-        let result = sqlx::query!(
-            "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?, ?)",
-            task_id,
-            blocking_id
-        )
-        .execute(&mut *tx)
-        .await;
-        match result {
-            Ok(_) => {}
-            Err(sqlx::Error::Database(ref e))
-                if e.message().contains("UNIQUE constraint failed") =>
-            {
-                // Duplicate blocker — idempotent, silently skip.
-            }
-            Err(e) => {
-                return Err(Error::Internal(format!(
-                    "failed to add blocker {blocking_id} → {task_id}: {e}"
-                )));
-            }
-        }
-        tx.commit().await?;
 
         if let Some(task) = self.get(task_id).await? {
             self.events
@@ -67,12 +86,27 @@ impl TaskRepository {
 
     pub async fn remove_blocker(&self, task_id: &str, blocking_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "DELETE FROM blockers WHERE task_id = ? AND blocking_task_id = ?",
-            task_id,
-            blocking_id
+        let task_id_owned = task_id.to_owned();
+        let blocking_id_owned = blocking_id.to_owned();
+
+        // DELETE is idempotent; retry on Dolt 1213.
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let task_id = task_id_owned.clone();
+                let blocking_id = blocking_id_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "DELETE FROM blockers WHERE task_id = ? AND blocking_task_id = ?",
+                        task_id,
+                        blocking_id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
         )
-        .execute(self.db.pool())
         .await?;
 
         if let Some(task) = self.get(task_id).await? {
@@ -98,64 +132,79 @@ impl TaskRepository {
         remove: &[String],
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
-        let mut tx = self.db.pool().begin().await?;
 
-        // Removals first (so adds can reference the freed edges if needed).
-        for blocking_id in remove {
-            sqlx::query!(
-                "DELETE FROM blockers WHERE task_id = ? AND blocking_task_id = ?",
-                task_id,
-                blocking_id
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
+        // Retry on Dolt 1213. `add` / `remove` are borrowed slices; reborrow
+        // them inside the closure so we avoid cloning the whole Vec on
+        // every attempt — only the short task_id is cloned.
+        let task_id_owned = task_id.to_owned();
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let task_id = task_id_owned.clone();
+                async move {
+                    let mut tx = self.db.pool().begin().await?;
 
-        // Additions with cycle detection.
-        for blocking_id in add {
-            if task_id == blocking_id {
-                return Err(Error::Internal("task cannot block itself".into()));
-            }
-            let would_cycle = sqlx::query_scalar!(
-                r#"WITH RECURSIVE reach(id) AS (
-                     SELECT task_id FROM blockers WHERE blocking_task_id = ?
-                     UNION
-                     SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
-                 )
-                 SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?) AS "exists!: i64""#,
-                task_id,
-                blocking_id
-            )
-            .fetch_one(&mut *tx)
-            .await?;
-            if would_cycle > 0 {
-                return Err(Error::Internal(
-                    "would create circular blocker dependency".into(),
-                ));
-            }
-            let result = sqlx::query!(
-                "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?, ?)",
-                task_id,
-                blocking_id
-            )
-            .execute(&mut *tx)
-            .await;
-            match result {
-                Ok(_) => {}
-                Err(sqlx::Error::Database(ref e))
-                    if e.message().contains("UNIQUE constraint failed") =>
-                {
-                    // Duplicate blocker — idempotent, silently skip.
+                    // Removals first (so adds can reference the freed edges if needed).
+                    for blocking_id in remove {
+                        sqlx::query!(
+                            "DELETE FROM blockers WHERE task_id = ? AND blocking_task_id = ?",
+                            task_id,
+                            blocking_id
+                        )
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+
+                    // Additions with cycle detection.
+                    for blocking_id in add {
+                        if &task_id == blocking_id {
+                            return Err(Error::Internal("task cannot block itself".into()));
+                        }
+                        let would_cycle = sqlx::query_scalar!(
+                            r#"WITH RECURSIVE reach(id) AS (
+                                 SELECT task_id FROM blockers WHERE blocking_task_id = ?
+                                 UNION
+                                 SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
+                             )
+                             SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?) AS "exists!: i64""#,
+                            task_id,
+                            blocking_id
+                        )
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        if would_cycle > 0 {
+                            return Err(Error::Internal(
+                                "would create circular blocker dependency".into(),
+                            ));
+                        }
+                        let result = sqlx::query!(
+                            "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?, ?)",
+                            task_id,
+                            blocking_id
+                        )
+                        .execute(&mut *tx)
+                        .await;
+                        match result {
+                            Ok(_) => {}
+                            Err(sqlx::Error::Database(ref e))
+                                if e.message().contains("UNIQUE constraint failed") =>
+                            {
+                                // Duplicate blocker — idempotent, silently skip.
+                            }
+                            Err(e) => {
+                                return Err(Error::Internal(format!(
+                                    "failed to add blocker {blocking_id} → {task_id}: {e}"
+                                )));
+                            }
+                        }
+                    }
+
+                    tx.commit().await?;
+                    Ok::<_, crate::Error>(())
                 }
-                Err(e) => {
-                    return Err(Error::Internal(format!(
-                        "failed to add blocker {blocking_id} → {task_id}: {e}"
-                    )));
-                }
-            }
-        }
-
-        tx.commit().await?;
+            },
+        )
+        .await?;
 
         // Emit events for all affected tasks (after commit).
         let mut notified = std::collections::HashSet::new();

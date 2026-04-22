@@ -52,201 +52,228 @@ impl TaskRepository {
 
         self.db.ensure_initialized().await?;
         let reason_str = reason.unwrap_or("").to_owned();
-        let mut tx = self.db.pool().begin().await?;
+        let id_owned = id.to_owned();
+        let actor_id_owned = actor_id.to_owned();
+        let actor_role_owned = actor_role.to_owned();
+        let conflict_metadata_owned = conflict_metadata.map(|s| s.to_owned());
 
-        // Load current task.
-        let current: Task = task_select_where_id!(id).fetch_one(&mut *tx).await?;
-        let from = TaskStatus::parse(&current.status)?;
+        // Dolt's commit-time MVCC check rejects overlapping writers on
+        // `tasks` / `activity_log` / `blockers` with error 1213; the entire
+        // transition is idempotent given the fresh `current` snapshot, so a
+        // retry on a fresh transaction succeeds once the contender commits.
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let actor_id = actor_id_owned.clone();
+                let actor_role = actor_role_owned.clone();
+                let reason_str = reason_str.clone();
+                let conflict_metadata = conflict_metadata_owned.clone();
+                let action = action.clone();
+                let target_override = target_override.clone();
+                async move {
+                    let mut tx = self.db.pool().begin().await?;
 
-        // Snapshot AC when reviewer starts so we can detect stale cycles later.
-        let ac_snapshot = if action == TransitionAction::TaskReviewStart {
-            Some(current.acceptance_criteria.clone())
-        } else {
-            None
-        };
+                    // Load current task.
+                    let current: Task =
+                        task_select_where_id!(&id).fetch_one(&mut *tx).await?;
+                    let from = TaskStatus::parse(&current.status)?;
 
-        // Validate and compute side effects.
-        let apply = compute_transition_for_issue_type(
-            &action,
-            &from,
-            target_override.as_ref(),
-            &current.issue_type,
-        )?;
+                    // Snapshot AC when reviewer starts so we can detect stale cycles later.
+                    let ac_snapshot = if action == TransitionAction::TaskReviewStart {
+                        Some(current.acceptance_criteria.clone())
+                    } else {
+                        None
+                    };
 
-        // For pre-completion closes: reject if this task still blocks other non-closed
-        // tasks. The lead/architect must reassign blockers to replacement tasks before
-        // closing incomplete work. Closures from post-approval states (Approved, PrDraft,
-        // PrReview) and PrMerge are exempt because the work actually landed.
-        // Simple-lifecycle tasks (spikes, research, planning, review) are also exempt
-        // when closed via Close — closing IS their completion, they never go through
-        // approval/merge states.
-        let simple_lifecycle_close = IssueType::parse(&current.issue_type)
-            .map(|it| it.uses_simple_lifecycle())
-            .unwrap_or(false)
-            && action == TransitionAction::Close;
-        let work_landed = matches!(
-            from,
-            TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview
-        ) || action == TransitionAction::PrMerge
-            || simple_lifecycle_close
-            || action == TransitionAction::ForceClose;
-        if apply.set_closed_at && !work_landed {
-            let downstream = sqlx::query_as!(
-                BlockerRef,
-                r#"SELECT t.id AS task_id, t.short_id, t.title, t.`status` AS "status!"
-                 FROM blockers b
-                 JOIN tasks t ON t.id = b.task_id
-                 WHERE b.blocking_task_id = ?
-                   AND t.`status` != 'closed'"#,
-                id
-            )
-            .fetch_all(&mut *tx)
-            .await?;
-            if !downstream.is_empty() {
-                let names: Vec<String> = downstream
-                    .iter()
-                    .map(|b| format!("{} ({})", b.short_id, b.title))
-                    .collect();
-                return Err(Error::InvalidTransition(format!(
-                    "task blocks {} other task(s): {}. Remove or reassign these blockers before closing.",
-                    downstream.len(),
-                    names.join(", ")
-                )));
-            }
-        }
+                    // Validate and compute side effects.
+                    let apply = compute_transition_for_issue_type(
+                        &action,
+                        &from,
+                        target_override.as_ref(),
+                        &current.issue_type,
+                    )?;
 
-        // For Start: block if any unresolved blockers exist.
-        // A blocker is unresolved if its blocking task has not reached post-merge states.
-        if action == TransitionAction::Start {
-            let uses_simple = IssueType::parse(&current.issue_type)
-                .map(|it| it.uses_simple_lifecycle())
-                .unwrap_or(false);
-            if !uses_simple {
-                let ac = current.acceptance_criteria.trim();
-                if ac.is_empty() || ac == "[]" {
-                    return Err(Error::InvalidTransition(
-                        "task has no acceptance criteria".into(),
-                    ));
+                    // For pre-completion closes: reject if this task still blocks other non-closed
+                    // tasks. The lead/architect must reassign blockers to replacement tasks before
+                    // closing incomplete work. Closures from post-approval states (Approved, PrDraft,
+                    // PrReview) and PrMerge are exempt because the work actually landed.
+                    // Simple-lifecycle tasks (spikes, research, planning, review) are also exempt
+                    // when closed via Close — closing IS their completion, they never go through
+                    // approval/merge states.
+                    let simple_lifecycle_close = IssueType::parse(&current.issue_type)
+                        .map(|it| it.uses_simple_lifecycle())
+                        .unwrap_or(false)
+                        && action == TransitionAction::Close;
+                    let work_landed = matches!(
+                        from,
+                        TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview
+                    ) || action == TransitionAction::PrMerge
+                        || simple_lifecycle_close
+                        || action == TransitionAction::ForceClose;
+                    if apply.set_closed_at && !work_landed {
+                        let downstream = sqlx::query_as!(
+                            BlockerRef,
+                            r#"SELECT t.id AS task_id, t.short_id, t.title, t.`status` AS "status!"
+                             FROM blockers b
+                             JOIN tasks t ON t.id = b.task_id
+                             WHERE b.blocking_task_id = ?
+                               AND t.`status` != 'closed'"#,
+                            id
+                        )
+                        .fetch_all(&mut *tx)
+                        .await?;
+                        if !downstream.is_empty() {
+                            let names: Vec<String> = downstream
+                                .iter()
+                                .map(|b| format!("{} ({})", b.short_id, b.title))
+                                .collect();
+                            return Err(Error::InvalidTransition(format!(
+                                "task blocks {} other task(s): {}. Remove or reassign these blockers before closing.",
+                                downstream.len(),
+                                names.join(", ")
+                            )));
+                        }
+                    }
+
+                    // For Start: block if any unresolved blockers exist.
+                    // A blocker is unresolved if its blocking task has not reached post-merge states.
+                    if action == TransitionAction::Start {
+                        let uses_simple = IssueType::parse(&current.issue_type)
+                            .map(|it| it.uses_simple_lifecycle())
+                            .unwrap_or(false);
+                        if !uses_simple {
+                            let ac = current.acceptance_criteria.trim();
+                            if ac.is_empty() || ac == "[]" {
+                                return Err(Error::InvalidTransition(
+                                    "task has no acceptance criteria".into(),
+                                ));
+                            }
+                        }
+                        let count: i64 = sqlx::query_scalar!(
+                            "SELECT COUNT(*) FROM blockers b
+                             JOIN tasks bt ON b.blocking_task_id = bt.id
+                             WHERE b.task_id = ?
+                               AND bt.`status` != 'closed'",
+                            id
+                        )
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        if count > 0 {
+                            return Err(Error::InvalidTransition(
+                                "task has unresolved blockers".into(),
+                            ));
+                        }
+                    }
+
+                    let to_status = apply
+                        .to_status
+                        .expect("all transitions must have a target status");
+                    let to_str = to_status.as_str();
+                    let from_str = from.as_str();
+
+                    // Auto-extract conflict metadata from reason when the transition sets the flag
+                    // but no explicit metadata was provided. The reason has the format:
+                    // "merge_conflict:{JSON}" — extract the JSON portion.
+                    let effective_conflict_metadata: Option<String> =
+                        if apply.set_merge_conflict_metadata {
+                            conflict_metadata.clone().or_else(|| {
+                                reason_str
+                                    .strip_prefix("merge_conflict:")
+                                    .map(|s| s.to_owned())
+                            })
+                        } else {
+                            None
+                        };
+                    let conflict_meta_ref = effective_conflict_metadata.as_deref();
+
+                    // Apply all side effects atomically.
+                    let reopen_inc_val: i64 = if apply.increment_reopen { 1 } else { 0 };
+                    sqlx::query!(
+                        "UPDATE tasks SET
+                            `status` = ?,
+                            reopen_count = reopen_count + ?,
+                            total_reopen_count = total_reopen_count + ?,
+                            continuation_count = CASE WHEN ? THEN 0 WHEN ? THEN continuation_count + 1 ELSE continuation_count END,
+                            verification_failure_count = CASE WHEN ? THEN 0 WHEN ? THEN verification_failure_count + 1 ELSE verification_failure_count END,
+                            total_verification_failure_count = total_verification_failure_count + CASE WHEN ? THEN 1 ELSE 0 END,
+                            intervention_count = CASE WHEN ? THEN intervention_count + 1 ELSE intervention_count END,
+                            last_intervention_at = CASE WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') ELSE last_intervention_at END,
+                            closed_at = CASE
+                                WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                                WHEN ? THEN NULL
+                                ELSE closed_at
+                            END,
+                            close_reason = CASE
+                                WHEN ? IS NOT NULL THEN ?
+                                WHEN ? THEN NULL
+                                ELSE close_reason
+                            END,
+                            merge_conflict_metadata = CASE
+                                WHEN ? THEN NULL
+                                WHEN ? THEN ?
+                                ELSE merge_conflict_metadata
+                            END,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        to_str,
+                        reopen_inc_val,
+                        reopen_inc_val,
+                        apply.reset_continuation,
+                        apply.increment_continuation,
+                        apply.reset_verification_failure,
+                        apply.increment_verification_failure,
+                        apply.increment_verification_failure,
+                        apply.record_intervention,
+                        apply.record_intervention,
+                        apply.set_closed_at,
+                        apply.clear_closed_at,
+                        apply.close_reason,
+                        apply.close_reason,
+                        apply.clear_close_reason,
+                        apply.clear_merge_conflict_metadata,
+                        apply.set_merge_conflict_metadata,
+                        conflict_meta_ref,
+                        id
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+
+                    // Append activity log entry.
+                    let activity_id = uuid::Uuid::now_v7().to_string();
+                    let mut payload_obj = serde_json::json!({
+                        "from_status": from_str,
+                        "to_status": to_str,
+                        "reason": if reason_str.is_empty() { None } else { Some(reason_str.as_str()) },
+                    });
+                    if let Some(ref ac) = ac_snapshot {
+                        let ac_value: serde_json::Value =
+                            serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
+                        payload_obj["ac_snapshot"] = ac_value;
+                    }
+                    let payload = payload_obj.to_string();
+
+                    sqlx::query!(
+                        "INSERT INTO activity_log
+                            (id, task_id, actor_id, actor_role, event_type, payload)
+                         VALUES (?, ?, ?, ?, ?, ?)",
+                        activity_id,
+                        id,
+                        actor_id,
+                        actor_role,
+                        apply.activity_type,
+                        payload
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+
+                    let task: Task = task_select_where_id!(&id).fetch_one(&mut *tx).await?;
+                    tx.commit().await?;
+                    Ok::<_, crate::Error>(task)
                 }
-            }
-            let count: i64 = sqlx::query_scalar!(
-                "SELECT COUNT(*) FROM blockers b
-                 JOIN tasks bt ON b.blocking_task_id = bt.id
-                 WHERE b.task_id = ?
-                   AND bt.`status` != 'closed'",
-                id
-            )
-            .fetch_one(&mut *tx)
-            .await?;
-            if count > 0 {
-                return Err(Error::InvalidTransition(
-                    "task has unresolved blockers".into(),
-                ));
-            }
-        }
-
-        let to_status = apply
-            .to_status
-            .expect("all transitions must have a target status");
-        let to_str = to_status.as_str();
-        let from_str = from.as_str();
-
-        // Auto-extract conflict metadata from reason when the transition sets the flag
-        // but no explicit metadata was provided. The reason has the format:
-        // "merge_conflict:{JSON}" — extract the JSON portion.
-        let effective_conflict_metadata: Option<String> = if apply.set_merge_conflict_metadata {
-            conflict_metadata.map(|s| s.to_owned()).or_else(|| {
-                reason_str
-                    .strip_prefix("merge_conflict:")
-                    .map(|s| s.to_owned())
-            })
-        } else {
-            None
-        };
-        let conflict_meta_ref = effective_conflict_metadata.as_deref();
-
-        // Apply all side effects atomically.
-        let reopen_inc_val: i64 = if apply.increment_reopen { 1 } else { 0 };
-        sqlx::query!(
-            "UPDATE tasks SET
-                `status` = ?,
-                reopen_count = reopen_count + ?,
-                total_reopen_count = total_reopen_count + ?,
-                continuation_count = CASE WHEN ? THEN 0 WHEN ? THEN continuation_count + 1 ELSE continuation_count END,
-                verification_failure_count = CASE WHEN ? THEN 0 WHEN ? THEN verification_failure_count + 1 ELSE verification_failure_count END,
-                total_verification_failure_count = total_verification_failure_count + CASE WHEN ? THEN 1 ELSE 0 END,
-                intervention_count = CASE WHEN ? THEN intervention_count + 1 ELSE intervention_count END,
-                last_intervention_at = CASE WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') ELSE last_intervention_at END,
-                closed_at = CASE
-                    WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                    WHEN ? THEN NULL
-                    ELSE closed_at
-                END,
-                close_reason = CASE
-                    WHEN ? IS NOT NULL THEN ?
-                    WHEN ? THEN NULL
-                    ELSE close_reason
-                END,
-                merge_conflict_metadata = CASE
-                    WHEN ? THEN NULL
-                    WHEN ? THEN ?
-                    ELSE merge_conflict_metadata
-                END,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            to_str,
-            reopen_inc_val,
-            reopen_inc_val,
-            apply.reset_continuation,
-            apply.increment_continuation,
-            apply.reset_verification_failure,
-            apply.increment_verification_failure,
-            apply.increment_verification_failure,
-            apply.record_intervention,
-            apply.record_intervention,
-            apply.set_closed_at,
-            apply.clear_closed_at,
-            apply.close_reason,
-            apply.close_reason,
-            apply.clear_close_reason,
-            apply.clear_merge_conflict_metadata,
-            apply.set_merge_conflict_metadata,
-            conflict_meta_ref,
-            id
+            },
         )
-        .execute(&mut *tx)
         .await?;
-
-        // Append activity log entry.
-        let activity_id = uuid::Uuid::now_v7().to_string();
-        let mut payload_obj = serde_json::json!({
-            "from_status": from_str,
-            "to_status": to_str,
-            "reason": if reason_str.is_empty() { None } else { Some(reason_str.as_str()) },
-        });
-        if let Some(ref ac) = ac_snapshot {
-            let ac_value: serde_json::Value =
-                serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
-            payload_obj["ac_snapshot"] = ac_value;
-        }
-        let payload = payload_obj.to_string();
-
-        sqlx::query!(
-            "INSERT INTO activity_log
-                (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            activity_id,
-            id,
-            actor_id,
-            actor_role,
-            apply.activity_type,
-            payload
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        let task: Task = task_select_where_id!(id).fetch_one(&mut *tx).await?;
-        tx.commit().await?;
 
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -265,33 +292,49 @@ impl TaskRepository {
     /// Only used for tests and admin tooling. Production code should use `transition`.
     pub async fn set_status(&self, id: &str, status: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        let from_task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
-        let closed_at_sql = if status == "closed" {
-            "closed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),"
-        } else {
-            ""
-        };
-        // Only increment reopen_count on actual reopen transitions (not open->open)
-        let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
-            1
-        } else {
-            0
-        };
-        // NOTE: dynamic SQL (closed_at fragment) — compile-time check not possible
-        sqlx::query(&format!(
-            "UPDATE tasks SET `status` = ?, {closed_at_sql}
-                reopen_count = reopen_count + ?,
-                total_reopen_count = total_reopen_count + ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?"
-        ))
-        .bind(status)
-        .bind(reopen_inc)
-        .bind(reopen_inc)
-        .bind(id)
-        .execute(self.db.pool())
+        let id_owned = id.to_owned();
+        let status_owned = status.to_owned();
+
+        let (from_task, task): (Task, Task) = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let status = status_owned.clone();
+                async move {
+                    let from_task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    let closed_at_sql = if status == "closed" {
+                        "closed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),"
+                    } else {
+                        ""
+                    };
+                    // Only increment reopen_count on actual reopen transitions (not open->open)
+                    let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
+                        1
+                    } else {
+                        0
+                    };
+                    // NOTE: dynamic SQL (closed_at fragment) — compile-time check not possible
+                    sqlx::query(&format!(
+                        "UPDATE tasks SET `status` = ?, {closed_at_sql}
+                            reopen_count = reopen_count + ?,
+                            total_reopen_count = total_reopen_count + ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?"
+                    ))
+                    .bind(&status)
+                    .bind(reopen_inc)
+                    .bind(reopen_inc)
+                    .bind(&id)
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>((from_task, task))
+                }
+            },
+        )
         .await?;
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         let status_payload = serde_json::json!({
             "from_status": from_task.status,
@@ -326,43 +369,60 @@ impl TaskRepository {
         close_reason: Option<&str>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
+        let id_owned = id.to_owned();
+        let status_owned = status.to_owned();
+        let close_reason_owned = close_reason.map(|s| s.to_owned());
 
-        let from_task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+        let (from_task, task): (Task, Task) = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let status = status_owned.clone();
+                let close_reason = close_reason_owned.clone();
+                async move {
+                    let from_task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
-        // Only increment reopen_count on actual reopen transitions (not open->open)
-        let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
-            1
-        } else {
-            0
-        };
-        sqlx::query!(
-            "UPDATE tasks SET
-                `status` = ?,
-                closed_at = CASE
-                    WHEN ? = 'closed' THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                    WHEN `status` = 'closed' THEN NULL
-                    ELSE closed_at
-                END,
-                reopen_count = reopen_count + ?,
-                total_reopen_count = total_reopen_count + ?,
-                close_reason = CASE
-                    WHEN ? = 'closed' THEN ?
-                    ELSE NULL
-                END,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            status,
-            status,
-            reopen_inc,
-            reopen_inc,
-            status,
-            close_reason,
-            id
+                    // Only increment reopen_count on actual reopen transitions (not open->open)
+                    let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
+                        1
+                    } else {
+                        0
+                    };
+                    sqlx::query!(
+                        "UPDATE tasks SET
+                            `status` = ?,
+                            closed_at = CASE
+                                WHEN ? = 'closed' THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                                WHEN `status` = 'closed' THEN NULL
+                                ELSE closed_at
+                            END,
+                            reopen_count = reopen_count + ?,
+                            total_reopen_count = total_reopen_count + ?,
+                            close_reason = CASE
+                                WHEN ? = 'closed' THEN ?
+                                ELSE NULL
+                            END,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        status,
+                        status,
+                        reopen_inc,
+                        reopen_inc,
+                        status,
+                        close_reason,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>((from_task, task))
+                }
+            },
         )
-        .execute(self.db.pool())
         .await?;
-
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         let status_payload = serde_json::json!({
             "from_status": from_task.status,
@@ -389,16 +449,31 @@ impl TaskRepository {
     /// Move a task to a different epic (or detach from epic with None).
     pub async fn move_to_epic(&self, id: &str, new_epic_id: Option<&str>) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE tasks SET epic_id = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
-            new_epic_id,
-            id
+        let id_owned = id.to_owned();
+        let new_epic_id_owned = new_epic_id.map(|s| s.to_owned());
+
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let new_epic_id = new_epic_id_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET epic_id = ?,
+                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        new_epic_id,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task =
+                        task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
         )
-        .execute(self.db.pool())
         .await?;
-        let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
         if let Some(epic_id) = new_epic_id {
             maybe_reopen_epic(&self.db, &self.events, epic_id).await?;
