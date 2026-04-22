@@ -375,6 +375,13 @@ mod tests {
         let err = run_phase(tmp.path(), "pre_warm", &commands)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("Some(7)"), "got: {err}");
+        // anyhow::Error::to_string() only renders the outermost context;
+        // the inner "exited with Some(7)" lives on the source chain.
+        // Use {:#} to flatten the full chain into one string.
+        let formatted = format!("{err:#}");
+        assert!(
+            formatted.contains("Some(7)"),
+            "expected chain to contain exit status, got: {formatted}"
+        );
     }
 }
