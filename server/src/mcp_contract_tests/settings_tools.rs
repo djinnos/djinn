@@ -1,16 +1,15 @@
+//! Remaining settings-tool contract tests.
+//!
+//! The read-only `settings_get_missing_returns_not_exists` migrated to
+//! `djinn-control-plane/tests/settings_tools.rs`.  The `settings_set` /
+//! `settings_reset` tests stay here because they rely on the real
+//! `RuntimeOps::apply_settings` path — the control-plane harness'
+//! `StubRuntime::apply_settings` returns a stub error rather than running
+//! the provider-connection and mount-config validators the tests exercise.
+
 use serde_json::json;
 
 use crate::test_helpers::{create_test_app, initialize_mcp_session, mcp_call_tool};
-
-#[tokio::test]
-async fn settings_get_missing_returns_not_exists() {
-    let app = create_test_app();
-    let session_id = initialize_mcp_session(&app).await;
-
-    let res = mcp_call_tool(&app, &session_id, "settings_get", json!({})).await;
-    assert_eq!(res["exists"], false);
-    assert!(res["settings"].is_null());
-}
 
 #[tokio::test]
 async fn settings_set_get_reset_round_trip() {

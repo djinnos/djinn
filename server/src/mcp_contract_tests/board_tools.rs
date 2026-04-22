@@ -1,58 +1,17 @@
+//! Remaining board-tool contract tests.
+//!
+//! `board_health` migrated to `djinn-control-plane/tests/board_tools.rs`; only
+//! `board_reconcile` stays here because it exercises the real coordinator +
+//! slot-pool actors (the control-plane harness stubs those).
+
 use serde_json::json;
 
 use crate::events::EventBus;
 use crate::test_helpers::{
-    create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
-    create_test_task, initialize_mcp_session, mcp_call_tool,
+    create_test_db, create_test_epic, create_test_project, create_test_task,
+    initialize_mcp_session, mcp_call_tool,
 };
-use djinn_db::{NoteRepository, TaskRepository};
-
-#[tokio::test]
-async fn board_health_with_no_pool_returns_response_shape() {
-    let db = create_test_db();
-    let project = create_test_project(&db).await;
-    let notes = NoteRepository::new(db.clone(), EventBus::noop());
-    notes
-        .create_db_note(
-            &project.id,
-            "Board Health",
-            "Planner-visible note",
-            "reference",
-            "[]",
-        )
-        .await
-        .expect("insert note for memory health summary");
-    let app = create_test_app_with_db(db);
-    let session_id = initialize_mcp_session(&app).await;
-
-    let response = mcp_call_tool(
-        &app,
-        &session_id,
-        "board_health",
-        json!({ "project": project.path }),
-    )
-    .await;
-
-    assert!(response.get("stale_tasks").is_some());
-    assert!(response.get("epic_stats").is_some());
-    assert!(response.get("review_queue").is_some());
-    assert!(response.get("memory_health").is_some());
-    assert!(response.get("stale_threshold_hours").is_some());
-    assert_eq!(response["memory_health"]["total_notes"], 1);
-    assert!(response["memory_health"].get("broken_link_count").is_some());
-    assert!(response["memory_health"].get("orphan_note_count").is_some());
-    assert!(
-        response["memory_health"]
-            .get("duplicate_cluster_count")
-            .is_some()
-    );
-    assert!(
-        response["memory_health"]
-            .get("low_confidence_note_count")
-            .is_some()
-    );
-    assert!(response["memory_health"].get("stale_note_count").is_some());
-}
+use djinn_db::TaskRepository;
 
 #[tokio::test]
 async fn board_reconcile_releases_stuck_in_progress_without_active_session() {
