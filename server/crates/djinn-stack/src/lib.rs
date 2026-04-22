@@ -11,7 +11,6 @@
 //! in PR 2; this crate is standalone and pure-function.
 
 pub mod detect;
-pub mod devcontainer_starter;
 pub mod environment;
 pub mod frameworks;
 pub mod heuristics;
@@ -21,7 +20,6 @@ pub mod schema;
 pub mod test_runners;
 
 pub use detect::{detect, detect_blocking};
-pub use devcontainer_starter::generate_starter;
 pub use environment::{
     BaseImage, ClangLanguage, ConfigSource, Distro, DotnetLanguage, EnvironmentConfig,
     EnvironmentConfigError, GoLanguage, HookCommand, JavaLanguage, Languages, LifecycleHooks,

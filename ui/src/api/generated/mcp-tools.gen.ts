@@ -475,53 +475,6 @@ export namespace CredentialSetOutputSchema {
 
 }
 export type CredentialSetOutput = CredentialSetOutputSchema.CredentialSetOutput;
-export namespace DevcontainerOpenPrInputSchema {
-  export interface DevcontainerOpenPrInput {
-  /**
-   * Project UUID to open a devcontainer PR on.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type DevcontainerOpenPrInput = DevcontainerOpenPrInputSchema.DevcontainerOpenPrInput;
-export namespace DevcontainerOpenPrOutputSchema {
-  export interface DevcontainerOpenPrOutput {
-  /**
-   * True when a PR with the setup head branch was already open prior
-   * to this call — the server did not push a new commit.
-   */
-  already_open: boolean
-  /**
-   * Populated on any failure along the path (missing coords, API
-   * error, etc.); the client surfaces this verbatim.
-   */
-  error?: string
-  /**
-   * PR that was opened or is already open. `None` only on error.
-   */
-  pr?: (DevcontainerPrRef | null)
-  [k: string]: any
-  }
-  /**
-   * Minimal reference to a devcontainer setup PR — enough for the UI to
-   * render a "View PR" link and navigate the user to GitHub.
-   */
-  export interface DevcontainerPrRef {
-  /**
-   * PR number within the repo.
-   */
-  number: number
-  /**
-   * Full `html_url` of the PR on GitHub.
-   */
-  url: string
-  [k: string]: any
-  }
-
-}
-export type DevcontainerOpenPrOutput = DevcontainerOpenPrOutputSchema.DevcontainerOpenPrOutput;
 export namespace EpicCloseInputSchema {
   export interface EpicCloseInput {
   /**
@@ -3843,7 +3796,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "devcontainer_open_pr" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3857,7 +3810,6 @@ export interface McpToolMap {
   "credential_delete": { input: CredentialDeleteInput; output: CredentialDeleteOutput };
   "credential_list": { input: CredentialListInput; output: CredentialListOutput };
   "credential_set": { input: CredentialSetInput; output: CredentialSetOutput };
-  "devcontainer_open_pr": { input: DevcontainerOpenPrInput; output: DevcontainerOpenPrOutput };
   "epic_close": { input: EpicCloseInput; output: EpicCloseOutput };
   "epic_count": { input: EpicCountInput; output: EpicCountOutput };
   "epic_create": { input: EpicCreateInput; output: EpicCreateOutput };
