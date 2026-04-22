@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_and_get_task() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -30,7 +30,7 @@ async fn create_and_get_task() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creating_task_reopens_closed_epic() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic_repo = EpicRepository::new(db.clone(), event_bus_for(&tx));
     let epic = epic_repo
@@ -52,7 +52,7 @@ async fn creating_task_reopens_closed_epic() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn short_id_lookup() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -67,7 +67,7 @@ async fn short_id_lookup() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_emits_event() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap(); // consume EpicCreated
@@ -86,7 +86,7 @@ async fn create_emits_event() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_emits_event() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
@@ -115,7 +115,7 @@ async fn update_emits_event() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transition_emits_event_start() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
@@ -155,7 +155,7 @@ async fn transition_emits_event_start() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transition_emits_event_close_with_closed_at() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
@@ -183,7 +183,7 @@ async fn transition_emits_event_close_with_closed_at() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transition_emits_event_reopen() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();
@@ -221,7 +221,7 @@ async fn transition_emits_event_reopen() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_status_transitions() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -240,7 +240,7 @@ async fn set_status_transitions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reopen_increments_counter() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -256,7 +256,7 @@ async fn reopen_increments_counter() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocker_management() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -293,7 +293,7 @@ async fn blocker_management() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocker_cycle_detection() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -322,7 +322,7 @@ async fn blocker_cycle_detection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_blocked_by_unresolved_blocker() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -359,7 +359,7 @@ async fn start_blocked_by_unresolved_blocker() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_ready_excludes_blocked_tasks() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -396,7 +396,7 @@ async fn list_ready_excludes_blocked_tasks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn activity_log() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -423,7 +423,7 @@ async fn activity_log() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_by_epic() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -443,7 +443,7 @@ async fn list_by_epic() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_task_emits_event() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap();

@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_peer_closed_task_not_regressed() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(64);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
@@ -28,7 +28,7 @@ async fn upsert_peer_closed_task_not_regressed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_peer_closed_updated_by_peer_close() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(64);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
@@ -59,7 +59,7 @@ async fn upsert_peer_closed_updated_by_peer_close() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_peer_non_terminal_lww_works() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(64);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));

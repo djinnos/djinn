@@ -85,7 +85,7 @@ async fn valid_transition(
     #[case] expected_to: &str,
     #[case] reason: Option<&str>,
 ) {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -174,7 +174,7 @@ async fn valid_transition(
 #[case("pr_draft", TransitionAction::PrChangesRequested)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_transition(#[case] from_status: &str, #[case] action: TransitionAction) {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -223,7 +223,7 @@ async fn invalid_transition(#[case] from_status: &str, #[case] action: Transitio
 #[case("epic")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_count_group_by(#[case] group_by: &str) {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -272,7 +272,7 @@ async fn task_count_group_by(#[case] group_by: &str) {
 #[case("text")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_list_filter(#[case] filter_kind: &str) {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));

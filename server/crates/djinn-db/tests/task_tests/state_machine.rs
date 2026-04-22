@@ -21,7 +21,7 @@ async fn status_enum_roundtrips() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_happy_path() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -83,7 +83,7 @@ async fn full_happy_path() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_transition_returns_error() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -124,7 +124,7 @@ async fn invalid_transition_returns_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_review_reject_increments_reopen() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -176,7 +176,7 @@ async fn task_review_reject_increments_reopen() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_review_reject_conflict_does_not_increment_reopen() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -228,7 +228,7 @@ async fn task_review_reject_conflict_does_not_increment_reopen() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn force_close_from_any_state() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -258,7 +258,7 @@ async fn force_close_from_any_state() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reopen_clears_closed_at_and_increments_reopen() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -299,7 +299,7 @@ async fn reopen_clears_closed_at_and_increments_reopen() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_blocked_when_acceptance_criteria_empty() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -333,7 +333,7 @@ async fn start_blocked_when_acceptance_criteria_empty() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_allows_when_acceptance_criteria_present() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -364,7 +364,7 @@ async fn start_allows_when_acceptance_criteria_present() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_allows_planning_without_acceptance_criteria() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -394,7 +394,7 @@ async fn start_allows_planning_without_acceptance_criteria() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_blocked_by_unresolved_blockers() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -420,7 +420,7 @@ async fn start_blocked_by_unresolved_blockers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_allowed_when_blocker_is_closed() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -448,7 +448,7 @@ async fn start_allowed_when_blocker_is_closed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_override_to_closed() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -473,7 +473,7 @@ async fn user_override_to_closed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn requires_reason_enforced() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -510,7 +510,7 @@ async fn requires_reason_enforced() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transition_writes_activity_log() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -539,7 +539,7 @@ async fn transition_writes_activity_log() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_activity_filters() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -590,7 +590,7 @@ async fn query_activity_filters() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_merge_commit_sha_persists_value() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -609,7 +609,7 @@ async fn set_merge_commit_sha_persists_value() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn board_health_report() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
@@ -644,10 +644,10 @@ async fn board_health_report() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn board_health_flags_repeated_reopen_role_tool_mismatch_candidates() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
     let task = repo
         .create_in_project(
@@ -669,7 +669,7 @@ async fn board_health_flags_repeated_reopen_role_tool_mismatch_candidates() {
         .execute(db.pool())
         .await
         .unwrap();
-    let _session = test_helpers::create_test_session(&db, &project.id, &task.id).await;
+    let _session = create_test_session(&db, &project.id, &task.id).await;
 
     let report = repo.board_health(24).await.unwrap();
     let mismatches = report
@@ -698,7 +698,7 @@ async fn board_health_flags_repeated_reopen_role_tool_mismatch_candidates() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn board_health_ignores_repeated_reopen_tasks_without_role_tool_mismatch() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
@@ -733,7 +733,7 @@ async fn board_health_ignores_repeated_reopen_tasks_without_role_tool_mismatch()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconcile_heals_stale_tasks() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));

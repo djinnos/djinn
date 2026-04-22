@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_for_export_includes_open_tasks() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(64);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
@@ -16,7 +16,7 @@ async fn list_for_export_includes_open_tasks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_for_export_includes_recently_closed() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(64);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
@@ -34,7 +34,7 @@ async fn list_for_export_includes_recently_closed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_for_export_excludes_old_closed() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(64);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
@@ -60,7 +60,7 @@ async fn list_for_export_excludes_old_closed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn increment_continuation_count_emits_task_updated_event() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, mut rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let _ = rx.recv().await.unwrap(); // consume EpicCreated
@@ -87,7 +87,7 @@ async fn increment_continuation_count_emits_task_updated_event() {
 /// the task is never visible to `list_ready` during an atomic swap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocker_swap_atomic_no_race_window() {
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = TaskRepository::new(db, event_bus_for(&tx));
@@ -146,7 +146,7 @@ async fn blocker_swap_atomic_no_race_concurrent() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let db = test_helpers::create_test_db();
+    let db = create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let epic = make_epic(&db, event_bus_for(&tx)).await;
     let repo = Arc::new(TaskRepository::new(db, event_bus_for(&tx)));

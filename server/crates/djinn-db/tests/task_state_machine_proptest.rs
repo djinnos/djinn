@@ -6,11 +6,20 @@
 //! All DB-backed cases use in-memory SQLite (no I/O) and run ≤6 transitions
 //! per case; the full 256 × 5 suite completes well under 5 seconds.
 
+use djinn_core::events::EventBus;
 use djinn_core::models::{TaskStatus, TransitionAction, compute_transition};
-use djinn_db::{EpicRepository, Error, TaskRepository};
+use djinn_db::{Database, EpicRepository, Error, TaskRepository};
 use proptest::prelude::*;
 
-use crate::test_helpers;
+// ── Local test fixtures (pure djinn-db / djinn-core) ─────────────────────────
+
+fn create_test_db() -> Database {
+    Database::open_in_memory().expect("failed to create test database")
+}
+
+fn test_events() -> EventBus {
+    EventBus::noop()
+}
 
 // ── Runtime helper ────────────────────────────────────────────────────────────
 
@@ -27,12 +36,12 @@ fn rt() -> &'static tokio::runtime::Runtime {
 
 /// Stand up a fresh in-memory DB, create an epic, and return an `open` task.
 async fn make_open_task() -> (TaskRepository, String) {
-    let db = test_helpers::create_test_db();
-    let epic = EpicRepository::new(db.clone(), test_helpers::test_events())
+    let db = create_test_db();
+    let epic = EpicRepository::new(db.clone(), test_events())
         .create("T", "", "", "", "", None)
         .await
         .unwrap();
-    let repo = TaskRepository::new(db, test_helpers::test_events());
+    let repo = TaskRepository::new(db, test_events());
     let task = repo
         .create(&epic.id, "T", "", "", "task", 0, "", Some("open"))
         .await
