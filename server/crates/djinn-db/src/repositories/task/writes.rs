@@ -644,6 +644,38 @@ impl TaskRepository {
             .send(DjinnEventEnvelope::task_updated(&task, false));
         Ok(task)
     }
+
+    /// Force-set `updated_at` to a literal timestamp string.
+    ///
+    /// Exists as a deliberate test fixture: board-health / board-reconcile
+    /// tests backdate a task's `updated_at` beyond the stale threshold to
+    /// exercise the reconciliation path. Production writes stamp
+    /// `updated_at = NOW()` automatically.
+    pub async fn set_updated_at(&self, id: &str, updated_at: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let id_owned = id.to_owned();
+        let updated_at_owned = updated_at.to_owned();
+
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let updated_at = updated_at_owned.clone();
+                async move {
+                    sqlx::query!(
+                        "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                        updated_at,
+                        id
+                    )
+                    .execute(self.db.pool())
+                    .await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

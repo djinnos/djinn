@@ -150,6 +150,22 @@ impl CredentialRepository {
         Ok(found.is_some())
     }
 
+    /// Return the raw encrypted ciphertext blob for `key_name` without
+    /// decrypting it.
+    ///
+    /// Exists as a deliberate test fixture: contract tests assert that the
+    /// stored value is actually encrypted (non-empty and distinct from
+    /// plaintext). Production code should use [`Self::get_decrypted`].
+    pub async fn get_encrypted_raw(&self, key_name: &str) -> Result<Option<Vec<u8>>> {
+        ensure_db!(self.db);
+        let blob: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?")
+                .bind(key_name)
+                .fetch_optional(self.db.pool())
+                .await?;
+        Ok(blob)
+    }
+
     /// Decrypt and return the raw API key for `key_name`.
     ///
     /// Called by `AgentSupervisor` at dispatch time to obtain the key for

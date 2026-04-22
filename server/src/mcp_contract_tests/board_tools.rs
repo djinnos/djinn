@@ -1,31 +1,27 @@
 use serde_json::json;
 
+use crate::events::EventBus;
 use crate::test_helpers::{
     create_test_app_with_db, create_test_db, create_test_epic, create_test_project,
     create_test_task, initialize_mcp_session, mcp_call_tool,
 };
+use djinn_db::{NoteRepository, TaskRepository};
 
 #[tokio::test]
 async fn board_health_with_no_pool_returns_response_shape() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    sqlx::query(
-        "INSERT INTO notes (id, project_id, permalink, title, file_path, note_type, folder, tags, content, created_at, updated_at, last_accessed, content_hash, confidence, storage)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'), DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'), DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'), ?, ?, 'db')",
-    )
-    .bind(uuid::Uuid::now_v7().to_string())
-    .bind(&project.id)
-    .bind("reference/board-health")
-    .bind("Board Health")
-    .bind(format!("{}/.djinn/reference/board-health.md", project.path))
-    .bind("reference")
-    .bind("reference")
-    .bind("[]")
-    .bind("Planner-visible note")
-    .bind("hash")
-    .bind(0.95_f64)
-    .execute(db.pool())
-    .await
-    .expect("insert note for memory health summary");
+    let notes = NoteRepository::new(db.clone(), EventBus::noop());
+    notes
+        .create_db_note(
+            &project.id,
+            "Board Health",
+            "Planner-visible note",
+            "reference",
+            "[]",
+        )
+        .await
+        .expect("insert note for memory health summary");
     let app = create_test_app_with_db(db);
     let session_id = initialize_mcp_session(&app).await;
 
@@ -64,14 +60,13 @@ async fn board_reconcile_releases_stuck_in_progress_without_active_session() {
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = ?")
-        .bind(&task.id)
-        .execute(db.pool())
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop());
+    tasks
+        .set_status(&task.id, "in_progress")
         .await
         .expect("set task in_progress");
-    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?")
-        .bind(&task.id)
-        .execute(db.pool())
+    tasks
+        .set_updated_at(&task.id, "2020-01-01T00:00:00.000Z")
         .await
         .expect("age task beyond stale threshold");
 
@@ -91,10 +86,10 @@ async fn board_reconcile_releases_stuck_in_progress_without_active_session() {
 
     assert!(response.get("healed_tasks").is_some());
 
-    let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
-        .bind(&task.id)
-        .fetch_one(db.pool())
+    let refreshed = tasks
+        .get(&task.id)
         .await
-        .expect("fetch task status");
-    assert_eq!(status, "open");
+        .expect("fetch task status")
+        .expect("task row missing");
+    assert_eq!(refreshed.status, "open");
 }

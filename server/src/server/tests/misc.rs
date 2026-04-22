@@ -65,14 +65,8 @@ async fn test_db_has_tables() {
     let db = test_helpers::create_test_db();
     db.ensure_initialized().await.unwrap();
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM information_schema.tables \
-         WHERE table_schema = DATABASE() AND table_name = 'settings'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(count, 1, "settings table should exist");
+    let exists = db.table_exists("settings").await.unwrap();
+    assert!(exists, "settings table should exist");
 }
 
 /// Demonstrates tokio::test(start_paused = true) for time-dependent logic.

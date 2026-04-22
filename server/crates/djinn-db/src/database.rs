@@ -277,6 +277,24 @@ impl Database {
     /// MySQL/Dolt has no sqlite-vec equivalent — vector search is handled by
     /// Qdrant. This always returns "unavailable" so tests that gate on the
     /// extension status take their fallback path.
+    /// Return `true` if a table with the given name exists in the current
+    /// database schema.
+    ///
+    /// Exists as a deliberate test fixture: contract tests verify that the
+    /// in-memory test database has its migrations applied. Production code
+    /// should not need to probe the schema at runtime.
+    pub async fn table_exists(&self, table_name: &str) -> DbResult<bool> {
+        self.ensure_initialized().await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = DATABASE() AND table_name = ?",
+        )
+        .bind(table_name)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
     pub async fn sqlite_vec_status(&self) -> DbResult<SqliteVecStatus> {
         Ok(SqliteVecStatus {
             available: false,

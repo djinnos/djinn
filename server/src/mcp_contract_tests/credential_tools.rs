@@ -25,17 +25,15 @@ async fn credential_set_success_shape() {
     assert_eq!(res["key_name"], "ANTHROPIC_API_KEY");
     assert!(res["id"].as_str().unwrap_or_default().len() > 8);
 
-    let row: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?")
-            .bind("ANTHROPIC_API_KEY")
-            .fetch_optional(db.pool())
-            .await
-            .unwrap();
-    let ciphertext = row.expect("missing credential row");
+    let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+    let ciphertext = repo
+        .get_encrypted_raw("ANTHROPIC_API_KEY")
+        .await
+        .unwrap()
+        .expect("missing credential row");
     assert!(!ciphertext.is_empty());
     assert_ne!(ciphertext, b"secret-1");
 
-    let repo = CredentialRepository::new(db.clone(), EventBus::noop());
     let decrypted = repo
         .get_decrypted("ANTHROPIC_API_KEY")
         .await
