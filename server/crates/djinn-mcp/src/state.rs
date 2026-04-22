@@ -132,6 +132,14 @@ impl McpState {
     pub async fn persist_model_health_state(&self) {
         self.runtime.persist_model_health_state().await;
     }
+
+    pub async fn apply_environment_config(
+        &self,
+        project_id: &str,
+        config: &djinn_stack::environment::EnvironmentConfig,
+    ) -> Result<(), String> {
+        self.runtime.apply_environment_config(project_id, config).await
+    }
 }
 
 // ── Stub impls for test builds ─────────────────────────────────────────────────
@@ -198,6 +206,13 @@ pub(crate) mod stubs {
         }
         async fn reset_runtime_settings(&self) {}
         async fn persist_model_health_state(&self) {}
+        async fn apply_environment_config(
+            &self,
+            _: &str,
+            _: &djinn_stack::environment::EnvironmentConfig,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     pub struct StubGitOps;

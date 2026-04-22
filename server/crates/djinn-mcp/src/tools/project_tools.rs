@@ -256,6 +256,40 @@ pub struct RetriggerImageBuildResponse {
     pub error: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectEnvironmentConfigGetParams {
+    /// Project UUID.
+    pub project: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectEnvironmentConfigGetResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The raw JSON config currently in `projects.environment_config`.
+    /// Empty object `{}` when the row hasn't been reseeded yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectEnvironmentConfigSetParams {
+    /// Project UUID.
+    pub project: String,
+    /// Full `EnvironmentConfig` JSON blob. Validated server-side via
+    /// `djinn_stack::environment::EnvironmentConfig::validate` before
+    /// anything is written.
+    pub config: serde_json::Value,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectEnvironmentConfigSetResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// A single verification rule returned in project config.
 #[derive(Deserialize, Serialize, JsonSchema, Clone)]
 pub struct VerificationRuleDto {
@@ -1309,6 +1343,100 @@ impl DjinnMcpServer {
                 error: Some(format!("failed to flag image for rebuild: {err}")),
             }),
         }
+    }
+
+    /// Return the current `environment_config` JSON for a project.
+    ///
+    /// Returns `{}` while the boot reseed hook hasn't seen the row yet
+    /// — callers can treat that as "show the auto-detection preview"
+    /// or surface a "not seeded yet" state.
+    #[tool(
+        description = "Read projects.environment_config as JSON. Returns '{}' for projects that haven't been reseeded yet."
+    )]
+    pub async fn project_environment_config_get(
+        &self,
+        Parameters(input): Parameters<ProjectEnvironmentConfigGetParams>,
+    ) -> Json<ProjectEnvironmentConfigGetResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        match repo.get_environment_config(&input.project).await {
+            Ok(Some(raw)) => {
+                let parsed = serde_json::from_str::<serde_json::Value>(&raw)
+                    .unwrap_or(serde_json::json!({}));
+                Json(ProjectEnvironmentConfigGetResponse {
+                    status: "ok".into(),
+                    error: None,
+                    config: Some(parsed),
+                })
+            }
+            Ok(None) => Json(ProjectEnvironmentConfigGetResponse {
+                status: "error".into(),
+                error: Some(format!("project not found: {}", input.project)),
+                config: None,
+            }),
+            Err(err) => Json(ProjectEnvironmentConfigGetResponse {
+                status: "error".into(),
+                error: Some(format!("db error: {err}")),
+                config: None,
+            }),
+        }
+    }
+
+    /// Write a validated `environment_config` JSON blob for a project.
+    ///
+    /// Flow: validate → upsert the runtime ConfigMap (so warm/task-run
+    /// Pods scheduled after this call see the new config) → write to
+    /// Dolt (which nulls `image_hash` so the next mirror-fetch tick
+    /// rebuilds the image).
+    #[tool(
+        description = "Validate + persist projects.environment_config, upsert the runtime ConfigMap, and null image_hash so the next tick rebuilds the image. Accepts a JSON EnvironmentConfig."
+    )]
+    pub async fn project_environment_config_set(
+        &self,
+        Parameters(input): Parameters<ProjectEnvironmentConfigSetParams>,
+    ) -> Json<ProjectEnvironmentConfigSetResponse> {
+        // Parse + validate up front so the MCP error surface is the
+        // typed EnvironmentConfigError, not whatever the DB layer
+        // returns later.
+        let cfg: djinn_stack::environment::EnvironmentConfig =
+            match serde_json::from_value(input.config) {
+                Ok(c) => c,
+                Err(err) => {
+                    return Json(ProjectEnvironmentConfigSetResponse {
+                        status: "error".into(),
+                        error: Some(format!("parse config: {err}")),
+                    });
+                }
+            };
+        if let Err(err) = cfg.validate() {
+            return Json(ProjectEnvironmentConfigSetResponse {
+                status: "error".into(),
+                error: Some(format!("validate: {err}")),
+            });
+        }
+
+        // Mark it as user-edited so the boot reseed hook leaves it
+        // alone on the next server restart.
+        let mut cfg = cfg;
+        cfg.source = djinn_stack::environment::ConfigSource::UserEdited;
+
+        // Dispatch through the RuntimeOps bridge — production apps
+        // upsert the runtime ConfigMap via the image-controller; test
+        // stubs fall back to a plain DB write.
+        if let Err(err) = self
+            .state
+            .apply_environment_config(&input.project, &cfg)
+            .await
+        {
+            return Json(ProjectEnvironmentConfigSetResponse {
+                status: "error".into(),
+                error: Some(format!("apply: {err}")),
+            });
+        }
+
+        Json(ProjectEnvironmentConfigSetResponse {
+            status: "ok".into(),
+            error: None,
+        })
     }
 
     /// Open (or return the existing) PR that adds a starter

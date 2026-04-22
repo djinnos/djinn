@@ -102,6 +102,16 @@ pub trait RuntimeOps: Send + Sync {
     ) -> Result<Option<SemanticQueryEmbedding>, String>;
     async fn reset_runtime_settings(&self);
     async fn persist_model_health_state(&self);
+    /// P6: persist a fresh `EnvironmentConfig` for a project + upsert
+    /// the runtime ConfigMap + null `image_hash` so the next tick
+    /// rebuilds. In dev mode without a kube client, falls back to a
+    /// plain DB write. `config_json` is the serialised `EnvironmentConfig`
+    /// — caller has already validated.
+    async fn apply_environment_config(
+        &self,
+        project_id: &str,
+        config: &djinn_stack::environment::EnvironmentConfig,
+    ) -> Result<(), String>;
 }
 
 // ── Git ─────────────────────────────────────────────────────────────────────────

@@ -286,6 +286,65 @@ impl ImageController {
         Ok(())
     }
 
+    /// Persist a fresh `EnvironmentConfig` for a project and update the
+    /// runtime ConfigMap warm/task-run Pods mount. Invoked by the
+    /// `project_environment_config_set` MCP tool.
+    ///
+    /// Order matters: the runtime CM is upserted *before* the DB write.
+    /// The DB write nulls `image_hash`, which triggers a rebuild on the
+    /// next mirror-fetch tick; warm Pods scheduled in the interim read
+    /// the pre-update image plus the new CM, which is still closer to
+    /// "what the user intended" than stale-both.
+    ///
+    /// The caller has already validated `cfg.validate()` — if they
+    /// haven't, the DB write succeeds and the stored JSON is invalid;
+    /// the next `enqueue` will surface the error.
+    pub async fn apply_environment_config(
+        &self,
+        project_id: &str,
+        cfg: &djinn_stack::environment::EnvironmentConfig,
+    ) -> Result<()> {
+        let json = serde_json::to_string(cfg).map_err(|e| ImageControllerError::ConfigParse {
+            project_id: project_id.to_string(),
+            reason: format!("serialise: {e}"),
+        })?;
+
+        // Upsert the runtime ConfigMap first. If this fails, abort
+        // before touching the DB — the caller sees a clear error.
+        self.upsert_runtime_env_cm(project_id, &json).await?;
+
+        let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
+        repo.set_environment_config(project_id, &json).await?;
+        info!(
+            project_id,
+            "apply_environment_config: DB + runtime ConfigMap updated; next tick will rebuild"
+        );
+        Ok(())
+    }
+
+    async fn upsert_runtime_env_cm(
+        &self,
+        project_id: &str,
+        environment_config_json: &str,
+    ) -> Result<()> {
+        let cms: Api<ConfigMap> =
+            Api::namespaced(self.client.clone(), &self.config.namespace);
+        let cm = djinn_k8s::build_env_config_config_map(
+            &self.config.namespace,
+            project_id,
+            environment_config_json,
+        );
+        let name = djinn_k8s::env_config_config_map_name(project_id);
+        let params = PatchParams::apply("djinn-image-controller").force();
+        cms.patch(&name, &params, &Patch::Apply(&cm)).await?;
+        debug!(
+            project_id,
+            cm = %name,
+            "apply_environment_config: runtime env-config CM applied"
+        );
+        Ok(())
+    }
+
     async fn upsert_build_context_cm(
         &self,
         project_id: &str,

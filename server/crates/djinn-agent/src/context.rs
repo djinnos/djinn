@@ -202,6 +202,20 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
             Err(e) => tracing::warn!(error = %e, "failed to serialize model health state"),
         }
     }
+
+    async fn apply_environment_config(
+        &self,
+        _project_id: &str,
+        _config: &djinn_stack::environment::EnvironmentConfig,
+    ) -> Result<(), String> {
+        // The agent-internal runtime doesn't own the kube client /
+        // ImageController — only the server-side AppState impl does.
+        // If this path ever fires from in-agent MCP invocation, surface
+        // a clear error so the caller knows they're wired up wrong.
+        Err("apply_environment_config is unavailable on the agent-internal runtime — \
+             route project_environment_config_set through djinn-server's MCP endpoint"
+            .into())
+    }
 }
 
 /// Fallback `RepoGraphOps` implementation used when `AgentContext` is built

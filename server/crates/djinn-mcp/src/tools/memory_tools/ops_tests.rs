@@ -46,6 +46,13 @@ mod tests {
 
         async fn reset_runtime_settings(&self) {}
         async fn persist_model_health_state(&self) {}
+        async fn apply_environment_config(
+            &self,
+            _: &str,
+            _: &djinn_stack::environment::EnvironmentConfig,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
@@ -66,6 +73,13 @@ mod tests {
 
         async fn reset_runtime_settings(&self) {}
         async fn persist_model_health_state(&self) {}
+        async fn apply_environment_config(
+            &self,
+            _: &str,
+            _: &djinn_stack::environment::EnvironmentConfig,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {

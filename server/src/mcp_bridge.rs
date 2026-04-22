@@ -172,6 +172,33 @@ impl RuntimeOps for AppState {
     async fn persist_model_health_state(&self) {
         AppState::persist_model_health_state(self).await;
     }
+
+    async fn apply_environment_config(
+        &self,
+        project_id: &str,
+        config: &djinn_stack::environment::EnvironmentConfig,
+    ) -> Result<(), String> {
+        // Route through the image-controller in prod so the runtime
+        // ConfigMap gets upserted alongside the DB write. In dev mode
+        // without a kube client there's no CM to reconcile; just write
+        // the DB.
+        if let Some(controller) = self.image_controller().await {
+            controller
+                .apply_environment_config(project_id, config)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            let repo = djinn_db::ProjectRepository::new(
+                self.db().clone(),
+                djinn_core::events::EventBus::noop(),
+            );
+            let json = serde_json::to_string(config)
+                .map_err(|e| format!("serialize environment_config: {e}"))?;
+            repo.set_environment_config(project_id, &json)
+                .await
+                .map_err(|e| format!("db write: {e}"))
+        }
+    }
 }
 
 #[async_trait]

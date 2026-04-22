@@ -10,6 +10,7 @@ doctest = false
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-image-builder = { path = "../djinn-image-builder" }
+djinn-k8s = { path = "../djinn-k8s" }
 djinn-runtime = { path = "../djinn-runtime" }
 djinn-stack = { path = "../djinn-stack" }
 djinn-workspace = { path = "../djinn-workspace" }

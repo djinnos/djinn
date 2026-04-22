@@ -14,6 +14,7 @@ djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-mcp = { path = "../djinn-mcp" }
 djinn-runtime = { path = "../djinn-runtime", features = ["test-runtime"] }
+djinn-stack = { path = "../djinn-stack" }
 djinn-supervisor = { path = "../djinn-supervisor" }
 djinn-k8s = { path = "../djinn-k8s" }
 djinn-workspace = { path = "../djinn-workspace" }
