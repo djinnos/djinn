@@ -1,13 +1,11 @@
-//! P5 boot reseed hook.
+//! Boot reseed hook.
 //!
 //! Walks `projects` once at server boot. For every row whose
 //! `environment_config` is still the migration-10 default (`'{}'`) or
 //! whose parsed config has `schema_version < 1`, builds a fresh
 //! [`EnvironmentConfig`] from `projects.stack` via
-//! [`EnvironmentConfig::from_stack`], folds the `verification_rules`
-//! column into `environment_config.verification.rules` verbatim, and
-//! writes it back — nulling `image_hash` so the image-controller
-//! rebuilds on the next tick.
+//! [`EnvironmentConfig::from_stack`] and writes it back — nulling
+//! `image_hash` so the image-controller rebuilds on the next tick.
 //!
 //! Idempotence: the sentinel is "empty config". Once a project has a
 //! non-empty config (from this reseed *or* a user edit via the MCP
@@ -20,7 +18,7 @@
 use std::sync::Arc;
 
 use djinn_db::{Database, ProjectRepository};
-use djinn_stack::environment::{EnvironmentConfig, VerificationRule};
+use djinn_stack::environment::EnvironmentConfig;
 use djinn_stack::schema::Stack;
 
 /// Summary returned by [`reseed_empty_configs`], intended for log lines.
@@ -73,10 +71,7 @@ pub async fn reseed_empty_configs(db: &Database) -> ReseedStats {
             }
         };
 
-        let rules = parse_verification_rules(&row.verification_rules);
-
-        let mut cfg = EnvironmentConfig::from_stack(&stack);
-        cfg.verification.rules = rules;
+        let cfg = EnvironmentConfig::from_stack(&stack);
 
         if let Err(err) = cfg.validate() {
             tracing::warn!(
@@ -149,20 +144,6 @@ fn parse_stack(raw: &str) -> Option<Stack> {
     serde_json::from_str::<Stack>(trimmed).ok()
 }
 
-fn parse_verification_rules(raw: &str) -> Vec<VerificationRule> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "[]" {
-        return Vec::new();
-    }
-    serde_json::from_str::<Vec<VerificationRule>>(trimmed).unwrap_or_else(|err| {
-        tracing::warn!(
-            error = %err,
-            "reseed_empty_configs: verification_rules JSON unparseable; using empty list"
-        );
-        Vec::new()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,21 +173,5 @@ mod tests {
     fn parse_stack_tolerates_empty() {
         assert!(parse_stack("{}").is_none());
         assert!(parse_stack("").is_none());
-    }
-
-    #[test]
-    fn parse_verification_rules_tolerates_empty() {
-        assert!(parse_verification_rules("[]").is_empty());
-        assert!(parse_verification_rules("").is_empty());
-    }
-
-    #[test]
-    fn parse_verification_rules_round_trips_existing_shape() {
-        let raw = r#"[
-            {"match_pattern": "src/**/*.rs", "commands": ["cargo test"]}
-        ]"#;
-        let rules = parse_verification_rules(raw);
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].match_pattern, "src/**/*.rs");
     }
 }

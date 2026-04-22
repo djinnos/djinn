@@ -694,11 +694,10 @@ mod created_by_tests {
         db.ensure_initialized().await.unwrap();
         let project_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
-            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
             project_id,
             "p",
             "/tmp/p",
-            "[]"
         )
         .execute(db.pool())
         .await

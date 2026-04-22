@@ -96,11 +96,10 @@ mod tests {
         for id in ids {
             let path = format!("/tmp/verif-cache-{id}");
             sqlx::query!(
-                "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+                "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
                 id,
                 id,
                 path,
-                "[]",
             )
             .execute(db.pool())
             .await

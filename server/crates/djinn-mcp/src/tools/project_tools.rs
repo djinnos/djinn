@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::server::DjinnMcpServer;
+use crate::tools::ObjectJson;
 use djinn_core::auth_context::current_user_token;
 use djinn_db::{
     OrgConfigRepository, ProjectImage, ProjectImageStatus, ProjectRepository,
-    RepoGraphCacheRepository, VerificationRule,
+    RepoGraphCacheRepository,
 };
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient};
 use djinn_stack::{Stack, generate_starter};
@@ -168,14 +169,10 @@ pub struct GetProjectDevcontainerStatusParams {
     pub project: String,
 }
 
-/// Snapshot of a project's devcontainer + image-build state, used by the
-/// UI onboarding banner.
+/// Snapshot of a project's image-build state, used by the UI onboarding
+/// banner.
 #[derive(Serialize, JsonSchema)]
 pub struct GetProjectDevcontainerStatusResponse {
-    /// True when the mirror's HEAD contains `.devcontainer/devcontainer.json`.
-    pub has_devcontainer: bool,
-    /// True when the mirror's HEAD also contains `.devcontainer/devcontainer-lock.json`.
-    pub has_devcontainer_lock: bool,
     /// Content-addressable image tag from the last successful build, or
     /// `None` when no build has completed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,16 +182,6 @@ pub struct GetProjectDevcontainerStatusResponse {
     /// Human-readable error from the most recent failed build, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_last_error: Option<String>,
-    /// Generated starter `devcontainer.json` (pretty-printed). Populated
-    /// when `has_devcontainer == false` so the UI can show a copyable
-    /// template.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub starter_json: Option<String>,
-    /// Reference to an already-open PR on the `djinn/setup-devcontainer`
-    /// branch, when one exists. The UI uses this to swap the "Open PR"
-    /// button to "View PR" without a second round-trip.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub open_setup_pr: Option<DevcontainerPrRef>,
     /// ISO-8601 UTC timestamp of the most recent successful canonical-graph
     /// warm for this project. `None` means the warmer has not completed a
     /// run yet (cold project or failing pipeline). The coordinator will not
@@ -270,7 +257,7 @@ pub struct ProjectEnvironmentConfigGetResponse {
     /// The raw JSON config currently in `projects.environment_config`.
     /// Empty object `{}` when the row hasn't been reseeded yet.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub config: Option<serde_json::Value>,
+    pub config: Option<ObjectJson>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -280,7 +267,7 @@ pub struct ProjectEnvironmentConfigSetParams {
     /// Full `EnvironmentConfig` JSON blob. Validated server-side via
     /// `djinn_stack::environment::EnvironmentConfig::validate` before
     /// anything is written.
-    pub config: serde_json::Value,
+    pub config: ObjectJson,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -288,15 +275,6 @@ pub struct ProjectEnvironmentConfigSetResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-}
-
-/// A single verification rule returned in project config.
-#[derive(Deserialize, Serialize, JsonSchema, Clone)]
-pub struct VerificationRuleDto {
-    /// Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).
-    pub match_pattern: String,
-    /// One or more shell commands to run when the pattern matches.
-    pub commands: Vec<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -307,9 +285,6 @@ pub struct ProjectConfigResponse {
     pub auto_merge: bool,
     pub sync_enabled: bool,
     pub sync_remote: Option<String>,
-    /// File-pattern-to-command mapping for selective verification.
-    /// Empty list means fall back to full-project verification.
-    pub verification_rules: Vec<VerificationRuleDto>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -415,53 +390,13 @@ fn error_response(
 ) -> GetProjectDevcontainerStatusResponse {
     let graph_warm_status = derive_graph_warm_status(&image_status, &None);
     GetProjectDevcontainerStatusResponse {
-        has_devcontainer: false,
-        has_devcontainer_lock: false,
         image_tag: None,
         image_status,
         image_last_error,
-        starter_json: None,
-        open_setup_pr: None,
         graph_warmed_at: None,
         graph_warm_status,
         error: Some(error),
     }
-}
-
-/// Look up an open PR on the `djinn/setup-devcontainer` branch for a
-/// project. Silently returns `None` when the project has no GitHub coords,
-/// no cached installation id, or when the GitHub API call fails — the
-/// caller treats this as "no PR open, show the create button".
-async fn find_open_setup_pr(
-    repo: &ProjectRepository,
-    project_id: &str,
-) -> Option<DevcontainerPrRef> {
-    let (owner, repo_name) = repo.get_github_coords(project_id).await.ok()??;
-    let installation_id = repo.get_installation_id(project_id).await.ok()??;
-
-    let client = GitHubApiClient::for_installation(installation_id);
-    let head = format!("{owner}:{DEVCONTAINER_PR_BRANCH}");
-    let prs = client
-        .list_pulls_by_head_with_state(&owner, &repo_name, &head, "open")
-        .await
-        .ok()?;
-    prs.into_iter().next().map(|pr| DevcontainerPrRef {
-        url: pr.html_url,
-        number: pr.number,
-    })
-}
-
-/// Parse a JSON-encoded `verification_rules` string into `Vec<VerificationRuleDto>`.
-/// Returns an empty vec on any parse error (safe default).
-fn parse_verification_rules(json: &str) -> Vec<VerificationRuleDto> {
-    serde_json::from_str::<Vec<VerificationRule>>(json)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| VerificationRuleDto {
-            match_pattern: r.match_pattern,
-            commands: r.commands,
-        })
-        .collect()
 }
 
 // ── Tools ────────────────────────────────────────────────────────────────────
@@ -882,7 +817,6 @@ impl DjinnMcpServer {
                     auto_merge: true,
                     sync_enabled: false,
                     sync_remote: None,
-                    verification_rules: vec![],
                 });
             }
             Err(e) => {
@@ -893,7 +827,6 @@ impl DjinnMcpServer {
                     auto_merge: true,
                     sync_enabled: false,
                     sync_remote: None,
-                    verification_rules: vec![],
                 });
             }
         };
@@ -905,7 +838,6 @@ impl DjinnMcpServer {
                 auto_merge: config.auto_merge,
                 sync_enabled: config.sync_enabled,
                 sync_remote: config.sync_remote,
-                verification_rules: parse_verification_rules(&config.verification_rules),
             }),
             Ok(None) => Json(ProjectConfigResponse {
                 status: "ok".into(),
@@ -914,7 +846,6 @@ impl DjinnMcpServer {
                 auto_merge: project.auto_merge,
                 sync_enabled: project.sync_enabled,
                 sync_remote: project.sync_remote,
-                verification_rules: vec![],
             }),
             Err(e) => Json(ProjectConfigResponse {
                 status: format!("error: {e}"),
@@ -923,7 +854,6 @@ impl DjinnMcpServer {
                 auto_merge: project.auto_merge,
                 sync_enabled: project.sync_enabled,
                 sync_remote: project.sync_remote,
-                verification_rules: vec![],
             }),
         }
     }
@@ -944,7 +874,6 @@ impl DjinnMcpServer {
                     auto_merge: true,
                     sync_enabled: false,
                     sync_remote: None,
-                    verification_rules: vec![],
                 });
             }
             Err(e) => {
@@ -955,7 +884,6 @@ impl DjinnMcpServer {
                     auto_merge: true,
                     sync_enabled: false,
                     sync_remote: None,
-                    verification_rules: vec![],
                 });
             }
         };
@@ -971,7 +899,6 @@ impl DjinnMcpServer {
                 auto_merge: config.auto_merge,
                 sync_enabled: config.sync_enabled,
                 sync_remote: config.sync_remote,
-                verification_rules: parse_verification_rules(&config.verification_rules),
             }),
             Ok(None) => Json(ProjectConfigResponse {
                 status: format!("error: invalid key '{}'", input.key),
@@ -980,7 +907,6 @@ impl DjinnMcpServer {
                 auto_merge: project.auto_merge,
                 sync_enabled: project.sync_enabled,
                 sync_remote: project.sync_remote,
-                verification_rules: vec![],
             }),
             Err(e) => Json(ProjectConfigResponse {
                 status: format!("error: {e}"),
@@ -989,7 +915,6 @@ impl DjinnMcpServer {
                 auto_merge: project.auto_merge,
                 sync_enabled: project.sync_enabled,
                 sync_remote: project.sync_remote,
-                verification_rules: vec![],
             }),
         }
     }
@@ -1151,16 +1076,13 @@ impl DjinnMcpServer {
         }
     }
 
-    /// Return devcontainer + image-build status for a project.
+    /// Return image-build status for a project.
     ///
-    /// Drives the UI onboarding banner (Phase 3 PR 6). Reads the latest
-    /// stack JSON for the two `manifest_signals.has_devcontainer*` flags,
-    /// joins it with the `image_*` columns, and — when the project has
-    /// no committed devcontainer — fills `starter_json` with
-    /// `djinn_stack::generate_starter(&stack)` so the banner can show a
-    /// copyable template.
+    /// Drives the UI status badge (P7). Joins the `image_*` columns with
+    /// the `graph_warmed_at` stamp so the badge can reflect both build
+    /// progress and canonical-graph warm readiness.
     #[tool(
-        description = "Return devcontainer + image-build status for a project (has_devcontainer, has_devcontainer_lock, image_tag, image_status, image_last_error, starter_json). Drives the UI onboarding banner."
+        description = "Return image-build status for a project (image_tag, image_status, image_last_error, graph_warmed_at, graph_warm_status). Drives the UI status badge."
     )]
     pub async fn get_project_devcontainer_status(
         &self,
@@ -1168,66 +1090,15 @@ impl DjinnMcpServer {
     ) -> Json<GetProjectDevcontainerStatusResponse> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        // Resolve the stack first — the `has_devcontainer*` signals drive
-        // whether we bother generating a starter template.
-        let stack_raw = match repo.get_stack(&input.project).await {
-            Ok(Some(raw)) => raw,
-            Ok(None) => {
-                return Json(error_response(
-                    ProjectImageStatus::NONE.to_string(),
-                    None,
-                    format!("project not found: {}", input.project),
-                ));
-            }
-            Err(err) => {
-                return Json(error_response(
-                    ProjectImageStatus::NONE.to_string(),
-                    None,
-                    format!("stack lookup failed: {err}"),
-                ));
-            }
-        };
-
-        // Treat empty / default (`{}`) stack as "not detected yet" — no
-        // signals known, no starter JSON; banner will render the
-        // `missing` state as soon as detection runs.
-        let stack: Option<Stack> = if stack_raw.trim().is_empty() || stack_raw.trim() == "{}" {
-            None
-        } else {
-            match serde_json::from_str::<Stack>(&stack_raw) {
-                Ok(s) => Some(s),
-                Err(err) => {
-                    return Json(error_response(
-                        ProjectImageStatus::NONE.to_string(),
-                        None,
-                        format!("stack JSON deserialize failed: {err}"),
-                    ));
-                }
-            }
-        };
-
-        let (has_devcontainer, has_devcontainer_lock) = stack
-            .as_ref()
-            .map(|s| {
-                (
-                    s.manifest_signals.has_devcontainer,
-                    s.manifest_signals.has_devcontainer_lock,
-                )
-            })
-            .unwrap_or((false, false));
-
-        // Generate a starter only when the user has nothing committed and
-        // we have a non-trivial stack to base it on. A missing stack
-        // falls back to a minimal Ubuntu-based starter so the banner is
-        // still actionable on the first mirror fetch.
-        let starter_json = if !has_devcontainer {
-            Some(match stack.as_ref() {
-                Some(s) => generate_starter(s),
-                None => generate_starter(&Stack::empty()),
-            })
-        } else {
-            None
-        };
+        // Existence check — if the project id is unknown, surface it up
+        // front so the badge doesn't render "building…" indefinitely.
+        if let Err(err) = repo.get_stack(&input.project).await {
+            return Json(error_response(
+                ProjectImageStatus::NONE.to_string(),
+                None,
+                format!("stack lookup failed: {err}"),
+            ));
+        }
 
         let image = match repo.get_project_image(&input.project).await {
             Ok(Some(img)) => img,
@@ -1239,16 +1110,6 @@ impl DjinnMcpServer {
                     format!("image state lookup failed: {err}"),
                 ));
             }
-        };
-
-        // Only bother checking GitHub for an open setup PR when the user
-        // would actually see the button (i.e. `has_devcontainer == false`).
-        // Failures here are non-fatal — the banner still works, the button
-        // just falls back to "Open PR" and retries on click.
-        let open_setup_pr = if has_devcontainer {
-            None
-        } else {
-            find_open_setup_pr(&repo, &input.project).await
         };
 
         // Graph-warm status: derived from the dispatch-readiness row so the
@@ -1280,13 +1141,9 @@ impl DjinnMcpServer {
         let graph_warm_status = derive_graph_warm_status(&image.status, &graph_warmed_at);
 
         Json(GetProjectDevcontainerStatusResponse {
-            has_devcontainer,
-            has_devcontainer_lock,
             image_tag: image.tag,
             image_status: image.status,
             image_last_error: image.last_error,
-            starter_json,
-            open_setup_pr,
             graph_warmed_at,
             graph_warm_status,
             error: None,
@@ -1365,7 +1222,7 @@ impl DjinnMcpServer {
                 Json(ProjectEnvironmentConfigGetResponse {
                     status: "ok".into(),
                     error: None,
-                    config: Some(parsed),
+                    config: Some(ObjectJson::from(parsed)),
                 })
             }
             Ok(None) => Json(ProjectEnvironmentConfigGetResponse {
@@ -1397,16 +1254,17 @@ impl DjinnMcpServer {
         // Parse + validate up front so the MCP error surface is the
         // typed EnvironmentConfigError, not whatever the DB layer
         // returns later.
-        let cfg: djinn_stack::environment::EnvironmentConfig =
-            match serde_json::from_value(input.config) {
-                Ok(c) => c,
-                Err(err) => {
-                    return Json(ProjectEnvironmentConfigSetResponse {
-                        status: "error".into(),
-                        error: Some(format!("parse config: {err}")),
-                    });
-                }
-            };
+        let cfg: djinn_stack::environment::EnvironmentConfig = match serde_json::from_value(
+            serde_json::Value::Object(input.config.0),
+        ) {
+            Ok(c) => c,
+            Err(err) => {
+                return Json(ProjectEnvironmentConfigSetResponse {
+                    status: "error".into(),
+                    error: Some(format!("parse config: {err}")),
+                });
+            }
+        };
         if let Err(err) = cfg.validate() {
             return Json(ProjectEnvironmentConfigSetResponse {
                 status: "error".into(),

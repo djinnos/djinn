@@ -2075,29 +2075,8 @@ expression: signatures
     },
     "name": "get_project_devcontainer_status",
     "output_schema": {
-      "$defs": {
-        "DevcontainerPrRef": {
-          "description": "Minimal reference to a devcontainer setup PR — enough for the UI to\nrender a \"View PR\" link and navigate the user to GitHub.",
-          "properties": {
-            "number": {
-              "description": "PR number within the repo.",
-              "format": "int64",
-              "type": "integer"
-            },
-            "url": {
-              "description": "Full `html_url` of the PR on GitHub.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "url",
-            "number"
-          ],
-          "type": "object"
-        }
-      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Snapshot of a project's devcontainer + image-build state, used by the\nUI onboarding banner.",
+      "description": "Snapshot of a project's image-build state, used by the UI onboarding\nbanner.",
       "properties": {
         "error": {
           "description": "Populated on lookup failures; clients should surface this verbatim.",
@@ -2113,14 +2092,6 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
-        "has_devcontainer": {
-          "description": "True when the mirror's HEAD contains `.devcontainer/devcontainer.json`.",
-          "type": "boolean"
-        },
-        "has_devcontainer_lock": {
-          "description": "True when the mirror's HEAD also contains `.devcontainer/devcontainer-lock.json`.",
-          "type": "boolean"
-        },
         "image_last_error": {
           "description": "Human-readable error from the most recent failed build, if any.",
           "nullable": true,
@@ -2134,28 +2105,9 @@ expression: signatures
           "description": "Content-addressable image tag from the last successful build, or\n`None` when no build has completed.",
           "nullable": true,
           "type": "string"
-        },
-        "open_setup_pr": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DevcontainerPrRef"
-            },
-            {
-              "const": null,
-              "nullable": true
-            }
-          ],
-          "description": "Reference to an already-open PR on the `djinn/setup-devcontainer`\nbranch, when one exists. The UI uses this to swap the \"Open PR\"\nbutton to \"View PR\" without a second round-trip."
-        },
-        "starter_json": {
-          "description": "Generated starter `devcontainer.json` (pretty-printed). Populated\nwhen `has_devcontainer == false` so the UI can show a copyable\ntemplate.",
-          "nullable": true,
-          "type": "string"
         }
       },
       "required": [
-        "has_devcontainer",
-        "has_devcontainer_lock",
         "image_status",
         "graph_warm_status"
       ],
@@ -2207,12 +2159,6 @@ expression: signatures
             "has_cargo_toml": {
               "type": "boolean"
             },
-            "has_devcontainer": {
-              "type": "boolean"
-            },
-            "has_devcontainer_lock": {
-              "type": "boolean"
-            },
             "has_go_mod": {
               "type": "boolean"
             },
@@ -2235,9 +2181,7 @@ expression: signatures
             "has_pyproject_toml",
             "has_go_mod",
             "has_pnpm_workspace",
-            "has_turbo_json",
-            "has_devcontainer",
-            "has_devcontainer_lock"
+            "has_turbo_json"
           ],
           "type": "object"
         },
@@ -4665,29 +4609,6 @@ expression: signatures
     },
     "name": "project_config_get",
     "output_schema": {
-      "$defs": {
-        "VerificationRuleDto": {
-          "description": "A single verification rule returned in project config.",
-          "properties": {
-            "commands": {
-              "description": "One or more shell commands to run when the pattern matches.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "match_pattern": {
-              "description": "Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).",
-              "type": "string"
-            }
-          },
-          "required": [
-            "match_pattern",
-            "commands"
-          ],
-          "type": "object"
-        }
-      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "auto_merge": {
@@ -4708,13 +4629,6 @@ expression: signatures
         },
         "target_branch": {
           "type": "string"
-        },
-        "verification_rules": {
-          "description": "File-pattern-to-command mapping for selective verification.\nEmpty list means fall back to full-project verification.",
-          "items": {
-            "$ref": "#/$defs/VerificationRuleDto"
-          },
-          "type": "array"
         }
       },
       "required": [
@@ -4722,8 +4636,7 @@ expression: signatures
         "project",
         "target_branch",
         "auto_merge",
-        "sync_enabled",
-        "verification_rules"
+        "sync_enabled"
       ],
       "title": "ProjectConfigResponse",
       "type": "object"
@@ -4753,29 +4666,6 @@ expression: signatures
     },
     "name": "project_config_set",
     "output_schema": {
-      "$defs": {
-        "VerificationRuleDto": {
-          "description": "A single verification rule returned in project config.",
-          "properties": {
-            "commands": {
-              "description": "One or more shell commands to run when the pattern matches.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "match_pattern": {
-              "description": "Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).",
-              "type": "string"
-            }
-          },
-          "required": [
-            "match_pattern",
-            "commands"
-          ],
-          "type": "object"
-        }
-      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "auto_merge": {
@@ -4796,13 +4686,6 @@ expression: signatures
         },
         "target_branch": {
           "type": "string"
-        },
-        "verification_rules": {
-          "description": "File-pattern-to-command mapping for selective verification.\nEmpty list means fall back to full-project verification.",
-          "items": {
-            "$ref": "#/$defs/VerificationRuleDto"
-          },
-          "type": "array"
         }
       },
       "required": [
@@ -4810,8 +4693,7 @@ expression: signatures
         "project",
         "target_branch",
         "auto_merge",
-        "sync_enabled",
-        "verification_rules"
+        "sync_enabled"
       ],
       "title": "ProjectConfigResponse",
       "type": "object"
@@ -4834,9 +4716,24 @@ expression: signatures
     },
     "name": "project_environment_config_get",
     "output_schema": {
+      "$defs": {
+        "ObjectJson": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectJson"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
           "description": "The raw JSON config currently in `projects.environment_config`.\nEmpty object `{}` when the row hasn't been reseeded yet."
         },
         "error": {
@@ -4856,9 +4753,16 @@ expression: signatures
   },
   {
     "input_schema": {
+      "$defs": {
+        "ObjectJson": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "config": {
+          "$ref": "#/$defs/ObjectJson",
           "description": "Full `EnvironmentConfig` JSON blob. Validated server-side via\n`djinn_stack::environment::EnvironmentConfig::validate` before\nanything is written."
         },
         "project": {

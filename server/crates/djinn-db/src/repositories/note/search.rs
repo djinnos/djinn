@@ -693,11 +693,10 @@ mod contradiction_tests {
         let id = uuid::Uuid::now_v7().to_string();
         let path_str = tmp.path().to_str().unwrap();
         sqlx::query!(
-            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
             id,
             "test",
             path_str,
-            "[]"
         )
         .execute(db.pool())
         .await
@@ -870,11 +869,10 @@ mod scope_overlap_decay_tests {
         let id = uuid::Uuid::now_v7().to_string();
         let path_str = tmp.path().to_str().unwrap();
         sqlx::query!(
-            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
             id,
             "test",
             path_str,
-            "[]"
         )
         .execute(db.pool())
         .await

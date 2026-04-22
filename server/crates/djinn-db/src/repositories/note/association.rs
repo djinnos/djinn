@@ -1,6 +1,6 @@
 use super::*;
 use crate::repositories::note::NoteRepository;
-use djinn_core::models::{NoteAssociation, canonical_pair};
+use djinn_memory::{NoteAssociation, canonical_pair};
 
 /// A resolved association entry: the "other" note's identity plus the link weight.
 #[derive(Clone, Debug, sqlx::FromRow, serde::Serialize)]
@@ -686,11 +686,10 @@ mod tests {
             let id = uuid::Uuid::now_v7().to_string();
             let project2_path_str = project2_path.to_str().unwrap();
             sqlx::query!(
-                "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+                "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
                 id,
                 "test-project-2",
                 project2_path_str,
-                "[]"
             )
             .execute(db.pool())
             .await

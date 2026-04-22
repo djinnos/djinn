@@ -1000,8 +1000,8 @@ export namespace GetProjectDevcontainerStatusInputSchema {
 export type GetProjectDevcontainerStatusInput = GetProjectDevcontainerStatusInputSchema.GetProjectDevcontainerStatusInput;
 export namespace GetProjectDevcontainerStatusOutputSchema {
   /**
-   * Snapshot of a project's devcontainer + image-build state, used by the
-   * UI onboarding banner.
+   * Snapshot of a project's image-build state, used by the UI onboarding
+   * banner.
    */
   export interface GetProjectDevcontainerStatusOutput {
   /**
@@ -1024,14 +1024,6 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    */
   graph_warmed_at?: string
   /**
-   * True when the mirror's HEAD contains `.devcontainer/devcontainer.json`.
-   */
-  has_devcontainer: boolean
-  /**
-   * True when the mirror's HEAD also contains `.devcontainer/devcontainer-lock.json`.
-   */
-  has_devcontainer_lock: boolean
-  /**
    * Human-readable error from the most recent failed build, if any.
    */
   image_last_error?: string
@@ -1044,33 +1036,6 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    * `None` when no build has completed.
    */
   image_tag?: string
-  /**
-   * Reference to an already-open PR on the `djinn/setup-devcontainer`
-   * branch, when one exists. The UI uses this to swap the "Open PR"
-   * button to "View PR" without a second round-trip.
-   */
-  open_setup_pr?: (DevcontainerPrRef | null)
-  /**
-   * Generated starter `devcontainer.json` (pretty-printed). Populated
-   * when `has_devcontainer == false` so the UI can show a copyable
-   * template.
-   */
-  starter_json?: string
-  [k: string]: any
-  }
-  /**
-   * Minimal reference to a devcontainer setup PR — enough for the UI to
-   * render a "View PR" link and navigate the user to GitHub.
-   */
-  export interface DevcontainerPrRef {
-  /**
-   * PR number within the repo.
-   */
-  number: number
-  /**
-   * Full `html_url` of the PR on GitHub.
-   */
-  url: string
   [k: string]: any
   }
 
@@ -1173,8 +1138,6 @@ export namespace GetProjectStackOutputSchema {
    */
   export interface ManifestSignals {
   has_cargo_toml: boolean
-  has_devcontainer: boolean
-  has_devcontainer_lock: boolean
   has_go_mod: boolean
   has_package_json: boolean
   has_pnpm_workspace: boolean
@@ -2287,25 +2250,6 @@ export namespace ProjectConfigGetOutputSchema {
   sync_enabled: boolean
   sync_remote?: string
   target_branch: string
-  /**
-   * File-pattern-to-command mapping for selective verification.
-   * Empty list means fall back to full-project verification.
-   */
-  verification_rules: VerificationRuleDto[]
-  [k: string]: any
-  }
-  /**
-   * A single verification rule returned in project config.
-   */
-  export interface VerificationRuleDto {
-  /**
-   * One or more shell commands to run when the pattern matches.
-   */
-  commands: string[]
-  /**
-   * Glob pattern (e.g. `src/** /*.rs`, `**` for catch-all).
-   */
-  match_pattern: string
   [k: string]: any
   }
 
@@ -2329,25 +2273,6 @@ export namespace ProjectConfigSetOutputSchema {
   sync_enabled: boolean
   sync_remote?: string
   target_branch: string
-  /**
-   * File-pattern-to-command mapping for selective verification.
-   * Empty list means fall back to full-project verification.
-   */
-  verification_rules: VerificationRuleDto[]
-  [k: string]: any
-  }
-  /**
-   * A single verification rule returned in project config.
-   */
-  export interface VerificationRuleDto {
-  /**
-   * One or more shell commands to run when the pattern matches.
-   */
-  commands: string[]
-  /**
-   * Glob pattern (e.g. `src/** /*.rs`, `**` for catch-all).
-   */
-  match_pattern: string
   [k: string]: any
   }
 
@@ -2370,11 +2295,12 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    * The raw JSON config currently in `projects.environment_config`.
    * Empty object `{}` when the row hasn't been reseeded yet.
    */
-  config?: {
-  [k: string]: any
-  }
+  config?: (ObjectJson | null)
   error?: string
   status: string
+  [k: string]: any
+  }
+  export interface ObjectJson {
   [k: string]: any
   }
 
@@ -2382,18 +2308,19 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
 export type ProjectEnvironmentConfigGetOutput = ProjectEnvironmentConfigGetOutputSchema.ProjectEnvironmentConfigGetOutput;
 export namespace ProjectEnvironmentConfigSetInputSchema {
   export interface ProjectEnvironmentConfigSetInput {
+  config: ObjectJson
+  /**
+   * Project UUID.
+   */
+  project: string
+  [k: string]: any
+  }
   /**
    * Full `EnvironmentConfig` JSON blob. Validated server-side via
    * `djinn_stack::environment::EnvironmentConfig::validate` before
    * anything is written.
    */
-  config: {
-  [k: string]: any
-  }
-  /**
-   * Project UUID.
-   */
-  project: string
+  export interface ObjectJson {
   [k: string]: any
   }
 

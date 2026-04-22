@@ -4,57 +4,12 @@ use djinn_core::models::Project;
 use crate::Result;
 use crate::database::Database;
 
-/// A single verification rule: a glob pattern matched against changed file paths,
-/// and the commands to run when that pattern matches.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct VerificationRule {
-    /// Glob pattern (e.g. `src/**/*.rs`, `**` for catch-all).
-    pub match_pattern: String,
-    /// One or more shell commands to execute when the pattern matches.
-    pub commands: Vec<String>,
-}
-
-impl VerificationRule {
-    /// Validate a single rule.
-    ///
-    /// Returns `Err` with a human-readable message if:
-    /// - `match_pattern` is not valid glob syntax
-    /// - `commands` is empty
-    pub fn validate(&self) -> std::result::Result<(), String> {
-        if self.commands.is_empty() {
-            return Err(format!(
-                "rule for pattern '{}': commands must not be empty",
-                self.match_pattern
-            ));
-        }
-        globset::GlobBuilder::new(&self.match_pattern)
-            .build()
-            .map_err(|e| {
-                format!(
-                    "rule for pattern '{}': invalid glob syntax: {e}",
-                    self.match_pattern
-                )
-            })?;
-        Ok(())
-    }
-}
-
-/// Validate a slice of verification rules. Returns `Err` with the first error found.
-pub fn validate_verification_rules(rules: &[VerificationRule]) -> std::result::Result<(), String> {
-    for rule in rules {
-        rule.validate()?;
-    }
-    Ok(())
-}
-
 #[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
 pub struct ProjectConfig {
     pub target_branch: String,
     pub auto_merge: bool,
     pub sync_enabled: bool,
     pub sync_remote: Option<String>,
-    /// JSON-encoded Vec<VerificationRule>, stored as TEXT in SQLite.
-    pub verification_rules: String,
 }
 
 pub struct ProjectRepository {
@@ -211,11 +166,10 @@ impl ProjectRepository {
                 async move {
                     let mut tx = self.db.pool().begin().await?;
                     sqlx::query!(
-                        "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
                         id,
                         name,
                         path,
-                        "[]"
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -266,11 +220,10 @@ impl ProjectRepository {
                 async move {
                     let mut tx = self.db.pool().begin().await?;
                     sqlx::query!(
-                        "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
                         id,
                         name,
                         path,
-                        "[]"
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -405,8 +358,8 @@ impl ProjectRepository {
         let installation_id_i64: Option<i64> = installation_id.map(|v| v as i64);
         sqlx::query!(
             "INSERT INTO projects
-                (id, name, path, github_owner, github_repo, default_branch, clone_path, target_branch, installation_id, verification_rules)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (id, name, path, github_owner, github_repo, default_branch, clone_path, target_branch, installation_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             id,
             name,
             clone_path,
@@ -416,7 +369,6 @@ impl ProjectRepository {
             clone_path,
             default_branch,
             installation_id_i64,
-            "[]"
         )
         .execute(self.db.pool())
         .await?;
@@ -517,7 +469,7 @@ impl ProjectRepository {
             r#"SELECT target_branch,
                     auto_merge AS "auto_merge!: bool",
                     sync_enabled AS "sync_enabled!: bool",
-                    sync_remote, verification_rules
+                    sync_remote
              FROM projects WHERE id = ?"#,
             id
         )
@@ -559,22 +511,6 @@ impl ProjectRepository {
                 sqlx::query!("UPDATE projects SET sync_remote = ? WHERE id = ?", val, id)
                     .execute(self.db.pool())
                     .await?;
-            }
-            "verification_rules" => {
-                // Parse the incoming JSON and validate each rule before persisting.
-                let rules: Vec<VerificationRule> = serde_json::from_str(value).map_err(|e| {
-                    crate::error::DbError::InvalidData(format!(
-                        "verification_rules: invalid JSON: {e}"
-                    ))
-                })?;
-                validate_verification_rules(&rules).map_err(crate::error::DbError::InvalidData)?;
-                sqlx::query!(
-                    "UPDATE projects SET verification_rules = ? WHERE id = ?",
-                    value,
-                    id
-                )
-                .execute(self.db.pool())
-                .await?;
             }
             _ => return Ok(None),
         }
@@ -768,16 +704,16 @@ impl ProjectRepository {
     }
 
     /// List every project id + its current `environment_config` +
-    /// `stack` + `verification_rules`. Used by the P5 boot reseed hook
-    /// which walks the table once at startup, spots rows with an empty
-    /// config, and rewrites them from the stack.
+    /// `stack`. Used by the boot reseed hook which walks the table once
+    /// at startup, spots rows with an empty config, and rewrites them
+    /// from the stack.
     ///
     /// Non-macro `sqlx::query_as` — see `get_environment_config` for
     /// the reason.
     pub async fn list_for_reseed(&self) -> Result<Vec<ProjectReseedRow>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, ProjectReseedRow>(
-            "SELECT id, stack, verification_rules, environment_config FROM projects",
+            "SELECT id, stack, environment_config FROM projects",
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -890,16 +826,14 @@ impl ProjectRepository {
     }
 }
 
-/// One row the P5 boot reseed hook walks. All four columns come back
-/// as raw strings at the DB boundary — `djinn_stack` handles JSON
-/// shape, `djinn-db` doesn't. `verification_rules` is non-null with a
-/// `'[]'` default; `environment_config` is non-null with a `'{}'`
+/// One row the boot reseed hook walks. All columns come back as raw
+/// strings at the DB boundary — `djinn_stack` handles JSON shape,
+/// `djinn-db` doesn't. `environment_config` is non-null with a `'{}'`
 /// default; `stack` is non-null with a `'{}'` default.
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct ProjectReseedRow {
     pub id: String,
     pub stack: String,
-    pub verification_rules: String,
     pub environment_config: String,
 }
 
@@ -1139,163 +1073,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(total, 10, "2 projects × 5 roles = 10 default rows");
-    }
-
-    // ── VerificationRule validation ──────────────────────────────────────────
-
-    #[test]
-    fn verification_rule_valid_glob() {
-        let rule = VerificationRule {
-            match_pattern: "src/**/*.rs".to_string(),
-            commands: vec!["cargo test".to_string()],
-        };
-        assert!(rule.validate().is_ok());
-    }
-
-    #[test]
-    fn verification_rule_catch_all_is_valid() {
-        let rule = VerificationRule {
-            match_pattern: "**".to_string(),
-            commands: vec!["cargo test".to_string()],
-        };
-        assert!(rule.validate().is_ok());
-    }
-
-    #[test]
-    fn verification_rule_empty_commands_rejected() {
-        let rule = VerificationRule {
-            match_pattern: "**".to_string(),
-            commands: vec![],
-        };
-        let err = rule.validate().unwrap_err();
-        assert!(err.contains("commands must not be empty"), "got: {err}");
-    }
-
-    #[test]
-    fn verification_rule_invalid_glob_rejected() {
-        // A lone `[` is invalid glob syntax.
-        let rule = VerificationRule {
-            match_pattern: "[invalid".to_string(),
-            commands: vec!["echo ok".to_string()],
-        };
-        let err = rule.validate().unwrap_err();
-        assert!(err.contains("invalid glob syntax"), "got: {err}");
-    }
-
-    #[test]
-    fn validate_verification_rules_stops_at_first_error() {
-        let rules = vec![
-            VerificationRule {
-                match_pattern: "**".to_string(),
-                commands: vec!["echo ok".to_string()],
-            },
-            VerificationRule {
-                match_pattern: "**".to_string(),
-                commands: vec![],
-            },
-        ];
-        assert!(validate_verification_rules(&rules).is_err());
-    }
-
-    #[test]
-    fn validate_verification_rules_empty_is_ok() {
-        assert!(validate_verification_rules(&[]).is_ok());
-    }
-
-    // ── DB round-trip ────────────────────────────────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_config_default_verification_rules_is_empty_json_array() {
-        let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("cfg-default", "/cfg-default").await.unwrap();
-        let config = repo.get_config(&project.id).await.unwrap().unwrap();
-        assert_eq!(config.verification_rules, "[]");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_config_verification_rules_round_trip() {
-        let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("cfg-vr", "/cfg-vr").await.unwrap();
-
-        let rules_json = r#"[{"match_pattern":"src/**/*.rs","commands":["cargo test"]}]"#;
-        let config = repo
-            .update_config_field(&project.id, "verification_rules", rules_json)
-            .await
-            .unwrap()
-            .expect("should return config");
-
-        let stored: Vec<VerificationRule> =
-            serde_json::from_str(&config.verification_rules).unwrap();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].match_pattern, "src/**/*.rs");
-        assert_eq!(stored[0].commands, vec!["cargo test"]);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_config_verification_rules_catch_all() {
-        let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("cfg-catch", "/cfg-catch").await.unwrap();
-
-        let rules_json = r#"[{"match_pattern":"**","commands":["cargo clippy"]}]"#;
-        let config = repo
-            .update_config_field(&project.id, "verification_rules", rules_json)
-            .await
-            .unwrap()
-            .expect("should return config");
-
-        let stored: Vec<VerificationRule> =
-            serde_json::from_str(&config.verification_rules).unwrap();
-        assert_eq!(stored[0].match_pattern, "**");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_config_verification_rules_invalid_json_returns_error() {
-        let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo
-            .create("cfg-invalid-json", "/cfg-invalid-json")
-            .await
-            .unwrap();
-
-        let result = repo
-            .update_config_field(&project.id, "verification_rules", "not-json")
-            .await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("verification_rules") || err.contains("invalid"),
-            "got: {err}"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_config_verification_rules_empty_commands_returns_error() {
-        let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo
-            .create("cfg-empty-cmds", "/cfg-empty-cmds")
-            .await
-            .unwrap();
-
-        let rules_json = r#"[{"match_pattern":"**","commands":[]}]"#;
-        let result = repo
-            .update_config_field(&project.id, "verification_rules", rules_json)
-            .await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("commands must not be empty"), "got: {err}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_config_verification_rules_invalid_glob_returns_error() {
-        let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("cfg-bad-glob", "/cfg-bad-glob").await.unwrap();
-
-        let rules_json = r#"[{"match_pattern":"[invalid","commands":["echo ok"]}]"#;
-        let result = repo
-            .update_config_field(&project.id, "verification_rules", rules_json)
-            .await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("invalid glob syntax"), "got: {err}");
     }
 
     // ── Stack column round-trip ──────────────────────────────────────────────

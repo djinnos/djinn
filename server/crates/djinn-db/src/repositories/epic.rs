@@ -569,11 +569,10 @@ impl EpicRepository {
 
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
-            "INSERT INTO projects (id, name, path, verification_rules) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
             id,
             "default",
             ".",
-            "[]"
         )
         .execute(self.db.pool())
         .await?;
