@@ -52,7 +52,14 @@ local_resource(
     'djinn-server-image',
     cmd='bash scripts/tilt/build-server-image.sh',
     deps=['server/src', 'server/crates', 'server/Cargo.toml', 'server/Cargo.lock'],
-    ignore=['server/target', 'server/.sqlx/cache'],
+    # Exclude every build artefact dir so `cargo test` on any crate (which
+    # writes target/debug/** and target/test-tmp/**) doesn't re-trigger the
+    # image build. The workspace has a root `target/` plus per-crate
+    # `crates/*/target/` dirs; the `**/target` glob covers both, including
+    # future sub-targets. `server/.sqlx` is committed and only changes when
+    # the user intentionally runs `cargo sqlx prepare`, so watching it is
+    # fine — but the `.../cache` suffix in the old pattern matched nothing.
+    ignore=['server/**/target', 'server/**/test-tmp'],
     labels=['build'],
 )
 
@@ -68,7 +75,10 @@ local_resource(
         'docker push {ref}'.format(ref=AGENT_RUNTIME_REF),
     ]),
     deps=['server', 'server/docker/djinn-agent-runtime.Dockerfile'],
-    ignore=['server/target', 'server/.sqlx/cache'],
+    # Same ignore story as djinn-server-image — every target/ dir under the
+    # workspace is excluded so host-side `cargo test` runs don't produce
+    # phantom dependency changes that re-trigger the docker build.
+    ignore=['server/**/target', 'server/**/test-tmp'],
     labels=['build'],
 )
 
