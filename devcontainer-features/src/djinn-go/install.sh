@@ -71,7 +71,9 @@ install_tools() {
     log "installing gopls"
     "${GOROOT}/bin/go" install golang.org/x/tools/gopls@latest
     log "installing scip-go"
-    "${GOROOT}/bin/go" install github.com/sourcegraph/scip-go/cmd/scip-go@latest
+    # Module was renamed sourcegraph/scip-go → scip-code/scip-go (Go
+    # rejects the old path with "module declares its path as ...").
+    "${GOROOT}/bin/go" install github.com/scip-code/scip-go/cmd/scip-go@latest
     chmod -R a+rX "${GOPATH}"
 }
 

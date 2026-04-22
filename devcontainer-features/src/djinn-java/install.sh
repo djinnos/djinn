@@ -3,7 +3,26 @@
 #
 # Installs SDKMAN, JDK, build tool (gradle/maven), jdtls, and scip-java.
 
-set -euo pipefail
+# NOTE: `-u` (nounset) is intentionally not enabled — SDKMAN's
+# `sdkman-init.sh` + internal `sdkman-install.sh` dereference several
+# of their own internal vars before defining them, and the errors
+# happen far enough down the `sdk install` code path that we can't
+# confidently fence them with local `set +u` blocks.
+set -eo pipefail
+
+# devcontainer-feature.json's `containerEnv.PATH` prepends
+# /usr/local/sdkman/candidates/java/current/bin (etc.) so the installed
+# JDK is on PATH inside the running container without sourcing
+# /etc/profile. The downside: those paths are also present during THIS
+# install, and SDKMAN's `sdk install` helper detects the path prefix,
+# concludes java is already "current", then readlinks the (not-yet-
+# existing) symlink and bails. Strip the sdkman/djinn-java entries
+# from PATH for the duration of this script; the final containerEnv is
+# applied by the devcontainer CLI separately.
+PATH="$(echo "${PATH}" | tr ':' '\n' | \
+        grep -vE '^/usr/local/sdkman/candidates/(java|gradle|maven)/current/bin$|^/opt/djinn-java/bin$' | \
+        paste -sd:)"
+export PATH
 
 JDK_VERSION="${JDK_VERSION:-25-tem}"
 BUILD_TOOL="${BUILD_TOOL:-gradle}"

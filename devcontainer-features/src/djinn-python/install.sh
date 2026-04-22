@@ -79,9 +79,13 @@ install_python_via_uv() {
     mkdir -p "${INSTALL_DIR}/bin"
     ln -sfn "${py_bin}" "${INSTALL_DIR}/bin/python3"
     ln -sfn "${py_bin}" "${INSTALL_DIR}/bin/python"
-    # Ensure pip is available for scip-python install.
+    # uv ships a working pip inside each Python it installs, but the
+    # install is marked EXTERNALLY-MANAGED (PEP 668), so
+    # `pip install --upgrade pip` against it errors. ensurepip bootstraps
+    # the bundled pip on first use — that's enough; any further package
+    # installs we do here go through `--break-system-packages` to
+    # acknowledge we're intentionally managing this Python.
     "${py_bin}" -m ensurepip --upgrade || true
-    "${py_bin}" -m pip install --upgrade pip
 }
 
 install_python_via_pyenv() {
@@ -128,10 +132,10 @@ install_pm() {
             install_uv
             ;;
         poetry)
-            "${INSTALL_DIR}/bin/pip" install --no-cache-dir poetry
+            "${INSTALL_DIR}/bin/pip" install --break-system-packages --no-cache-dir poetry
             ;;
         pdm)
-            "${INSTALL_DIR}/bin/pip" install --no-cache-dir pdm
+            "${INSTALL_DIR}/bin/pip" install --break-system-packages --no-cache-dir pdm
             ;;
         pip)
             log "pip bundled with python; no extra install"

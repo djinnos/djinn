@@ -4,7 +4,10 @@
 # Installs Node.js via nvm, typescript-language-server + TypeScript (npm global),
 # scip-typescript (npm global), and the selected package manager.
 
-set -euo pipefail
+# NOTE: `-u` (nounset) is intentionally not enabled — nvm.sh dereferences
+# several of its own internal vars before defining them, and we source
+# it as part of normal install flow.
+set -eo pipefail
 
 NODE_VERSION="${NODE_VERSION:-24}"
 PM="${PM:-pnpm}"
