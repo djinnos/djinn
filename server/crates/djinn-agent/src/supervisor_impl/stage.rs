@@ -91,8 +91,8 @@ use crate::actors::slot::lifecycle::setup::{
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::context::AgentContext;
-use crate::message::{Conversation, Message};
-use crate::provider::{LlmProvider, ProviderConfig, create_provider};
+use djinn_provider::message::{Conversation, Message};
+use djinn_provider::provider::{LlmProvider, ProviderConfig, create_provider};
 use crate::roles::{AgentRole, role_impl_for};
 
 use super::SupervisorCallbackContext;

@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::extension;
-use crate::message::ContentBlock;
+use djinn_provider::message::ContentBlock;
 use crate::output_stash::OutputStash;
-use crate::provider::telemetry;
+use djinn_provider::provider::telemetry;
 
 /// Maximum number of concurrent-safe tools that can execute in parallel within
 /// a single batch (ADR-048 §1A).
@@ -146,7 +146,7 @@ pub(super) async fn dispatch_single_tool<'a>(
     name: String,
     _input_json: serde_json::Value,
     args: Option<serde_json::Map<String, serde_json::Value>>,
-    tool_span: Option<crate::provider::telemetry::ToolSpan>,
+    tool_span: Option<djinn_provider::provider::telemetry::ToolSpan>,
     stash: Arc<Mutex<OutputStash>>,
     app_state: &'a crate::context::AgentContext,
     task_id: &'a str,

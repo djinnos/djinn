@@ -1,5 +1,5 @@
-use crate::message::Message;
-use crate::provider::ToolChoice;
+use djinn_provider::message::Message;
+use djinn_provider::provider::ToolChoice;
 
 /// Maximum retries for empty assistant turns before treating as a hard failure.
 pub(super) const MAX_EMPTY_TURN_RETRIES: u32 = 2;

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
-use crate::provider::LlmProvider;
+use djinn_provider::provider::LlmProvider;
 
 pub(crate) mod pr;
 pub(crate) mod stage;

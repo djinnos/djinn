@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
-use crate::message::ContentBlock;
-use crate::provider::{LlmProvider, StreamEvent};
+use djinn_provider::message::ContentBlock;
+use djinn_provider::provider::{LlmProvider, StreamEvent};
 use djinn_core::events::DjinnEventEnvelope;
 
 use super::error_handling::{

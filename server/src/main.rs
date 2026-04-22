@@ -125,8 +125,8 @@ async fn async_main() {
 
     // OTLP telemetry is configured at deploy time via env (set by the Helm
     // chart from values.langfuse.*). Absent env → telemetry stays off.
-    if let Some(config) = djinn_agent::provider::telemetry::LangfuseConfig::from_env()
-        && let Err(e) = djinn_agent::provider::telemetry::init(&config)
+    if let Some(config) = djinn_provider::provider::telemetry::LangfuseConfig::from_env()
+        && let Err(e) = djinn_provider::provider::telemetry::init(&config)
     {
         tracing::warn!(error = %e, "failed to initialize Langfuse telemetry");
     }
@@ -156,7 +156,7 @@ async fn async_main() {
     state_for_shutdown.shutdown_rpc_listener().await;
 
     // Flush any pending OTel spans before exit.
-    djinn_agent::provider::telemetry::shutdown();
+    djinn_provider::provider::telemetry::shutdown();
 }
 
 /// Parse a mysql URL of the form `mysql://<user>[:<pw>]@<host>:<port>/<db>` and

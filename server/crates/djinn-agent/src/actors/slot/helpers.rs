@@ -522,8 +522,8 @@ pub(crate) async fn initial_user_message_for_task(
 pub fn format_family_for_provider(
     provider_id: &str,
     model_id: &str,
-) -> crate::provider::FormatFamily {
-    use crate::provider::FormatFamily;
+) -> djinn_provider::provider::FormatFamily {
+    use djinn_provider::provider::FormatFamily;
     let lower = provider_id.to_lowercase();
     if lower.contains("anthropic") {
         FormatFamily::Anthropic
@@ -558,8 +558,8 @@ fn is_native_openai_provider(provider_id_lower: &str) -> bool {
         || provider_id_lower.contains("chatgpt")
 }
 
-pub fn capabilities_for_provider(provider_id: &str) -> crate::provider::ProviderCapabilities {
-    use crate::provider::ProviderCapabilities;
+pub fn capabilities_for_provider(provider_id: &str) -> djinn_provider::provider::ProviderCapabilities {
+    use djinn_provider::provider::ProviderCapabilities;
     let lower = provider_id.to_lowercase();
     if lower.contains("synthetic") || lower.contains("local") {
         ProviderCapabilities {
@@ -576,8 +576,8 @@ pub fn capabilities_for_provider(provider_id: &str) -> crate::provider::Provider
     }
 }
 
-pub fn auth_method_for_provider(provider_id: &str, api_key: &str) -> crate::provider::AuthMethod {
-    use crate::provider::AuthMethod;
+pub fn auth_method_for_provider(provider_id: &str, api_key: &str) -> djinn_provider::provider::AuthMethod {
+    use djinn_provider::provider::AuthMethod;
     if provider_id.to_lowercase().contains("anthropic") {
         AuthMethod::ApiKeyHeader {
             header: "x-api-key".to_string(),
@@ -606,7 +606,7 @@ pub enum ProviderCredential {
     /// Traditional API-key credential (key_name, decrypted key).
     ApiKey(String, String),
     /// OAuth-derived full provider config (base_url, auth, model already set).
-    OAuthConfig(Box<crate::provider::ProviderConfig>),
+    OAuthConfig(Box<djinn_provider::provider::ProviderConfig>),
 }
 
 pub async fn load_provider_credential(
@@ -715,8 +715,8 @@ pub fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)> {
 pub(crate) fn build_telemetry_meta(
     agent_type_str: &str,
     task_id: &str,
-) -> crate::provider::TelemetryMeta {
-    crate::provider::TelemetryMeta {
+) -> djinn_provider::provider::TelemetryMeta {
+    djinn_provider::provider::TelemetryMeta {
         task_id: Some(task_id.to_owned()),
         agent_type: Some(agent_type_str.to_owned()),
         session_id: Some(task_id.to_owned()),

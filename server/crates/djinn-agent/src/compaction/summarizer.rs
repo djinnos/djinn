@@ -1,7 +1,7 @@
 use futures::StreamExt;
 
-use crate::message::{Conversation, Message, Role};
-use crate::provider::{LlmProvider, StreamEvent};
+use djinn_provider::message::{Conversation, Message, Role};
+use djinn_provider::provider::{LlmProvider, StreamEvent};
 
 use super::prompts::{
     CompactionContext, PARTIAL_COMPACTION_PROMPT, PARTIAL_COMPACTION_SUMMARISER_SYSTEM,
@@ -131,7 +131,7 @@ pub(super) fn filter_tool_responses_middle_out(
                 && !m.content.is_empty()
                 && m.content
                     .iter()
-                    .all(|b| matches!(b, crate::message::ContentBlock::ToolResult { .. }))
+                    .all(|b| matches!(b, djinn_provider::message::ContentBlock::ToolResult { .. }))
         })
         .map(|(i, _)| i)
         .collect();
@@ -161,7 +161,7 @@ pub(super) fn filter_tool_responses_middle_out(
 }
 
 pub(super) fn format_messages_as_text(messages: &[Message]) -> String {
-    use crate::message::ContentBlock;
+    use djinn_provider::message::ContentBlock;
 
     let mut out = String::new();
     for msg in messages {
@@ -215,7 +215,7 @@ pub(super) fn is_context_error_message(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::ContentBlock;
+    use djinn_provider::message::ContentBlock;
 
     #[test]
     fn filter_tool_responses_zero_percent_unchanged() {

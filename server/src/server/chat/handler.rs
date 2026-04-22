@@ -16,8 +16,8 @@ use djinn_agent::actors::slot::{
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
 use djinn_agent::mcp_client::{McpToolRegistry, connect_and_discover};
-use djinn_agent::message::{ContentBlock, Conversation, Message, Role};
-use djinn_agent::provider::{StreamEvent, TelemetryMeta, create_provider};
+use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
+use djinn_provider::provider::{StreamEvent, TelemetryMeta, create_provider};
 use djinn_agent::verification::settings::{load_mcp_server_registry, resolve_mcp_servers};
 use djinn_db::ProjectRepository;
 use djinn_mcp::server::DjinnMcpServer;
@@ -130,7 +130,7 @@ pub(super) async fn completions_handler_impl(
                 .map(|p| p.base_url.clone())
                 .filter(|u| !u.is_empty())
                 .unwrap_or_else(|| default_base_url(&provider_id));
-            djinn_agent::provider::ProviderConfig {
+            djinn_provider::provider::ProviderConfig {
                 base_url,
                 auth: auth_method_for_provider(&provider_id, &api_key),
                 format_family: format_family_for_provider(&provider_id, &resolved_model),

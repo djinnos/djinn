@@ -1,4 +1,4 @@
-use crate::message::{Message, Role};
+use djinn_provider::message::{Message, Role};
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
 #[derive(Debug, Clone)]
@@ -218,7 +218,7 @@ pub(super) fn rebuild_partial_compaction_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::Conversation;
+    use djinn_provider::message::Conversation;
 
     #[test]
     fn compaction_prompt_varies_by_context() {

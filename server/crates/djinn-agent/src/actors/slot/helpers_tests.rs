@@ -17,7 +17,7 @@ fn parse_conflict_metadata_patterns() {
 
 #[test]
 fn provider_helpers_cover_branches() {
-    use crate::provider::{AuthMethod, FormatFamily};
+    use djinn_provider::provider::{AuthMethod, FormatFamily};
 
     assert_eq!(
         format_family_for_provider("anthropic", "claude-3"),
@@ -70,7 +70,7 @@ fn provider_helpers_cover_branches() {
     assert!(!local.streaming);
 
     let default_caps = capabilities_for_provider("openai");
-    let expected_default = crate::provider::ProviderCapabilities::default();
+    let expected_default = djinn_provider::provider::ProviderCapabilities::default();
     assert_eq!(default_caps.streaming, expected_default.streaming);
     assert_eq!(
         default_caps.max_tokens_default,

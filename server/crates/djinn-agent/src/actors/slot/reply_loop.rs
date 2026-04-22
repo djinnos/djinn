@@ -1,11 +1,11 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use crate::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
+use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::output_parser::ParsedAgentOutput;
 use crate::output_stash::OutputStash;
-use crate::provider::LlmProvider;
-use crate::provider::telemetry;
+use djinn_provider::provider::LlmProvider;
+use djinn_provider::provider::telemetry;
 use djinn_core::events::DjinnEventEnvelope;
 
 use super::*;
@@ -271,7 +271,7 @@ pub(crate) async fn run_reply_loop(
                         current_context_tokens = 0;
                         compaction_attempts += 1;
                         output_stash.lock().unwrap().clear();
-                        conversation.push(crate::message::Message::user(
+                        conversation.push(djinn_provider::message::Message::user(
                             "Continue with the task.",
                         ));
                         continue;
@@ -390,7 +390,7 @@ pub(crate) async fn run_reply_loop(
                     current_context_tokens = 0;
                     compaction_attempts += 1;
                     output_stash.lock().unwrap().clear();
-                    conversation.push(crate::message::Message::user(
+                    conversation.push(djinn_provider::message::Message::user(
                         "Continue with the task.",
                     ));
                     continue;
@@ -712,9 +712,9 @@ pub(crate) async fn run_reply_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ContentBlock, Conversation, Message};
-    use crate::provider::ToolChoice;
-    use crate::provider::{LlmProvider, StreamEvent, TokenUsage};
+    use djinn_provider::message::{ContentBlock, Conversation, Message};
+    use djinn_provider::provider::ToolChoice;
+    use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
     use crate::test_helpers;
     use djinn_core::message::Role;
     use djinn_db::repositories::session::CreateSessionParams;
@@ -993,7 +993,7 @@ mod tests {
         );
         assert_eq!(
             conv.messages[0].role,
-            crate::message::Role::System,
+            djinn_provider::message::Role::System,
             "first message should still be the system prompt"
         );
     }

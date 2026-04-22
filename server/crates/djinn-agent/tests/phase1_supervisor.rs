@@ -38,8 +38,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use djinn_agent::context::AgentContext;
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
-use djinn_agent::message::{ContentBlock, Conversation};
-use djinn_agent::provider::{LlmProvider, StreamEvent, ToolChoice};
+use djinn_provider::message::{ContentBlock, Conversation};
+use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::supervisor::{
     SupervisorError, SupervisorFlow, TaskRunOutcome, TaskRunSpec, TaskRunSupervisor,

@@ -1,6 +1,6 @@
 use crate::context::AgentContext;
-use crate::message::{Conversation, Message, Role};
-use crate::provider::LlmProvider;
+use djinn_provider::message::{Conversation, Message, Role};
+use djinn_provider::provider::LlmProvider;
 use djinn_db::SessionMessageRepository;
 
 use super::prompts::{
@@ -75,7 +75,7 @@ fn microcompact_with_thresholds(
     age_threshold: usize,
     exempt_recent: usize,
 ) -> usize {
-    use crate::message::ContentBlock;
+    use djinn_provider::message::ContentBlock;
 
     let messages = &mut conversation.messages;
     let mut turn_map: Vec<usize> = vec![0; messages.len()];
@@ -428,7 +428,7 @@ async fn partial_compact(
     }
 
     {
-        use crate::message::ContentBlock;
+        use djinn_provider::message::ContentBlock;
         let pivot_msg = &messages[pivot_idx];
         if pivot_msg.role == Role::User
             && pivot_msg
@@ -465,7 +465,7 @@ fn estimate_char_budget(context_window: i64) -> usize {
 }
 
 fn estimate_message_chars(msg: &Message) -> usize {
-    use crate::message::ContentBlock;
+    use djinn_provider::message::ContentBlock;
     msg.content
         .iter()
         .map(|block| match block {
@@ -486,7 +486,7 @@ fn estimate_message_chars(msg: &Message) -> usize {
 }
 
 pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> Vec<Message> {
-    use crate::message::ContentBlock;
+    use djinn_provider::message::ContentBlock;
 
     if messages.is_empty() {
         return vec![];
@@ -602,7 +602,7 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
 
 #[cfg(test)]
 pub(crate) fn find_orphaned_tool_result(messages: &[Message]) -> Option<String> {
-    use crate::message::ContentBlock;
+    use djinn_provider::message::ContentBlock;
     use std::collections::HashSet;
 
     let mut known_tool_ids = HashSet::new();
@@ -632,7 +632,7 @@ pub(crate) fn find_orphaned_tool_result(messages: &[Message]) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::ContentBlock;
+    use djinn_provider::message::ContentBlock;
 
     #[test]
     fn needs_compaction_at_threshold() {

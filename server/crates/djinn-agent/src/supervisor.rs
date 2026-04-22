@@ -34,7 +34,7 @@ pub use djinn_supervisor::*;
 
 use crate::context::AgentContext;
 use crate::direct_services::DirectServices;
-use crate::provider::LlmProvider;
+use djinn_provider::provider::LlmProvider;
 
 /// Build a `SupervisorServices` pre-wired with the in-tree `djinn-agent`
 /// lifecycle bodies.

@@ -1,4 +1,4 @@
-use djinn_agent::message::{CacheBreakpoint, ContentBlock, Message, MessageMeta, Role};
+use djinn_provider::message::{CacheBreakpoint, ContentBlock, Message, MessageMeta, Role};
 
 use super::layout::{compose_system_prompt_segments, partition_system_prompt_segments};
 

@@ -1,6 +1,6 @@
 use super::reply_loop::{ReplyLoopContext, run_reply_loop};
-use crate::message::{ContentBlock, Conversation, Message, Role};
-use crate::provider::StreamEvent;
+use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
+use djinn_provider::provider::StreamEvent;
 use crate::test_helpers::{
     FailingProvider, FakeProvider, agent_context_from_db, create_test_db, create_test_epic,
     create_test_project, create_test_task, test_path,
@@ -46,7 +46,7 @@ fn base_conversation() -> Conversation {
 }
 
 async fn run_with_provider(
-    provider: &dyn crate::provider::LlmProvider,
+    provider: &dyn djinn_provider::provider::LlmProvider,
     tools: &[serde_json::Value],
     conversation: &mut Conversation,
     app_state: &crate::context::AgentContext,

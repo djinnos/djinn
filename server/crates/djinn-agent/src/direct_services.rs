@@ -24,7 +24,7 @@ use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
-use crate::provider::LlmProvider;
+use djinn_provider::provider::LlmProvider;
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
 
 /// In-process `SupervisorServices` impl that delegates straight to the

@@ -9,7 +9,7 @@ mod context;
 mod handler;
 mod prompt;
 
-use djinn_agent::message::{ContentBlock, Message, Role};
+use djinn_provider::message::{ContentBlock, Message, Role};
 use djinn_agent::verification::settings::{
     effective_mcp_server_names, effective_skill_names, load_settings,
 };
