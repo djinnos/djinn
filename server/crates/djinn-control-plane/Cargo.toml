@@ -26,9 +26,17 @@ tracing = "0.1"
 time = { version = "0.3", features = ["formatting"] }
 uuid = { version = "1", features = ["v7"] }
 futures = "0.3"
+anyhow = "1"
 workspace-hack.workspace = true
+
+[features]
+# Exposes `test_support::McpTestHarness` + stub bridge impls for downstream
+# integration tests (e.g. contract tests that previously needed `AppState`).
+# Off by default; enabled automatically under `cfg(test)` for this crate.
+test-support = []
 
 [dev-dependencies]
 tempfile = "3"
 sqlx = { version = "0.8", features = ["mysql", "runtime-tokio-rustls", "macros"] }
 anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

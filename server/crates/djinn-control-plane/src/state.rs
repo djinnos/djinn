@@ -146,8 +146,8 @@ impl McpState {
 // Provide a no-actor McpState for tests that exercise MCP tool handlers
 // directly (without a full Axum server).
 
-#[cfg(test)]
-pub(crate) mod stubs {
+#[cfg(any(test, feature = "test-support"))]
+pub mod stubs {
     #![allow(dead_code, unused_imports)]
     use super::*;
     use crate::bridge::{
