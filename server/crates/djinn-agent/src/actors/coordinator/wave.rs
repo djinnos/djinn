@@ -652,15 +652,31 @@ mod tests {
 
         let handle = spawn_coordinator_with_planner(&db, &tx);
         handle.trigger_planner_patrol().await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
+        // Poll (up to 5s) rather than sleep-then-check: the planner patrol
+        // task is async and under concurrent test load the 200ms sleep
+        // occasionally ran out before the review task landed in the DB.
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let tasks_by_project = task_repo.list_by_project(&project.id).await.unwrap();
-        assert!(
-            tasks_by_project
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let tasks_by_project = task_repo.list_by_project(&project.id).await.unwrap();
+            if tasks_by_project
                 .iter()
                 .any(|t| t.issue_type == "review" && t.title.contains("patrol"))
-        );
+            {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "patrol review task did not land within 5s; current tasks: {:?}",
+                    tasks_by_project
+                        .iter()
+                        .map(|t| (&t.issue_type, &t.title))
+                        .collect::<Vec<_>>()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

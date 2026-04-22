@@ -563,7 +563,12 @@ mod tests {
 
         let _handle = spawn_coordinator(&db, &tx);
         close_task(&db, &spike.id, &tx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Negative assertion: count must *stay* at 1 (the pre-existing planning
+        // task). `assert_planning_task_count(1)` wouldn't help — it returns as
+        // soon as count matches, missing a late spurious write. 400ms gives
+        // the coordinator tick + DB write window under concurrent nextest
+        // load; 150ms was too tight.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
@@ -635,7 +640,8 @@ mod tests {
 
         let _handle = spawn_coordinator(&db, &tx);
         close_task(&db, &t1.id, &tx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Negative assertion — same 400ms budget as the sibling test above.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
@@ -663,7 +669,8 @@ mod tests {
 
         let _handle = spawn_coordinator(&db, &tx);
         close_task(&db, &t1.id, &tx).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Negative assertion — same 400ms budget as the sibling tests above.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
         let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
         assert_eq!(
