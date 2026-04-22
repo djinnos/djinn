@@ -1,3 +1,9 @@
 [toolchain]
 channel = "stable"
-components = ["clippy"]
+# rust-analyzer is required for the canonical-graph warm pipeline: the
+# K8s warm Pod runs `rust-analyzer scip` against this tree to emit the
+# SCIP index djinn-graph consumes. Without it listed here, rustup's
+# auto-sync on the first in-tree cargo/rust-analyzer invocation removes
+# the component the devcontainer's djinn-rust Feature installed at build
+# time (rustup syncs to exactly what rust-toolchain.toml lists).
+components = ["clippy", "rust-analyzer"]
