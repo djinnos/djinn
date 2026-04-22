@@ -65,63 +65,11 @@ install_rustup() {
 }
 
 install_rust_analyzer() {
-    # We install rust-analyzer two ways, and they matter for different
-    # callers:
-    #
-    # 1. As a rustup component on ${TOOLCHAIN} (the feature's configured
-    #    toolchain). This is what developers expect when they run
-    #    `rustup which rust-analyzer` or use the feature inside an
-    #    interactive IDE session. Degrade gracefully — very old nightlies
-    #    don't carry the component.
     log "installing rust-analyzer component for ${TOOLCHAIN}"
+    # Some toolchains (very old nightlies) don't carry the component; degrade gracefully.
     if ! "${CARGO_HOME}/bin/rustup" component add rust-analyzer --toolchain "${TOOLCHAIN}"; then
         warn "rust-analyzer component unavailable for ${TOOLCHAIN}; skipping"
     fi
-
-    # 2. As a standalone binary at ${CARGO_HOME}/bin/rust-analyzer
-    #    overwriting the rustup proxy shim. This is the load-bearing
-    #    install for djinn's canonical-graph warm pipeline.
-    #
-    #    Why: the proxy shim consults ${PROJECT}/rust-toolchain.toml at
-    #    invocation time and redirects to that toolchain's
-    #    rust-analyzer. When a project pins `channel = "1.94.1"` (or any
-    #    specific version the feature didn't install rust-analyzer for),
-    #    the shim errors with `Unknown binary 'rust-analyzer' in
-    #    official toolchain '1.94.1-...'` — even though rust-analyzer is
-    #    sitting right there under the feature-installed toolchain. The
-    #    standalone binary doesn't participate in toolchain resolution;
-    #    SCIP emission works regardless of project pin.
-    #
-    #    cargo/rustc/clippy proxies are left alone — they _need_ to
-    #    respect the project's pin. Only rust-analyzer is special-cased.
-    install_standalone_rust_analyzer
-}
-
-install_standalone_rust_analyzer() {
-    local arch url tmp
-    case "$(uname -m)" in
-        x86_64)  arch="x86_64-unknown-linux-gnu" ;;
-        aarch64) arch="aarch64-unknown-linux-gnu" ;;
-        *) warn "unsupported arch $(uname -m) for standalone rust-analyzer; skipping"; return 0 ;;
-    esac
-    # Pin a known-good release instead of following `latest` so image
-    # content is reproducible build-to-build.
-    local ra_release="2026-03-31"
-    url="https://github.com/rust-lang/rust-analyzer/releases/download/${ra_release}/rust-analyzer-${arch}.gz"
-    log "downloading standalone rust-analyzer ${ra_release} for ${arch}"
-    tmp="$(mktemp)"
-    if ! curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "${tmp}.gz"; then
-        warn "standalone rust-analyzer download failed; falling back to rustup proxy only"
-        rm -f "${tmp}.gz"
-        return 0
-    fi
-    gunzip "${tmp}.gz"  # produces $tmp
-    # Overwrite the rustup proxy shim at ${CARGO_HOME}/bin/rust-analyzer
-    # so `rust-analyzer` on PATH hits the standalone. cargo/rustc/clippy
-    # shims are untouched.
-    install -m 0755 "$tmp" "${CARGO_HOME}/bin/rust-analyzer"
-    rm -f "$tmp"
-    log "standalone rust-analyzer installed at ${CARGO_HOME}/bin/rust-analyzer"
 }
 
 persist_profile() {
