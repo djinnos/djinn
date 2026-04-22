@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 
+use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Task;
-use djinn_db::{ActivityQuery, NoteRepository, TaskRepository};
+use djinn_db::{ActivityQuery, Database, NoteRepository, TaskRepository};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 
 fn parse_task_memory_refs(memory_refs: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(memory_refs).unwrap_or_else(|_| {
@@ -31,10 +33,19 @@ struct ConfidenceSignalPayload {
     from_sync: bool,
 }
 
-pub(crate) fn spawn_task_outcome_listener(state: crate::server::AppState) {
-    let mut rx = state.events().subscribe();
-    let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
-    let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
+/// Spawn the task-outcome listener. When a task transitions to a successful
+/// terminal state, confidence signals are applied to the notes it references.
+///
+/// `events` is the broadcast sender the listener subscribes to. `db` and
+/// `event_bus` are used to construct the underlying repositories.
+pub fn spawn_task_outcome_listener(
+    db: Database,
+    event_bus: EventBus,
+    events: &broadcast::Sender<DjinnEventEnvelope>,
+) {
+    let mut rx = events.subscribe();
+    let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+    let note_repo = NoteRepository::new(db, event_bus);
 
     tokio::spawn(async move {
         loop {
@@ -240,12 +251,31 @@ mod tests {
 
     use djinn_core::events::DjinnEventEnvelope;
     use djinn_db::repositories::task::ActivityQuery;
+    use djinn_db::test_support::event_bus_for;
     use djinn_db::{NoteRepository, TaskRepository};
+    use tokio::sync::broadcast;
     use tokio::time::timeout;
 
-    use crate::test_helpers;
-
     const WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+    const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+    struct TestHarness {
+        db: Database,
+        events: broadcast::Sender<DjinnEventEnvelope>,
+        event_bus: EventBus,
+    }
+
+    async fn make_harness() -> TestHarness {
+        let db = crate::test_helpers::create_test_db();
+        db.ensure_initialized().await.expect("ensure initialized");
+        let (events, _rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let event_bus = event_bus_for(&events);
+        TestHarness {
+            db,
+            events,
+            event_bus,
+        }
+    }
 
     fn temp_project_path(name: &str) -> PathBuf {
         std::env::current_dir()
@@ -267,12 +297,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn applies_task_success_signal_to_referenced_notes() {
-        let state = test_helpers::test_app_state_in_memory().await;
-        spawn_task_outcome_listener(state.clone());
+        let harness = make_harness().await;
+        spawn_task_outcome_listener(harness.db.clone(), harness.event_bus.clone(), &harness.events);
 
-        let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
-        let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
-        let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
+        let task_repo = TaskRepository::new(harness.db.clone(), harness.event_bus.clone());
+        let note_repo = NoteRepository::new(harness.db.clone(), harness.event_bus.clone());
+        let project_repo =
+            djinn_db::ProjectRepository::new(harness.db.clone(), harness.event_bus.clone());
 
         let project = create_test_project(
             &project_repo,
@@ -359,11 +390,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_memory_refs_is_noop_for_task_completion() {
-        let state = test_helpers::test_app_state_in_memory().await;
-        spawn_task_outcome_listener(state.clone());
+        let harness = make_harness().await;
+        spawn_task_outcome_listener(harness.db.clone(), harness.event_bus.clone(), &harness.events);
 
-        let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
-        let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
+        let task_repo = TaskRepository::new(harness.db.clone(), harness.event_bus.clone());
+        let project_repo =
+            djinn_db::ProjectRepository::new(harness.db.clone(), harness.event_bus.clone());
 
         let project = create_test_project(
             &project_repo,
@@ -416,11 +448,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn missing_memory_refs_are_skipped() {
-        let state = test_helpers::test_app_state_in_memory().await;
-        spawn_task_outcome_listener(state.clone());
+        let harness = make_harness().await;
+        spawn_task_outcome_listener(harness.db.clone(), harness.event_bus.clone(), &harness.events);
 
-        let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
-        let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
+        let task_repo = TaskRepository::new(harness.db.clone(), harness.event_bus.clone());
+        let project_repo =
+            djinn_db::ProjectRepository::new(harness.db.clone(), harness.event_bus.clone());
 
         let project = create_test_project(
             &project_repo,
@@ -485,12 +518,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn duplicate_task_completion_events_are_ignored() {
-        let state = test_helpers::test_app_state_in_memory().await;
-        spawn_task_outcome_listener(state.clone());
+        let harness = make_harness().await;
+        spawn_task_outcome_listener(harness.db.clone(), harness.event_bus.clone(), &harness.events);
 
-        let task_repo = TaskRepository::new(state.db().clone(), state.event_bus());
-        let note_repo = NoteRepository::new(state.db().clone(), state.event_bus());
-        let project_repo = djinn_db::ProjectRepository::new(state.db().clone(), state.event_bus());
+        let task_repo = TaskRepository::new(harness.db.clone(), harness.event_bus.clone());
+        let note_repo = NoteRepository::new(harness.db.clone(), harness.event_bus.clone());
+        let project_repo =
+            djinn_db::ProjectRepository::new(harness.db.clone(), harness.event_bus.clone());
 
         let project = create_test_project(
             &project_repo,
@@ -550,7 +584,7 @@ mod tests {
         let first = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
 
         let duplicate_event = DjinnEventEnvelope::task_updated(&closed, false);
-        let _ = state.events().send(duplicate_event);
+        let _ = harness.events.send(duplicate_event);
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 

@@ -250,32 +250,41 @@ pub(super) async fn completions_handler_impl(
             );
             ctx.working_root = Some(cached_root);
         } else {
-            match djinn_graph::canonical_graph::ensure_canonical_graph(
-                &state,
-                project_id,
-                project_path_buf,
-            )
-            .await
-            {
-                Ok((handle, _graph)) => {
-                    let root = handle.path().to_path_buf();
-                    tracing::debug!(
-                        session_id = %session_id,
-                        project_id = %project_id,
-                        index_tree = %root.display(),
-                        "chat session: pinned working_root to canonical index tree"
-                    );
-                    state.chat_session_record_warmed(&session_id, project_id, root.clone());
-                    ctx.working_root = Some(root);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        project_id = %project_id,
-                        error = %e,
-                        "chat session: ensure_canonical_graph failed; falling back to project root"
-                    );
-                }
+            // TODO(architect-only): the previous implementation called
+            // `djinn_graph::canonical_graph::ensure_canonical_graph` here on
+            // first chat message to pin `working_root` to the canonical
+            // index tree.  That broke the architect-only warm invariant
+            // (`djinn_graph::architect::ArchitectWarmToken`) — chat sessions
+            // carry no role context and must not trigger a SCIP rebuild.
+            //
+            // If the index tree already exists on disk (because the
+            // architect dispatch path or K8s warmer has run at least once
+            // for this project), pin to it; otherwise fall back to the
+            // project root and let the architect path create it on its
+            // own schedule.
+            let index_tree_path =
+                djinn_core::index_tree::index_tree_path(project_path_buf);
+            if index_tree_path.exists() {
+                tracing::debug!(
+                    session_id = %session_id,
+                    project_id = %project_id,
+                    index_tree = %index_tree_path.display(),
+                    "chat session: pinned working_root to existing canonical index tree (no warm)"
+                );
+                state.chat_session_record_warmed(
+                    &session_id,
+                    project_id,
+                    index_tree_path.clone(),
+                );
+                ctx.working_root = Some(index_tree_path);
+            } else {
+                tracing::debug!(
+                    session_id = %session_id,
+                    project_id = %project_id,
+                    project_root = %project_path_buf.display(),
+                    "chat session: canonical index tree absent; skipping warm (architect-only) \
+                     and falling back to project root"
+                );
             }
         }
         Some(ctx)

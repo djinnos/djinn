@@ -2,6 +2,7 @@ pub mod mcp_json;
 pub mod scoped;
 pub mod service;
 pub mod settings;
+pub mod task_confidence;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub enum StepEvent {

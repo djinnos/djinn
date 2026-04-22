@@ -15,6 +15,7 @@ use std::sync::Arc;
 use djinn_core::events::EventBus;
 use djinn_db::Database;
 
+pub mod architect;
 pub mod canonical_graph;
 pub mod index_tree;
 pub mod process;

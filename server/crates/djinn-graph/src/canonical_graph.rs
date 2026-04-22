@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::WarmContext;
+use crate::architect::ArchitectWarmToken;
 
 /// Output bundle of the CPU-bound canonical graph build pipeline,
 /// produced on a `spawn_blocking` thread and consumed by the async tail that
@@ -67,7 +68,11 @@ pub fn derive_graph_caches(
 /// Pod is short-lived and has no inbound traffic, so spinning up the
 /// HTTP server + coordinator + RPC listener would be ~2.5s of wasted
 /// latency per warm run.
-pub async fn run_warm_graph_command<C: WarmContext>(ctx: &C, project_id: &str) -> anyhow::Result<()> {
+pub async fn run_warm_graph_command<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    token: ArchitectWarmToken,
+) -> anyhow::Result<()> {
     use djinn_db::ProjectRepository;
 
     let repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
@@ -97,7 +102,7 @@ pub async fn run_warm_graph_command<C: WarmContext>(ctx: &C, project_id: &str) -
         "run_warm_graph_command: starting warm pipeline"
     );
     let started = std::time::Instant::now();
-    let (_handle, graph) = ensure_canonical_graph(ctx, project_id, &project_root)
+    let (_handle, graph) = ensure_canonical_graph(ctx, project_id, &project_root, token)
         .await
         .map_err(|e| anyhow::anyhow!("ensure_canonical_graph failed: {e}"))?;
     tracing::info!(
@@ -114,6 +119,12 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     ctx: &C,
     project_id: &str,
     project_root: &Path,
+    // Architect-only capability token.  Consumed (taken by value) so each
+    // warm call has to justify itself at the type system level; the token
+    // carries no data so the move is free.  Construct via
+    // `djinn_graph::architect::ArchitectWarmToken::new` on a sanctioned
+    // warm path only.
+    _token: ArchitectWarmToken,
 ) -> Result<
     (
         crate::index_tree::IndexTreeHandle,
@@ -813,7 +824,13 @@ mod tests {
             .await
             .expect("seed cache");
 
-        let result = ensure_canonical_graph(&ctx, &project.id, &project_root).await;
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
         assert!(result.is_ok(), "expected cache-hit success, got {result:?}");
         let (_handle, returned_graph) = result.unwrap();
         let _ = head_sha;
@@ -853,7 +870,13 @@ mod tests {
             .await
             .expect("seed cache");
 
-        let result = ensure_canonical_graph(&ctx, &project.id, &project_root).await;
+        let result = ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await;
         if let Err(msg) = &result {
             assert!(
                 !msg.contains("deserialize cached graph")

@@ -379,9 +379,18 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
         );
     }
 
-    djinn_graph::canonical_graph::run_warm_graph_command(&ctx, project_id)
-        .await
-        .with_context(|| format!("run_warm_graph_command({project_id})"))
+    // Architect-only warm path: this subcommand binary is dispatched
+    // exclusively by `K8sGraphWarmer`, which is wired into the
+    // architect-only `GraphWarmerService::trigger` pipeline.  Minting the
+    // capability token here is the sanctioned "this is the warm Pod
+    // runner" claim — see `djinn_graph::architect` for the invariant.
+    djinn_graph::canonical_graph::run_warm_graph_command(
+        &ctx,
+        project_id,
+        djinn_graph::architect::ArchitectWarmToken::new(),
+    )
+    .await
+    .with_context(|| format!("run_warm_graph_command({project_id})"))
 }
 
 /// Replicates `AppState::minimal_for_warm_only`'s DB resolution — the

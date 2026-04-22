@@ -13,7 +13,6 @@ pub mod memory_mount;
 pub mod semantic_memory;
 pub mod server;
 pub mod sse;
-mod task_confidence;
 pub(crate) mod watchers;
 
 #[cfg(test)]

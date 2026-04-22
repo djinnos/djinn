@@ -1073,7 +1073,11 @@ impl AppState {
         // `ensure_canonical_graph` on architect dispatch and chat first
         // use.  Per-worktree skeleton refresh is no longer required.
 
-        crate::task_confidence::spawn_task_outcome_listener(self.clone());
+        djinn_agent::verification::task_confidence::spawn_task_outcome_listener(
+            self.db().clone(),
+            self.event_bus(),
+            self.events(),
+        );
 
         // Phase 3C: periodic GitHub-org-membership reconciliation.
         // Flips `users.is_member_of_org` and revokes sessions when someone
@@ -1435,10 +1439,17 @@ fn build_in_process_graph_warmer(
             );
             tokio::spawn(async move {
                 let started = std::time::Instant::now();
+                // Architect-only warm path: this closure is only wired in
+                // via `GraphWarmerService::trigger`, which dispatch.rs gates
+                // on `role == "architect"` (plus the mirror-fetcher tick,
+                // which is the scheduled-refresh sibling of the architect
+                // dispatch path).  See `djinn_graph::architect` for the
+                // invariant.
                 let result = djinn_graph::canonical_graph::ensure_canonical_graph(
                     &state,
                     &project_id_owned,
                     &project_root_owned,
+                    djinn_graph::architect::ArchitectWarmToken::new(),
                 )
                 .await;
                 let elapsed_ms = started.elapsed().as_millis() as u64;
