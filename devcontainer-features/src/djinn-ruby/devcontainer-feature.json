@@ -1,6 +1,6 @@
 {
   "id": "djinn-ruby",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Djinn Ruby",
   "description": "Ruby (via rbenv) + ruby-lsp + scip-ruby.",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-ruby",

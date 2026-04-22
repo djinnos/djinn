@@ -1,6 +1,6 @@
 {
   "id": "djinn-python",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Djinn Python",
   "description": "Python (via uv or pyenv) + pyright (Node-based LSP) + scip-python + selected package manager.",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-python",

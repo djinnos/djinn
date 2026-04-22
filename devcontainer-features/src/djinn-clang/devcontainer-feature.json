@@ -1,6 +1,6 @@
 {
   "id": "djinn-clang",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Djinn Clang / C / C++",
   "description": "clang + clangd + scip-clang (for C, C++, Objective-C, CUDA). scip-clang binary is pulled from GitHub releases.",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-clang",

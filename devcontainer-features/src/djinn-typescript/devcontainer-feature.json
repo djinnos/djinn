@@ -1,6 +1,6 @@
 {
   "id": "djinn-typescript",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Djinn TypeScript / JavaScript",
   "description": "Node.js (via nvm) + typescript-language-server + scip-typescript + the user's chosen package manager.",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-typescript",

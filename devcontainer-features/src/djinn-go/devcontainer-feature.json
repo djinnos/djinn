@@ -1,6 +1,6 @@
 {
   "id": "djinn-go",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Djinn Go",
   "description": "Go toolchain + gopls + scip-go. Downloads the official Go tarball from go.dev.",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-go",

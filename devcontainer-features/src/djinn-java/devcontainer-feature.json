@@ -1,6 +1,6 @@
 {
   "id": "djinn-java",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Djinn Java",
   "description": "JDK (via SDKMAN) + jdtls (Eclipse JDT language server) + scip-java. Pick gradle or maven as the build tool.",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-java",

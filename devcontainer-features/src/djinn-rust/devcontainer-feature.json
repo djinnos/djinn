@@ -1,6 +1,6 @@
 {
   "id": "djinn-rust",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Djinn Rust",
   "description": "Rust toolchain (rustup) + rust-analyzer. rust-analyzer emits SCIP natively (`rust-analyzer scip`), so no separate indexer is installed.",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-rust",

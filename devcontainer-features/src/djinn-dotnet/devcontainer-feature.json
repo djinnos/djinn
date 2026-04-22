@@ -1,6 +1,6 @@
 {
   "id": "djinn-dotnet",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "Djinn .NET",
   "description": ".NET SDK (via Microsoft's official installer) + csharp-ls + scip-dotnet.",
   "documentationURL": "https://github.com/djinnos/djinn/tree/main/devcontainer-features/src/djinn-dotnet",
