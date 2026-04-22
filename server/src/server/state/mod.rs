@@ -40,6 +40,28 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
+/// Report which `GITHUB_APP_*` env vars are unset or empty, so `init_app_config`
+/// can surface a useful diagnosis when `GitHubAppConfig::load()` returns `None`.
+fn missing_github_app_env_vars() -> Vec<&'static str> {
+    fn empty(key: &str) -> bool {
+        std::env::var(key).ok().filter(|v| !v.is_empty()).is_none()
+    }
+    let mut missing = Vec::new();
+    for k in [
+        "GITHUB_APP_ID",
+        "GITHUB_APP_CLIENT_ID",
+        "GITHUB_APP_CLIENT_SECRET",
+    ] {
+        if empty(k) {
+            missing.push(k);
+        }
+    }
+    if empty("GITHUB_APP_PRIVATE_KEY") && empty("GITHUB_APP_PRIVATE_KEY_PATH") {
+        missing.push("GITHUB_APP_PRIVATE_KEY");
+    }
+    missing
+}
+
 fn canonical_view_resolution(
     active_task_count: usize,
     fallback: Option<crate::server::MemoryMountViewFallback>,
@@ -447,9 +469,17 @@ impl AppState {
         if cfg.is_some() {
             tracing::info!("github_app: loaded App configuration from env");
         } else {
-            tracing::debug!(
-                "github_app: no env App configuration on startup — \
-                 mount the djinn-github-app Secret to enable GitHub integration"
+            // Previously logged at `debug!` which is invisible at the default
+            // log level, producing a silent "GitHub App not configured"
+            // outcome for operators who thought they wired the Secret
+            // correctly. Log at `warn!` with the specific unset vars so
+            // operators get a single-line diagnosis in `kubectl logs`.
+            let missing = missing_github_app_env_vars();
+            tracing::warn!(
+                missing = missing.join(",").as_str(),
+                "github_app: App configuration not loaded — \
+                 mount the djinn-github-app Secret or set the listed \
+                 GITHUB_APP_* env vars to enable GitHub integration"
             );
         }
         *self.inner.app_config.write().await = cfg.map(Arc::new);

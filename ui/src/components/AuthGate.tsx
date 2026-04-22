@@ -55,7 +55,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
     queryKey: ["auth", "setup-status"],
     queryFn: fetchSetupStatus,
     retry: false,
-    staleTime: 60_000,
+    // Always refetch on mount / window-focus. This query gates the entire
+    // app on "is the deployment provisioned?", and caching a stale `false`
+    // answer locks the UI on the "App not configured" screen for a minute
+    // after the operator fixes the Secret.
+    staleTime: 0,
   });
 
   if (userLoading || setupLoading) {

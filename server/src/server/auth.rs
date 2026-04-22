@@ -34,8 +34,9 @@
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -78,6 +79,18 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route("/auth/logout", post(logout))
         .route("/setup/status", get(setup_status))
+        // Auth/setup responses reflect live deployment + session state. Without
+        // an explicit directive browsers apply heuristic freshness and can
+        // hand `fetch()` a stale body — e.g. the UI kept rendering the "App
+        // not configured" screen after the operator dropped the Secret.
+        .layer(middleware::from_fn(no_store))
+}
+
+async fn no_store(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
 }
 
 #[derive(Serialize)]
