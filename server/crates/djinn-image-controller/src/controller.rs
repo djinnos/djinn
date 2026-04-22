@@ -1,82 +1,82 @@
-//! [`ImageController`] — per-project devcontainer-image reconciler.
+//! [`ImageController`] — per-project image reconciler.
 //!
-//! Runs inside the `djinn-server` process. Invoked from
+//! Runs inside the `djinn-server` process, invoked from
 //! `mirror_fetcher::fetch_one` after every successful fetch + stack
-//! detection. Best-effort: failures log + return Ok so a broken cluster
-//! never breaks the mirror fetch tick.
+//! detection. Best-effort: failures log + return Ok so a broken
+//! cluster never breaks the mirror fetch tick.
 //!
-//! ## Flow
+//! ## Flow (post-P5)
 //!
-//! 1. Bail out early if `stack.manifest_signals.has_devcontainer == false`
-//!    — the UI banner handles onboarding.
-//! 2. Compute `sha256(devcontainer.json [+ devcontainer-lock.json])` from
-//!    the bare mirror at `HEAD` via [`crate::hash::compute_devcontainer_hash`].
-//! 3. Compare against `projects.image_hash`. If unchanged, log + return.
-//! 4. Else: acquire the in-flight guard (skip duplicate enqueues), acquire
-//!    a semaphore permit (cap cluster-wide build concurrency), and create
-//!    the build Job via `kube::Api::<Job>::create`.
-//! 5. Write `projects.image_status = "building"` + `image_hash = <new>` so
-//!    `KubernetesRuntime::prepare` can see the state.
+//! 1. Read `projects.environment_config` from Dolt. If the row is still
+//!    the migration-10 default (`'{}'`) or has `schema_version = 0`,
+//!    skip — the boot reseed hook will seed it on the next server
+//!    boot; until then there's nothing to build.
+//! 2. Compute `djinn_image_builder::compute_environment_hash(&cfg,
+//!    &agent_worker_ref)`. This covers config edits, installer-script
+//!    edits, and worker-binary rebuilds — every input that could
+//!    change the resulting image invalidates the hash.
+//! 3. Compare against `projects.image_hash`. Skip if unchanged and the
+//!    previous build reached `ready`.
+//! 4. Acquire the in-flight guard + semaphore permit, upsert the
+//!    per-build ConfigMap carrying the generated Dockerfile + scripts,
+//!    create the build Job.
+//! 5. Write `projects.image_status = building` + `image_hash = <new>`.
 //!
-//! **Known limitation.** This PR does *not* watch the Job through
-//! completion — status stays `"building"` until a follow-up reconcile
-//! loop (planned for a later PR per plan §5.5 step 6/7) observes the
-//! Job's terminal state and flips the column to `"ready"` / `"failed"`.
-//! The Job carries `djinn.app/project-id` + `djinn.app/image-hash` labels
-//! so that future loop can correlate without an in-process side channel.
+//! **What's gone.** No more `.devcontainer/devcontainer.json` read
+//! path. No GitHub shallow-clone in the build Pod (Dockerfile
+//! generator is self-contained). No per-project clone-URL Secret
+//! (build-token Secret is deleted).
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use std::collections::BTreeMap;
-use std::path::Path;
-
 use djinn_db::{Database, ProjectImage, ProjectImageStatus, ProjectRepository};
-use djinn_stack::Stack;
+use djinn_image_builder::{
+    AgentWorkerImage, BuildContext, compute_environment_hash, generate_dockerfile,
+};
+use djinn_stack::environment::EnvironmentConfig;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::Secret;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, info, warn};
 
 use crate::build_job::{
-    build_image_build_job, build_token_secret_name, sanitize_id, BUILD_TOKEN_SECRET_KEY_URL,
-    LABEL_COMPONENT, LABEL_PROJECT_ID,
+    build_context_config_map_name, build_image_build_context_config_map, build_image_build_job,
+    build_job_owner_reference, sanitize_id,
 };
 use crate::config::ImageControllerConfig;
-use crate::hash::compute_devcontainer_hash;
-use djinn_workspace::mirror_path_for;
 
-/// How many hex characters of the devcontainer hash to include in the
+/// How many hex characters of the environment hash to include in the
 /// image tag and Job name suffix. 12 is enough to be globally unique
 /// for realistic project counts and short enough for DNS label budgets.
 const HASH_TAG_PREFIX_LEN: usize = 12;
 
 /// Errors the controller surfaces from [`ImageController::enqueue`].
-///
-/// Most of these degrade to a `warn!` log at the call site — the
-/// mirror-fetcher swallows them so a broken build pipeline never breaks
-/// the mirror fetch tick.
 #[derive(Debug, thiserror::Error)]
 pub enum ImageControllerError {
-    #[error("image hash computation failed: {0}")]
-    Hash(#[source] anyhow::Error),
     #[error("db error: {0}")]
     Db(#[from] djinn_db::Error),
     #[error("kubernetes api error: {0}")]
     Kube(#[from] kube::Error),
-    #[error("read clone URL from mirror config at {path}: {reason}")]
-    CloneUrl { path: String, reason: String },
+    #[error("parse environment_config for project {project_id}: {reason}")]
+    ConfigParse { project_id: String, reason: String },
+    #[error("environment_config invalid for project {project_id}: {source}")]
+    ConfigInvalid {
+        project_id: String,
+        #[source]
+        source: djinn_stack::environment::EnvironmentConfigError,
+    },
+    #[error("dockerfile generation failed for project {project_id}: {source}")]
+    Dockerfile {
+        project_id: String,
+        #[source]
+        source: djinn_image_builder::DockerfileError,
+    },
 }
 
 type Result<T> = std::result::Result<T, ImageControllerError>;
 
-/// Controller handle. Cheaply cloneable via the outer `Arc`.
-///
-/// The `Database` clone is small; `Semaphore` + `Mutex<HashSet>` are
-/// the bookkeeping that enforce single-flight per project AND capped
-/// cluster-wide concurrency.
 pub struct ImageController {
     client: kube::Client,
     config: ImageControllerConfig,
@@ -86,12 +86,6 @@ pub struct ImageController {
 }
 
 impl ImageController {
-    /// Construct a controller bound to an already-built `kube::Client`.
-    ///
-    /// The server boot path calls `kube::Client::try_default()` and wires
-    /// the resulting client here. In dev environments without a cluster
-    /// the server skips controller construction entirely — the mirror
-    /// fetcher sees `None` and silently skips the enqueue step.
     pub fn new(client: kube::Client, config: ImageControllerConfig, db: Database) -> Self {
         let cap = config.max_concurrent.max(1);
         Self {
@@ -103,55 +97,68 @@ impl ImageController {
         }
     }
 
-    /// Snapshot the active config (tests + introspection).
     pub fn config(&self) -> &ImageControllerConfig {
         &self.config
     }
 
     /// Reconcile one project's image state.
-    ///
-    /// Returns `Ok(())` on all expected states (no devcontainer, unchanged
-    /// hash, duplicate enqueue coalesced, Job created). Reserves
-    /// `ImageControllerError` for hash / DB / cluster faults — the caller
-    /// is expected to warn-log and proceed.
-    pub async fn enqueue(&self, project_id: &str, stack: &Stack) -> Result<()> {
-        // Fast-path: no committed devcontainer → nothing to build. The
-        // onboarding banner in PR 6 drives the user to create one.
-        if !stack.manifest_signals.has_devcontainer {
+    pub async fn enqueue(&self, project_id: &str) -> Result<()> {
+        let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
+
+        let raw = match repo.get_environment_config(project_id).await? {
+            Some(s) => s,
+            None => {
+                debug!(project_id, "image_controller: project row missing — skipping");
+                return Ok(());
+            }
+        };
+
+        // The migration-10 default is the "needs reseed" sentinel — the
+        // P5 boot reseed hook handles those on next server boot. The
+        // controller is a no-op for un-seeded rows; once the hook runs
+        // every project has a real config and the next tick builds.
+        if raw.trim() == "{}" || raw.trim().is_empty() {
             debug!(
                 project_id,
-                "image_controller: skipping — stack reports no devcontainer"
+                "image_controller: environment_config empty (pre-reseed) — skipping"
             );
             return Ok(());
         }
 
-        let mirror_path = self.resolve_mirror_path(project_id);
-        let Some(new_hash) = compute_devcontainer_hash(&mirror_path)
-            .map_err(ImageControllerError::Hash)?
-        else {
+        let cfg: EnvironmentConfig = serde_json::from_str(&raw).map_err(|e| {
+            ImageControllerError::ConfigParse {
+                project_id: project_id.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        if cfg.schema_version == 0 {
             debug!(
                 project_id,
-                mirror = %mirror_path.display(),
-                "image_controller: stack flagged devcontainer but mirror HEAD has none — skipping"
+                "image_controller: environment_config schema_version=0 (reseed pending) — skipping"
             );
             return Ok(());
-        };
+        }
 
-        let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
+        cfg.validate()
+            .map_err(|source| ImageControllerError::ConfigInvalid {
+                project_id: project_id.to_string(),
+                source,
+            })?;
+
+        let agent_worker_ref = self.config.agent_worker_image.clone();
+        let new_hash = compute_environment_hash(&cfg, &agent_worker_ref);
+
         let current = repo.get_project_image(project_id).await?;
         let current_hash = current.as_ref().and_then(|r| r.hash.clone());
         let current_status = current.as_ref().map(|r| r.status.as_str()).unwrap_or("");
-        // Skip rebuild only when the previous build actually produced a ready
-        // image — a stale BUILDING/FAILED/NONE row with a matching hash means
-        // the last attempt never published an image, so we must re-enqueue.
-        // Otherwise the warmer waits forever on an image that will never arrive.
         if current_hash.as_deref() == Some(new_hash.as_str())
             && current_status == ProjectImageStatus::READY
         {
             debug!(
                 project_id,
                 hash = %short_hash(&new_hash),
-                "image_controller: devcontainer hash unchanged and image ready — skipping rebuild"
+                "image_controller: environment hash unchanged and image ready — skipping"
             );
             return Ok(());
         }
@@ -162,8 +169,6 @@ impl ImageController {
             "image_controller: enqueueing build (hash mismatch or image not ready)"
         );
 
-        // In-flight guard: swallow duplicate enqueues for the same project
-        // without stalling callers behind a held semaphore permit.
         {
             let mut guard = self.in_flight.lock().await;
             if !guard.insert(project_id.to_string()) {
@@ -175,10 +180,8 @@ impl ImageController {
             }
         }
 
-        // From here on we must always drop the in-flight entry before
-        // returning. Wrap the body so the result is returned unchanged.
         let outcome = self
-            .submit_build_job(&repo, project_id, &new_hash, current.as_ref())
+            .submit_build_job(&repo, project_id, &cfg, &new_hash, current.as_ref())
             .await;
 
         self.in_flight.lock().await.remove(project_id);
@@ -189,6 +192,7 @@ impl ImageController {
         &self,
         repo: &ProjectRepository,
         project_id: &str,
+        cfg: &EnvironmentConfig,
         new_hash: &str,
         previous: Option<&ProjectImage>,
     ) -> Result<()> {
@@ -205,17 +209,34 @@ impl ImageController {
 
         let hash_prefix = &new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())];
         let image_tag = format_image_tag(&self.config.registry_host, project_id, hash_prefix);
-        let job = build_image_build_job(&self.config, project_id, hash_prefix, &image_tag);
 
-        // Upsert the per-project clone-URL Secret *before* creating the
-        // Job so the Pod's Secret mount is satisfiable at startup. The
-        // Secret is mutated in place each enqueue so the most recent
-        // installation token is live — older Pods still running see the
-        // file update via kubelet's periodic re-sync.
-        let mirror_path = self.resolve_mirror_path(project_id);
-        let clone_url = read_clone_url_from_mirror(&mirror_path)?;
-        self.upsert_build_token_secret(project_id, &clone_url).await?;
+        let (repo_ref, tag_ref) = split_image_ref(&self.config.agent_worker_image);
+        let agent_worker_image = AgentWorkerImage::new(repo_ref, tag_ref);
 
+        // 1. Generate the Dockerfile + script bundle.
+        let build_context =
+            generate_dockerfile(cfg, &agent_worker_image).map_err(|source| {
+                ImageControllerError::Dockerfile {
+                    project_id: project_id.to_string(),
+                    source,
+                }
+            })?;
+
+        // 2. Create the build-context ConfigMap *before* the Job so the
+        // Pod's volume mount is satisfiable at startup. The CM is
+        // per-build (per hash) so two different hashes never share
+        // content.
+        self.upsert_build_context_cm(project_id, hash_prefix, &build_context)
+            .await?;
+
+        // 3. Create the Job.
+        let job = build_image_build_job(
+            &self.config,
+            project_id,
+            hash_prefix,
+            &image_tag,
+            &build_context,
+        );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let job_name = job
             .metadata
@@ -223,13 +244,8 @@ impl ImageController {
             .clone()
             .unwrap_or_else(|| format!("djinn-build-{project_id}-{hash_prefix}"));
 
-        // Guard against a prior process (or prior tick) having already
-        // submitted this exact Job: check existence first, then create.
-        // Avoids the race where `create` fails with 409 AlreadyExists and
-        // prevents the controller from getting wedged behind a hash-matching
-        // row whose Job is still in flight.
-        match jobs.get_opt(&job_name).await? {
-            Some(_) => {
+        let created_job = match jobs.get_opt(&job_name).await? {
+            Some(existing) => {
                 info!(
                     project_id,
                     hash = %hash_prefix,
@@ -237,6 +253,7 @@ impl ImageController {
                     namespace = %self.config.namespace,
                     "image_controller: build Job already exists — leaving it running"
                 );
+                existing
             }
             None => {
                 let created = jobs.create(&PostParams::default(), &job).await?;
@@ -247,16 +264,18 @@ impl ImageController {
                     namespace = %self.config.namespace,
                     "image_controller: build Job created"
                 );
+                created
             }
+        };
+
+        // 4. Back-fill OwnerReference on the CM so it GCs with the Job.
+        if let Some(owner) = build_job_owner_reference(&created_job) {
+            self.set_context_cm_owner(project_id, hash_prefix, owner)
+                .await?;
         }
+
         drop(permit);
 
-        // Flip state to `building` + stash the new hash so subsequent
-        // ticks compare correctly. We intentionally keep the previous
-        // `image_tag` around (if any) so `KubernetesRuntime::prepare`
-        // doesn't fail-hard in the window between "building started" and
-        // "first build finished". A follow-up reconcile flips to
-        // `ready` + overwrites `image_tag` once the Job terminates.
         let image = ProjectImage {
             tag: previous.and_then(|p| p.tag.clone()),
             hash: Some(new_hash.to_string()),
@@ -267,113 +286,65 @@ impl ImageController {
         Ok(())
     }
 
-    fn resolve_mirror_path(&self, project_id: &str) -> std::path::PathBuf {
-        mirror_path_for(project_id)
-    }
-
-    /// Create (or overwrite) the per-project clone-URL Secret the build
-    /// Job's script reads at startup.
-    ///
-    /// Per-project (not per-Job): keeps the cluster object count flat, and
-    /// leaves the token live for any in-flight Pods to re-read via kubelet's
-    /// mount refresh when it rotates.
-    ///
-    /// Uses server-side apply (`patch` verb) so the same call covers both
-    /// create and rotate paths, and stays within the RBAC we already have
-    /// (no `update` verb needed).
-    ///
-    /// TODO(cleanup): when a project is deleted, the Secret lingers. Wire
-    /// a delete hook into the project-removal path so we clean up.
-    async fn upsert_build_token_secret(
+    async fn upsert_build_context_cm(
         &self,
         project_id: &str,
-        clone_url: &str,
+        hash_prefix: &str,
+        ctx: &BuildContext,
     ) -> Result<()> {
-        let secrets: Api<Secret> =
+        let cms: Api<ConfigMap> =
             Api::namespaced(self.client.clone(), &self.config.namespace);
-        let name = build_token_secret_name(project_id);
-
-        let mut labels = BTreeMap::new();
-        labels.insert(LABEL_COMPONENT.to_string(), "build-token".to_string());
-        labels.insert(LABEL_PROJECT_ID.to_string(), sanitize_id(project_id));
-
-        let mut string_data = BTreeMap::new();
-        // `stringData` takes raw values and lets the apiserver do the
-        // base64 encoding into `data`. Keeps the patch JSON small and
-        // avoids an in-process base64 dependency.
-        string_data.insert(BUILD_TOKEN_SECRET_KEY_URL.to_string(), clone_url.to_string());
-
-        let secret = Secret {
-            metadata: ObjectMeta {
-                name: Some(name.clone()),
-                namespace: Some(self.config.namespace.clone()),
-                labels: Some(labels),
-                ..ObjectMeta::default()
-            },
-            type_: Some("Opaque".to_string()),
-            string_data: Some(string_data),
-            ..Secret::default()
-        };
-
-        // Server-side apply: idempotent create-or-update, uses `patch`
-        // verb only. `force` wins conflicts against any other field
-        // manager that might touch this Secret.
+        let cm = build_image_build_context_config_map(&self.config, project_id, hash_prefix, ctx);
+        let name = build_context_config_map_name(project_id, hash_prefix);
         let params = PatchParams::apply("djinn-image-controller").force();
-        secrets
-            .patch(&name, &params, &Patch::Apply(&secret))
-            .await?;
-        debug!(project_id, secret = %name, "image_controller: build-token secret applied");
+        cms.patch(&name, &params, &Patch::Apply(&cm)).await?;
+        debug!(
+            project_id,
+            hash = %hash_prefix,
+            cm = %name,
+            "image_controller: build-context ConfigMap applied"
+        );
+        Ok(())
+    }
+
+    async fn set_context_cm_owner(
+        &self,
+        project_id: &str,
+        hash_prefix: &str,
+        owner: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
+    ) -> Result<()> {
+        let cms: Api<ConfigMap> =
+            Api::namespaced(self.client.clone(), &self.config.namespace);
+        let name = build_context_config_map_name(project_id, hash_prefix);
+        let patch = serde_json::json!({
+            "metadata": { "ownerReferences": [owner] }
+        });
+        let params = PatchParams::default();
+        cms.patch(&name, &params, &Patch::Merge(&patch)).await?;
         Ok(())
     }
 }
 
-/// Read the clone URL (including the rotating installation token) out of
-/// the bare mirror's git config. Runs in-process as UID 10001 against a
-/// file the same user owns — no safe.directory drama.
-fn read_clone_url_from_mirror(mirror_path: &Path) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(mirror_path)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .map_err(|e| ImageControllerError::CloneUrl {
-            path: mirror_path.display().to_string(),
-            reason: format!("spawning `git config`: {e}"),
-        })?;
-
-    if !output.status.success() {
-        return Err(ImageControllerError::CloneUrl {
-            path: mirror_path.display().to_string(),
-            reason: format!(
-                "`git config` exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
+/// Split an image ref of the form `repo:tag` or `repo@sha256:...` into
+/// its (repository, reference) parts. Falls back to `(whole, "latest")`
+/// if the caller passed a bare repo with no tag.
+fn split_image_ref(full: &str) -> (String, String) {
+    // Colon after the last `/` — otherwise `:` inside a registry's
+    // `host:port` prefix misparses.
+    let last_slash = full.rfind('/').unwrap_or(0);
+    let search = &full[last_slash..];
+    if let Some(rel_colon) = search.find('@') {
+        let colon = last_slash + rel_colon;
+        return (full[..colon].to_string(), full[colon + 1..].to_string());
     }
-
-    let url = String::from_utf8(output.stdout)
-        .map_err(|e| ImageControllerError::CloneUrl {
-            path: mirror_path.display().to_string(),
-            reason: format!("URL was not valid UTF-8: {e}"),
-        })?
-        .trim()
-        .to_string();
-
-    if url.is_empty() {
-        return Err(ImageControllerError::CloneUrl {
-            path: mirror_path.display().to_string(),
-            reason: "remote.origin.url is empty".to_string(),
-        });
+    if let Some(rel_colon) = search.find(':') {
+        let colon = last_slash + rel_colon;
+        return (full[..colon].to_string(), full[colon + 1..].to_string());
     }
-    Ok(url)
+    (full.to_string(), "latest".to_string())
 }
 
 /// Build the content-addressable image tag.
-///
-/// Shape: `<registry>/djinn-project-<sanitized_id>:<hash_prefix>` so
-/// every build produces a distinct, immutable image reference the
-/// runtime can pin to.
 pub fn format_image_tag(registry: &str, project_id: &str, hash_prefix: &str) -> String {
     format!(
         "{}/djinn-project-{}:{}",
@@ -401,5 +372,37 @@ mod tests {
     fn format_image_tag_sanitizes_project_id() {
         let tag = format_image_tag("r:5000", "Weird/ID_1", "deadbeefcafe");
         assert_eq!(tag, "r:5000/djinn-project-weird-id-1:deadbeefcafe");
+    }
+
+    #[test]
+    fn split_image_ref_handles_tag() {
+        assert_eq!(
+            split_image_ref("djinn/agent-runtime:dev"),
+            ("djinn/agent-runtime".into(), "dev".into())
+        );
+    }
+
+    #[test]
+    fn split_image_ref_handles_registry_port_and_tag() {
+        assert_eq!(
+            split_image_ref("localhost:5001/djinn/agent-runtime:abc123"),
+            ("localhost:5001/djinn/agent-runtime".into(), "abc123".into())
+        );
+    }
+
+    #[test]
+    fn split_image_ref_handles_digest() {
+        assert_eq!(
+            split_image_ref("reg/x@sha256:deadbeef"),
+            ("reg/x".into(), "sha256:deadbeef".into())
+        );
+    }
+
+    #[test]
+    fn split_image_ref_falls_back_to_latest() {
+        assert_eq!(
+            split_image_ref("djinn/agent-runtime"),
+            ("djinn/agent-runtime".into(), "latest".into())
+        );
     }
 }

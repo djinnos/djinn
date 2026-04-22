@@ -119,8 +119,7 @@ pub struct EnvironmentConfig {
 
 impl EnvironmentConfig {
     /// Minimal valid config — what the column's default `'{}'` parses into
-    /// once the P5 reseed hook tags the source. Useful in tests and as the
-    /// seed for `from_stack` (lands in P2).
+    /// once the P5 reseed hook tags the source.
     pub fn empty() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -133,6 +132,112 @@ impl EnvironmentConfig {
             lifecycle: LifecycleHooks::default(),
             verification: Verification::default(),
         }
+    }
+
+    /// Seed a fresh config from a freshly-detected [`crate::schema::Stack`].
+    /// Called by the P5 boot reseed hook for every project whose
+    /// `environment_config` column is still `'{}'`.
+    ///
+    /// Populates:
+    /// * `schema_version`, `source = AutoDetected`
+    /// * `base` — default debian/bookworm-slim
+    /// * `languages.*` — one entry per language the stack detected a
+    ///   runtime for. Rust is populated even when `stack.runtimes.rust`
+    ///   is `None`, as long as `Stack.workspaces` has a Rust entry
+    ///   (covers the bare "Cargo.toml without rust-toolchain.toml"
+    ///   case). `rust-analyzer` is included in components by default
+    ///   so the warm-graph SCIP pipeline works out of the box.
+    /// * `workspaces` — one entry per `StackWorkspace`, with
+    ///   toolchain/version routed to the right field per language.
+    /// * `env`, `system_packages`, `lifecycle`, `verification` —
+    ///   empty (user fills them in via the UI).
+    pub fn from_stack(stack: &crate::schema::Stack) -> Self {
+        let mut cfg = Self::empty();
+        cfg.source = ConfigSource::AutoDetected;
+
+        // Detect which languages appear in workspaces or runtimes so we
+        // only populate `languages.*` blocks that the image will actually
+        // install.
+        let has_rust = stack.runtimes.rust.is_some()
+            || stack.workspaces.iter().any(|w| w.language == "rust");
+        let has_node = stack.runtimes.node.is_some()
+            || stack.workspaces.iter().any(|w| w.language == "node");
+        let has_python = stack.runtimes.python.is_some()
+            || stack.workspaces.iter().any(|w| w.language == "python");
+        let has_go = stack.runtimes.go.is_some()
+            || stack.workspaces.iter().any(|w| w.language == "go");
+
+        if has_rust {
+            cfg.languages.rust = Some(RustLanguage {
+                default_toolchain: stack
+                    .runtimes
+                    .rust
+                    .clone()
+                    .unwrap_or_else(|| "stable".to_string()),
+                components: vec!["rust-analyzer".to_string()],
+                targets: vec![],
+            });
+        }
+        if has_node {
+            let default_version = stack.runtimes.node.clone().unwrap_or_else(|| "22".to_string());
+            // Pick the first package manager the stack saw among the
+            // Node set, else pnpm (matches djinn's own default).
+            let default_pm = stack
+                .package_managers
+                .iter()
+                .find(|p| matches!(p.as_str(), "pnpm" | "yarn" | "bun" | "npm"))
+                .cloned()
+                .or_else(|| Some("pnpm".to_string()));
+            cfg.languages.node = Some(NodeLanguage {
+                default_version,
+                default_package_manager: default_pm,
+                scip_indexer: Some("scip-typescript".to_string()),
+            });
+        }
+        if has_python {
+            cfg.languages.python = Some(PythonLanguage {
+                default_version: stack
+                    .runtimes
+                    .python
+                    .clone()
+                    .unwrap_or_else(|| "3.12".to_string()),
+                scip_indexer: Some("scip-python".to_string()),
+            });
+        }
+        if has_go {
+            cfg.languages.go = Some(GoLanguage {
+                default_version: stack
+                    .runtimes
+                    .go
+                    .clone()
+                    .unwrap_or_else(|| "1.22".to_string()),
+                scip_indexer: Some("scip-go".to_string()),
+            });
+        }
+
+        // Workspace entries — route StackWorkspace.toolchain to the
+        // right field per language: Rust uses `toolchain`, others use
+        // `version`.
+        cfg.workspaces = stack
+            .workspaces
+            .iter()
+            .map(|ws| {
+                let (toolchain, version) = match ws.language.as_str() {
+                    "rust" => (ws.toolchain.clone(), None),
+                    _ => (None, ws.toolchain.clone()),
+                };
+                Workspace {
+                    slug: ws.slug.clone(),
+                    root: ws.root.clone(),
+                    language: ws.language.clone(),
+                    toolchain,
+                    version,
+                    package_manager: ws.package_manager.clone(),
+                }
+            })
+            .collect();
+
+        cfg
     }
 
     /// Validate the config. Called from the MCP `_set` tool and from
@@ -1092,6 +1197,113 @@ mod tests {
             HookCommand::Parallel(_)
         ));
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn from_stack_seeds_rust_when_only_workspace_detected() {
+        // Bare Cargo.toml without a rust-toolchain.toml → no
+        // runtimes.rust, but a workspace entry with no toolchain. We
+        // still populate languages.rust so the image has cargo
+        // + rust-analyzer.
+        let mut stack = crate::schema::Stack::empty();
+        stack.workspaces = vec![crate::schema::StackWorkspace {
+            slug: "root".into(),
+            root: "".into(),
+            language: "rust".into(),
+            toolchain: None,
+            package_manager: None,
+        }];
+        let cfg = EnvironmentConfig::from_stack(&stack);
+        assert_eq!(cfg.schema_version, SCHEMA_VERSION);
+        assert_eq!(cfg.source, ConfigSource::AutoDetected);
+        let rust = cfg.languages.rust.as_ref().expect("rust block");
+        assert_eq!(rust.default_toolchain, "stable");
+        assert!(rust.components.contains(&"rust-analyzer".to_string()));
+        assert_eq!(cfg.workspaces.len(), 1);
+        assert!(cfg.workspaces[0].toolchain.is_none());
+        assert!(cfg.workspaces[0].version.is_none());
+    }
+
+    #[test]
+    fn from_stack_routes_rust_toolchain_and_node_version_distinctly() {
+        let mut stack = crate::schema::Stack::empty();
+        stack.runtimes.rust = Some("1.84".into());
+        stack.runtimes.node = Some("22".into());
+        stack.package_managers = vec!["pnpm".into(), "cargo".into()];
+        stack.workspaces = vec![
+            crate::schema::StackWorkspace {
+                slug: "server".into(),
+                root: "server".into(),
+                language: "rust".into(),
+                toolchain: Some("stable".into()),
+                package_manager: None,
+            },
+            crate::schema::StackWorkspace {
+                slug: "ui".into(),
+                root: "ui".into(),
+                language: "node".into(),
+                toolchain: Some("20".into()),
+                package_manager: Some("pnpm".into()),
+            },
+        ];
+        let cfg = EnvironmentConfig::from_stack(&stack);
+        // Rust workspace uses `toolchain`, not `version`.
+        let rust_ws = cfg.workspaces.iter().find(|w| w.slug == "server").unwrap();
+        assert_eq!(rust_ws.toolchain.as_deref(), Some("stable"));
+        assert!(rust_ws.version.is_none());
+        // Node workspace uses `version`, not `toolchain`.
+        let node_ws = cfg.workspaces.iter().find(|w| w.slug == "ui").unwrap();
+        assert!(node_ws.toolchain.is_none());
+        assert_eq!(node_ws.version.as_deref(), Some("20"));
+        assert_eq!(node_ws.package_manager.as_deref(), Some("pnpm"));
+        // Language defaults flow through verbatim.
+        assert_eq!(
+            cfg.languages.rust.as_ref().unwrap().default_toolchain,
+            "1.84"
+        );
+        assert_eq!(
+            cfg.languages.node.as_ref().unwrap().default_version,
+            "22"
+        );
+        // The first Node-capable package manager wins for the language default.
+        assert_eq!(
+            cfg.languages
+                .node
+                .as_ref()
+                .unwrap()
+                .default_package_manager
+                .as_deref(),
+            Some("pnpm")
+        );
+    }
+
+    #[test]
+    fn from_stack_omits_languages_with_no_signal() {
+        // Empty stack → empty language blocks. The Dockerfile generator
+        // skips empty blocks, so the resulting image is base + worker
+        // only.
+        let stack = crate::schema::Stack::empty();
+        let cfg = EnvironmentConfig::from_stack(&stack);
+        assert!(cfg.languages.rust.is_none());
+        assert!(cfg.languages.node.is_none());
+        assert!(cfg.languages.python.is_none());
+        assert!(cfg.languages.go.is_none());
+        assert!(cfg.workspaces.is_empty());
+    }
+
+    #[test]
+    fn from_stack_produces_config_that_validates() {
+        let mut stack = crate::schema::Stack::empty();
+        stack.runtimes.rust = Some("1.84".into());
+        stack.workspaces = vec![crate::schema::StackWorkspace {
+            slug: "server".into(),
+            root: "server".into(),
+            language: "rust".into(),
+            toolchain: Some("stable".into()),
+            package_manager: None,
+        }];
+        let cfg = EnvironmentConfig::from_stack(&stack);
+        cfg.validate().unwrap();
     }
 
     #[test]

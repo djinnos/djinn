@@ -6,8 +6,14 @@ use std::num::ParseIntError;
 const DEFAULT_BUILDKITD_HOST: &str = "tcp://djinn-buildkitd.djinn.svc.cluster.local:1234";
 /// Default Zot registry DNS (matches `zot-service.yaml` shipped in PR 4).
 const DEFAULT_REGISTRY_HOST: &str = "djinn-zot.djinn.svc.cluster.local:5000";
-/// Default djinn-image-builder image (Dockerfile shipped in PR 4).
-const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/djinnos/djinn-image-builder:latest";
+/// Default builder-Pod image. Post-P5 this is just a bash+buildctl
+/// shell — moby/buildkit ships `buildctl` alongside buildkitd. Operators
+/// can repoint this at a custom image via `DJINN_IMAGE_BUILDER_IMAGE`.
+const DEFAULT_BUILDER_IMAGE: &str = "moby/buildkit:latest";
+/// Default agent-worker helper image. The generated Dockerfile COPYs the
+/// `djinn-agent-worker` binary out of this image. The ref must pin
+/// something stable (sha-tagged in prod, `:dev` for Tilt).
+const DEFAULT_AGENT_WORKER_IMAGE: &str = "djinn/agent-runtime:dev";
 /// Default namespace for build Jobs + registry-auth Secret lookup.
 const DEFAULT_NAMESPACE: &str = "djinn";
 /// Default registry-auth Secret name referenced by the build-Job Pod spec.
@@ -22,6 +28,7 @@ pub mod env {
     pub const BUILDKITD_HOST: &str = "DJINN_IMAGE_BUILDKITD_HOST";
     pub const REGISTRY_HOST: &str = "DJINN_IMAGE_REGISTRY_HOST";
     pub const BUILDER_IMAGE: &str = "DJINN_IMAGE_BUILDER_IMAGE";
+    pub const AGENT_WORKER_IMAGE: &str = "DJINN_IMAGE_AGENT_WORKER_IMAGE";
     pub const MAX_CONCURRENT: &str = "DJINN_IMAGE_MAX_CONCURRENT";
     pub const NAMESPACE: &str = "DJINN_IMAGE_NAMESPACE";
     pub const REGISTRY_AUTH_SECRET: &str = "DJINN_IMAGE_REGISTRY_AUTH_SECRET";
@@ -41,9 +48,14 @@ pub struct ImageControllerConfig {
     pub buildkitd_host: String,
     /// `host:port` of the Zot registry (no scheme — buildx formats the URL).
     pub registry_host: String,
-    /// Image reference for the djinn-image-builder Pod (Node + docker
-    /// buildx + `@devcontainers/cli`).
+    /// Image the build Pod runs. Post-P5 it only needs `buildctl` + a
+    /// POSIX shell; `moby/buildkit:latest` is the default.
     pub builder_image: String,
+    /// Full image ref for the agent-worker helper image (the image the
+    /// generated Dockerfile `COPY --from=...`s the worker binary from).
+    /// Tilt publishes `djinn/agent-runtime:dev` to the local registry;
+    /// prod ships a sha-tagged image to the shared registry.
+    pub agent_worker_image: String,
     /// Namespace where build Jobs are created and the registry-auth Secret
     /// is mounted from.
     pub namespace: String,
@@ -64,6 +76,7 @@ impl ImageControllerConfig {
             buildkitd_host: DEFAULT_BUILDKITD_HOST.into(),
             registry_host: DEFAULT_REGISTRY_HOST.into(),
             builder_image: DEFAULT_BUILDER_IMAGE.into(),
+            agent_worker_image: DEFAULT_AGENT_WORKER_IMAGE.into(),
             namespace: DEFAULT_NAMESPACE.into(),
             registry_auth_secret: DEFAULT_REGISTRY_AUTH_SECRET.into(),
             mirror_pvc: DEFAULT_MIRROR_PVC.into(),
@@ -86,6 +99,9 @@ impl ImageControllerConfig {
         }
         if let Ok(v) = std::env::var(env::BUILDER_IMAGE) {
             cfg.builder_image = v;
+        }
+        if let Ok(v) = std::env::var(env::AGENT_WORKER_IMAGE) {
+            cfg.agent_worker_image = v;
         }
         if let Ok(v) = std::env::var(env::NAMESPACE) {
             cfg.namespace = v;

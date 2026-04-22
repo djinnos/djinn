@@ -1215,6 +1215,7 @@ dependencies = [
  "async-trait",
  "djinn-core",
  "djinn-db",
+ "djinn-image-builder",
  "djinn-runtime",
  "djinn-stack",
  "djinn-workspace",
@@ -1297,6 +1298,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "time",
  "workspace-hack",
 ]
 

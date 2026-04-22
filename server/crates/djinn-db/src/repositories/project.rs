@@ -712,6 +712,77 @@ impl ProjectRepository {
         )
     }
 
+    /// Fetch the raw `environment_config` JSON string for a project.
+    ///
+    /// Returns `Ok(None)` when the project id is unknown. A project that
+    /// has not been reseeded by the P5 boot hook yet returns
+    /// `Ok(Some("{}"))` (the migration-10 default); the reseed hook
+    /// treats that as its trigger.
+    ///
+    /// Uses the non-macro `sqlx::query_scalar` form because the
+    /// `environment_config` column was added in migration 10 — the
+    /// offline cache + compile-time macro check haven't seen it yet in
+    /// the prod Dolt used by `cargo check`. Runs fine at runtime; the
+    /// query fails with a clear schema error if migration 10 hasn't
+    /// been applied, which is what the caller wants.
+    pub async fn get_environment_config(&self, project_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT environment_config FROM projects WHERE id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Persist the `environment_config` JSON for a project and null
+    /// `image_hash` so the image-controller re-runs the build on the
+    /// next tick. `environment_config_json` must be a serialized
+    /// `djinn_stack::environment::EnvironmentConfig`; callers (MCP,
+    /// boot reseed hook) validate before calling.
+    ///
+    /// Nulling `image_hash` is intentional: changing the environment
+    /// config necessarily changes the image content, so the cached
+    /// image is no longer authoritative. The next reconcile tick sees
+    /// the `None` and builds again.
+    ///
+    /// Non-macro `sqlx::query` — see `get_environment_config` for the
+    /// reason.
+    pub async fn set_environment_config(
+        &self,
+        project_id: &str,
+        environment_config_json: &str,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE projects
+                SET environment_config = ?,
+                    image_hash = NULL
+              WHERE id = ?",
+        )
+        .bind(environment_config_json)
+        .bind(project_id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// List every project id + its current `environment_config` +
+    /// `stack` + `verification_rules`. Used by the P5 boot reseed hook
+    /// which walks the table once at startup, spots rows with an empty
+    /// config, and rewrites them from the stack.
+    ///
+    /// Non-macro `sqlx::query_as` — see `get_environment_config` for
+    /// the reason.
+    pub async fn list_for_reseed(&self) -> Result<Vec<ProjectReseedRow>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProjectReseedRow>(
+            "SELECT id, stack, verification_rules, environment_config FROM projects",
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     /// Fetch the persisted devcontainer-image state for a project (Phase 3 PR 5).
     ///
     /// Returns `Ok(None)` when the project id is unknown. A project whose
@@ -817,6 +888,19 @@ impl ProjectRepository {
         .await?;
         Ok(())
     }
+}
+
+/// One row the P5 boot reseed hook walks. All four columns come back
+/// as raw strings at the DB boundary — `djinn_stack` handles JSON
+/// shape, `djinn-db` doesn't. `verification_rules` is non-null with a
+/// `'[]'` default; `environment_config` is non-null with a `'{}'`
+/// default; `stack` is non-null with a `'{}'` default.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct ProjectReseedRow {
+    pub id: String,
+    pub stack: String,
+    pub verification_rules: String,
+    pub environment_config: String,
 }
 
 /// Per-project devcontainer-image record as persisted in migration 8.

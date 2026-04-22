@@ -127,10 +127,14 @@ pub(crate) async fn fetch_one(
             }
         };
 
-    // Phase 3 PR 5: image-controller enqueue — fire-and-forget, log on error.
+    // P5: image-controller enqueue — reads environment_config from
+    // Dolt, generates a Dockerfile via djinn-image-builder, and
+    // dispatches a `buildctl build` Job if the hash changed. The
+    // stack is no longer passed; config is authoritative.
     // Absent controller (local dev without a kube::Client) is expected.
-    if let (Some(stack), Some(controller)) = (detected_stack, state.image_controller().await)
-        && let Err(err) = controller.enqueue(project_id, &stack).await
+    let _ = detected_stack;
+    if let Some(controller) = state.image_controller().await
+        && let Err(err) = controller.enqueue(project_id).await
     {
         tracing::warn!(project_id, error = %err, "image-controller enqueue failed");
     }

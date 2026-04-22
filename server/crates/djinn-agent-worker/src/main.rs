@@ -370,32 +370,40 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
     let lifecycle_root = std::env::var("DJINN_PROJECT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/workspace"));
-    if let Err(e) = lifecycle::run_lifecycle(&lifecycle_root).await {
-        warn!(
-            project_id,
-            project_root = %lifecycle_root.display(),
-            error = %format!("{e:#}"),
-            "devcontainer lifecycle failed; continuing with warm-graph anyway"
-        );
-    }
 
-    // P4: probe for the new environment-config ConfigMap mount. Until
-    // P5 wires this into the canonical warm pipeline (hooks, toolchain
-    // resolution, etc.), we only log what's there — the goal here is
-    // purely to exercise the read path so operators can confirm the
-    // volume mount wiring is correct end-to-end.
+    // P5: load the project's EnvironmentConfig from the ConfigMap mount
+    // and run its pre_warm hooks before the canonical-graph pipeline.
+    // An absent mount is fine — the warm Pod runs without hooks, which
+    // is what the pre-cut-over behaviour would give us anyway.
     let env_config_path = PathBuf::from(lifecycle::ENV_CONFIG_MOUNT_FILE);
     match lifecycle::load_environment_config(&env_config_path).await {
-        Ok(Some(cfg)) => tracing::info!(
-            project_id,
-            schema_version = cfg.schema_version,
-            workspace_count = cfg.workspaces.len(),
-            "environment_config present at {}",
-            env_config_path.display()
-        ),
+        Ok(Some(cfg)) => {
+            tracing::info!(
+                project_id,
+                schema_version = cfg.schema_version,
+                workspace_count = cfg.workspaces.len(),
+                pre_warm_hooks = cfg.lifecycle.pre_warm.len(),
+                "environment_config loaded from {}",
+                env_config_path.display()
+            );
+            if let Err(e) = lifecycle::run_phase(
+                &lifecycle_root,
+                "pre_warm",
+                &cfg.lifecycle.pre_warm,
+            )
+            .await
+            {
+                warn!(
+                    project_id,
+                    project_root = %lifecycle_root.display(),
+                    error = %format!("{e:#}"),
+                    "pre_warm hook failed; continuing with warm-graph anyway"
+                );
+            }
+        }
         Ok(None) => tracing::debug!(
             project_id,
-            "no environment_config mounted at {} (pre-cut-over state)",
+            "no environment_config mounted at {} — continuing without hooks",
             env_config_path.display()
         ),
         Err(e) => warn!(

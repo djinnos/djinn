@@ -4,104 +4,43 @@
 //! apiserver) is out of scope for this PR — it belongs to a follow-up
 //! kind_smoke test. Instead these tests exercise the pure-function
 //! building blocks: the Job manifest builder (labels, envs, volumes)
-//! and the devcontainer hash (deterministic, flips on file change).
+//! and the image-build watcher's state transitions.
 
-use std::fs;
-use std::path::Path;
+use std::collections::BTreeMap;
 
+use djinn_image_builder::{AgentWorkerImage, BuildContext, generate_dockerfile};
+use djinn_image_controller::ImageControllerConfig;
 use djinn_image_controller::build_job::{
     COMPONENT_IMAGE_BUILD, LABEL_BUILD, LABEL_COMPONENT, LABEL_IMAGE_HASH, LABEL_PROJECT_ID,
     build_image_build_job,
 };
 use djinn_image_controller::controller::format_image_tag;
-use djinn_image_controller::hash::{
-    DEVCONTAINER_LOCK_PATH, DEVCONTAINER_PATH, compute_devcontainer_hash,
-};
-use djinn_image_controller::ImageControllerConfig;
 use djinn_image_controller::watcher::__test_handle_event;
+use djinn_stack::environment::EnvironmentConfig;
 
-/// Init a bare git mirror containing `files` at `HEAD`. Returns the
-/// TempDir (drop = cleanup) and the absolute path to the mirror.
-fn bare_mirror_with(files: &[(&str, &[u8])]) -> (tempfile::TempDir, std::path::PathBuf) {
-    let tmp = tempfile::tempdir().unwrap();
-    let work = tempfile::tempdir().unwrap();
-    let repo = git2::Repository::init(work.path()).unwrap();
-    {
-        let mut cfg = repo.config().unwrap();
-        cfg.set_str("user.name", "tester").unwrap();
-        cfg.set_str("user.email", "tester@example.com").unwrap();
-    }
-    for (rel, bytes) in files {
-        let full = work.path().join(rel);
-        if let Some(p) = full.parent() {
-            fs::create_dir_all(p).unwrap();
-        }
-        fs::write(&full, bytes).unwrap();
-    }
-    let mut index = repo.index().unwrap();
-    for (rel, _) in files {
-        index.add_path(Path::new(rel)).unwrap();
-    }
-    index.write().unwrap();
-    let oid = index.write_tree().unwrap();
-    let tree = repo.find_tree(oid).unwrap();
-    let sig = repo.signature().unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "seed", &tree, &[])
-        .unwrap();
-
-    let bare = tmp.path().join("mirror.git");
-    git2::build::RepoBuilder::new()
-        .bare(true)
-        .clone(&format!("file://{}", work.path().display()), &bare)
-        .unwrap();
-    (tmp, bare)
-}
-
-#[test]
-fn hash_is_deterministic_for_same_contents() {
-    let (_keep_a, mirror_a) = bare_mirror_with(&[(DEVCONTAINER_PATH, b"{\"name\":\"demo\"}")]);
-    let (_keep_b, mirror_b) = bare_mirror_with(&[(DEVCONTAINER_PATH, b"{\"name\":\"demo\"}")]);
-    let a = compute_devcontainer_hash(&mirror_a).unwrap().unwrap();
-    let b = compute_devcontainer_hash(&mirror_b).unwrap().unwrap();
-    assert_eq!(
-        a, b,
-        "identical devcontainer.json content must hash the same across mirrors"
-    );
-}
-
-#[test]
-fn hash_flips_when_lockfile_is_added() {
-    let (_a, ma) = bare_mirror_with(&[(DEVCONTAINER_PATH, b"{}")]);
-    let (_b, mb) = bare_mirror_with(&[
-        (DEVCONTAINER_PATH, b"{}"),
-        (DEVCONTAINER_LOCK_PATH, b"{}"),
-    ]);
-    let a = compute_devcontainer_hash(&ma).unwrap().unwrap();
-    let b = compute_devcontainer_hash(&mb).unwrap().unwrap();
-    assert_ne!(a, b, "adding the lockfile must move the hash");
-}
-
-#[test]
-fn missing_devcontainer_is_none() {
-    let (_keep, bare) = bare_mirror_with(&[("README.md", b"hi")]);
-    assert!(compute_devcontainer_hash(&bare).unwrap().is_none());
+fn test_build_context() -> BuildContext {
+    let mut cfg = EnvironmentConfig::empty();
+    cfg.schema_version = djinn_stack::environment::SCHEMA_VERSION;
+    generate_dockerfile(
+        &cfg,
+        &AgentWorkerImage::new("djinn/agent-runtime", "dev"),
+    )
+    .expect("generate")
 }
 
 #[test]
 fn build_job_labels_and_envs_match_plan() {
     let cfg = ImageControllerConfig::for_testing();
     let tag = format_image_tag(&cfg.registry_host, "proj-abc", "1a2b3c4d5e6f");
-    let job = build_image_build_job(&cfg, "proj-abc", "1a2b3c4d5e6f", &tag);
+    let ctx = test_build_context();
+    let job = build_image_build_job(&cfg, "proj-abc", "1a2b3c4d5e6f", &tag, &ctx);
 
-    // Labels carry the correlators the future reconcile loop relies on.
     let labels = job.metadata.labels.as_ref().expect("labels present");
     assert_eq!(labels.get(LABEL_COMPONENT).unwrap(), COMPONENT_IMAGE_BUILD);
     assert_eq!(labels.get(LABEL_BUILD).unwrap(), "true");
     assert_eq!(labels.get(LABEL_PROJECT_ID).unwrap(), "proj-abc");
     assert_eq!(labels.get(LABEL_IMAGE_HASH).unwrap(), "1a2b3c4d5e6f");
 
-    // Pod template mirrors the same labels (so watching by label picks
-    // up the Pod, not just the Job).
     let template_labels = job
         .spec
         .as_ref()
@@ -113,8 +52,6 @@ fn build_job_labels_and_envs_match_plan() {
         .expect("template labels");
     assert_eq!(template_labels.get(LABEL_PROJECT_ID).unwrap(), "proj-abc");
 
-    // The container env exposes IMAGE_TAG + DOCKER_HOST — the builder
-    // script pivots entirely on these.
     let pod = job
         .spec
         .as_ref()
@@ -124,25 +61,42 @@ fn build_job_labels_and_envs_match_plan() {
         .as_ref()
         .unwrap();
     assert_eq!(pod.containers.len(), 1);
-    let env: std::collections::BTreeMap<&str, &str> = pod.containers[0]
+    let env: BTreeMap<&str, &str> = pod.containers[0]
         .env
         .as_ref()
         .unwrap()
         .iter()
         .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
         .collect();
+    // Post-P5: the builder Pod talks to buildkitd via BUILDCTL_ADDR and
+    // publishes to IMAGE_TAG. DOCKER_HOST is gone — `docker buildx` is not
+    // used anymore.
     assert_eq!(env.get("IMAGE_TAG").copied(), Some(tag.as_str()));
     assert_eq!(
-        env.get("DOCKER_HOST").copied(),
+        env.get("BUILDCTL_ADDR").copied(),
         Some(cfg.buildkitd_host.as_str())
     );
+    assert!(
+        !env.contains_key("DOCKER_HOST"),
+        "DOCKER_HOST must be absent — buildctl talks to buildkitd directly"
+    );
 
-    // Volumes carry a writable workspace (emptyDir) plus the registry-auth
-    // and build-token Secrets. The mirror PVC was dropped in 89f054af2
-    // (build Job now clones upstream directly) so no PVC is expected.
+    // Volumes: build-context ConfigMap, writable docker-config emptyDir,
+    // registry-auth Secret. No workspace emptyDir (no clone), no
+    // build-token Secret (no GitHub auth needed).
     let volumes = pod.volumes.as_ref().unwrap();
-    assert!(volumes.iter().any(|v| v.empty_dir.is_some()));
-    assert!(volumes.iter().any(|v| v.secret.is_some()));
+    assert!(
+        volumes.iter().any(|v| v.config_map.is_some()),
+        "build-context must be a ConfigMap volume"
+    );
+    assert!(
+        volumes.iter().any(|v| v.secret.is_some()),
+        "registry-auth must be a Secret volume"
+    );
+    assert!(
+        !volumes.iter().any(|v| v.name == "workspace"),
+        "no workspace emptyDir — the Dockerfile generator is self-contained"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -159,8 +113,8 @@ mod watcher_transitions {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
-    use djinn_image_controller::build_job::{LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_PROJECT_ID};
     use djinn_image_controller::ImageControllerConfig;
+    use djinn_image_controller::build_job::{LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_PROJECT_ID};
 
     use super::__test_handle_event;
 
@@ -199,9 +153,6 @@ mod watcher_transitions {
         }
     }
 
-    /// `succeeded=1` flips `projects.image_status` to `ready`, populates
-    /// `image_tag` from the registry + hash-prefix, and emits a
-    /// `project_image/ready` envelope on the bus.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn succeeded_event_flips_status_to_ready_and_emits_event() {
         let cfg = ImageControllerConfig::for_testing();
@@ -213,9 +164,6 @@ mod watcher_transitions {
             .await
             .expect("create project");
 
-        // Simulate the pre-flight write the controller does on enqueue:
-        // status=building + the full hash stashed. The watcher must pick
-        // up the full hash from here when writing Ready.
         let full_hash = "1a2b3c4d5e6f7081928374655e4d3c2b1a0f1e2d";
         repo_seed
             .set_project_image(
@@ -245,7 +193,6 @@ mod watcher_transitions {
         __test_handle_event(&cfg, &db, &bus, &mut seen, watcher::Event::Apply(job.clone()))
             .await;
 
-        // DB row should now be Ready, tag populated, hash preserved.
         let row = repo_seed
             .get_project_image(&project.id)
             .await
@@ -264,7 +211,6 @@ mod watcher_transitions {
             "tag {tag} should reference the project slug"
         );
 
-        // Event envelope shape the UI subscribes to.
         {
             let events = captured.lock().unwrap();
             assert_eq!(events.len(), 1, "one envelope expected");
@@ -280,9 +226,6 @@ mod watcher_transitions {
             );
         }
 
-        // Second re-fire with identical outcome should be coalesced by
-        // the in-memory dedupe set — no additional DB write, no second
-        // event emission.
         __test_handle_event(&cfg, &db, &bus, &mut seen, watcher::Event::Apply(job)).await;
         assert_eq!(
             captured.lock().unwrap().len(),
@@ -291,8 +234,6 @@ mod watcher_transitions {
         );
     }
 
-    /// `failed>=1` flips `projects.image_status` to `failed` and stores a
-    /// diagnostic `image_last_error` referencing `kubectl logs`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_event_flips_status_and_records_last_error() {
         let cfg = ImageControllerConfig::for_testing();
@@ -332,7 +273,6 @@ mod watcher_transitions {
         assert!(err.contains(&job_name), "error '{err}' should cite job name");
         assert!(err.contains("kubectl logs"), "error '{err}' should hint logs");
 
-        // The envelope for failures carries action=build_failed.
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, "build_failed");

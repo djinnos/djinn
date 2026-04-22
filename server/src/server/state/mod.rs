@@ -301,6 +301,20 @@ impl AppState {
             }
         };
 
+        // P5 boot reseed — seed `environment_config` for every project
+        // whose column is still the migration-10 default. Runs before
+        // the controller starts taking enqueue calls so the first
+        // reconcile tick sees populated configs instead of the sentinel.
+        let stats = djinn_image_controller::reseed_empty_configs(self.db()).await;
+        tracing::info!(
+            inspected = stats.inspected,
+            reseeded = stats.reseeded,
+            skipped_seeded = stats.skipped_already_seeded,
+            skipped_no_stack = stats.skipped_stack_missing,
+            errors = stats.errors,
+            "environment_config: boot reseed complete"
+        );
+
         let config = ImageControllerConfig::from_env();
         let controller = Arc::new(ImageController::new(
             client.clone(),
