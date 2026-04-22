@@ -219,10 +219,10 @@ pub struct MemoryAssociationsResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryExtractedAuditResponse {
     pub scanned_note_count: Option<i64>,
-    pub merge_candidates: Option<Vec<djinn_core::models::ExtractedNoteAuditFinding>>,
-    pub underspecified: Option<Vec<djinn_core::models::ExtractedNoteAuditFinding>>,
-    pub demote_to_working_spec: Option<Vec<djinn_core::models::ExtractedNoteAuditFinding>>,
-    pub archive_candidates: Option<Vec<djinn_core::models::ExtractedNoteAuditFinding>>,
+    pub merge_candidates: Option<Vec<djinn_memory::ExtractedNoteAuditFinding>>,
+    pub underspecified: Option<Vec<djinn_memory::ExtractedNoteAuditFinding>>,
+    pub demote_to_working_spec: Option<Vec<djinn_memory::ExtractedNoteAuditFinding>>,
+    pub archive_candidates: Option<Vec<djinn_memory::ExtractedNoteAuditFinding>>,
     pub rerun_hint: Option<String>,
     pub error: Option<String>,
 }
@@ -287,7 +287,7 @@ pub struct MemorySearchResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryListResponse {
-    pub notes: Vec<djinn_core::models::NoteCompact>,
+    pub notes: Vec<djinn_memory::NoteCompact>,
     pub error: Option<String>,
 }
 
@@ -305,7 +305,7 @@ pub struct MemoryHealthResponse {
     pub duplicate_cluster_count: Option<i64>,
     pub low_confidence_note_count: Option<i64>,
     pub stale_note_count: Option<i64>,
-    pub stale_notes_by_folder: Option<Vec<djinn_core::models::StaleFolder>>,
+    pub stale_notes_by_folder: Option<Vec<djinn_memory::StaleFolder>>,
     pub error: Option<String>,
 }
 
@@ -317,7 +317,7 @@ pub struct MemoryCatalogResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryRecentResponse {
-    pub notes: Vec<djinn_core::models::NoteCompact>,
+    pub notes: Vec<djinn_memory::NoteCompact>,
     pub error: Option<String>,
 }
 
@@ -336,8 +336,8 @@ pub struct MemoryDiffResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryBuildContextResponse {
     pub primary: Vec<MemoryNoteView>,
-    pub related_l1: Vec<djinn_core::models::NoteOverview>,
-    pub related_l0: Vec<djinn_core::models::NoteAbstract>,
+    pub related_l1: Vec<djinn_memory::NoteOverview>,
+    pub related_l0: Vec<djinn_memory::NoteAbstract>,
     pub error: Option<String>,
 }
 
@@ -357,20 +357,20 @@ pub struct MemoryTaskRefItem {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryGraphResponse {
-    pub nodes: Vec<djinn_core::models::GraphNode>,
-    pub edges: Vec<djinn_core::models::GraphEdge>,
+    pub nodes: Vec<djinn_memory::GraphNode>,
+    pub edges: Vec<djinn_memory::GraphEdge>,
     pub error: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryBrokenLinksResponse {
-    pub broken_links: Vec<djinn_core::models::BrokenLink>,
+    pub broken_links: Vec<djinn_memory::BrokenLink>,
     pub error: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryOrphansResponse {
-    pub orphans: Vec<djinn_core::models::OrphanNote>,
+    pub orphans: Vec<djinn_memory::OrphanNote>,
     pub error: Option<String>,
 }
 
@@ -399,8 +399,8 @@ pub struct MemoryNoteView {
     pub last_accessed: String,
 }
 
-impl From<djinn_core::models::Note> for MemoryNoteView {
-    fn from(note: djinn_core::models::Note) -> Self {
+impl From<djinn_memory::Note> for MemoryNoteView {
+    fn from(note: djinn_memory::Note) -> Self {
         Self {
             tags: note.parsed_tags(),
             id: note.id,
@@ -418,8 +418,8 @@ impl From<djinn_core::models::Note> for MemoryNoteView {
     }
 }
 
-impl From<&djinn_core::models::Note> for MemoryNoteView {
-    fn from(note: &djinn_core::models::Note) -> Self {
+impl From<&djinn_memory::Note> for MemoryNoteView {
+    fn from(note: &djinn_memory::Note) -> Self {
         Self {
             id: note.id.clone(),
             project_id: note.project_id.clone(),
@@ -438,11 +438,11 @@ impl From<&djinn_core::models::Note> for MemoryNoteView {
 }
 
 impl MemoryNoteResponse {
-    pub fn from_note(note: &djinn_core::models::Note) -> Self {
+    pub fn from_note(note: &djinn_memory::Note) -> Self {
         Self::from_note_with_deduplicated(note, false)
     }
 
-    pub fn deduplicated_from_note(note: &djinn_core::models::Note) -> Self {
+    pub fn deduplicated_from_note(note: &djinn_memory::Note) -> Self {
         Self::from_note_with_deduplicated(note, true)
     }
 
@@ -451,7 +451,7 @@ impl MemoryNoteResponse {
         self
     }
 
-    fn from_note_with_deduplicated(note: &djinn_core::models::Note, deduplicated: bool) -> Self {
+    fn from_note_with_deduplicated(note: &djinn_memory::Note, deduplicated: bool) -> Self {
         Self {
             id: Some(note.id.clone()),
             project_id: Some(note.project_id.clone()),

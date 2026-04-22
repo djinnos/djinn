@@ -13,6 +13,7 @@ qdrant = ["dep:qdrant-client"]
 [dependencies]
 async-trait = "0.1"
 djinn-core = { path = "../djinn-core", features = ["sqlx"] }
+djinn-memory = { path = "../djinn-memory", features = ["sqlx"] }
 dirs = "6"
 globset = "0.4"
 ring = "0.17"

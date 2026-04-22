@@ -9,7 +9,8 @@ use tower::ServiceExt;
 
 use crate::events::EventBus;
 use crate::server::{self, AppState};
-use djinn_core::models::{Epic, Note, Project, SessionRecord, Task};
+use djinn_core::models::{Epic, Project, SessionRecord, Task};
+use djinn_memory::Note;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
     Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use djinn_core::events::EventBus;
-use djinn_core::models::Note;
+use djinn_memory::Note;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 

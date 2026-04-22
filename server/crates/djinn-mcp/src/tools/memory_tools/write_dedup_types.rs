@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use djinn_core::models::NoteDedupCandidate;
+use djinn_memory::NoteDedupCandidate;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PendingWriteDedup<'a> {

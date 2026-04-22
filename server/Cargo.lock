@@ -1042,6 +1042,7 @@ dependencies = [
  "djinn-git",
  "djinn-k8s",
  "djinn-mcp",
+ "djinn-memory",
  "djinn-provider",
  "djinn-runtime",
  "djinn-supervisor",
@@ -1120,6 +1121,7 @@ dependencies = [
  "async-trait",
  "dirs",
  "djinn-core",
+ "djinn-memory",
  "globset",
  "libc",
  "proptest",
@@ -1161,6 +1163,7 @@ dependencies = [
  "bincode",
  "djinn-core",
  "djinn-db",
+ "djinn-memory",
  "djinn-stack",
  "futures",
  "hex",
@@ -1241,6 +1244,7 @@ dependencies = [
  "djinn-core",
  "djinn-db",
  "djinn-git",
+ "djinn-memory",
  "djinn-provider",
  "djinn-stack",
  "futures",
@@ -1256,6 +1260,18 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-memory"
+version = "0.1.0"
+dependencies = [
+ "djinn-core",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sqlx",
  "workspace-hack",
 ]
 
@@ -1336,6 +1352,7 @@ dependencies = [
  "djinn-image-controller",
  "djinn-k8s",
  "djinn-mcp",
+ "djinn-memory",
  "djinn-provider",
  "djinn-runtime",
  "djinn-stack",

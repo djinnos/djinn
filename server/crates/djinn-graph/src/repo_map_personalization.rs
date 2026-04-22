@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
-use djinn_core::models::{NoteSearchResult, Task};
+use djinn_core::models::Task;
+use djinn_memory::NoteSearchResult;
 
 /// Local copy of `djinn-server::task_confidence::parse_task_memory_refs` —
 /// the original lives in `djinn-server` and we don't want this crate to

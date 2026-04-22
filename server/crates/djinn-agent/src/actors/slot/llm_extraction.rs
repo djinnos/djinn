@@ -101,7 +101,7 @@ impl ExtractionContext<'_> {
         content: &str,
         note_type: &str,
         scope_paths_json: &str,
-    ) -> djinn_db::Result<djinn_core::models::Note> {
+    ) -> djinn_db::Result<djinn_memory::Note> {
         match self.knowledge_branch_target {
             KnowledgeBranchTarget::Main => {
                 self.note_repo

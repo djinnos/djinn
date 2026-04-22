@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use djinn_core::models::Note;
+use djinn_memory::Note;
 
 use super::*;
 use crate::note_hash::note_content_hash;

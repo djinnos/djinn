@@ -480,7 +480,7 @@ impl NoteRepository {
 
         let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
-        self.events.send(DjinnEventEnvelope::note_updated(&note));
+        self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
     }
 
@@ -503,7 +503,7 @@ impl NoteRepository {
 
         let note = note_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
-        self.events.send(DjinnEventEnvelope::note_updated(&note));
+        self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
     }
 
@@ -573,7 +573,7 @@ impl NoteRepository {
             &note.content,
         )
         .await;
-        self.events.send(DjinnEventEnvelope::note_created(&note));
+        self.events.send(djinn_memory::events::note_created(&note));
         Ok(note)
     }
 
@@ -842,7 +842,7 @@ impl NoteRepository {
             &note.content,
         )
         .await;
-        self.events.send(DjinnEventEnvelope::note_created(&note));
+        self.events.send(djinn_memory::events::note_created(&note));
         Ok(note)
     }
 
@@ -1165,7 +1165,7 @@ impl NoteRepository {
             &note.content,
         )
         .await;
-        self.events.send(DjinnEventEnvelope::note_updated(&note));
+        self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
     }
 
@@ -1195,7 +1195,7 @@ impl NoteRepository {
         let note: Note = note_select_where_id!(id).fetch_one(&mut *tx).await?;
 
         tx.commit().await?;
-        self.events.send(DjinnEventEnvelope::note_updated(&note));
+        self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
     }
 
@@ -1248,7 +1248,7 @@ impl NoteRepository {
         }
 
         self.events
-            .send(DjinnEventEnvelope::note_deleted(&id_for_event));
+            .send(djinn_memory::events::note_deleted(&id_for_event));
         Ok(())
     }
 
@@ -1271,7 +1271,7 @@ impl NoteRepository {
 
         if note.abstract_.is_none() || note.overview.is_none() {
             self.events
-                .send(DjinnEventEnvelope::note_missing_summary(&note));
+                .send(djinn_memory::events::note_missing_summary(&note));
         }
 
         Ok(())
@@ -1386,7 +1386,7 @@ impl NoteRepository {
             &note.content,
         )
         .await;
-        self.events.send(DjinnEventEnvelope::note_updated(&note));
+        self.events.send(djinn_memory::events::note_updated(&note));
         Ok(note)
     }
 }

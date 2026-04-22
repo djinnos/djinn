@@ -2,8 +2,7 @@ use super::*;
 
 use crate::tools::memory_tools::contradiction::ContradictionAnalysisInput;
 use crate::tools::memory_tools::summaries::NoteSummaryService;
-use djinn_core::events::DjinnEventEnvelope;
-use djinn_core::models::Note;
+use djinn_memory::Note;
 use djinn_db::folder_for_type;
 
 pub(crate) fn schedule_summary_regeneration(server: &DjinnMcpServer, note_id: &str) {
@@ -38,7 +37,7 @@ pub(crate) async fn detect_emit_and_schedule_contradictions(
     server
         .state
         .event_bus()
-        .send(DjinnEventEnvelope::contradiction_candidates(
+        .send(djinn_memory::events::contradiction_candidates(
             note,
             &candidates,
         ));

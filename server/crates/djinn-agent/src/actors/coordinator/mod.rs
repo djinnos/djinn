@@ -162,7 +162,7 @@ mod tests {
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
         title: &str,
-    ) -> (djinn_core::models::Task, djinn_core::models::Note) {
+    ) -> (djinn_core::models::Task, djinn_memory::Note) {
         let project = test_helpers::create_test_project(db).await;
         std::fs::create_dir_all(Path::new(&project.path)).unwrap();
         let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))

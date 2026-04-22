@@ -274,7 +274,7 @@ pub async fn persist_repo_map_note(
     project_id: &str,
     commit_sha: &str,
     rendered: &RenderedRepoMap,
-) -> Result<djinn_core::models::Note, djinn_db::Error> {
+) -> Result<djinn_memory::Note, djinn_db::Error> {
     let spec = repo_map_note_spec(commit_sha);
     note_repo
         .upsert_db_note_by_permalink(
@@ -333,7 +333,7 @@ impl RepoMapNoteSearcher for NoteRepository {
         query: &'a str,
         task_id: Option<&'a str>,
         limit: usize,
-    ) -> Result<Vec<djinn_core::models::NoteSearchResult>, Self::Error> {
+    ) -> Result<Vec<djinn_memory::NoteSearchResult>, Self::Error> {
         NoteRepository::search(
             self,
             NoteSearchParams {

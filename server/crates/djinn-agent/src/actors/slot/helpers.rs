@@ -778,7 +778,7 @@ pub(crate) fn derive_task_scope_paths(
 /// Uses L0 (abstract) for most notes, L1 (overview) for high-confidence ones.
 /// Budget-capped at `budget_chars`, dropping lowest-confidence notes first.
 pub(crate) fn format_knowledge_notes(
-    notes: &[djinn_core::models::Note],
+    notes: &[djinn_memory::Note],
     budget_chars: usize,
 ) -> String {
     let mut lines = Vec::new();

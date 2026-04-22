@@ -103,7 +103,7 @@ mod tests {
         project_id: &str,
         path: &std::path::Path,
         title: &str,
-    ) -> djinn_core::models::Note {
+    ) -> djinn_memory::Note {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
         repo.create(project_id, path, title, title, "reference", "[]")
             .await

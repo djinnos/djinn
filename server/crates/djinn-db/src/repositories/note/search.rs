@@ -2,7 +2,7 @@ use super::*;
 use crate::database::NoteSearchBackend as DatabaseNoteSearchBackend;
 use crate::repositories::note::embeddings::embedding_branch_filter_sql;
 use crate::repositories::note::rrf::rrf_fuse;
-use djinn_core::models::{ContradictionCandidate, TypeRisk};
+use djinn_memory::{ContradictionCandidate, TypeRisk};
 
 fn merge_candidate_ids(lists: &[&[(String, f64)]]) -> Vec<String> {
     let mut ids = Vec::new();
@@ -685,7 +685,7 @@ mod contradiction_tests {
     use super::*;
     use crate::database::Database;
     use djinn_core::events::EventBus;
-    use djinn_core::models::TypeRisk;
+    use djinn_memory::TypeRisk;
 
     async fn make_repo_and_project(tmp: &tempfile::TempDir) -> (NoteRepository, String) {
         let db = Database::open_in_memory().unwrap();

@@ -9,7 +9,7 @@ use crate::tools::memory_tools::lifecycle::{
 use crate::tools::memory_tools::{MemoryNoteResponse, WriteParams};
 
 fn actual_file_path_for_response(
-    note: &djinn_core::models::Note,
+    note: &djinn_memory::Note,
     worktree_root: Option<&Path>,
 ) -> String {
     match worktree_root {

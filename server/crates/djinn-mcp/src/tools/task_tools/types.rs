@@ -555,7 +555,7 @@ pub struct BoardHealthResponse {
     /// calls for duplicate clusters, low-confidence notes, staleness, broken
     /// links, and orphans.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory_health: Option<djinn_core::models::HealthReport>,
+    pub memory_health: Option<djinn_memory::HealthReport>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub repeated_reopen_role_tool_mismatches: Vec<BoardHealthRoleToolMismatchItem>,
     pub stale_threshold_hours: i64,

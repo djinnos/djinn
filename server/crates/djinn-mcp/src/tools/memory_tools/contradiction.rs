@@ -2,7 +2,7 @@
 // confidence signals and bilateral associations.
 
 use djinn_core::events::EventBus;
-use djinn_core::models::ContradictionCandidate;
+use djinn_memory::ContradictionCandidate;
 use djinn_db::{CONTRADICTION, NoteRepository, STALE_CITATION};
 use djinn_provider::{CompletionRequest, complete, provider::LlmProvider, resolve_memory_provider};
 use tokio::sync::mpsc;
@@ -229,7 +229,7 @@ mod tests {
     use super::*;
     use djinn_core::events::EventBus;
     use djinn_core::message::{ContentBlock, Conversation};
-    use djinn_core::models::TypeRisk;
+    use djinn_memory::TypeRisk;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use djinn_provider::provider::{StreamEvent, ToolChoice};
     use futures::stream;

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use djinn_core::models::{Note, NoteAbstract, NoteOverview};
+use djinn_memory::{BuildContextResponse, Note, NoteAbstract, NoteOverview};
 
 use crate::error::DbResult as Result;
 use crate::repositories::note::rrf::rrf_fuse;
@@ -15,17 +15,6 @@ use super::NoteRepository;
 /// Notes below this value are excluded from context results. This prevents
 /// contradicted or very low-confidence notes from polluting context.
 pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.1;
-
-/// Tiered context response with budget-aware disclosure.
-#[derive(Clone, Debug)]
-pub struct BuildContextResponse {
-    /// Full-content notes at the seed (primary focus) - never dropped by budget.
-    pub primary: Vec<Note>,
-    /// L1 overview notes: direct wikilink neighbors using overview text.
-    pub related_l1: Vec<NoteOverview>,
-    /// L0 abstract notes: discovered non-direct notes via RRF using abstract text.
-    pub related_l0: Vec<NoteAbstract>,
-}
 
 impl NoteRepository {
     /// Build context from a seed note with progressive disclosure and token budget pruning.

@@ -6,7 +6,7 @@ use std::path::Path;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 
 use crate::server::DjinnMcpServer;
-use djinn_core::models::{GitLogEntry, Note, ReindexSummary};
+use djinn_memory::{GitLogEntry, Note, ReindexSummary};
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 

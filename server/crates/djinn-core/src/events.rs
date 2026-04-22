@@ -1,10 +1,8 @@
 use crate::models::Agent;
-use crate::models::ContradictionCandidate;
 use crate::models::Credential;
 use crate::models::CustomProvider;
 use crate::models::Epic;
 use crate::models::GitSettings;
-use crate::models::Note;
 use crate::models::Project;
 use crate::models::Task;
 use serde::de::DeserializeOwned;
@@ -136,71 +134,6 @@ impl DjinnEventEnvelope {
             payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
             id: Some(id.to_string()),
             project_id: None,
-            from_sync: false,
-        }
-    }
-    pub fn note_created(note: &Note) -> Self {
-        Self {
-            entity_type: "note",
-            action: "created",
-            payload: serde_json::to_value(note).unwrap(),
-            id: None,
-            project_id: None,
-            from_sync: false,
-        }
-    }
-    pub fn note_updated(note: &Note) -> Self {
-        Self {
-            entity_type: "note",
-            action: "updated",
-            payload: serde_json::to_value(note).unwrap(),
-            id: None,
-            project_id: None,
-            from_sync: false,
-        }
-    }
-    pub fn note_deleted(id: &str) -> Self {
-        Self {
-            entity_type: "note",
-            action: "deleted",
-            payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
-            id: Some(id.to_string()),
-            project_id: None,
-            from_sync: false,
-        }
-    }
-    pub fn contradiction_candidates(note: &Note, candidates: &[ContradictionCandidate]) -> Self {
-        Self {
-            entity_type: "note",
-            action: "contradiction_candidates",
-            payload: serde_json::to_value(serde_json::json!({
-                "note_id": note.id,
-                "project_id": note.project_id,
-                "permalink": note.permalink,
-                "candidates": candidates,
-            }))
-            .unwrap(),
-            id: Some(note.id.clone()),
-            project_id: Some(note.project_id.clone()),
-            from_sync: false,
-        }
-    }
-    pub fn note_missing_summary(note: &Note) -> Self {
-        Self {
-            entity_type: "note",
-            action: "missing_summary",
-            payload: serde_json::to_value(serde_json::json!({
-                "id": note.id,
-                "project_id": note.project_id,
-                "permalink": note.permalink,
-                "title": note.title,
-                "note_type": note.note_type,
-                "missing_abstract": note.abstract_.is_none(),
-                "missing_overview": note.overview.is_none(),
-            }))
-            .unwrap(),
-            id: Some(note.id.clone()),
-            project_id: Some(note.project_id.clone()),
             from_sync: false,
         }
     }

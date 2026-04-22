@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use djinn_core::models::Note;
+use djinn_memory::Note;
 use djinn_db::{
     NoteRepository, folder_for_type, infer_note_type, normalize_virtual_note_path, permalink_for,
     permalink_from_virtual_note_path, render_note_markdown, task_branch_name, title_from_permalink,

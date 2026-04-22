@@ -1,4 +1,5 @@
-use djinn_core::models::{Credential, CustomProvider, Epic, GitSettings, Note, Project};
+use djinn_core::models::{Credential, CustomProvider, Epic, GitSettings, Project};
+use djinn_memory::Note;
 
 use crate::Result;
 

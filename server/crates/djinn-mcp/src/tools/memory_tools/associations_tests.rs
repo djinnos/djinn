@@ -64,7 +64,7 @@ mod tests {
         project: &Project,
         tmp: &tempfile::TempDir,
         title: &str,
-    ) -> djinn_core::models::Note {
+    ) -> djinn_memory::Note {
         repo.create(&project.id, tmp.path(), title, "content", "reference", "[]")
             .await
             .unwrap()

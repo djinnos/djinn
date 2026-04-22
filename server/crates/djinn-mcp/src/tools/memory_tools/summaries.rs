@@ -377,7 +377,7 @@ mod tests {
         path: &std::path::Path,
         title: &str,
         content: &str,
-    ) -> djinn_core::models::Note {
+    ) -> djinn_memory::Note {
         repo.create(project_id, path, title, content, "reference", "[]")
             .await
             .unwrap()

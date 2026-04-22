@@ -35,7 +35,7 @@ mod tests {
         repo: &NoteRepository,
         note_id: &str,
         previous_overview: Option<String>,
-    ) -> djinn_core::models::Note {
+    ) -> djinn_memory::Note {
         for _ in 0..40 {
             let note = repo.get(note_id).await.unwrap().unwrap();
             if note

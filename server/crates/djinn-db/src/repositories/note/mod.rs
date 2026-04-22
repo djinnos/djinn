@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::{
+use djinn_core::events::EventBus;
+use djinn_memory::{
     BrokenLink, ExtractedNoteAuditReport, GraphEdge, GraphNode, GraphResponse, HealthReport, Note,
     NoteCompact, NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
 };
@@ -30,12 +30,11 @@ pub use consolidation::{
     CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
     CreatedCanonicalConsolidatedNote, NoteConsolidationRepository,
 };
-pub use context::BuildContextResponse;
 pub use djinn_core::models::{
     ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
-    ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate, DbNoteGroup,
-    NoteDedupCandidate,
+    ConsolidationNote, ConsolidationRunMetric, DbNoteGroup,
 };
+pub use djinn_memory::{BuildContextResponse, ContradictionCandidate, NoteDedupCandidate};
 pub use embeddings::{
     EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
     NoteEmbeddingProvider, NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore, QdrantConfig,
@@ -104,7 +103,7 @@ pub struct NoteSearchParams<'a> {
 macro_rules! note_select_where_id {
     ($id:expr) => {
         ::sqlx::query_as!(
-            ::djinn_core::models::Note,
+            ::djinn_memory::Note,
             r#"SELECT id, project_id, permalink, title, file_path,
                 storage, note_type, folder, tags, content,
                 created_at, updated_at, last_accessed,

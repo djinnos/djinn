@@ -4,7 +4,6 @@ pub mod consolidation_query;
 pub mod credential;
 pub mod epic;
 pub mod git_settings;
-pub mod note;
 pub mod note_association;
 pub mod project;
 pub mod provider;
@@ -22,13 +21,6 @@ pub use consolidation_query::{
 pub use credential::Credential;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
-pub use note::{
-    BrokenLink, BrokenLinkRepair, BuildContextResponse, ContradictionCandidate,
-    ExtractedNoteAuditCategory, ExtractedNoteAuditFinding, ExtractedNoteAuditReport, GitLogEntry,
-    GraphEdge, GraphNode, GraphResponse, HealthReport, Note, NoteAbstract, NoteCompact,
-    NoteDedupCandidate, NoteOverview, NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
-    TypeRisk,
-};
 pub use note_association::{NoteAssociation, canonical_pair};
 pub use project::Project;
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};

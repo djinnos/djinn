@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use djinn_core::models::{ExtractedNoteAuditCategory, ExtractedNoteAuditFinding};
+use djinn_memory::{ExtractedNoteAuditCategory, ExtractedNoteAuditFinding};
 
 use super::*;
 use crate::repositories::note::{NoteConsolidationRepository, STALE_CITATION};

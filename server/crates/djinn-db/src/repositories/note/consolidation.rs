@@ -3,8 +3,9 @@ use std::collections::BTreeSet;
 use djinn_core::events::EventBus;
 use djinn_core::models::{
     ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
-    ConsolidationNote, ConsolidationRunMetric, DbNoteGroup, Note, NoteDedupCandidate,
+    ConsolidationNote, ConsolidationRunMetric, DbNoteGroup,
 };
+use djinn_memory::{Note, NoteDedupCandidate};
 
 use super::{NoteRepository, note_select_where_id};
 use crate::Database;

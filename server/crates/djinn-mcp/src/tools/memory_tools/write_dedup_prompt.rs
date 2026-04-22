@@ -1,4 +1,4 @@
-use djinn_core::models::NoteDedupCandidate;
+use djinn_memory::NoteDedupCandidate;
 
 use super::write_dedup_types::{MemoryWriteDedupDecision, MemoryWriteDedupDecisionInput};
 
