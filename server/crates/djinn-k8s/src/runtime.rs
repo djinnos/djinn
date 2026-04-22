@@ -297,6 +297,7 @@ impl SessionRuntime for KubernetesRuntime {
         let job = build_task_run_job(
             &self.config,
             &task_run_id,
+            &spec.project_id,
             &resource_name,
             &project_image_tag,
         );
@@ -904,6 +905,7 @@ mod tests {
         let job = crate::job::build_task_run_job(
             &cfg,
             &task_run_id,
+            "proj-xyz",
             &resource_name,
             "reg.test:5000/djinn-project-proj-xyz:deadbeefcafe",
         );

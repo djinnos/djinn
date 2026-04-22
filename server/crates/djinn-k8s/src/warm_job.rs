@@ -142,6 +142,7 @@ exec {bin} warm-graph "{project_id}"
                 read_only: Some(false),
                 ..VolumeMount::default()
             },
+            crate::env_config::env_config_volume_mount(),
         ]),
         ..Container::default()
     };
@@ -160,6 +161,7 @@ exec {bin} warm-graph "{project_id}"
             empty_dir: Some(EmptyDirVolumeSource::default()),
             ..Volume::default()
         },
+        crate::env_config::env_config_volume(project_id),
     ];
 
     let pod_spec = PodSpec {
@@ -314,7 +316,7 @@ mod tests {
         assert_eq!(envs.get("DJINN_MYSQL_FLAVOR").copied(), Some("dolt"));
 
         let mounts = container.volume_mounts.as_ref().expect("mounts");
-        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts.len(), 3, "mirror + workspace + env-config");
         let by_name: BTreeMap<&str, &VolumeMount> =
             mounts.iter().map(|m| (m.name.as_str(), m)).collect();
         let mirror = by_name.get(VOLUME_MIRROR).expect("mirror mount");
@@ -323,6 +325,14 @@ mod tests {
         let workspace = by_name.get(VOLUME_WORKSPACE).expect("workspace mount");
         assert_eq!(workspace.mount_path, WORKSPACE_MOUNT_DIR);
         assert_eq!(workspace.read_only, Some(false));
+        let env_config_mount = by_name
+            .get(crate::env_config::VOLUME_ENV_CONFIG)
+            .expect("env-config mount");
+        assert_eq!(
+            env_config_mount.mount_path,
+            crate::env_config::ENV_CONFIG_MOUNT_DIR
+        );
+        assert_eq!(env_config_mount.read_only, Some(true));
 
         let volumes = pod.volumes.as_ref().expect("volumes");
         let by_volume_name: BTreeMap<&str, &Volume> =
@@ -335,6 +345,19 @@ mod tests {
             .get(VOLUME_WORKSPACE)
             .expect("workspace volume");
         assert!(workspace_v.empty_dir.is_some(), "workspace must be emptyDir");
+        let env_v = by_volume_name
+            .get(crate::env_config::VOLUME_ENV_CONFIG)
+            .expect("env-config volume");
+        let cm_src = env_v
+            .config_map
+            .as_ref()
+            .expect("env-config volume is a ConfigMap source");
+        assert_eq!(cm_src.name, "djinn-env-proj-xyz");
+        assert_eq!(
+            cm_src.optional,
+            Some(true),
+            "env-config CM must be optional so Pods start pre-P6 when the CM doesn't exist yet"
+        );
     }
 
     #[test]

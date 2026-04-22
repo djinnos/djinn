@@ -1093,6 +1093,7 @@ dependencies = [
  "djinn-db",
  "djinn-graph",
  "djinn-runtime",
+ "djinn-stack",
  "djinn-supervisor",
  "djinn-workspace",
  "serde",

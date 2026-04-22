@@ -57,6 +57,47 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tracing::{info, warn};
 
+/// Load the project's `EnvironmentConfig` from the ConfigMap mount the
+/// warm / task-run Pod specs attach at [`ENV_CONFIG_MOUNT_FILE`].
+///
+/// Returns:
+/// * `Ok(Some(cfg))` — file present and parsed.
+/// * `Ok(None)` — file missing (pre-P6 state, or the CM didn't exist at
+///   Pod schedule time so Kubelet resolved the `optional: true` volume
+///   to empty).
+/// * `Err(...)` — file present but unreadable or unparseable. Caller
+///   decides whether to hard-fail or log + continue; today's `run_lifecycle`
+///   coexists with this path and still reads devcontainer.json, so we
+///   don't collapse into a single fatal.
+///
+/// The caller supplies the path explicitly so tests can point at a tmp
+/// dir; production callers pass [`ENV_CONFIG_MOUNT_FILE`] verbatim.
+pub async fn load_environment_config(
+    path: &Path,
+) -> Result<Option<djinn_stack::environment::EnvironmentConfig>> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(r) => r,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            info!(
+                path = %path.display(),
+                "environment_config mount absent; continuing without one"
+            );
+            return Ok(None);
+        }
+        Err(err) => {
+            return Err(anyhow::Error::from(err)
+                .context(format!("read {}", path.display())));
+        }
+    };
+    let cfg: djinn_stack::environment::EnvironmentConfig = serde_json::from_str(&raw)
+        .with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(cfg))
+}
+
+/// Canonical mount path the Pod spec attaches the environment-config
+/// ConfigMap at. Matches `djinn_k8s::env_config::ENV_CONFIG_MOUNT_FILE`.
+pub const ENV_CONFIG_MOUNT_FILE: &str = "/etc/djinn/environment.json";
+
 /// Public entrypoint. Resolves `project_root/.devcontainer/devcontainer.json`
 /// (falling back to `.devcontainer.json`), parses it, and runs every
 /// lifecycle hook the spec lists for container-creation time in the order
@@ -592,5 +633,41 @@ mod tests {
         std::fs::write(tmp.path().join(".devcontainer.json"), json).unwrap();
         run_lifecycle(tmp.path()).await.expect("ok");
         assert!(marker.exists());
+    }
+
+    #[tokio::test]
+    async fn load_environment_config_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("environment.json");
+        let out = load_environment_config(&path).await.expect("ok");
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_environment_config_parses_valid_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("environment.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "schema_version": 1,
+                "source": "auto-detected",
+                "env": {"RUST_LOG": "info"}
+            }"#,
+        )
+        .unwrap();
+        let out = load_environment_config(&path).await.expect("ok");
+        let cfg = out.expect("some");
+        assert_eq!(cfg.schema_version, 1);
+        assert_eq!(cfg.env.get("RUST_LOG").map(String::as_str), Some("info"));
+    }
+
+    #[tokio::test]
+    async fn load_environment_config_errors_on_malformed_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("environment.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let err = load_environment_config(&path).await.unwrap_err();
+        assert!(err.to_string().contains("parse"), "got: {err}");
     }
 }

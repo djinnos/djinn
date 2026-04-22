@@ -379,6 +379,32 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
         );
     }
 
+    // P4: probe for the new environment-config ConfigMap mount. Until
+    // P5 wires this into the canonical warm pipeline (hooks, toolchain
+    // resolution, etc.), we only log what's there — the goal here is
+    // purely to exercise the read path so operators can confirm the
+    // volume mount wiring is correct end-to-end.
+    let env_config_path = PathBuf::from(lifecycle::ENV_CONFIG_MOUNT_FILE);
+    match lifecycle::load_environment_config(&env_config_path).await {
+        Ok(Some(cfg)) => tracing::info!(
+            project_id,
+            schema_version = cfg.schema_version,
+            workspace_count = cfg.workspaces.len(),
+            "environment_config present at {}",
+            env_config_path.display()
+        ),
+        Ok(None) => tracing::debug!(
+            project_id,
+            "no environment_config mounted at {} (pre-cut-over state)",
+            env_config_path.display()
+        ),
+        Err(e) => warn!(
+            project_id,
+            error = %format!("{e:#}"),
+            "environment_config present but failed to load; ignoring"
+        ),
+    }
+
     // Architect-only warm path: this subcommand binary is dispatched
     // exclusively by `K8sGraphWarmer`, which is wired into the
     // architect-only `GraphWarmerService::trigger` pipeline.  Minting the

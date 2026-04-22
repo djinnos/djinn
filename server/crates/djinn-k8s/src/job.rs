@@ -84,6 +84,7 @@ pub const VOLUME_WORKSPACE: &str = "workspace";
 pub fn build_task_run_job(
     config: &KubernetesConfig,
     task_run_id: &Uuid,
+    project_id: &str,
     secret_name: &str,
     project_image_tag: &str,
 ) -> Job {
@@ -118,6 +119,7 @@ pub fn build_task_run_job(
             volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(true)),
             volume_mount(VOLUME_CACHE, CACHE_MOUNT_DIR, None),
             volume_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
+            crate::env_config::env_config_volume_mount(),
         ]),
         resources: Some(ResourceRequirements {
             requests: Some(BTreeMap::from([
@@ -187,6 +189,7 @@ pub fn build_task_run_job(
             empty_dir: Some(EmptyDirVolumeSource::default()),
             ..Volume::default()
         },
+        crate::env_config::env_config_volume(project_id),
     ];
 
     let pod_spec = PodSpec {
@@ -265,7 +268,13 @@ mod tests {
         let secret_name = "djinn-taskrun-test";
         let project_image = "registry.example:5000/djinn-project-p:abc123def456";
 
-        let job = build_task_run_job(&cfg, &task_run_id, secret_name, project_image);
+        let job = build_task_run_job(
+            &cfg,
+            &task_run_id,
+            "proj-xyz",
+            secret_name,
+            project_image,
+        );
 
         // Metadata.
         let meta = &job.metadata;
@@ -360,18 +369,24 @@ mod tests {
             Some(task_run_id.to_string().as_str())
         );
 
-        // Volume mounts: exactly 5, in the required order.
+        // Volume mounts: 5 from the pre-env-config layout + the
+        // environment-config mount added in P4.
         let mounts = container
             .volume_mounts
             .as_ref()
             .expect("volume_mounts set");
-        assert_eq!(mounts.len(), 5, "expected 5 volume mounts");
-        let expected_mounts: [(&str, &str, Option<bool>); 5] = [
+        assert_eq!(mounts.len(), 6, "expected 6 volume mounts");
+        let expected_mounts: [(&str, &str, Option<bool>); 6] = [
             (VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             (VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
             (VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(true)),
             (VOLUME_CACHE, CACHE_MOUNT_DIR, None),
             (VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
+            (
+                crate::env_config::VOLUME_ENV_CONFIG,
+                crate::env_config::ENV_CONFIG_MOUNT_DIR,
+                Some(true),
+            ),
         ];
         for (mount, (exp_name, exp_path, exp_ro)) in mounts.iter().zip(expected_mounts.iter()) {
             assert_eq!(&mount.name, exp_name);
@@ -379,16 +394,16 @@ mod tests {
             assert_eq!(mount.read_only, *exp_ro);
         }
 
-        // Volumes: exactly 5, matching the mount names, with the expected
-        // backing variants.
+        // Volumes mirror the mount list.
         let volumes = pod.volumes.as_ref().expect("volumes set");
-        assert_eq!(volumes.len(), 5, "expected 5 volumes");
+        assert_eq!(volumes.len(), 6, "expected 6 volumes");
         let expected_volume_names = [
             VOLUME_SPEC,
             VOLUME_AUTH_TOKEN,
             VOLUME_MIRROR,
             VOLUME_CACHE,
             VOLUME_WORKSPACE,
+            crate::env_config::VOLUME_ENV_CONFIG,
         ];
         for (volume, expected_name) in volumes.iter().zip(expected_volume_names.iter()) {
             assert_eq!(&volume.name, expected_name);
