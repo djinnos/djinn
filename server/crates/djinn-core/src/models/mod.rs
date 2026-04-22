@@ -1,10 +1,7 @@
 pub mod agent;
-pub mod consolidation;
-pub mod consolidation_query;
 pub mod credential;
 pub mod epic;
 pub mod git_settings;
-pub mod note_association;
 pub mod project;
 pub mod provider;
 pub mod session;
@@ -14,14 +11,9 @@ pub mod task;
 pub mod task_run;
 
 pub use agent::Agent;
-pub use consolidation::{ConsolidatedNoteProvenance, ConsolidationRunMetric};
-pub use consolidation_query::{
-    ConsolidationCandidateEdge, ConsolidationCluster, ConsolidationNote, DbNoteGroup,
-};
 pub use credential::Credential;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
-pub use note_association::{NoteAssociation, canonical_pair};
 pub use project::Project;
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{SessionRecord, SessionStatus};

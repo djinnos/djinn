@@ -30,11 +30,11 @@ pub use consolidation::{
     CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric,
     CreatedCanonicalConsolidatedNote, NoteConsolidationRepository,
 };
-pub use djinn_core::models::{
-    ConsolidatedNoteProvenance, ConsolidationCandidateEdge, ConsolidationCluster,
-    ConsolidationNote, ConsolidationRunMetric, DbNoteGroup,
+pub use djinn_memory::{
+    BuildContextResponse, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
+    ConsolidationCluster, ConsolidationNote, ConsolidationRunMetric, ContradictionCandidate,
+    DbNoteGroup, NoteDedupCandidate,
 };
-pub use djinn_memory::{BuildContextResponse, ContradictionCandidate, NoteDedupCandidate};
 pub use embeddings::{
     EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
     NoteEmbeddingProvider, NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore, QdrantConfig,

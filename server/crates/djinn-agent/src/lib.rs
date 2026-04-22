@@ -1,30 +1,30 @@
 // Agent-domain code extracted from djinn-server.
 // Covers: commands, agent context/roles/lifecycle, verification, actors.
 
-pub mod commands;
-pub mod events;
-pub mod process;
+pub(crate) mod commands;
+pub(crate) mod events;
+pub(crate) mod process;
 
 // ─── Agent module (was src/agent/) ───────────────────────────────────────────
 
 pub(crate) mod compaction;
-pub mod config;
+pub(crate) mod config;
 pub mod context;
 // Extension tools: `pub(crate)` internals, `chat_tools` re-exports the chat-safe subset.
 pub mod chat_tools;
 pub(crate) mod extension;
 pub mod file_time;
-pub mod knowledge_promotion;
+pub(crate) mod knowledge_promotion;
 pub mod lsp;
 pub(crate) mod task_merge;
-pub mod oauth;
+pub(crate) mod oauth;
 pub(crate) mod output_parser;
 pub(crate) mod output_stash;
 pub(crate) mod patch;
 pub mod prompts;
 pub mod mcp_client;
 pub mod roles;
-pub mod sandbox;
+pub(crate) mod sandbox;
 pub mod skills;
 pub mod direct_services;
 pub mod runtime_bridge;
@@ -43,7 +43,7 @@ pub mod resource_monitor;
 
 // ─── Per-session cgroup memory limits ───────────────────────────────────────
 
-pub mod cgroup;
+pub(crate) mod cgroup;
 
 // ─── Actors (was src/actors/) ────────────────────────────────────────────────
 
@@ -129,7 +129,7 @@ impl<'de> serde::Deserialize<'de> for AgentType {
 }
 
 #[cfg(test)]
-pub mod test_helpers;
+pub(crate) mod test_helpers;
 
 #[cfg(test)]
 mod tests {
