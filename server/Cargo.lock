@@ -1113,21 +1113,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "djinn-daemon"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "time",
- "tokio",
- "tracing",
- "workspace-hack",
-]
-
-[[package]]
 name = "djinn-db"
 version = "0.1.0"
 dependencies = [
@@ -1342,7 +1327,6 @@ dependencies = [
  "dirs",
  "djinn-agent",
  "djinn-core",
- "djinn-daemon",
  "djinn-db",
  "djinn-git",
  "djinn-graph",

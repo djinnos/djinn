@@ -1,6 +1,5 @@
 #![warn(unreachable_pub)]
 
-pub mod daemon;
 pub mod db;
 pub mod embedded;
 pub mod error;

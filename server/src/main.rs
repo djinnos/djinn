@@ -1,49 +1,20 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
-use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
-    model::{
-        CallToolRequestParams, CallToolResult, Implementation, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
-    },
-    service::{Peer, RequestContext, RoleClient, RoleServer},
-    transport::{
-        StreamableHttpClientTransport, io::stdio,
-        streamable_http_client::StreamableHttpClientTransportConfig,
-    },
-};
 use tokio::signal;
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use djinn_server::daemon;
 use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
 
-const DEFAULT_UPSTREAM_URL: &str = "http://127.0.0.1:3000/mcp";
-
 #[derive(Parser)]
 #[command(name = "djinn-server", about = "Djinn MCP server", version)]
 struct Cli {
-    /// Run as stdio bridge to daemon HTTP MCP endpoint.
-    #[arg(long, default_value_t = false)]
-    mcp_connect: bool,
-
-    /// Ensure daemon is running and exit.
-    #[arg(long, default_value_t = false)]
-    ensure_daemon: bool,
-
-    /// Upstream MCP URL override for --mcp-connect.
-    #[arg(long, env = "DJINN_MCP_URL")]
-    mcp_url: Option<String>,
-
     /// Port to listen on
     #[arg(short, long, default_value_t = 3000, env = "DJINN_PORT")]
     port: u16,
@@ -85,27 +56,7 @@ async fn async_main() {
 
     let cli = Cli::parse();
 
-    if cli.ensure_daemon {
-        if let Err(e) = ensure_daemon_running(cli.port, cli.db_path.as_deref()).await {
-            tracing::error!(error = %e, "failed to ensure daemon is running");
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    if cli.mcp_connect {
-        if let Err(e) = run_stdio_bridge(&cli).await {
-            tracing::error!(error = %e, "stdio bridge failed");
-            std::process::exit(1);
-        }
-        return;
-    }
-
     let cancel = CancellationToken::new();
-    let _daemon_lock = daemon::acquire(cli.port).unwrap_or_else(|e| {
-        tracing::error!(error = %e, "failed to acquire daemon lockfile");
-        std::process::exit(1);
-    });
 
     let shutdown_cancel = cancel.clone();
     tokio::spawn(async move {
@@ -204,124 +155,6 @@ async fn async_main() {
     djinn_agent::provider::telemetry::shutdown();
 }
 
-#[derive(Clone)]
-struct StdioBridge {
-    upstream: Arc<Mutex<Peer<RoleClient>>>,
-    upstream_url: String,
-    port: u16,
-    db_path: Option<PathBuf>,
-}
-
-impl StdioBridge {
-    async fn connect(url: &str) -> Result<Peer<RoleClient>, Box<dyn std::error::Error>> {
-        let config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
-        let transport = StreamableHttpClientTransport::from_config(config);
-        let service = ().serve(transport).await?;
-        let peer = service.peer().clone();
-        // Keep the upstream service alive in the background
-        tokio::spawn(async move {
-            let _ = service.waiting().await;
-        });
-        Ok(peer)
-    }
-
-    async fn reconnect(&self) -> Result<(), McpError> {
-        tracing::info!("upstream connection lost, attempting reconnect");
-        ensure_daemon_running(self.port, self.db_path.as_deref())
-            .await
-            .map_err(|e| McpError::internal_error(format!("ensure daemon: {e}"), None))?;
-
-        let peer = Self::connect(&self.upstream_url)
-            .await
-            .map_err(|e| McpError::internal_error(format!("reconnect failed: {e}"), None))?;
-
-        *self.upstream.lock().await = peer;
-        tracing::info!("upstream reconnected successfully");
-        Ok(())
-    }
-}
-
-impl ServerHandler for StdioBridge {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "djinn-server-bridge".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                ..Default::default()
-            },
-            instructions: Some(format!("Forwards MCP tools to {}", self.upstream_url)),
-        }
-    }
-
-    async fn list_tools(
-        &self,
-        request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
-        let peer = self.upstream.lock().await.clone();
-        match peer.list_tools(request.clone()).await {
-            Ok(result) => Ok(result),
-            Err(first_err) => {
-                tracing::warn!(error = %first_err, "upstream list_tools failed, reconnecting");
-                self.reconnect().await?;
-                let peer = self.upstream.lock().await.clone();
-                peer.list_tools(request).await.map_err(|e| {
-                    McpError::internal_error(
-                        format!("upstream list_tools failed after reconnect: {e}"),
-                        None,
-                    )
-                })
-            }
-        }
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
-        let peer = self.upstream.lock().await.clone();
-        match peer.call_tool(request.clone()).await {
-            Ok(result) => Ok(result),
-            Err(first_err) => {
-                tracing::warn!(error = %first_err, "upstream call_tool failed, reconnecting");
-                self.reconnect().await?;
-                let peer = self.upstream.lock().await.clone();
-                peer.call_tool(request).await.map_err(|e| {
-                    McpError::internal_error(
-                        format!("upstream call_tool failed after reconnect: {e}"),
-                        None,
-                    )
-                })
-            }
-        }
-    }
-}
-
-async fn run_stdio_bridge(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_daemon_running(cli.port, cli.db_path.as_deref()).await?;
-
-    let daemon_info = read_daemon_info();
-    let upstream_url = resolve_upstream_url(cli.mcp_url.clone(), daemon_info.as_ref());
-
-    tracing::info!(url = %upstream_url, "starting stdio bridge");
-
-    let peer = StdioBridge::connect(&upstream_url).await?;
-
-    let bridge = StdioBridge {
-        upstream: Arc::new(Mutex::new(peer)),
-        upstream_url,
-        port: cli.port,
-        db_path: cli.db_path.clone(),
-    };
-
-    let stdio_service = bridge.serve(stdio()).await?;
-    let _ = stdio_service.waiting().await?;
-    Ok(())
-}
-
 /// Parse a mysql URL of the form `mysql://<user>[:<pw>]@<host>:<port>/<db>` and
 /// block until a TCP connection to host:port succeeds (up to ~60s).
 fn wait_for_dolt_reachable(target: &str) {
@@ -349,46 +182,6 @@ fn wait_for_dolt_reachable(target: &str) {
         endpoint = %addr,
         "external database did not accept TCP connections within 60s; continuing and letting the pool retry"
     );
-}
-
-async fn ensure_daemon_running(port: u16, db_path: Option<&std::path::Path>) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("resolve current exe: {e}"))?;
-    // On Linux, /proc/self/exe resolves with a trailing " (deleted)" suffix
-    // when the backing binary has been replaced on disk (e.g. after a cargo
-    // rebuild while the stdio bridge is still running). `current_exe()`
-    // returns that literal string, and handing it to `Command::new` fails
-    // with ENOENT. Strip the suffix so we exec the freshly-rebuilt file at
-    // the original path instead.
-    let exe = strip_deleted_suffix(exe);
-    daemon::ensure_running(port, db_path, &exe).await?;
-    Ok(())
-}
-
-/// Strip the trailing `" (deleted)"` marker that Linux procfs appends to a
-/// `/proc/self/exe` symlink whose target inode has been unlinked.
-fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {
-    const SUFFIX: &str = " (deleted)";
-    match path.to_str() {
-        Some(s) if s.ends_with(SUFFIX) => std::path::PathBuf::from(&s[..s.len() - SUFFIX.len()]),
-        _ => path,
-    }
-}
-
-fn resolve_upstream_url(
-    override_url: Option<String>,
-    daemon_info: Option<&daemon::DaemonInfo>,
-) -> String {
-    if let Some(url) = override_url {
-        return url;
-    }
-    if let Some(info) = daemon_info {
-        return format!("http://127.0.0.1:{}/mcp", info.port);
-    }
-    DEFAULT_UPSTREAM_URL.to_string()
-}
-
-fn read_daemon_info() -> Option<daemon::DaemonInfo> {
-    daemon::read_info_default()
 }
 
 fn init_logging() -> (WorkerGuard, WorkerGuard) {
@@ -444,33 +237,5 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
-    }
-}
-
-#[cfg(test)]
-mod strip_deleted_suffix_tests {
-    use super::strip_deleted_suffix;
-    use std::path::PathBuf;
-
-    #[test]
-    fn strips_trailing_deleted_marker() {
-        let input = PathBuf::from("/usr/bin/foo (deleted)");
-        assert_eq!(strip_deleted_suffix(input), PathBuf::from("/usr/bin/foo"));
-    }
-
-    #[test]
-    fn leaves_unrelated_paths_alone() {
-        let input = PathBuf::from("/usr/bin/foo");
-        assert_eq!(strip_deleted_suffix(input), PathBuf::from("/usr/bin/foo"));
-    }
-
-    #[test]
-    fn does_not_strip_deleted_inside_path() {
-        // "(deleted) " in the middle is a legitimate filename component.
-        let input = PathBuf::from("/weird/ (deleted) /bin");
-        assert_eq!(
-            strip_deleted_suffix(input),
-            PathBuf::from("/weird/ (deleted) /bin")
-        );
     }
 }

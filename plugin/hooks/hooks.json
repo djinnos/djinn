@@ -1,15 +1,5 @@
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "djinn-server --ensure-daemon"
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "hooks": [
