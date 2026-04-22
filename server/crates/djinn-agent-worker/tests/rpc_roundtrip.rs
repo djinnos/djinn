@@ -304,6 +304,7 @@ async fn worker_roundtrips_load_task_over_tcp() {
     //    manifest shape the `KubernetesRuntime` will produce.
     let exe = env!("CARGO_BIN_EXE_djinn-agent-worker");
     let child = tokio::process::Command::new(exe)
+        .arg("task-run")
         .env("DJINN_SERVER_ADDR", addr.to_string())
         .env("DJINN_SPEC_PATH", &spec_path)
         .env("DJINN_TOKEN_PATH", &token_path)
@@ -389,6 +390,7 @@ async fn worker_exits_nonzero_when_tcp_auth_rejects() {
 
     let exe = env!("CARGO_BIN_EXE_djinn-agent-worker");
     let child = tokio::process::Command::new(exe)
+        .arg("task-run")
         .env("DJINN_SERVER_ADDR", addr.to_string())
         .env("DJINN_SPEC_PATH", &spec_path)
         .env("DJINN_TOKEN_PATH", &token_path)
