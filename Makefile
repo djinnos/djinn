@@ -1,18 +1,18 @@
 UI_DIR := $(CURDIR)/ui
 SERVER_DIR := $(CURDIR)/server
 
-.PHONY: help up up-no-build down logs dev watch test test-all test-vault
+# Local-dev inner loop: `tilt up` at the repo root. It bootstraps the kind
+# cluster + local registry, compiles djinn-server + djinn-agent-worker once
+# (via scripts/tilt/build-binaries.sh), builds the agent-runtime base +
+# thin images, installs the Helm release, and wires port-forwards. Nothing
+# in this Makefile manages the dev stack anymore — only the isolated test
+# Dolt (docker-compose.yml → `dolt-test` service at :3307) plus the test
+# harness targets that depend on it.
+
+.PHONY: help dev test-db-migrate test-vault test-db-reset sqlx-prepare sqlx-check test test-all
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
-
-up: ## Start the stack, rebuilding the server image if source changed
-	docker compose up -d --build
-	@$(MAKE) --no-print-directory test-db-migrate test-vault
-
-up-no-build: ## Start the stack without rebuilding (use an existing image)
-	docker compose up -d
-	@$(MAKE) --no-print-directory test-db-migrate test-vault
 
 test-db-migrate: ## Ensure schema is applied to the test Dolt (:3307)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
@@ -27,18 +27,8 @@ test-vault: ## Create the test-only vault key at $DJINN_VAULT_KEY_PATH (idempote
 		echo "Created /var/tmp/djinn-test-vault/vault.key"; \
 	fi
 
-down: ## Stop the docker compose stack (volumes persist)
-	docker compose down
-
-logs: ## Tail djinn-server logs
-	docker compose logs -f djinn-server
-
-dev: ## Start the Vite web client (assumes `make up` was run)
+dev: ## Start the Vite web client standalone (Tilt also runs it — this is for UI-only sessions)
 	cd $(UI_DIR) && pnpm dev
-
-watch: ## Rebuild + restart djinn-server on Rust source changes (cargo-watch)
-	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch: cargo install cargo-watch"; exit 1; }
-	cd $(SERVER_DIR) && cargo watch -w crates -w src -s 'cd $(CURDIR) && docker compose up -d --build djinn-server'
 
 sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Dolt on :3307 via .cargo/config.toml)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
@@ -79,10 +69,3 @@ test-all: ## Run every workspace crate's tests sequentially (avoids test-Dolt OO
 	cd $(SERVER_DIR) && cargo test -p djinn-agent
 	@$(MAKE) --no-print-directory test-db-reset
 	cd $(SERVER_DIR) && cargo test -p djinn-server
-
-# ----------------------------------------------------------------------------
-# Kubernetes / Helm local-dev inner loop: see Tiltfile at the repo root.
-# ----------------------------------------------------------------------------
-# `tilt up` bootstraps the kind cluster + registry, builds images, installs
-# the Helm release, and wires port-forwards. `kind delete cluster --name djinn`
-# to tear down.

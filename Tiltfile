@@ -41,44 +41,72 @@ local('bash scripts/kind/setup-kind.sh', quiet=False, echo_off=True)
 # Refuse to apply against anything other than the local kind cluster.
 allow_k8s_contexts(CLUSTER)
 
-# --- djinn-server image --------------------------------------------------
-# BuildKit's cargo target cache-mount was wedging such that source edits to
-# server/** weren't producing new binaries — Tilt "builds" completed in 1s
-# by reusing the cached target dir. Switched to a local_resource that runs
-# cargo build on the host and wraps the fresh binary in a thin runtime
-# image. Shells to scripts/tilt/build-server-image.sh so the logic is
-# testable outside Tilt.
+# --- djinn-agent-runtime base image --------------------------------------
+# Heavy base: LSPs (Node + rust-analyzer + pyright + typescript-language-
+# server), rustup + stable toolchain, sccache + mold + clang, non-root
+# user. Rebuilt only when its Dockerfile changes (tarball version bumps,
+# apt dep edits). Tagged locally — never pushed; the top wrap step resolves
+# the FROM against the local docker image store. Keeping LSP fetches + apt
+# out of the per-build path is the single biggest layering win: worker
+# source edits no longer bust 1.5 GB of LSP downloads.
 local_resource(
-    'djinn-server-image',
-    cmd='bash scripts/tilt/build-server-image.sh',
+    'djinn-agent-runtime-base-image',
+    cmd='bash scripts/tilt/build-agent-runtime-base.sh',
+    deps=['server/docker/djinn-agent-runtime-base.Dockerfile'],
+    labels=['build'],
+)
+
+# --- djinn binaries ------------------------------------------------------
+# Host-side cargo build that produces BOTH djinn-server and djinn-agent-
+# worker in one pass. They share six workspace crates (djinn-core, djinn-
+# db, djinn-graph, djinn-runtime, djinn-supervisor, djinn-workspace) plus
+# ~80 external deps unified by workspace-hack, so compiling them together
+# cuts per-change work roughly in half versus the old separate-image
+# rebuilds. Staged into .tilt/artifacts/; the two wrap-*-image resources
+# below pick them up.
+#
+# BuildKit's cargo target cache-mount was wedging such that source edits
+# weren't producing new binaries — named docker volumes (cargo-registry,
+# cargo-target, sccache) survive across Tilt invocations without that
+# failure mode. The sccache volume also rebuilds the target dir cheaply
+# if `docker volume prune` wipes it.
+local_resource(
+    'djinn-binaries',
+    cmd='bash scripts/tilt/build-binaries.sh',
     deps=['server/src', 'server/crates', 'server/Cargo.toml', 'server/Cargo.lock'],
     # Exclude every build artefact dir so `cargo test` on any crate (which
-    # writes target/debug/** and target/test-tmp/**) doesn't re-trigger the
-    # image build. The workspace has a root `target/` plus per-crate
+    # writes target/debug/** and target/test-tmp/**) doesn't re-trigger
+    # the image build. The workspace has a root `target/` plus per-crate
     # `crates/*/target/` dirs; the `**/target` glob covers both, including
-    # future sub-targets. `server/.sqlx` is committed and only changes when
-    # the user intentionally runs `cargo sqlx prepare`, so watching it is
-    # fine — but the `.../cache` suffix in the old pattern matched nothing.
+    # future sub-targets. `server/.sqlx` is committed and only changes
+    # when the user intentionally runs `cargo sqlx prepare`, so watching
+    # it is fine — but the `.../cache` suffix in the old pattern matched
+    # nothing.
     ignore=['server/**/target', 'server/**/test-tmp'],
     labels=['build'],
 )
 
+# --- djinn-server image --------------------------------------------------
+# Thin wrap: debian-slim + the freshly-built djinn-server binary + tini.
+# Waits on djinn-binaries so the binary exists before docker build runs.
+local_resource(
+    'djinn-server-image',
+    cmd='bash scripts/tilt/wrap-server-image.sh',
+    resource_deps=['djinn-binaries'],
+    labels=['build'],
+)
+
 # --- djinn-agent-runtime image -------------------------------------------
-# Not referenced by any PodSpec at render time — the controller reads
-# DJINN_TASKRUN_IMAGE from its ConfigMap and plugs it into Jobs it creates
-# at dispatch time. Tilt can't rewrite ConfigMap values, so we build + push
-# under the stable :dev tag values.local.yaml already points at.
+# Thin wrap on top of djinn-agent-runtime-base: copies in the djinn-agent-
+# worker binary and pushes under the stable :dev tag that values.local.yaml
+# (and thus DJINN_TASKRUN_IMAGE on the controller) points at. Not
+# referenced by any PodSpec at render time — the controller plugs the ref
+# into Jobs it creates at dispatch time, so Tilt can't rewrite anything,
+# hence the stable-tag pattern.
 local_resource(
     'djinn-agent-runtime-image',
-    cmd=' && '.join([
-        'docker build -f server/docker/djinn-agent-runtime.Dockerfile -t {ref} .'.format(ref=AGENT_RUNTIME_REF),
-        'docker push {ref}'.format(ref=AGENT_RUNTIME_REF),
-    ]),
-    deps=['server', 'server/docker/djinn-agent-runtime.Dockerfile'],
-    # Same ignore story as djinn-server-image — every target/ dir under the
-    # workspace is excluded so host-side `cargo test` runs don't produce
-    # phantom dependency changes that re-trigger the docker build.
-    ignore=['server/**/target', 'server/**/test-tmp'],
+    cmd='bash scripts/tilt/wrap-agent-runtime-image.sh',
+    resource_deps=['djinn-binaries', 'djinn-agent-runtime-base-image'],
     labels=['build'],
 )
 

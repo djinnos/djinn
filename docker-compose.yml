@@ -1,46 +1,17 @@
-# Full djinn stack: server + dolt + qdrant.
+# Test-only Dolt instance for `cargo test` and sqlx macro compilation.
 #
-# Usage:
-#   docker compose up                                       # core stack
-#   docker compose --profile observability up               # + langfuse
+# The full dev stack (djinn-server, dev Dolt at :3306, Qdrant) runs inside
+# the kind cluster managed by `tilt up` — see the Tiltfile at the repo
+# root. The one thing Tilt does NOT run is this isolated test DB, because
+# `cargo test` spins up ~250 ephemeral `djinn_test_*` DBs per crate and
+# must stay off the shared dev DB.
 #
-# Host paths:
-#   ${DJINN_HOME:-~/.djinn}/        -> /root/.djinn         (logs, tokens, data)
-#   ${DJINN_WORKSPACE_ROOT:-$HOME}  -> /workspace           (user codebases)
-#
-# Per-task-run sandbox surface (bind-mounted into djinn-server so it can
-# stage mirror clones + share build caches; K8s deploys bind the same paths
-# as PVCs):
-#   ${DJINN_HOME:-~/.djinn}/mirrors       host-side mirror clones
-#   ${DJINN_HOME:-~/.djinn}/cache/cargo   shared cargo cache
-#   ${DJINN_HOME:-~/.djinn}/cache/pnpm    shared pnpm store
-#   ${DJINN_HOME:-~/.djinn}/cache/pip     shared pip cache
-# Task-run containers are scheduled by KubernetesRuntime (future PR) and
-# mount these paths from PVCs inside the cluster.
+# Consumed by Makefile targets: `test-db-migrate`, `test-db-reset`,
+# `test`, `test-all`, `sqlx-prepare`, `sqlx-check`. The workspace
+# `.cargo/config.toml` defaults DATABASE_URL to `:3307` so every cargo
+# invocation in the repo hits this instance by default.
 
 services:
-  dolt:
-    image: dolthub/dolt-sql-server:latest
-    container_name: djinn-dolt
-    restart: unless-stopped
-    environment:
-      DOLT_ROOT_PASSWORD: ""
-      DOLT_ROOT_HOST: "%"
-      DOLT_DATABASE: djinn
-    ports:
-      - "127.0.0.1:3306:3306"
-    volumes:
-      - ${DJINN_HOME:-${HOME}/.djinn}/dolt:/var/lib/dolt
-    # Cap RAM so runaway query caches can't freeze the host. Dolt had
-    # been claiming ~37GB with accumulated test-DB clutter before this.
-    mem_limit: 8g
-    memswap_limit: 8g
-
-  # Isolated Dolt instance for `cargo test` and sqlx macro compilation.
-  # No host volume — state is ephemeral, scoped to container lifetime.
-  # The workspace `.cargo/config.toml` defaults DATABASE_URL here, so
-  # `cargo test` / `cargo check` use this instance automatically. The
-  # dev Dolt on :3306 is opt-in only — agents can't accidentally hit it.
   dolt-test:
     image: dolthub/dolt-sql-server:latest
     container_name: djinn-dolt-test
@@ -54,60 +25,6 @@ services:
     # Generous cap — `cargo test -p djinn-db` creates ~250 ephemeral
     # `djinn_test_*` DBs in a single run and each gets 4 migrations applied,
     # which spikes Dolt memory. At 2g Dolt was OOM-killed mid-run and every
-    # downstream test saw "UnexpectedEof". 8g keeps the full suite stable
-    # while still bounded (the dev Dolt on :3306 uses the same cap).
+    # downstream test saw "UnexpectedEof". 8g keeps the full suite stable.
     mem_limit: 8g
     memswap_limit: 8g
-
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: djinn-qdrant
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
-    volumes:
-      - ${DJINN_HOME:-${HOME}/.djinn}/qdrant:/qdrant/storage
-
-  djinn-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: djinn-server:local
-    container_name: djinn-server
-    restart: unless-stopped
-    depends_on:
-      dolt:
-        condition: service_started
-      qdrant:
-        condition: service_started
-    ports:
-      - "127.0.0.1:8372:8372"
-    environment:
-      DJINN_DB_BACKEND: dolt
-      DJINN_MYSQL_URL: mysql://root@dolt:3306/djinn
-      DJINN_MYSQL_FLAVOR: dolt
-      DJINN_VECTOR_BACKEND: qdrant
-      QDRANT_URL: http://qdrant:6334
-      RUST_LOG: ${RUST_LOG:-info}
-      # URL where GitHub (and users' browsers) reach the API server. Must
-      # match the callback URL registered on the GitHub App.
-      DJINN_PUBLIC_URL: ${DJINN_PUBLIC_URL:-http://127.0.0.1:8372}
-      # URL where the web client is served (Vite dev server in development).
-      # Post-OAuth redirects land here. Defaults to DJINN_PUBLIC_URL.
-      DJINN_WEB_URL: ${DJINN_WEB_URL:-http://127.0.0.1:1420}
-      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
-      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
-      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
-      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
-      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
-    volumes:
-      - ${DJINN_HOME:-${HOME}/.djinn}:/root/.djinn
-      - ${DJINN_WORKSPACE_ROOT:-${HOME}}:/workspace:rw
-      # Shared workspace surface: mirror clones + package caches. Same host
-      # paths become PVCs in the K8s deploy; djinn-server owns them either
-      # way so mirror fetching + cache warming live in one process.
-      - ${DJINN_HOME:-${HOME}/.djinn}/mirrors:/var/lib/djinn/mirrors
-      - ${DJINN_HOME:-${HOME}/.djinn}/cache/cargo:/var/lib/djinn/cache/cargo
-      - ${DJINN_HOME:-${HOME}/.djinn}/cache/pnpm:/var/lib/djinn/cache/pnpm
-      - ${DJINN_HOME:-${HOME}/.djinn}/cache/pip:/var/lib/djinn/cache/pip

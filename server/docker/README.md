@@ -1,29 +1,39 @@
 # `server/docker/`
 
-Container assets for Djinn:
+Container assets for Djinn. The canonical build pipeline is the Tiltfile at
+the repo root (`tilt up`) — these files are the artefacts it drives.
 
-- `djinn-server.Dockerfile` — long-lived controller image. Multi-stage:
-  `rust:1.82-slim-bookworm` builder → `debian:bookworm-slim` runtime with
-  `git`, `ca-certificates`, `libssl3`, `tini`. Runs as uid 10001. Exposes
-  `:3000` (HTTP API + UI) and `:8443` (worker RPC).
-- `djinn-agent-runtime.Dockerfile` — per-task-run sandbox image. Debian-slim
-  + rustup toolchain + Node 20 + LSPs (rust-analyzer, typescript-language-server,
-  pyright). Each task-run dispatched by `KubernetesRuntime` becomes a Job
-  whose Pod runs one container from this image.
-- `build-runtime-image.sh` — convenience script for building the runtime
-  image. The same build is also wired into `make image`.
+- `djinn-agent-runtime-base.Dockerfile` — heavy base layer carrying the
+  slow-churning bits: rustup + stable toolchain, sccache, mold + clang,
+  Node 20, rust-analyzer, typescript-language-server, pyright, non-root
+  `djinn` user (uid 10001). Rebuilt only when this Dockerfile changes.
+- `djinn-agent-runtime.Dockerfile` — thin top layer: `FROM
+  djinn-agent-runtime-base` + `COPY djinn-agent-worker`. The binary is
+  produced host-side by `scripts/tilt/build-binaries.sh` and staged under
+  `.tilt/artifacts/`. Each per-task-run Job Pod runs one container from
+  this image.
+- `djinn-image-builder.Dockerfile` — devcontainer builder: Node 22 +
+  docker CLI + buildx + `@devcontainers/cli`. Tiny; rebuilds quickly.
+- `build-runtime-image.sh` — standalone wrapper for building the runtime
+  image outside Tilt. Chains `build-agent-runtime-base.sh` → `build-
+  binaries.sh` → `wrap-agent-runtime-image.sh`.
 - `docker-compose.langfuse.yml` — optional sidecar for local observability
   (separate from the main compose stack).
 
-## Quick reference — Make targets
+The djinn-server image is produced entirely host-side by `scripts/tilt/
+build-binaries.sh` + `scripts/tilt/wrap-server-image.sh` — no Dockerfile
+under this directory, because the runtime layer is tiny (~30 lines) and
+assembled inline by the wrap script from the pre-compiled binary. See
+`scripts/tilt/wrap-server-image.sh` for the runtime image definition.
+
+## Quick reference
 
 ```
-make kind-up             # bring up local kind cluster + registry
-make image               # build both djinn-server + djinn-agent-runtime
-make image-push-local    # push to localhost:5001
-make helm-install-local  # helm install with values.local.yaml
-make helm-uninstall      # uninstall both releases
-make kind-down           # delete kind cluster
+tilt up                                    # full local-dev loop (preferred)
+bash scripts/tilt/build-binaries.sh        # cargo build both binaries
+bash scripts/tilt/build-agent-runtime-base.sh   # rebuild the heavy base
+bash scripts/tilt/wrap-server-image.sh     # thin wrap djinn-server
+bash scripts/tilt/wrap-agent-runtime-image.sh   # thin wrap djinn-agent-runtime
 ```
 
 # End-to-end test runbook (kind, single laptop)
