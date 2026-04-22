@@ -62,6 +62,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod lifecycle;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use djinn_core::events::EventBus;
@@ -352,6 +354,31 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
         db,
         indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
+
+    // Run the customer's `.devcontainer/devcontainer.json` lifecycle hooks
+    // (onCreateCommand, postCreateCommand, updateContentCommand,
+    // postStartCommand) before invoking the canonical-graph pipeline. These
+    // hooks carry per-project setup — e.g. `rustup component add
+    // rust-analyzer` for a pinned toolchain — without which the SCIP
+    // indexers can fail with "Unknown binary" inside the warm Pod. Resolved
+    // against DJINN_PROJECT_ROOT (set by build_warm_job).
+    //
+    // Non-fatal on purpose: the status quo before this runner existed was
+    // zero hook execution, so any partial success is strictly additive; a
+    // broken hook shouldn't wedge the graph build. Errors are logged with
+    // full context so they surface in kubectl logs.
+    let lifecycle_root = std::env::var("DJINN_PROJECT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/workspace"));
+    if let Err(e) = lifecycle::run_lifecycle(&lifecycle_root).await {
+        warn!(
+            project_id,
+            project_root = %lifecycle_root.display(),
+            error = %format!("{e:#}"),
+            "devcontainer lifecycle failed; continuing with warm-graph anyway"
+        );
+    }
+
     djinn_graph::canonical_graph::run_warm_graph_command(&ctx, project_id)
         .await
         .with_context(|| format!("run_warm_graph_command({project_id})"))
