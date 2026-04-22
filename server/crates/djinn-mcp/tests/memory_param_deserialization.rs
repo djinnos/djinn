@@ -1,3 +1,16 @@
+//! Pure-serde deserialization contract tests for memory-tool params.
+//!
+//! Asserts the JSON shape of each `*Params` struct (field names, optional
+//! fields, renames such as `type` -> `note_type`) without touching AppState
+//! or HTTP. Moved out of `djinn-server`'s `mcp_contract_tests` because these
+//! never needed the server's test harness — only `djinn_mcp`'s public types.
+
+use djinn_mcp::tools::memory_tools::{
+    BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams, DiffParams, EditParams,
+    GraphParams, HealthParams, HistoryParams, ListParams, MoveParams, OrphansParams, ReadParams,
+    RecentParams, ReindexParams, SearchParams, TaskRefsParams, WriteParams,
+};
+
 // ── Param deserialization ─────────────────────────────────────────────────
 
 #[test]

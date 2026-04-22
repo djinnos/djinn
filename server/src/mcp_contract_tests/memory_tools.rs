@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use djinn_db::ProjectRepository;
-use djinn_mcp::tools::memory_tools::*;
 use serde_json::json;
 
 use crate::events::EventBus;
@@ -13,5 +12,3 @@ use crate::test_helpers::{
 use djinn_db::NoteRepository;
 
 include!("memory_tools/contract_tests.rs");
-
-include!("memory_tools/param_deserialization.rs");
