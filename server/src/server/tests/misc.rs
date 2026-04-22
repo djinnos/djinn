@@ -48,7 +48,7 @@ fn mcp_tools_do_not_use_untyped_json_output() {
         }
     }
 
-    let tools_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/djinn-mcp/src/tools");
+    let tools_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/djinn-control-plane/src/tools");
     let mut offenders = Vec::new();
     visit(&tools_dir, &mut offenders);
 

@@ -9,7 +9,7 @@ use crate::test_helpers;
 #[tokio::test]
 async fn all_tool_schemas_includes_cross_domain_tools() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
-    let mcp = djinn_mcp::server::DjinnMcpServer::new(state.mcp_state());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
     let tools = mcp.all_tool_schemas();
     assert!(!tools.is_empty(), "all_tool_schemas should not be empty");
 
@@ -38,7 +38,7 @@ async fn all_tool_schemas_includes_cross_domain_tools() {
 #[tokio::test]
 async fn chat_uses_router_derived_tool_schemas() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
-    let mcp = djinn_mcp::server::DjinnMcpServer::new(state.mcp_state());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
 
     let names = mcp
         .all_tool_schemas()

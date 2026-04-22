@@ -808,7 +808,7 @@ impl DjinnMcpServer {
 impl DjinnMcpServer {
     /// Resolve an absolute project path to the canonical project UUID required by the public
     /// task mutation seam. External crates should call
-    /// `djinn_mcp::tools::task_tools::{create_task, update_task, transition_task, add_task_comment}`
+    /// `djinn_control_plane::tools::task_tools::{create_task, update_task, transition_task, add_task_comment}`
     /// with this project ID rather than re-implementing MCP/project lookup locally.
     pub async fn require_project_id_public(
         &self,

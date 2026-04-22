@@ -1022,7 +1022,7 @@ mod tests {
     use djinn_core::events::EventBus;
     use djinn_core::models::Project;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
-    use djinn_mcp::bridge::{
+    use djinn_control_plane::bridge::{
         CycleGroup, EdgeEntry, GraphStatus, ImpactResult, NeighborsResult, OrphanEntry, PathResult,
         RankedNode, RepoGraphOps, SearchHit, SymbolDescription,
     };

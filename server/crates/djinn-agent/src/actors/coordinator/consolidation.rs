@@ -2,11 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use djinn_core::models::ConsolidationCluster;
 use djinn_db::{
     CreateCanonicalConsolidatedNote, CreateConsolidationRunMetric, Database, DbNoteGroup,
     NoteConsolidationRepository,
 };
+use djinn_memory::ConsolidationCluster;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -246,7 +246,7 @@ fn synthesize_cluster(cluster: &ConsolidationCluster) -> SynthesizedClusterNote 
     }
 }
 
-fn preferred_summary(note: &djinn_core::models::ConsolidationNote) -> String {
+fn preferred_summary(note: &djinn_memory::ConsolidationNote) -> String {
     note.abstract_
         .as_deref()
         .or(note.overview.as_deref())

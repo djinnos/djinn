@@ -17,7 +17,7 @@ use crate::bridge::{
 ///
 /// Holds the database, catalog, and boxed bridge-trait handles for
 /// server-specific actors (coordinator, pool, LSP). The server
-/// constructs this from AppState; djinn-mcp never depends on AppState or
+/// constructs this from AppState; djinn-control-plane never depends on AppState or
 /// any actor type directly.
 #[derive(Clone)]
 pub struct McpState {

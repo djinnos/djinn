@@ -20,7 +20,7 @@ use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{StreamEvent, TelemetryMeta, create_provider};
 use djinn_agent::verification::settings::{load_mcp_server_registry, resolve_mcp_servers};
 use djinn_db::ProjectRepository;
-use djinn_mcp::server::DjinnMcpServer;
+use djinn_control_plane::server::DjinnMcpServer;
 
 const MAX_TOOL_ITERATIONS: usize = 20;
 

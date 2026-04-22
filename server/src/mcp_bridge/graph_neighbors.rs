@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use djinn_mcp::bridge::{FileGroupEntry, GraphNeighbor, ImpactEntry};
+use djinn_control_plane::bridge::{FileGroupEntry, GraphNeighbor, ImpactEntry};
 
 use djinn_graph::repo_graph::{RepoDependencyGraph, RepoGraphNode, RepoNodeKey};
 

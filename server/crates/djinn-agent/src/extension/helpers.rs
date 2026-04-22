@@ -6,7 +6,7 @@ use crate::context::AgentContext;
 use djinn_core::models::Task;
 use djinn_db::ProjectRepository;
 
-/// Supported djinn-agent → djinn-mcp integration seam for shared task mutation ops.
+/// Supported djinn-agent → djinn-control-plane integration seam for shared task mutation ops.
 ///
 /// External callers should bridge their existing runtime context through
 /// [`AgentContext::to_mcp_state`] and resolve the project id with
@@ -37,26 +37,26 @@ pub(super) fn acceptance_criterion_to_string(value: &serde_json::Value) -> Strin
 }
 
 pub(super) fn task_response_to_value(
-    response: djinn_mcp::tools::task_tools::TaskResponse,
+    response: djinn_control_plane::tools::task_tools::TaskResponse,
 ) -> serde_json::Value {
     serde_json::to_value(response)
         .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize task response" }))
 }
 
 pub(super) fn activity_entry_to_value(
-    response: djinn_mcp::tools::task_tools::ActivityEntryResponse,
+    response: djinn_control_plane::tools::task_tools::ActivityEntryResponse,
 ) -> serde_json::Value {
     serde_json::to_value(response)
         .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize activity response" }))
 }
 
 pub(super) fn error_or_to_value<T>(
-    response: djinn_mcp::tools::task_tools::ErrorOr<T>,
+    response: djinn_control_plane::tools::task_tools::ErrorOr<T>,
     ok: impl FnOnce(T) -> serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     Ok(match response {
-        djinn_mcp::tools::task_tools::ErrorOr::Ok(value) => ok(value),
-        djinn_mcp::tools::task_tools::ErrorOr::Error(error) => {
+        djinn_control_plane::tools::task_tools::ErrorOr::Ok(value) => ok(value),
+        djinn_control_plane::tools::task_tools::ErrorOr::Error(error) => {
             serde_json::json!({ "error": error.error })
         }
     })

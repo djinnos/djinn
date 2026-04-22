@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_runtime::GraphWarmerService;
 use djinn_workspace::MirrorManager;
-use djinn_mcp::{
+use djinn_control_plane::{
     McpState, bridge,
     bridge::{
         CycleGroup, EdgeEntry, ImpactResult, NeighborsResult, OrphanEntry, PathResult, RankedNode,
@@ -332,10 +332,10 @@ impl bridge::LspOps for LspManager {
 }
 
 impl AgentContext {
-    /// Build the public djinn-mcp state bridge expected by the shared task-mutation ops.
+    /// Build the public djinn-control-plane state bridge expected by the shared task-mutation ops.
     ///
     /// This keeps djinn-agent on the supported ADR-041 seam: shared business logic stays in
-    /// djinn-mcp, while agent adapters reuse their existing database/event-bus/project resolver
+    /// djinn-control-plane, while agent adapters reuse their existing database/event-bus/project resolver
     /// dependencies instead of reconstructing MCP internals locally.
     pub fn to_mcp_state(&self) -> McpState {
         McpState::new(
@@ -362,7 +362,7 @@ impl AgentContext {
         )
     }
 
-    /// Resolve a project path through the same public djinn-mcp contract used by external
+    /// Resolve a project path through the same public djinn-control-plane contract used by external
     /// task-mutation callers.
     pub async fn require_project_id_for_task_ops(
         &self,
@@ -374,7 +374,7 @@ impl AgentContext {
             .and_then(|override_path| override_path.to_str())
             .filter(|path| !path.is_empty())
             .unwrap_or(project);
-        let server = djinn_mcp::server::DjinnMcpServer::new(self.to_mcp_state());
+        let server = djinn_control_plane::server::DjinnMcpServer::new(self.to_mcp_state());
         match server.require_project_id_public(project).await {
             Ok(project_id) => Ok(project_id),
             Err(_initial_error)

@@ -109,7 +109,7 @@ async fn dispatch(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            match djinn_mcp::server::DjinnMcpServer::new(state.mcp_state())
+            match djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state())
                 .dispatch_tool_with_worktree(name, args, worktree_root)
                 .await
             {
@@ -127,7 +127,7 @@ async fn dispatch(
         }
         Some("tools/list") => {
             let tools =
-                djinn_mcp::server::DjinnMcpServer::new(state.mcp_state()).all_tool_schemas();
+                djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state()).all_tool_schemas();
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": payload.get("id").cloned().unwrap_or(Value::Null),

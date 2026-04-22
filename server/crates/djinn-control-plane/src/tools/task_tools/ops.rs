@@ -5,8 +5,8 @@
 //! mutation helpers re-exported from [`crate::tools::task_tools`]:
 //!
 //! ```ignore
-//! use djinn_mcp::server::DjinnMcpServer;
-//! use djinn_mcp::tools::task_tools::{
+//! use djinn_control_plane::server::DjinnMcpServer;
+//! use djinn_control_plane::tools::task_tools::{
 //!     CommentTaskRequest, CreateTaskRequest, TransitionTaskRequest, UpdateTaskRequest,
 //!     add_task_comment, create_task, transition_task, update_task,
 //! };

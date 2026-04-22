@@ -11,12 +11,12 @@ use crate::lsp::format_diagnostics_xml;
 use crate::lsp::{SymbolQuery, parse_symbol_kind_filter};
 use crate::mcp_client::McpToolRegistry;
 use djinn_db::{AgentRepository, EpicRepository, SessionRepository, TaskRepository};
-use djinn_mcp::tools::agent_tools::{
+use djinn_control_plane::tools::agent_tools::{
     AgentCreateParams as SharedAgentCreateParams, AgentMetricsParams as SharedAgentMetricsParams,
     create_agent as shared_create_agent, metrics_for_agents as shared_metrics_for_agents,
 };
-use djinn_mcp::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
-use djinn_mcp::tools::memory_tools::{
+use djinn_control_plane::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
+use djinn_control_plane::tools::memory_tools::{
     BrokenLinksParams as SharedMemoryBrokenLinksParams,
     BuildContextParams as SharedMemoryBuildContextParams, EditParams as SharedMemoryEditParams,
     ExtractedAuditParams as SharedMemoryExtractedAuditParams,
@@ -24,7 +24,7 @@ use djinn_mcp::tools::memory_tools::{
     OrphansParams as SharedMemoryOrphansParams, ReadParams as SharedMemoryReadParams,
     SearchParams as SharedMemorySearchParams, WriteParams as SharedMemoryWriteParams,
 };
-use djinn_mcp::tools::task_tools::{
+use djinn_control_plane::tools::task_tools::{
     CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
     TransitionTaskRequest as SharedTransitionTaskRequest,
     UpdateTaskRequest as SharedUpdateTaskRequest, add_task_comment as shared_add_task_comment,

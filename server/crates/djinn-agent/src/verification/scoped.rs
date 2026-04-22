@@ -300,18 +300,18 @@ mod tests {
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
         let verification = make_verification(vec![
             VerificationRule {
-                match_pattern: "crates/djinn-mcp/**".into(),
-                commands: vec!["cargo test -p djinn-mcp".into()],
+                match_pattern: "crates/djinn-control-plane/**".into(),
+                commands: vec!["cargo test -p djinn-control-plane".into()],
             },
             VerificationRule {
                 match_pattern: "crates/djinn-core/**".into(),
                 commands: vec!["cargo test -p djinn-core".into()],
             },
         ]);
-        git_commit_file(dir.path(), "crates/djinn-mcp/src/lib.rs", "// mcp change");
+        git_commit_file(dir.path(), "crates/djinn-control-plane/src/lib.rs", "// mcp change");
 
         let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
-        assert_eq!(result, vec!["cargo test -p djinn-mcp"]);
+        assert_eq!(result, vec!["cargo test -p djinn-control-plane"]);
     }
 
     #[test]
@@ -320,21 +320,21 @@ mod tests {
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
         let verification = make_verification(vec![
             VerificationRule {
-                match_pattern: "crates/djinn-mcp/**".into(),
-                commands: vec!["cargo test -p djinn-mcp".into()],
+                match_pattern: "crates/djinn-control-plane/**".into(),
+                commands: vec!["cargo test -p djinn-control-plane".into()],
             },
             VerificationRule {
                 match_pattern: "crates/djinn-core/**".into(),
                 commands: vec!["cargo test -p djinn-core".into()],
             },
         ]);
-        git_commit_file(dir.path(), "crates/djinn-mcp/src/lib.rs", "// mcp");
+        git_commit_file(dir.path(), "crates/djinn-control-plane/src/lib.rs", "// mcp");
         git_commit_file(dir.path(), "crates/djinn-core/src/lib.rs", "// core");
 
         let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
         assert_eq!(
             result,
-            vec!["cargo test -p djinn-mcp", "cargo test -p djinn-core"]
+            vec!["cargo test -p djinn-control-plane", "cargo test -p djinn-core"]
         );
     }
 
@@ -344,7 +344,7 @@ mod tests {
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
         let verification = make_verification(vec![
             VerificationRule {
-                match_pattern: "crates/djinn-mcp/**".into(),
+                match_pattern: "crates/djinn-control-plane/**".into(),
                 commands: vec!["cargo test --workspace".into()],
             },
             VerificationRule {
@@ -352,7 +352,7 @@ mod tests {
                 commands: vec!["cargo test --workspace".into()],
             },
         ]);
-        git_commit_file(dir.path(), "crates/djinn-mcp/src/lib.rs", "// mcp");
+        git_commit_file(dir.path(), "crates/djinn-control-plane/src/lib.rs", "// mcp");
         git_commit_file(dir.path(), "crates/djinn-core/src/lib.rs", "// core");
 
         let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
@@ -365,8 +365,8 @@ mod tests {
         let dir = tempdir_in_tmp();
         let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
         let verification = make_verification(vec![VerificationRule {
-            match_pattern: "crates/djinn-mcp/**".into(),
-            commands: vec!["cargo test -p djinn-mcp".into()],
+            match_pattern: "crates/djinn-control-plane/**".into(),
+            commands: vec!["cargo test -p djinn-control-plane".into()],
         }]);
         git_commit_file(dir.path(), "docs/README.md", "# readme");
 
@@ -384,13 +384,13 @@ mod tests {
         let persistent = dir.keep();
         let base = init_git_repo_with_task_branch(&persistent, "main", "task/test");
         let verification = make_verification(vec![VerificationRule {
-            match_pattern: "crates/djinn-mcp/**".into(),
-            commands: vec!["cargo test -p djinn-mcp".into()],
+            match_pattern: "crates/djinn-control-plane/**".into(),
+            commands: vec!["cargo test -p djinn-control-plane".into()],
         }]);
         seed_project_with_verification(&db, "p1", &persistent, verification).await;
-        git_commit_file(&persistent, "crates/djinn-mcp/src/lib.rs", "// mcp");
+        git_commit_file(&persistent, "crates/djinn-control-plane/src/lib.rs", "// mcp");
 
         let result = resolve_scoped_commands(&db, &persistent, &base, None).await;
-        assert_eq!(result, vec!["cargo test -p djinn-mcp"]);
+        assert_eq!(result, vec!["cargo test -p djinn-control-plane"]);
     }
 }

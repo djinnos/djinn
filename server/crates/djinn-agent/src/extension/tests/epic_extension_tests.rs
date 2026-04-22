@@ -57,7 +57,7 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
     let update_value = call_epic_update(&state, &update_args, None)
         .await
         .expect("epic_update succeeds");
-    let epic_model: djinn_mcp::tools::epic_ops::EpicSingleResponse =
+    let epic_model: djinn_control_plane::tools::epic_ops::EpicSingleResponse =
         serde_json::from_value(update_value.clone()).expect("parse epic update response");
     let epic_model = epic_model.epic.expect("updated epic payload");
     assert_eq!(epic_model.title, "updated epic title");

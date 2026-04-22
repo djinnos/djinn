@@ -1,4 +1,4 @@
-/// Bridge traits that decouple djinn-mcp from the server binary.
+/// Bridge traits that decouple djinn-control-plane from the server binary.
 ///
 /// The server implements each trait for its concrete handle types
 /// (CoordinatorHandle, SlotPoolHandle, LspManager, AppState).
@@ -17,7 +17,7 @@ pub struct SemanticQueryEmbedding {
 
 // ── Data types ─────────────────────────────────────────────────────────────────
 // Plain data returned by the bridge traits. Defined here so they can be used
-// by both djinn-mcp tool handlers and the server bridge implementations.
+// by both djinn-control-plane tool handlers and the server bridge implementations.
 
 #[derive(Debug, Clone)]
 pub struct CoordinatorStatus {
@@ -126,7 +126,7 @@ pub trait GitOps: Send + Sync {
 
 // ── Repo Graph ──────────────────────────────────────────────────────────────────
 // Bridge for RepoDependencyGraph queries. The server implements this by
-// building the graph from SCIP artifacts; djinn-mcp/djinn-agent never depend
+// building the graph from SCIP artifacts; djinn-control-plane/djinn-agent never depend
 // on petgraph or SCIP protobuf types directly.
 
 /// A neighbor of a node in the repository dependency graph.

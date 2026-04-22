@@ -1,4 +1,4 @@
-// djinn-mcp: MCP tool handler crate
+// djinn-control-plane: MCP tool handler crate
 
 pub mod bridge;
 pub mod dispatch;

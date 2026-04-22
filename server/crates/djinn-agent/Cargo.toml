@@ -12,7 +12,7 @@ djinn-db = { path = "../djinn-db" }
 djinn-memory = { path = "../djinn-memory" }
 djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
-djinn-mcp = { path = "../djinn-mcp" }
+djinn-control-plane = { path = "../djinn-control-plane" }
 djinn-runtime = { path = "../djinn-runtime", features = ["test-runtime"] }
 djinn-stack = { path = "../djinn-stack" }
 djinn-supervisor = { path = "../djinn-supervisor" }

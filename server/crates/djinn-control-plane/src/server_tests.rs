@@ -542,7 +542,7 @@ mod tests {
         assert!(
             missing.is_empty(),
             "tools registered via #[tool] but missing from dispatch_tool match in dispatch.rs: {missing:#?}\n\
-             Add a match arm for each in server/crates/djinn-mcp/src/dispatch.rs"
+             Add a match arm for each in server/crates/djinn-control-plane/src/dispatch.rs"
         );
     }
 }

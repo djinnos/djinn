@@ -1,6 +1,6 @@
 use crate::server::AppState;
 use crate::test_helpers;
-use djinn_mcp::server::DjinnMcpServer;
+use djinn_control_plane::server::DjinnMcpServer;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 

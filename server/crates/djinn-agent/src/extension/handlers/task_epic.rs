@@ -174,7 +174,7 @@ pub(crate) async fn call_epic_show(
         None => resolve_project_id_for_agent_tools(state, arguments).await?,
     };
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-    let response = djinn_mcp::tools::epic_ops::epic_show(
+    let response = djinn_control_plane::tools::epic_ops::epic_show(
         &repo,
         &project_id,
         EpicShowRequest {
@@ -197,7 +197,7 @@ pub(crate) async fn call_epic_update(
         None => resolve_project_id_for_agent_tools(state, arguments).await?,
     };
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
-    let response = djinn_mcp::tools::epic_ops::epic_update_with_delta(
+    let response = djinn_control_plane::tools::epic_ops::epic_update_with_delta(
         &repo,
         &project_id,
         EpicUpdateDeltaRequest {
@@ -229,7 +229,7 @@ pub(crate) async fn call_epic_tasks(
     };
     let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
     let task_repo = TaskRepository::new(state.db.clone(), state.event_bus.clone());
-    let response = djinn_mcp::tools::epic_ops::epic_tasks(
+    let response = djinn_control_plane::tools::epic_ops::epic_tasks(
         &epic_repo,
         &task_repo,
         &project_id,
@@ -298,7 +298,7 @@ pub(super) async fn call_task_create(
         }
     };
     let project_id = project_id_for_path(state, project_path).await?;
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     let Json(response) = shared_create_task(
         &server,
         &project_id,
@@ -335,7 +335,7 @@ pub(super) async fn call_task_update(
 ) -> Result<serde_json::Value, String> {
     let p: TaskUpdateParams = parse_args(arguments)?;
     let project_id = project_id_for_path(state, project_path).await?;
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     let Json(response) = shared_update_task(
         &server,
         &project_id,
@@ -547,7 +547,7 @@ pub(super) async fn call_task_comment_add(
     let p: TaskCommentAddParams = parse_args(arguments)?;
     let default_role = session_role.unwrap_or("system");
     let project_id = project_id_for_path(state, project_path).await?;
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     let Json(response) = shared_add_task_comment(
         &server,
         &project_id,

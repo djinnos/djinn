@@ -103,7 +103,7 @@ pub(super) async fn call_task_transition(
         .transpose()
         .map_err(|e| e.to_string())?;
     let project_id = project_id_for_path(state, project_path).await?;
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     let Json(response) = shared_transition_task(
         &server,
         &project_id,

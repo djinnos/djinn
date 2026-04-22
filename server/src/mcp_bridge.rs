@@ -1,8 +1,8 @@
-/// Bridge trait implementations: connect djinn-mcp's abstract traits to
+/// Bridge trait implementations: connect djinn-control-plane's abstract traits to
 /// the server's concrete actor handles and managers.
 ///
 /// Newtypes are required for CoordinatorHandle, SlotPoolHandle, and LspManager
-/// because both the trait (djinn-mcp) and the implementor (djinn-agent) are
+/// because both the trait (djinn-control-plane) and the implementor (djinn-agent) are
 /// external to the server — orphan rule.
 /// AppState is a server-local type so it implements RuntimeOps and GitOps directly.
 use std::path::Path;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
-use djinn_mcp::bridge::{
+use djinn_control_plane::bridge::{
     CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry, GitOps, GraphNeighbor,
     GraphStatus, ImpactEntry, ImpactResult, LspOps, LspWarning, ModelPoolStatus, NeighborsResult,
     OrphanEntry, PathHop, PathResult, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo,
@@ -725,12 +725,12 @@ impl RepoGraphOps for RepoGraphBridge {
 }
 
 impl AppState {
-    /// Build a `djinn_mcp::McpState` from this AppState, wiring all bridge impls.
+    /// Build a `djinn_control_plane::McpState` from this AppState, wiring all bridge impls.
     ///
     /// Snapshots the current coordinator and pool handles via `try_lock()`.
     /// In production this is called after `initialize_agents()`, so both are
     /// populated. In tests neither is initialised; tools return graceful errors.
-    pub fn mcp_state(&self) -> djinn_mcp::McpState {
+    pub fn mcp_state(&self) -> djinn_control_plane::McpState {
         let coordinator = self
             .coordinator_sync()
             .map(|c| Arc::new(CoordinatorBridge(c)) as Arc<dyn CoordinatorOps>);
@@ -738,7 +738,7 @@ impl AppState {
             .pool_sync()
             .map(|p| Arc::new(SlotPoolBridge(p)) as Arc<dyn SlotPoolOps>);
 
-        djinn_mcp::McpState::new(
+        djinn_control_plane::McpState::new(
             self.db().clone(),
             self.event_bus(),
             self.catalog().clone(),

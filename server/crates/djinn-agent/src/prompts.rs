@@ -651,7 +651,7 @@ mod tests {
         let task = make_task();
         let ctx = TaskContext {
             verification_rules: Some(
-                "- `crates/djinn-mcp/**`: `cargo test -p djinn-mcp`, `cargo clippy -p djinn-mcp -- -D warnings`".into(),
+                "- `crates/djinn-control-plane/**`: `cargo test -p djinn-control-plane`, `cargo clippy -p djinn-control-plane -- -D warnings`".into(),
             ),
             ..make_ctx()
         };
@@ -662,11 +662,11 @@ mod tests {
             "worker prompt should include verification rules section heading"
         );
         assert!(
-            prompt.contains("crates/djinn-mcp/**"),
+            prompt.contains("crates/djinn-control-plane/**"),
             "worker prompt should include rule pattern"
         );
         assert!(
-            prompt.contains("cargo test -p djinn-mcp"),
+            prompt.contains("cargo test -p djinn-control-plane"),
             "worker prompt should include rule commands"
         );
         assert!(!prompt.contains("{{verification_rules_section}}"));

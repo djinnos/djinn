@@ -7,9 +7,9 @@ pub(super) async fn call_memory_read(
 ) -> Result<serde_json::Value, String> {
     let p: MemoryReadParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
-        djinn_mcp::tools::memory_tools::ops::memory_read(
+        djinn_control_plane::tools::memory_tools::ops::memory_read(
             &server,
             SharedMemoryReadParams {
                 project: project_path,
@@ -30,9 +30,9 @@ pub(super) async fn call_memory_search(
     let p: MemorySearchParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
     let task_id = p.task_id.or_else(|| session_task_id.map(ToOwned::to_owned));
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
-        djinn_mcp::tools::memory_tools::ops::memory_search(
+        djinn_control_plane::tools::memory_tools::ops::memory_search(
             &server,
             SharedMemorySearchParams {
                 project: project_path,
@@ -57,9 +57,9 @@ pub(super) async fn call_memory_list(
 ) -> Result<serde_json::Value, String> {
     let p: MemoryListParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
-        djinn_mcp::tools::memory_tools::ops::memory_list(
+        djinn_control_plane::tools::memory_tools::ops::memory_list(
             &server,
             SharedMemoryListParams {
                 project: project_path,
@@ -84,9 +84,9 @@ pub(super) async fn call_memory_build_context(
     let task_id = p.task_id.or_else(|| session_task_id.map(ToOwned::to_owned));
     let url = p.url.unwrap_or_else(|| "/*".to_string());
     let max_related = p.max_related.or(p.limit);
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
-        djinn_mcp::tools::memory_tools::ops::memory_build_context(
+        djinn_control_plane::tools::memory_tools::ops::memory_build_context(
             &server,
             SharedMemoryBuildContextParams {
                 project: project_path,
@@ -111,9 +111,9 @@ pub(super) async fn call_memory_health(
     _arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_path: &str,
 ) -> Result<serde_json::Value, String> {
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
-        djinn_mcp::tools::memory_tools::ops::memory_health(
+        djinn_control_plane::tools::memory_tools::ops::memory_health(
             &server,
             SharedMemoryHealthParams {
                 project: Some(project_path.to_owned()),
@@ -131,9 +131,9 @@ pub(super) async fn call_memory_extracted_audit(
     _arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_path: &str,
 ) -> Result<serde_json::Value, String> {
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
-        djinn_mcp::tools::memory_tools::ops::memory_extracted_audit(
+        djinn_control_plane::tools::memory_tools::ops::memory_extracted_audit(
             &server,
             SharedMemoryExtractedAuditParams {
                 project: project_path.to_owned(),
@@ -154,7 +154,7 @@ pub(super) async fn call_memory_write(
 ) -> Result<serde_json::Value, String> {
     let p: MemoryWriteParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     let worktree_root = Some(worktree_root.to_path_buf());
     let result = server
         .memory_write_with_worktree(
@@ -183,7 +183,7 @@ pub(super) async fn call_memory_edit(
 ) -> Result<serde_json::Value, String> {
     let p: MemoryEditParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     let worktree_root = Some(worktree_root.to_path_buf());
     let result = server
         .memory_edit_with_worktree(
@@ -210,10 +210,10 @@ pub(super) async fn call_memory_move(
     project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryMoveParams = parse_args(arguments)?;
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     let result = server
         .memory_move(rmcp::handler::server::wrapper::Parameters(
-            djinn_mcp::tools::memory_tools::MoveParams {
+            djinn_control_plane::tools::memory_tools::MoveParams {
                 project: project_path.to_owned(),
                 identifier: p.identifier,
                 note_type: p.note_type,
@@ -232,9 +232,9 @@ pub(super) async fn call_memory_broken_links(
     project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryBrokenLinksLocalParams = parse_args(arguments)?;
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
-        djinn_mcp::tools::memory_tools::ops::memory_broken_links(
+        djinn_control_plane::tools::memory_tools::ops::memory_broken_links(
             &server,
             SharedMemoryBrokenLinksParams {
                 project: project_path.to_owned(),
@@ -254,9 +254,9 @@ pub(super) async fn call_memory_orphans(
     project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryOrphansLocalParams = parse_args(arguments)?;
-    let server = djinn_mcp::server::DjinnMcpServer::new(state.to_mcp_state());
+    let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
     Ok(serde_json::to_value(
-        djinn_mcp::tools::memory_tools::ops::memory_orphans(
+        djinn_control_plane::tools::memory_tools::ops::memory_orphans(
             &server,
             SharedMemoryOrphansParams {
                 project: project_path.to_owned(),
