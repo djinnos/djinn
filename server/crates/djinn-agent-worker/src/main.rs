@@ -59,7 +59,6 @@
 //! `djinn-supervisor` + `djinn-runtime` + `djinn-workspace` + `djinn-core`
 //! cross the boundary.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -115,9 +114,11 @@ enum Cmd {
 #[derive(Debug, clap::Args)]
 struct WorkerDefaultArgs {
     /// `host:port` of the djinn-server ClusterIP Service (usually
-    /// `djinn.<namespace>.svc.cluster.local:8443`).
+    /// `djinn.<namespace>.svc.cluster.local:8443`). String, not
+    /// `SocketAddr` — kube DNS service hostnames are not parseable as
+    /// `IP:port`, and `TcpStream::connect` resolves DNS itself.
     #[arg(long, env = "DJINN_SERVER_ADDR")]
-    server_addr: SocketAddr,
+    server_addr: String,
 
     /// Path the launcher mounted the bincode-serialized `TaskRunSpec` at.
     /// Contractual default is `/var/run/djinn/spec.bin` — projected
@@ -239,6 +240,7 @@ async fn run() -> Result<()> {
     //    loop.  Any post-handshake `SupervisorServices` call round-trips over
     //    that same TCP connection.
     let cancel = CancellationToken::new();
+    let server_addr = args.server_addr.clone();
     let (rpc, background) = RpcServices::connect_tcp(
         args.server_addr,
         args.task_run_id.clone(),
@@ -246,8 +248,8 @@ async fn run() -> Result<()> {
         cancel.clone(),
     )
     .await
-    .with_context(|| format!("dial djinn-server at {}", args.server_addr))?;
-    info!(server = %args.server_addr, "tcp connection up, RPC handshake accepted");
+    .with_context(|| format!("dial djinn-server at {server_addr}"))?;
+    info!(server = %server_addr, "tcp connection up, RPC handshake accepted");
 
     // 4. Attach to the host-materialised workspace.
     let workspace = Workspace::attach_existing(args.workspace_path.as_path(), &spec.task_branch)

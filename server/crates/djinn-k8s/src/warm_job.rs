@@ -101,7 +101,14 @@ exec {bin} warm-graph "{project_id}"
         image_pull_policy: Some(config.image_pull_policy.clone()),
         command: Some(vec!["/bin/bash".to_string(), "-c".to_string(), cmd]),
         env: Some(vec![
-            env_var("DJINN_SERVER_ADDR", &config.server_addr),
+            // Deliberately DO NOT set DJINN_SERVER_ADDR. The warm-graph
+            // subcommand doesn't dial djinn-server, but clap parses
+            // env-bound args eagerly even on subcommand paths, and
+            // `WorkerDefaultArgs::server_addr: SocketAddr` rejects the
+            // DNS-name `djinn-server.djinn.svc.cluster.local:8443` at
+            // parse time. Any other default-mode env var would
+            // similarly trip clap; only mirror/project-root (specific
+            // to the warm path) are set here.
             env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
             env_var("DJINN_WARM_PROJECT_ID", project_id),
             // run_warm_graph_command picks this up when set and uses it
@@ -272,7 +279,10 @@ mod tests {
             .collect();
         assert_eq!(envs.get("DJINN_MIRROR_ROOT").copied(), Some(MIRROR_MOUNT_DIR));
         assert_eq!(envs.get("DJINN_WARM_PROJECT_ID").copied(), Some("proj-xyz"));
-        assert_eq!(envs.get("DJINN_SERVER_ADDR").copied(), Some(cfg.server_addr.as_str()));
+        // DJINN_SERVER_ADDR is intentionally absent — see build_warm_job
+        // comment. Its presence would make clap reject the warm Pod's
+        // args.
+        assert!(!envs.contains_key("DJINN_SERVER_ADDR"));
         assert_eq!(
             envs.get("DJINN_PROJECT_ROOT").copied(),
             Some(format!("{WORKSPACE_MOUNT_DIR}/proj-xyz").as_str()),

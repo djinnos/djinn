@@ -33,7 +33,6 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -193,12 +192,12 @@ impl RpcServices {
     /// [`ConnectTcpError::Rejected`]; anything else the server sends back
     /// in place of an `AuthResult` surfaces as [`ConnectTcpError::Protocol`].
     pub async fn connect_tcp(
-        addr: SocketAddr,
+        addr: impl tokio::net::ToSocketAddrs + std::fmt::Display,
         task_run_id: String,
         token: String,
         cancel: CancellationToken,
     ) -> Result<(Arc<Self>, RpcBackgroundTasks), ConnectTcpError> {
-        let mut stream = TcpStream::connect(addr).await?;
+        let mut stream = TcpStream::connect(&addr).await?;
         info!(%addr, %task_run_id, "tcp dialed launcher; sending AuthHello");
 
         // 1. Send the AuthHello on correlation_id 0.
