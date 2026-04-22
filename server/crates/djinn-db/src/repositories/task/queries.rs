@@ -620,56 +620,70 @@ impl TaskRepository {
     pub async fn reconcile(&self, stale_hours: i64) -> Result<serde_json::Value> {
         let events_tx = self.events.clone();
         self.db.ensure_initialized().await?;
-        let mut tx = self.db.pool().begin().await?;
-        // NOTE: dynamic SQL (stale_hours inlined) — compile-time check not possible
-        let sql = format!(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
-                    reopen_count, continuation_count, verification_failure_count,
-                    total_reopen_count, total_verification_failure_count,
-                    intervention_count, last_intervention_at,
-                    created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-             FROM tasks
-             WHERE `status` = 'in_progress'
-               AND updated_at < DATE_SUB(NOW(3), INTERVAL {stale_hours} HOUR)"
-        );
-        let stale: Vec<Task> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
 
-        let mut healed: Vec<Task> = Vec::new();
-        for task in stale {
-            sqlx::query!(
-                "UPDATE tasks
-                 SET `status` = 'open',
-                     updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                 WHERE id = ?",
-                task.id
-            )
-            .execute(&mut *tx)
-            .await?;
+        // Dolt surfaces error 1213 (serialization failure) when this
+        // transaction overlaps with any other writer to `tasks` /
+        // `activity_log`. The failure is benign — re-running the whole
+        // reconcile loop on a fresh transaction succeeds once the
+        // contending writer has committed. See `djinn_db::retry` for
+        // the retry contract.
+        let healed: Vec<Task> = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || async {
+                let mut tx = self.db.pool().begin().await?;
+                // NOTE: dynamic SQL (stale_hours inlined) — compile-time check not possible
+                let sql = format!(
+                    "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                            `status`, priority, owner, labels, acceptance_criteria,
+                            reopen_count, continuation_count, verification_failure_count,
+                            total_reopen_count, total_verification_failure_count,
+                            intervention_count, last_intervention_at,
+                            created_at, updated_at, closed_at,
+                            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
+                     FROM tasks
+                     WHERE `status` = 'in_progress'
+                       AND updated_at < DATE_SUB(NOW(3), INTERVAL {stale_hours} HOUR)"
+                );
+                let stale: Vec<Task> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
 
-            let activity_id = uuid::Uuid::now_v7().to_string();
-            let payload = serde_json::json!({
-                "from":   "in_progress",
-                "to":     "open",
-                "reason": "reconcile_stale",
-            })
-            .to_string();
-            sqlx::query!(
-                "INSERT INTO activity_log
-                    (id, task_id, actor_id, actor_role, event_type, payload)
-                 VALUES (?, ?, 'system', 'system', 'status_changed', ?)",
-                activity_id,
-                task.id,
-                payload
-            )
-            .execute(&mut *tx)
-            .await?;
+                let mut healed: Vec<Task> = Vec::new();
+                for task in stale {
+                    sqlx::query!(
+                        "UPDATE tasks
+                         SET `status` = 'open',
+                             updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+                         WHERE id = ?",
+                        task.id
+                    )
+                    .execute(&mut *tx)
+                    .await?;
 
-            let updated: Task = task_select_where_id!(&task.id).fetch_one(&mut *tx).await?;
-            healed.push(updated);
-        }
-        tx.commit().await?;
+                    let activity_id = uuid::Uuid::now_v7().to_string();
+                    let payload = serde_json::json!({
+                        "from":   "in_progress",
+                        "to":     "open",
+                        "reason": "reconcile_stale",
+                    })
+                    .to_string();
+                    sqlx::query!(
+                        "INSERT INTO activity_log
+                            (id, task_id, actor_id, actor_role, event_type, payload)
+                         VALUES (?, ?, 'system', 'system', 'status_changed', ?)",
+                        activity_id,
+                        task.id,
+                        payload
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+
+                    let updated: Task = task_select_where_id!(&task.id).fetch_one(&mut *tx).await?;
+                    healed.push(updated);
+                }
+                tx.commit().await?;
+                Ok::<_, crate::Error>(healed)
+            },
+        )
+        .await?;
 
         for task in &healed {
             events_tx.send(DjinnEventEnvelope::task_updated(task, false));

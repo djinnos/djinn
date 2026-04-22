@@ -1,5 +1,6 @@
 use super::*;
 use crate::note_hash::note_content_hash;
+use crate::retry::is_serialization_failure;
 use std::fs;
 
 struct CreateNoteParams<'a> {
@@ -1357,18 +1358,5 @@ impl NoteRepository {
         .await;
         self.events.send(DjinnEventEnvelope::note_updated(&note));
         Ok(note)
-    }
-}
-
-/// Detects MySQL/Dolt error 1213 (serialization failure / deadlock).
-fn is_serialization_failure(err: &crate::Error) -> bool {
-    if let crate::Error::Sqlx(sqlx::Error::Database(db_err)) = err {
-        let msg = db_err.message();
-        db_err.code().as_deref() == Some("40001")
-            || msg.contains("1213")
-            || msg.contains("serialization failure")
-            || msg.contains("Deadlock found")
-    } else {
-        false
     }
 }

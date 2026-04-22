@@ -4,6 +4,7 @@ pub mod error;
 pub mod migrations;
 pub mod note_hash;
 pub mod repositories;
+pub mod retry;
 
 pub mod test_support {
     pub use crate::repositories::test_support::{
