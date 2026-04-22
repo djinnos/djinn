@@ -30,14 +30,20 @@ data:
           "htpasswd": {
             "path": "/secret/htpasswd"
           }
-        }{{- if .Values.imagePipeline.zot.anonymousPull }},
+        },
         "accessControl": {
           "repositories": {
             "**": {
-              "anonymousPolicy": ["read"]
+              "policies": [
+                {
+                  "users": [{{ .Values.imagePipeline.zot.auth.username | default "djinn" | quote }}],
+                  "actions": ["read", "create", "update", "delete"]
+                }
+              ]{{- if .Values.imagePipeline.zot.anonymousPull }},
+              "anonymousPolicy": ["read"]{{- end }}
             }
           }
-        }{{- end }}
+        }
       },
       "log": {
         "level": "info"
