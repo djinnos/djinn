@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT COUNT(*) FROM blockers b\n                 JOIN tasks bt ON b.blocking_task_id = bt.id\n                 WHERE b.task_id = ?\n                   AND bt.`status` != 'closed'",
+  "query": "SELECT COUNT(*) FROM blockers b\n                             JOIN tasks bt ON b.blocking_task_id = bt.id\n                             WHERE b.task_id = ?\n                               AND bt.`status` != 'closed'",
   "describe": {
     "columns": [
       {
@@ -20,5 +20,5 @@
       false
     ]
   },
-  "hash": "829e9e93f8e16809141d6fb6c2184acb9c801e34562579079f4dcebb26f239cc"
+  "hash": "0dfa0daed0c5e972a3ccf21380674233eb5c25fdafa4aa3ab73c0473caa98e85"
 }

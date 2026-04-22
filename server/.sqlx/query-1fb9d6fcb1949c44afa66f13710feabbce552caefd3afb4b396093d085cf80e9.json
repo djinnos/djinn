@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE tasks SET\n                            title = ?, description = ?, design = ?,\n                            priority = ?, owner = ?, labels = ?,\n                            acceptance_criteria = ?,\n                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n                         WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "1fb9d6fcb1949c44afa66f13710feabbce552caefd3afb4b396093d085cf80e9"
+}

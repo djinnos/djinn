@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE agents SET system_prompt_extensions = ?,\n                    updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n             WHERE project_id = ? AND base_role = ? AND is_default = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "07b012f8b7cb86c8994232abed2a4b3d701520edbab37ccc25691d9c2d066646"
+}

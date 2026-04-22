@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT t.id AS task_id, t.short_id, t.title, t.`status` AS \"status!\"\n                 FROM blockers b\n                 JOIN tasks t ON t.id = b.task_id\n                 WHERE b.blocking_task_id = ?\n                   AND t.`status` != 'closed'",
+  "query": "SELECT t.id AS task_id, t.short_id, t.title, t.`status` AS \"status!\"\n                             FROM blockers b\n                             JOIN tasks t ON t.id = b.task_id\n                             WHERE b.blocking_task_id = ?\n                               AND t.`status` != 'closed'",
   "describe": {
     "columns": [
       {
@@ -50,5 +50,5 @@
       false
     ]
   },
-  "hash": "81917bde328cc98d8933e521a8efde3cba294344bc2e5e107e9a845b658ab2c0"
+  "hash": "65bfa9aec6b75d3c46e2b6d5424c8094e2dc4db8850bfbf7234afb852fe2496b"
 }

@@ -1,0 +1,54 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT target_branch,\n                    auto_merge AS \"auto_merge!: bool\",\n                    sync_enabled AS \"sync_enabled!: bool\",\n                    sync_remote\n             FROM projects WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "target_branch",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "auto_merge!: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "sync_enabled!: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "sync_remote",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 2048
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d681e933bdb64ab1b534bae87d47ed748b4fb7e73af94e56bdb638e26f785d49"
+}

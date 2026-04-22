@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM agents WHERE project_id = ? AND base_role = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b382beb439e17a5e2b39113d3caef7043baed097e63abd7689ecf647135f5417"
+}

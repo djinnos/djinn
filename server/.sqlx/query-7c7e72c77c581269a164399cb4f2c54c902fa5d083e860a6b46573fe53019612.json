@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT event_taxonomy FROM sessions WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_taxonomy",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 4294967295
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7c7e72c77c581269a164399cb4f2c54c902fa5d083e860a6b46573fe53019612"
+}
