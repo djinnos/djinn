@@ -44,12 +44,75 @@ pub struct Stack {
 
     /// Declared runtime versions (e.g. `{"node": "22"}`). `None` when
     /// the manifest exists but the field is absent.
+    ///
+    /// This is "*a* version" for each language — convenient for the UI
+    /// banner and Phase-3 image hashing. Multi-toolchain callers
+    /// (post-env-config P5) read [`Stack::workspaces`] instead, since a
+    /// single string can't express "two Rust crates pinned to different
+    /// toolchains".
     pub runtimes: Runtimes,
 
     /// Boolean presence flags for the manifests / top-level files the
     /// downstream consumers care about. Drives the UI devcontainer
     /// banner.
     pub manifest_signals: ManifestSignals,
+
+    /// Per-workspace toolchain detail — one entry per manifest dir that
+    /// the detector considered a distinct workspace root. Populated by
+    /// [`detect`]; empty when no manifests are present.
+    ///
+    /// Used by [`crate::environment::EnvironmentConfig::from_stack`] to
+    /// seed `environment_config.workspaces` during the P5 boot reseed
+    /// hook. Slugs match the rule used by
+    /// `djinn-graph/src/repo_map/workspaces.rs` so env-config workspace
+    /// names line up end-to-end with SCIP indexer workspace names.
+    #[serde(default)]
+    pub workspaces: Vec<StackWorkspace>,
+}
+
+/// One workspace the detector spotted in a mirror. A "workspace" here
+/// means "a directory that owns its own package manifest and deserves
+/// its own toolchain scope" — not every member crate in a Cargo
+/// workspace, but the Cargo-workspace root itself (or a lone Cargo
+/// crate without a workspace table); plus every `package.json`,
+/// `pyproject.toml`, `go.mod`, `Gemfile`, `pom.xml`, and root-level
+/// build.gradle(.kts) found at any depth.
+///
+/// The detector de-duplicates by "shallowest ancestor per language":
+/// if `repo/server/Cargo.toml` is already a workspace, a member
+/// `repo/server/crates/foo/Cargo.toml` does *not* also get emitted.
+/// That keeps the toolchain list bounded for typical monorepos while
+/// still emitting two Rust entries when two unrelated Cargo workspaces
+/// sit next to each other (the motivating case for the env-config
+/// refactor).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StackWorkspace {
+    /// Slug derived from `root` via the same algorithm as
+    /// `djinn-graph/src/repo_map/workspaces.rs::workspace_slug` — lowercase,
+    /// non-alnum replaced by `-`, empty root mapped to `"root"`.
+    pub slug: String,
+    /// Repo-relative path to the workspace directory (forward-slash,
+    /// never absolute, no `..`). The empty string represents the repo
+    /// root.
+    pub root: String,
+    /// Canonical language slug: `rust` | `node` | `python` | `go` |
+    /// `java` | `ruby` (future: `dotnet` | `clang`).
+    pub language: String,
+    /// Toolchain / version the manifest pins, in its raw form.
+    /// * rust: channel from `rust-toolchain.toml` or
+    ///   `package.rust-version` (e.g. `"stable"`, `"1.85.0"`,
+    ///   `"nightly-2026-04-01"`).
+    /// * node: major from `engines.node` (e.g. `"22"`).
+    /// * python: major.minor from `requires-python` (e.g. `"3.12"`).
+    /// * go: `go` directive (e.g. `"1.22"`).
+    /// * java/ruby: currently unused — left `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<String>,
+    /// Package-manager slug pinned by the manifest, when it carries one.
+    /// Currently populated for `node` (`packageManager` or lockfile
+    /// fallback) and `python` (`uv` / `poetry` / `pdm` / `pip`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_manager: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -99,6 +162,7 @@ impl Stack {
             frameworks: Vec::new(),
             runtimes: Runtimes::default(),
             manifest_signals: ManifestSignals::default(),
+            workspaces: Vec::new(),
         }
     }
 }

@@ -19,7 +19,7 @@ use chrono::Utc;
 use crate::frameworks::{self, framework_for_dep};
 use crate::languages::LanguageTable;
 use crate::manifests;
-use crate::schema::{LanguageStat, ManifestSignals, Runtimes, Stack};
+use crate::schema::{LanguageStat, ManifestSignals, Runtimes, Stack, StackWorkspace};
 use crate::test_runners::{self, NEXTEST_CONFIG_PATHS, runner_for_dep};
 
 /// Files whose names are significant regardless of extension.
@@ -72,7 +72,9 @@ pub async fn detect(mirror_path: &Path) -> Result<Stack> {
 pub fn detect_blocking(mirror_path: &Path) -> Result<Stack> {
     let files = enumerate(mirror_path)?;
     let bodies = read_manifest_bodies(mirror_path, &files)?;
-    Ok(build_stack(&files, &bodies))
+    let mut stack = build_stack(&files, &bodies);
+    stack.workspaces = discover_workspaces_blocking(mirror_path, &files);
+    Ok(stack)
 }
 
 /// One entry per tracked file: path (forward-slash, relative to root)
@@ -446,6 +448,11 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
         frameworks,
         runtimes,
         manifest_signals: signals,
+        // `workspaces` is populated by `detect_blocking` via
+        // `discover_workspaces_blocking` after `build_stack` returns —
+        // kept separate so unit tests of `build_stack` don't need a
+        // real filesystem root.
+        workspaces: Vec::new(),
     }
 }
 
@@ -510,6 +517,298 @@ fn dedup_sorted(mut v: Vec<String>) -> Vec<String> {
     v
 }
 
+// ---- workspace discovery ------------------------------------------------
+
+/// Skip any manifest whose path is under one of these directory segments.
+/// The git enumeration doesn't automatically exclude `node_modules/` if
+/// somebody accidentally committed it, so we belt-and-braces here.
+const WORKSPACE_SKIP_SEGMENTS: &[&str] = &[
+    "node_modules",
+    "vendor",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    ".git",
+];
+
+struct WorkspaceCandidate {
+    path: String,
+    language: &'static str,
+}
+
+/// Discover one `StackWorkspace` per distinct toolchain-scope in the
+/// mirror. Called by `detect_blocking` after `build_stack`.
+fn discover_workspaces_blocking(root: &Path, files: &[FileEntry]) -> Vec<StackWorkspace> {
+    let candidates: Vec<WorkspaceCandidate> = files
+        .iter()
+        .filter_map(|entry| {
+            workspace_manifest_language(&entry.path)
+                .map(|lang| WorkspaceCandidate {
+                    path: entry.path.clone(),
+                    language: lang,
+                })
+        })
+        .collect();
+
+    let selected = dedup_shallowest_per_language(candidates);
+    if selected.is_empty() {
+        return Vec::new();
+    }
+
+    // Read the bodies we'll parse — selected manifests plus sibling
+    // `rust-toolchain.toml` entries. Only nested paths land here; the
+    // root-level manifest bodies are already in the main `bodies` map,
+    // but since we want one consistent lookup we re-read from disk /
+    // git here.
+    let wanted_bodies = body_paths_for_workspaces(&selected, files);
+    let bodies = read_paths(root, &wanted_bodies);
+
+    selected
+        .into_iter()
+        .map(|c| build_workspace(c, &bodies))
+        .collect()
+}
+
+fn workspace_manifest_language(path: &str) -> Option<&'static str> {
+    for seg in WORKSPACE_SKIP_SEGMENTS {
+        if path == *seg
+            || path.starts_with(&format!("{seg}/"))
+            || path.contains(&format!("/{seg}/"))
+        {
+            return None;
+        }
+    }
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    match basename {
+        "Cargo.toml" => Some("rust"),
+        "package.json" => Some("node"),
+        "pyproject.toml" => Some("python"),
+        "go.mod" => Some("go"),
+        "Gemfile" => Some("ruby"),
+        "pom.xml" | "build.gradle" | "build.gradle.kts" => Some("java"),
+        _ => None,
+    }
+}
+
+fn dedup_shallowest_per_language(
+    mut candidates: Vec<WorkspaceCandidate>,
+) -> Vec<WorkspaceCandidate> {
+    // Shallower paths first so ancestors are visited before descendants.
+    // Tie-break alphabetically to make detection deterministic.
+    candidates.sort_by(|a, b| {
+        let depth_a = a.path.matches('/').count();
+        let depth_b = b.path.matches('/').count();
+        depth_a.cmp(&depth_b).then_with(|| a.path.cmp(&b.path))
+    });
+
+    let mut selected: Vec<WorkspaceCandidate> = Vec::new();
+    for c in candidates {
+        let dir = parent_dir(&c.path);
+        let suppressed = selected.iter().any(|s| {
+            s.language == c.language && is_ancestor_dir(&parent_dir(&s.path), dir)
+        });
+        if !suppressed {
+            selected.push(c);
+        }
+    }
+    selected
+}
+
+fn parent_dir(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(idx) => &path[..idx],
+        None => "",
+    }
+}
+
+/// `ancestor` is `candidate` itself or one of its prefix directories.
+/// Both are "" for the repo root.
+fn is_ancestor_dir(ancestor: &str, candidate: &str) -> bool {
+    if ancestor.is_empty() {
+        return true;
+    }
+    if ancestor == candidate {
+        return true;
+    }
+    candidate.starts_with(&format!("{ancestor}/"))
+}
+
+fn body_paths_for_workspaces(
+    selected: &[WorkspaceCandidate],
+    files: &[FileEntry],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in selected {
+        out.push(c.path.clone());
+        // Rust — sibling `rust-toolchain.toml` is the authoritative pin.
+        if c.language == "rust" {
+            let sibling = join_dir(parent_dir(&c.path), "rust-toolchain.toml");
+            if files.iter().any(|f| f.path == sibling) {
+                out.push(sibling);
+            }
+        }
+        // Node — sibling lockfiles help the package-manager fallback
+        // when `packageManager` isn't pinned in package.json.
+        if c.language == "node" {
+            for lf in ["pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock", "package-lock.json"] {
+                let sibling = join_dir(parent_dir(&c.path), lf);
+                if files.iter().any(|f| f.path == sibling) {
+                    out.push(sibling);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn join_dir(dir: &str, basename: &str) -> String {
+    if dir.is_empty() {
+        basename.to_string()
+    } else {
+        format!("{dir}/{basename}")
+    }
+}
+
+/// Read a batch of mirror-relative paths. Prefers `git` (reads from
+/// HEAD, so we don't depend on a working-tree checkout) and falls back
+/// to filesystem per-path. Missing files are silently omitted.
+fn read_paths(root: &Path, paths: &[String]) -> HashMap<String, String> {
+    if paths.is_empty() {
+        return HashMap::new();
+    }
+
+    let wanted: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    let mut out = HashMap::new();
+
+    if let Ok(repo) = git2::Repository::open(root).or_else(|_| git2::Repository::open_bare(root))
+        && let Ok(head) = repo.head()
+        && let Ok(tree) = head.peel_to_tree()
+    {
+        let _ = tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+            if entry.kind() != Some(git2::ObjectType::Blob) {
+                return git2::TreeWalkResult::Ok;
+            }
+            let Some(name) = entry.name() else {
+                return git2::TreeWalkResult::Ok;
+            };
+            let full = if dir.is_empty() {
+                name.to_string()
+            } else {
+                format!("{dir}{name}")
+            };
+            if !wanted.contains(full.as_str()) {
+                return git2::TreeWalkResult::Ok;
+            }
+            if let Ok(blob) = repo.find_blob(entry.id())
+                && let Ok(body) = std::str::from_utf8(blob.content())
+            {
+                out.insert(full, body.to_string());
+            }
+            git2::TreeWalkResult::Ok
+        });
+    }
+
+    for path in paths {
+        if out.contains_key(path) {
+            continue;
+        }
+        let fs_path = root.join(path);
+        if let Ok(body) = std::fs::read_to_string(&fs_path) {
+            out.insert(path.clone(), body);
+        }
+    }
+    out
+}
+
+fn build_workspace(
+    candidate: WorkspaceCandidate,
+    bodies: &HashMap<String, String>,
+) -> StackWorkspace {
+    use crate::schema::StackWorkspace as Ws;
+
+    let dir = parent_dir(&candidate.path).to_string();
+    let slug = workspace_slug(&dir);
+    let body = bodies.get(&candidate.path).map(String::as_str).unwrap_or("");
+
+    let (toolchain, package_manager) = match candidate.language {
+        "rust" => {
+            let sibling = join_dir(&dir, "rust-toolchain.toml");
+            let toolchain_body = bodies.get(&sibling).map(String::as_str);
+            let info = manifests::parse_cargo_toml(body, toolchain_body);
+            (info.rust_version, None)
+        }
+        "node" => {
+            let info = manifests::parse_package_json(body);
+            let pm = info.package_manager.or_else(|| {
+                // Lockfile fallback, mirroring build_stack's root-level logic.
+                for (lf, slug) in [
+                    ("pnpm-lock.yaml", "pnpm"),
+                    ("yarn.lock", "yarn"),
+                    ("bun.lockb", "bun"),
+                    ("bun.lock", "bun"),
+                    ("package-lock.json", "npm"),
+                ] {
+                    if bodies.contains_key(&join_dir(&dir, lf)) {
+                        return Some(slug.to_string());
+                    }
+                }
+                None
+            });
+            (info.node_engine, pm)
+        }
+        "python" => {
+            let info = manifests::parse_pyproject(body);
+            (info.python_version, info.package_manager)
+        }
+        "go" => {
+            let info = manifests::parse_go_mod(body);
+            (info.go_version, None)
+        }
+        _ => (None, None),
+    };
+
+    Ws {
+        slug,
+        root: dir,
+        language: candidate.language.to_string(),
+        toolchain,
+        package_manager,
+    }
+}
+
+/// Same algorithm as `djinn-graph/src/repo_map/workspaces.rs::workspace_slug`.
+/// Keep these two in sync — env-config workspace slugs must equal
+/// SCIP-indexer workspace slugs so downstream consumers (image Dockerfile
+/// generator, UI editor) don't need a translation table.
+pub(crate) fn workspace_slug(dir: &str) -> String {
+    if dir.is_empty() {
+        return "root".to_string();
+    }
+    let slug: String = dir
+        .split('/')
+        .flat_map(|segment| {
+            segment
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|part| !part.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "root".to_string()
+    } else {
+        slug
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +846,177 @@ mod tests {
         let (langs, _) = tally_languages(&files);
         assert_eq!(langs.len(), 1);
         assert_eq!(langs[0].name, "Rust");
+    }
+
+    #[test]
+    fn workspace_slug_matches_djinn_graph_rules() {
+        assert_eq!(workspace_slug(""), "root");
+        assert_eq!(workspace_slug("server"), "server");
+        assert_eq!(workspace_slug("tools/codegen"), "tools-codegen");
+        assert_eq!(workspace_slug("apps/web.app"), "apps-web-app");
+        assert_eq!(workspace_slug("Some_Dir/X"), "some-dir-x");
+    }
+
+    #[test]
+    fn workspace_manifest_language_classifies_basenames() {
+        assert_eq!(workspace_manifest_language("Cargo.toml"), Some("rust"));
+        assert_eq!(
+            workspace_manifest_language("server/Cargo.toml"),
+            Some("rust")
+        );
+        assert_eq!(
+            workspace_manifest_language("ui/package.json"),
+            Some("node")
+        );
+        assert_eq!(workspace_manifest_language("go.mod"), Some("go"));
+        assert_eq!(
+            workspace_manifest_language("services/api/pyproject.toml"),
+            Some("python")
+        );
+        assert_eq!(workspace_manifest_language("pom.xml"), Some("java"));
+        assert_eq!(workspace_manifest_language("build.gradle.kts"), Some("java"));
+        assert_eq!(workspace_manifest_language("Gemfile"), Some("ruby"));
+        assert_eq!(workspace_manifest_language("README.md"), None);
+        // Skip well-known vendored trees even when they contain manifests.
+        assert_eq!(
+            workspace_manifest_language("node_modules/react/package.json"),
+            None
+        );
+        assert_eq!(
+            workspace_manifest_language("vendor/github.com/pkg/errors/go.mod"),
+            None
+        );
+        assert_eq!(
+            workspace_manifest_language("ui/node_modules/x/package.json"),
+            None
+        );
+    }
+
+    fn candidate(path: &str, language: &'static str) -> WorkspaceCandidate {
+        WorkspaceCandidate {
+            path: path.to_string(),
+            language,
+        }
+    }
+
+    #[test]
+    fn dedup_suppresses_nested_same_language_manifests() {
+        // `server/Cargo.toml` should win — `server/crates/djinn-db/Cargo.toml`
+        // is a member crate, not a distinct workspace.
+        let input = vec![
+            candidate("server/crates/djinn-db/Cargo.toml", "rust"),
+            candidate("server/Cargo.toml", "rust"),
+            candidate("server/crates/djinn-graph/Cargo.toml", "rust"),
+        ];
+        let out = dedup_shallowest_per_language(input);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, "server/Cargo.toml");
+    }
+
+    #[test]
+    fn dedup_keeps_sibling_unrelated_workspaces() {
+        // Two Rust workspaces that aren't nested — the motivating case
+        // for the env-config refactor (different toolchains per dir).
+        let input = vec![
+            candidate("server/Cargo.toml", "rust"),
+            candidate("tools/codegen/Cargo.toml", "rust"),
+        ];
+        let out = dedup_shallowest_per_language(input);
+        let roots: Vec<&str> = out.iter().map(|c| c.path.as_str()).collect();
+        assert!(roots.contains(&"server/Cargo.toml"));
+        assert!(roots.contains(&"tools/codegen/Cargo.toml"));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn dedup_does_not_cross_languages() {
+        // Rust workspace at `server/` should not suppress a Node
+        // workspace at `server/ui/` or vice versa.
+        let input = vec![
+            candidate("server/Cargo.toml", "rust"),
+            candidate("server/ui/package.json", "node"),
+        ];
+        let out = dedup_shallowest_per_language(input);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn is_ancestor_dir_handles_root_and_empty() {
+        assert!(is_ancestor_dir("", "anything"));
+        assert!(is_ancestor_dir("", ""));
+        assert!(is_ancestor_dir("server", "server"));
+        assert!(is_ancestor_dir("server", "server/crates/foo"));
+        assert!(!is_ancestor_dir("server", "services"));
+        assert!(!is_ancestor_dir("server", "servero"));
+    }
+
+    fn file_entries(paths: &[&str]) -> Vec<FileEntry> {
+        paths
+            .iter()
+            .map(|p| FileEntry {
+                path: (*p).to_string(),
+                size: 100,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_workspace_reads_rust_toolchain_from_sibling() {
+        let mut bodies = HashMap::new();
+        bodies.insert("server/Cargo.toml".into(), "[workspace]\n".into());
+        bodies.insert(
+            "server/rust-toolchain.toml".into(),
+            "[toolchain]\nchannel = \"1.85.0\"\n".into(),
+        );
+        let ws = build_workspace(candidate("server/Cargo.toml", "rust"), &bodies);
+        assert_eq!(ws.slug, "server");
+        assert_eq!(ws.root, "server");
+        assert_eq!(ws.language, "rust");
+        assert_eq!(ws.toolchain.as_deref(), Some("1.85.0"));
+        assert!(ws.package_manager.is_none());
+    }
+
+    #[test]
+    fn build_workspace_parses_node_engine_and_pm() {
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            "ui/package.json".into(),
+            r#"{"packageManager":"pnpm@9","engines":{"node":">=22"}}"#.into(),
+        );
+        let ws = build_workspace(candidate("ui/package.json", "node"), &bodies);
+        assert_eq!(ws.root, "ui");
+        assert_eq!(ws.toolchain.as_deref(), Some("22"));
+        assert_eq!(ws.package_manager.as_deref(), Some("pnpm"));
+    }
+
+    #[test]
+    fn build_workspace_node_falls_back_to_lockfile() {
+        let mut bodies = HashMap::new();
+        bodies.insert("package.json".into(), r#"{"name":"x"}"#.into());
+        bodies.insert("pnpm-lock.yaml".into(), "lockfileVersion: 9\n".into());
+        let ws = build_workspace(candidate("package.json", "node"), &bodies);
+        assert_eq!(ws.root, "");
+        assert_eq!(ws.slug, "root");
+        assert_eq!(ws.package_manager.as_deref(), Some("pnpm"));
+    }
+
+    #[test]
+    fn body_paths_includes_rust_toolchain_sibling_only_when_present() {
+        let files = file_entries(&[
+            "server/Cargo.toml",
+            "server/rust-toolchain.toml",
+            "tools/codegen/Cargo.toml",
+        ]);
+        let selected = vec![
+            candidate("server/Cargo.toml", "rust"),
+            candidate("tools/codegen/Cargo.toml", "rust"),
+        ];
+        let paths = body_paths_for_workspaces(&selected, &files);
+        assert!(paths.contains(&"server/Cargo.toml".to_string()));
+        assert!(paths.contains(&"server/rust-toolchain.toml".to_string()));
+        assert!(paths.contains(&"tools/codegen/Cargo.toml".to_string()));
+        // `tools/codegen/rust-toolchain.toml` doesn't exist, so it must
+        // not be requested.
+        assert!(!paths.contains(&"tools/codegen/rust-toolchain.toml".to_string()));
     }
 }
