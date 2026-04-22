@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { HugeiconsIcon } from '@hugeicons/react';
 import {
   Delete02Icon,
@@ -8,6 +9,7 @@ import {
   LinkSquare02Icon,
   Loading02Icon,
   PlusSignIcon,
+  Settings01Icon,
 } from '@hugeicons/core-free-icons';
 
 import { Button } from '@/components/ui/button';
@@ -29,7 +31,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDialog';
-import { DevcontainerStatusBadge } from '@/components/DevcontainerStatusBadge';
+import { ImageStatusBadge } from '@/components/ImageStatusBadge';
 import { EmptyState } from '@/components/EmptyState';
 import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
 import { projectStore } from '@/stores/projectStore';
@@ -207,6 +209,7 @@ function RepositoryRow({
 }) {
   const coords = parseOwnerRepo(project.path);
   const githubUrl = coords ? `https://github.com/${coords.owner}/${coords.repo}` : null;
+  const navigate = useNavigate();
 
   return (
     <tr
@@ -233,7 +236,7 @@ function RepositoryRow({
         <BranchPicker project={project} />
       </td>
       <td className="px-4 py-3">
-        <DevcontainerStatusBadge
+        <ImageStatusBadge
           projectId={project.id}
           projectName={project.name}
         />
@@ -243,6 +246,14 @@ function RepositoryRow({
           className="flex items-center justify-end gap-1.5"
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            type="button"
+            onClick={() => navigate(`/projects/${project.id}/environment`)}
+            className="flex h-7 w-7 items-center justify-center rounded-md border bg-transparent text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+            title="Edit environment config"
+          >
+            <HugeiconsIcon icon={Settings01Icon} size={14} />
+          </button>
           {githubUrl && (
             <a
               href={githubUrl}

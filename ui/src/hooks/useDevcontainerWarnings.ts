@@ -3,14 +3,11 @@ import { fetchDevcontainerStatus, type DevcontainerStatus } from '@/api/devconta
 import { useProjects } from '@/stores/useProjectStore';
 
 /**
- * Returns the count of projects whose devcontainer is in a state that
- * requires user action (missing devcontainer.json or a failed image
- * build). "Building" is excluded — it's informational. The lock file is
- * NOT surfaced as a warning: the image pipeline doesn't require it, and
- * generating one mechanically requires the devcontainers CLI which we
- * don't ship on the server.
+ * Returns the count of projects whose per-project image build is in a
+ * state that requires user action (failed). "Building" is excluded —
+ * it's informational.
  *
- * Mirrors the triage logic in {@link DevcontainerStatusBadge.deriveState}.
+ * Mirrors the triage logic in {@link ImageStatusBadge.deriveState}.
  */
 export function useDevcontainerWarnings(): { count: number } {
   const projects = useProjects();
@@ -28,7 +25,7 @@ export function useDevcontainerWarnings(): { count: number } {
   for (const result of results) {
     const status = result.data as DevcontainerStatus | undefined;
     if (!status) continue;
-    if (!status.has_devcontainer || status.image_status === 'failed') {
+    if (status.image_status === 'failed') {
       count += 1;
     }
   }

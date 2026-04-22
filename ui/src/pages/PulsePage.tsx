@@ -129,19 +129,11 @@ function NotWarmedView({
   architectActive: boolean;
 }) {
   if (devcontainer) {
-    if (!devcontainer.has_devcontainer) {
-      return (
-        <CenteredMessage
-          title="Pulse not ready"
-          description="This project has no devcontainer.json yet. Commit one (use the status badge on the Repositories page) and Pulse will warm automatically."
-        />
-      );
-    }
     if (devcontainer.image_status === "failed") {
       return (
         <CenteredMessage
           title="Pulse not ready"
-          description="The devcontainer image build failed. Fix it from the Repositories status badge and Pulse will warm once the rebuild lands."
+          description="The project image build failed. Rebuild it from the Repositories status badge and Pulse will warm once the rebuild lands."
         />
       );
     }
@@ -150,7 +142,7 @@ function NotWarmedView({
         <CenteredMessage
           tone="active"
           title="Building project image…"
-          description="Pulse will warm automatically as soon as the per-project devcontainer image lands."
+          description="Pulse will warm automatically as soon as the per-project image lands."
         />
       );
     }
@@ -159,7 +151,7 @@ function NotWarmedView({
         <CenteredMessage
           tone="active"
           title="Warming code graph…"
-          description="Djinn is indexing the project inside its devcontainer image. This usually takes 1–3 minutes on first warm."
+          description="Djinn is indexing the project inside its runtime image. This usually takes 1–3 minutes on first warm."
         />
       );
     }

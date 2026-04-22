@@ -370,10 +370,6 @@ export namespace CodeGraphInputSchema {
    */
   query?: string
   /**
-   * Diff base selector for `diff`. Currently only `previous` is supported.
-   */
-  since?: string
-  /**
    * Sort key for `ranked`: `pagerank` (default), `in_degree`, `out_degree`,
    * or `total_degree`.
    */
@@ -1150,6 +1146,18 @@ export namespace GetProjectStackOutputSchema {
    * `pytest`, `go-test`, `junit`, `rspec`.
    */
   test_runners: string[]
+  /**
+   * Per-workspace toolchain detail — one entry per manifest dir that
+   * the detector considered a distinct workspace root. Populated by
+   * [`detect`]; empty when no manifests are present.
+   * 
+   * Used by [`crate::environment::EnvironmentConfig::from_stack`] to
+   * seed `environment_config.workspaces` during the P5 boot reseed
+   * hook. Slugs match the rule used by
+   * `djinn-graph/src/repo_map/workspaces.rs` so env-config workspace
+   * names line up end-to-end with SCIP indexer workspace names.
+   */
+  workspaces?: StackWorkspace[]
   [k: string]: any
   }
   export interface LanguageStat {
@@ -1177,12 +1185,72 @@ export namespace GetProjectStackOutputSchema {
   /**
    * Declared runtime versions (e.g. `{"node": "22"}`). `None` when
    * the manifest exists but the field is absent.
+   * 
+   * This is "*a* version" for each language — convenient for the UI
+   * banner and Phase-3 image hashing. Multi-toolchain callers
+   * (post-env-config P5) read [`Stack::workspaces`] instead, since a
+   * single string can't express "two Rust crates pinned to different
+   * toolchains".
    */
   export interface Runtimes {
   go?: string
   node?: string
   python?: string
   rust?: string
+  [k: string]: any
+  }
+  /**
+   * One workspace the detector spotted in a mirror. A "workspace" here
+   * means "a directory that owns its own package manifest and deserves
+   * its own toolchain scope" — not every member crate in a Cargo
+   * workspace, but the Cargo-workspace root itself (or a lone Cargo
+   * crate without a workspace table); plus every `package.json`,
+   * `pyproject.toml`, `go.mod`, `Gemfile`, `pom.xml`, and root-level
+   * build.gradle(.kts) found at any depth.
+   * 
+   * The detector de-duplicates by "shallowest ancestor per language":
+   * if `repo/server/Cargo.toml` is already a workspace, a member
+   * `repo/server/crates/foo/Cargo.toml` does *not* also get emitted.
+   * That keeps the toolchain list bounded for typical monorepos while
+   * still emitting two Rust entries when two unrelated Cargo workspaces
+   * sit next to each other (the motivating case for the env-config
+   * refactor).
+   */
+  export interface StackWorkspace {
+  /**
+   * Canonical language slug: `rust` | `node` | `python` | `go` |
+   * `java` | `ruby` (future: `dotnet` | `clang`).
+   */
+  language: string
+  /**
+   * Package-manager slug pinned by the manifest, when it carries one.
+   * Currently populated for `node` (`packageManager` or lockfile
+   * fallback) and `python` (`uv` / `poetry` / `pdm` / `pip`).
+   */
+  package_manager?: string
+  /**
+   * Repo-relative path to the workspace directory (forward-slash,
+   * never absolute, no `..`). The empty string represents the repo
+   * root.
+   */
+  root: string
+  /**
+   * Slug derived from `root` via the same algorithm as
+   * `djinn-graph/src/repo_map/workspaces.rs::workspace_slug` — lowercase,
+   * non-alnum replaced by `-`, empty root mapped to `"root"`.
+   */
+  slug: string
+  /**
+   * Toolchain / version the manifest pins, in its raw form.
+   * * rust: channel from `rust-toolchain.toml` or
+   *   `package.rust-version` (e.g. `"stable"`, `"1.85.0"`,
+   *   `"nightly-2026-04-01"`).
+   * * node: major from `engines.node` (e.g. `"22"`).
+   * * python: major.minor from `requires-python` (e.g. `"3.12"`).
+   * * go: `go` directive (e.g. `"1.22"`).
+   * * java/ruby: currently unused — left `None`.
+   */
+  toolchain?: string
   [k: string]: any
   }
 
@@ -2285,6 +2353,61 @@ export namespace ProjectConfigSetOutputSchema {
 
 }
 export type ProjectConfigSetOutput = ProjectConfigSetOutputSchema.ProjectConfigSetOutput;
+export namespace ProjectEnvironmentConfigGetInputSchema {
+  export interface ProjectEnvironmentConfigGetInput {
+  /**
+   * Project UUID.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProjectEnvironmentConfigGetInput = ProjectEnvironmentConfigGetInputSchema.ProjectEnvironmentConfigGetInput;
+export namespace ProjectEnvironmentConfigGetOutputSchema {
+  export interface ProjectEnvironmentConfigGetOutput {
+  /**
+   * The raw JSON config currently in `projects.environment_config`.
+   * Empty object `{}` when the row hasn't been reseeded yet.
+   */
+  config?: {
+  [k: string]: any
+  }
+  error?: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ProjectEnvironmentConfigGetOutput = ProjectEnvironmentConfigGetOutputSchema.ProjectEnvironmentConfigGetOutput;
+export namespace ProjectEnvironmentConfigSetInputSchema {
+  export interface ProjectEnvironmentConfigSetInput {
+  /**
+   * Full `EnvironmentConfig` JSON blob. Validated server-side via
+   * `djinn_stack::environment::EnvironmentConfig::validate` before
+   * anything is written.
+   */
+  config: {
+  [k: string]: any
+  }
+  /**
+   * Project UUID.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProjectEnvironmentConfigSetInput = ProjectEnvironmentConfigSetInputSchema.ProjectEnvironmentConfigSetInput;
+export namespace ProjectEnvironmentConfigSetOutputSchema {
+  export interface ProjectEnvironmentConfigSetOutput {
+  error?: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ProjectEnvironmentConfigSetOutput = ProjectEnvironmentConfigSetOutputSchema.ProjectEnvironmentConfigSetOutput;
 export namespace ProjectListInputSchema {
   export interface ProjectListInput {
   [k: string]: any
@@ -3793,7 +3916,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "devcontainer_open_pr" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" |"task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "devcontainer_open_pr" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_set" | "project_list" | "project_remove" | "project_settings_validate" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3851,6 +3974,8 @@ export interface McpToolMap {
   "project_branches": { input: ProjectBranchesInput; output: ProjectBranchesOutput };
   "project_config_get": { input: ProjectConfigGetInput; output: ProjectConfigGetOutput };
   "project_config_set": { input: ProjectConfigSetInput; output: ProjectConfigSetOutput };
+  "project_environment_config_get": { input: ProjectEnvironmentConfigGetInput; output: ProjectEnvironmentConfigGetOutput };
+  "project_environment_config_set": { input: ProjectEnvironmentConfigSetInput; output: ProjectEnvironmentConfigSetOutput };
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
   "project_settings_validate": { input: ProjectSettingsValidateInput; output: ProjectSettingsValidateOutput };

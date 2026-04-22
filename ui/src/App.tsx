@@ -10,7 +10,9 @@ import { ChatPage } from "@/pages/ChatPage";
 import { MemoryPage } from "@/pages/MemoryPage";
 import { PulsePage } from "@/pages/PulsePage";
 import { RepositoriesPage } from "@/pages/RepositoriesPage";
+import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
+import { EnvironmentConfigImportBanner } from "@/components/EnvironmentConfigImportBanner";
 import { AuthGate } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
@@ -30,6 +32,7 @@ function MainLayout() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1 flex-col">
           <ConnectionBanner />
+          <EnvironmentConfigImportBanner />
           <Routes>
             {/* Views — project selection lives in the projectStore, not the URL */}
             <Route path="/kanban" element={<KanbanPage />} />
@@ -46,6 +49,9 @@ function MainLayout() {
 
             {/* Repositories */}
             <Route path="/repositories" element={<RepositoriesPage />} />
+
+            {/* Per-project pages */}
+            <Route path="/projects/:id/environment" element={<ProjectEnvironmentPage />} />
 
             {/* Settings */}
             <Route path="/settings" element={<SettingsPage />} />

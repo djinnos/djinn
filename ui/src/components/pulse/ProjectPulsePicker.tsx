@@ -12,7 +12,6 @@ interface WarmDescriptor {
 
 function describeWarmState(status: DevcontainerStatus | undefined): WarmDescriptor {
   if (!status) return { tone: "unknown", label: "…" };
-  if (!status.has_devcontainer) return { tone: "pending", label: "No devcontainer" };
   if (status.image_status === "failed") return { tone: "failed", label: "Image failed" };
   if (status.image_status === "building") return { tone: "running", label: "Building image" };
 

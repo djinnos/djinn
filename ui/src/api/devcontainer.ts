@@ -19,8 +19,6 @@ export interface StackManifestSignals {
   has_go_mod?: boolean;
   has_pnpm_workspace?: boolean;
   has_turbo_json?: boolean;
-  has_devcontainer?: boolean;
-  has_devcontainer_lock?: boolean;
 }
 
 export interface Stack {
@@ -42,24 +40,10 @@ export interface GetProjectStackResponse {
   error?: string | null;
 }
 
-export interface DevcontainerPrRef {
-  url: string;
-  number: number;
-}
-
 export interface DevcontainerStatus {
-  has_devcontainer: boolean;
-  has_devcontainer_lock: boolean;
   image_tag?: string | null;
   image_status: "none" | "building" | "ready" | "failed" | string;
   image_last_error?: string | null;
-  starter_json?: string | null;
-  /**
-   * Already-open setup PR on the `djinn/setup-devcontainer` branch, if
-   * any. Present means the banner should show "View PR"; absent means
-   * the "Open PR" CTA is the right affordance.
-   */
-  open_setup_pr?: DevcontainerPrRef | null;
   /**
    * ISO-8601 UTC timestamp of the last successful canonical-graph warm
    * for this project. Absent/null means the warmer has not completed a
@@ -82,12 +66,6 @@ export interface RetriggerImageBuildResponse {
   error?: string | null;
 }
 
-export interface DevcontainerOpenPrResponse {
-  pr?: DevcontainerPrRef | null;
-  already_open: boolean;
-  error?: string | null;
-}
-
 /**
  * Fetch the raw detected stack for a project by UUID.
  */
@@ -107,35 +85,11 @@ export async function fetchDevcontainerStatus(
 }
 
 /**
- * Convenience wrapper — the starter JSON is already embedded in
- * {@link fetchDevcontainerStatus}, but callers sometimes want it on
- * demand (e.g. regenerating the template after the user edits the stack).
- */
-export async function generateStarterJson(projectId: string): Promise<string | null> {
-  const status = await fetchDevcontainerStatus(projectId);
-  return status.starter_json ?? null;
-}
-
-/**
- * Force a rebuild of the project's per-project devcontainer image on
- * the next mirror-fetch tick.
+ * Force a rebuild of the project's per-project image on the next
+ * mirror-fetch tick.
  */
 export async function retriggerImageBuild(
   projectId: string,
 ): Promise<RetriggerImageBuildResponse> {
   return callMcpTool("retrigger_image_build", { project: projectId });
-}
-
-/**
- * Open (or return the already-open) PR that adds a starter
- * `.devcontainer/devcontainer.json` to the project's default branch.
- *
- * Idempotent: a second call while a PR on `djinn/setup-devcontainer`
- * is still open returns that PR with `already_open: true` rather than
- * opening a duplicate.
- */
-export async function openDevcontainerPr(
-  projectId: string,
-): Promise<DevcontainerOpenPrResponse> {
-  return callMcpTool("devcontainer_open_pr", { project: projectId });
 }

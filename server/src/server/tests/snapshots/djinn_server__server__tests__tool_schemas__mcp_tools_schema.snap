@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 175
 expression: signatures
 ---
 [
@@ -2317,12 +2316,20 @@ expression: signatures
             },
             "runtimes": {
               "$ref": "#/$defs/Runtimes",
-              "description": "Declared runtime versions (e.g. `{\"node\": \"22\"}`). `None` when\nthe manifest exists but the field is absent."
+              "description": "Declared runtime versions (e.g. `{\"node\": \"22\"}`). `None` when\nthe manifest exists but the field is absent.\n\nThis is \"*a* version\" for each language — convenient for the UI\nbanner and Phase-3 image hashing. Multi-toolchain callers\n(post-env-config P5) read [`Stack::workspaces`] instead, since a\nsingle string can't express \"two Rust crates pinned to different\ntoolchains\"."
             },
             "test_runners": {
               "description": "Slugs: `vitest`, `jest`, `mocha`, `playwright`, `nextest`,\n`pytest`, `go-test`, `junit`, `rspec`.",
               "items": {
                 "type": "string"
+              },
+              "type": "array"
+            },
+            "workspaces": {
+              "default": [],
+              "description": "Per-workspace toolchain detail — one entry per manifest dir that\nthe detector considered a distinct workspace root. Populated by\n[`detect`]; empty when no manifests are present.\n\nUsed by [`crate::environment::EnvironmentConfig::from_stack`] to\nseed `environment_config.workspaces` during the P5 boot reseed\nhook. Slugs match the rule used by\n`djinn-graph/src/repo_map/workspaces.rs` so env-config workspace\nnames line up end-to-end with SCIP indexer workspace names.",
+              "items": {
+                "$ref": "#/$defs/StackWorkspace"
               },
               "type": "array"
             }
@@ -2337,6 +2344,39 @@ expression: signatures
             "frameworks",
             "runtimes",
             "manifest_signals"
+          ],
+          "type": "object"
+        },
+        "StackWorkspace": {
+          "description": "One workspace the detector spotted in a mirror. A \"workspace\" here\nmeans \"a directory that owns its own package manifest and deserves\nits own toolchain scope\" — not every member crate in a Cargo\nworkspace, but the Cargo-workspace root itself (or a lone Cargo\ncrate without a workspace table); plus every `package.json`,\n`pyproject.toml`, `go.mod`, `Gemfile`, `pom.xml`, and root-level\nbuild.gradle(.kts) found at any depth.\n\nThe detector de-duplicates by \"shallowest ancestor per language\":\nif `repo/server/Cargo.toml` is already a workspace, a member\n`repo/server/crates/foo/Cargo.toml` does *not* also get emitted.\nThat keeps the toolchain list bounded for typical monorepos while\nstill emitting two Rust entries when two unrelated Cargo workspaces\nsit next to each other (the motivating case for the env-config\nrefactor).",
+          "properties": {
+            "language": {
+              "description": "Canonical language slug: `rust` | `node` | `python` | `go` |\n`java` | `ruby` (future: `dotnet` | `clang`).",
+              "type": "string"
+            },
+            "package_manager": {
+              "description": "Package-manager slug pinned by the manifest, when it carries one.\nCurrently populated for `node` (`packageManager` or lockfile\nfallback) and `python` (`uv` / `poetry` / `pdm` / `pip`).",
+              "nullable": true,
+              "type": "string"
+            },
+            "root": {
+              "description": "Repo-relative path to the workspace directory (forward-slash,\nnever absolute, no `..`). The empty string represents the repo\nroot.",
+              "type": "string"
+            },
+            "slug": {
+              "description": "Slug derived from `root` via the same algorithm as\n`djinn-graph/src/repo_map/workspaces.rs::workspace_slug` — lowercase,\nnon-alnum replaced by `-`, empty root mapped to `\"root\"`.",
+              "type": "string"
+            },
+            "toolchain": {
+              "description": "Toolchain / version the manifest pins, in its raw form.\n* rust: channel from `rust-toolchain.toml` or\n  `package.rust-version` (e.g. `\"stable\"`, `\"1.85.0\"`,\n  `\"nightly-2026-04-01\"`).\n* node: major from `engines.node` (e.g. `\"22\"`).\n* python: major.minor from `requires-python` (e.g. `\"3.12\"`).\n* go: `go` directive (e.g. `\"1.22\"`).\n* java/ruby: currently unused — left `None`.",
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug",
+            "root",
+            "language"
           ],
           "type": "object"
         }
@@ -4774,6 +4814,81 @@ expression: signatures
         "verification_rules"
       ],
       "title": "ProjectConfigResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Project UUID.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ProjectEnvironmentConfigGetParams",
+      "type": "object"
+    },
+    "name": "project_environment_config_get",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "config": {
+          "description": "The raw JSON config currently in `projects.environment_config`.\nEmpty object `{}` when the row hasn't been reseeded yet."
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ProjectEnvironmentConfigGetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "config": {
+          "description": "Full `EnvironmentConfig` JSON blob. Validated server-side via\n`djinn_stack::environment::EnvironmentConfig::validate` before\nanything is written."
+        },
+        "project": {
+          "description": "Project UUID.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "config"
+      ],
+      "title": "ProjectEnvironmentConfigSetParams",
+      "type": "object"
+    },
+    "name": "project_environment_config_set",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ProjectEnvironmentConfigSetResponse",
       "type": "object"
     }
   },
