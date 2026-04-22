@@ -9,25 +9,27 @@ mod context;
 mod handler;
 mod prompt;
 
+use djinn_agent::verification::environment::environment_config_for_path;
+use djinn_agent::verification::settings::{effective_mcp_server_names, effective_skill_names};
+use djinn_db::Database;
 use djinn_provider::message::{ContentBlock, Message, Role};
-use djinn_agent::verification::settings::{
-    effective_mcp_server_names, effective_skill_names, load_settings,
-};
 
 pub(super) const DJINN_CHAT_SYSTEM_PROMPT: &str =
     include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 
-fn apply_chat_skills(
+async fn apply_chat_skills(
     base_message: Message,
     project_path: Option<&std::path::Path>,
+    db: &Database,
 ) -> (Message, ResolvedChatConfig) {
     let Some(project_path) = project_path else {
         return (base_message, ResolvedChatConfig::default());
     };
 
-    let settings = load_settings(project_path).unwrap_or_default();
-    let effective_skills = effective_skill_names(&settings, &[]);
-    let effective_mcp_servers = effective_mcp_server_names(&settings, "chat", None);
+    let env_cfg = environment_config_for_path(db, project_path).await;
+    let effective_skills = effective_skill_names(&env_cfg.global_skills, &[]);
+    let effective_mcp_servers =
+        effective_mcp_server_names(&env_cfg.agent_mcp_defaults, "chat", None);
     let resolved_skills = djinn_agent::skills::load_skills(project_path, &effective_skills);
 
     let text = djinn_agent::prompts::apply_skills(&base_message.text_content(), &resolved_skills);
@@ -49,10 +51,10 @@ struct ResolvedChatConfig {
 }
 
 #[cfg(test)]
-fn chat_effective_config(project_path: &std::path::Path) -> ResolvedChatConfig {
-    let settings = load_settings(project_path).unwrap_or_default();
+async fn chat_effective_config(project_path: &std::path::Path, db: &Database) -> ResolvedChatConfig {
+    let env_cfg = environment_config_for_path(db, project_path).await;
     ResolvedChatConfig {
-        mcp_servers: effective_mcp_server_names(&settings, "chat", None),
+        mcp_servers: effective_mcp_server_names(&env_cfg.agent_mcp_defaults, "chat", None),
     }
 }
 

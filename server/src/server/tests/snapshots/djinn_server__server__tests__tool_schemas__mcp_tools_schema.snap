@@ -4835,43 +4835,6 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "worktree_path": {
-          "description": "Absolute path to the worktree containing .djinn/settings.json",
-          "type": "string"
-        }
-      },
-      "required": [
-        "worktree_path"
-      ],
-      "title": "ProjectSettingsValidateParams",
-      "type": "object"
-    },
-    "name": "project_settings_validate",
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "errors": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "valid": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "valid",
-        "errors"
-      ],
-      "title": "ProjectSettingsValidateResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
         "auto_breakdown": {
           "description": "When creating the epic, set `auto_breakdown` to this value.\nDefaults to `true` so the normal breakdown Planner fires.",
           "nullable": true,

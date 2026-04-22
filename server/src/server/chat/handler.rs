@@ -172,7 +172,8 @@ pub(super) async fn completions_handler_impl(
         req.system.as_deref(),
         &req.model,
     );
-    let (system_message, chat_config) = apply_chat_skills(system_message, project_path.as_deref());
+    let (system_message, chat_config) =
+        apply_chat_skills(system_message, project_path.as_deref(), state.db()).await;
     conversation.push(system_message);
 
     for m in req.messages {

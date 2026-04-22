@@ -185,10 +185,8 @@ function ProjectsReplica({
                       />
                     </div>
                     <p className="border-t border-border pt-3 text-xs text-muted-foreground">
-                      Setup and verification commands are configured in{" "}
-                      <code className="rounded bg-muted px-1">
-                        .djinn/settings.json
-                      </code>
+                      Setup and verification commands are configured via the project's{" "}
+                      <code className="rounded bg-muted px-1">environment config</code>
                     </p>
                   </div>
                 )}

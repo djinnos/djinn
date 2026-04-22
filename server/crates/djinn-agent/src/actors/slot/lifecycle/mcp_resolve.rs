@@ -1,14 +1,14 @@
 //! Per-session MCP server + skills resolution for the task lifecycle.
 //!
 //! This is a pure code-motion extraction from `run_task_lifecycle` (task #14
-//! preparatory work). It loads the MCP/skills fields of
-//! `.djinn/settings.json` (verification config moved to Dolt in P8 — see
-//! `crate::verification::environment`), resolves the effective MCP servers
-//! and skills (role-level list merged with project defaults), connects to
-//! the resolved MCP servers (best-effort; unreachable servers are logged and
-//! skipped), and loads skill markdown files from the worktree.
+//! preparatory work). It reads the MCP default + global-skill fields of
+//! `environment_config` from Dolt (verification config already moved there —
+//! see `crate::verification::environment`), resolves the effective MCP
+//! servers and skills (role-level list merged with project defaults),
+//! connects to the resolved MCP servers (best-effort; unreachable servers are
+//! logged and skipped), and loads skill markdown files from the worktree.
 //!
-//! No failure modes here propagate errors: missing settings file, unknown
+//! No failure modes here propagate errors: missing environment config, unknown
 //! server names, unreachable endpoints, and missing skill files are all
 //! non-fatal and emit a `tracing::warn!` on the existing log path. There is
 //! therefore no error type — the helper always returns the populated struct.
@@ -19,9 +19,8 @@ use crate::context::AgentContext;
 use crate::mcp_client::McpToolRegistry;
 use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
-use crate::verification::settings::{
-    effective_mcp_server_names, effective_skill_names, load_settings,
-};
+use crate::verification::environment::environment_config_for_path;
+use crate::verification::settings::{effective_mcp_server_names, effective_skill_names};
 
 /// Resolved MCP + skills bundle for the upcoming session.
 ///
@@ -42,20 +41,19 @@ pub(crate) struct McpAndSkills {
     pub resolved_skills: Vec<ResolvedSkill>,
 }
 
-/// Load project settings, resolve the effective MCP server + skill lists for
-/// the current role, connect to the resolved MCP servers, and load the skill
-/// markdown files.
+/// Fetch project environment config, resolve the effective MCP server + skill
+/// lists for the current role, connect to the resolved MCP servers, and load
+/// the skill markdown files.
 ///
-/// Mirrors the byte-for-byte behavior of the former inline block in
-/// `run_task_lifecycle`:
-///   - `.djinn/settings.json` parse failure is logged and defaulted (no
-///     error propagation),
-///   - empty `effective_mcp_servers` short-circuits both the registry load
+/// Behaviour:
+///   - Fetching the `environment_config` from Dolt is best-effort; any
+///     failure (missing row, parse error, pre-reseed column) is logged on the
+///     call path and defaulted to an empty config.
+///   - Empty `effective_mcp_servers` short-circuits both the registry load
 ///     and `connect_and_discover` so default-role sessions don't touch the
-///     MCP machinery at all,
-///   - the `mcp_registry_override` test seam bypasses `connect_and_discover`
-///     exactly as before,
-///   - the two `tracing::info!` "resolved role MCP servers" / "resolved role
+///     MCP machinery at all.
+///   - The `mcp_registry_override` test seam bypasses `connect_and_discover`.
+///   - The two `tracing::info!` "resolved role MCP servers" / "resolved role
 ///     skills" log lines are preserved.
 pub(crate) async fn resolve_mcp_and_skills(
     worktree_path: &Path,
@@ -66,21 +64,20 @@ pub(crate) async fn resolve_mcp_and_skills(
     #[cfg(test)] mcp_registry_override: Option<McpToolRegistry>,
     app_state: &AgentContext,
 ) -> McpAndSkills {
-    let settings = load_settings(worktree_path).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "failed to load project settings, using defaults");
-        Default::default()
-    });
+    let env_cfg = environment_config_for_path(&app_state.db, worktree_path).await;
 
-    let effective_mcp_servers =
-        effective_mcp_server_names(&settings, runtime_role.config().name, role_mcp_servers);
-    let effective_skills = effective_skill_names(&settings, role_skills);
+    let effective_mcp_servers = effective_mcp_server_names(
+        &env_cfg.agent_mcp_defaults,
+        runtime_role.config().name,
+        role_mcp_servers,
+    );
+    let effective_skills = effective_skill_names(&env_cfg.global_skills, role_skills);
 
     // ── Resolve role-level MCP servers ────────────────────────────────────────
-    // Load the project MCP server registry from standard discovery files. Legacy
-    // `.djinn/settings.json` entries are migrated into root `mcp.json` during
-    // registry load, then resolution proceeds from the discovered registry only.
-    // Unknown names are logged as warnings and skipped — they never block the
-    // session from starting.
+    // Load the project MCP server registry from standard discovery files
+    // (`mcp.json`, `.cursor/mcp.json`, `.opencode/mcp.json`). Unknown names
+    // are logged as warnings and skipped — they never block the session from
+    // starting.
     //
     // Default roles have empty mcp_servers, so this block is a no-op for them.
     let resolved_mcp_servers = if !effective_mcp_servers.is_empty() {

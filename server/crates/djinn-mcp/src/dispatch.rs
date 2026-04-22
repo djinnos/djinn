@@ -25,7 +25,7 @@ use crate::tools::project_tools::{
     GetProjectDevcontainerStatusParams, GetProjectStackParams, GithubListReposParams,
     ProjectAddFromGithubParams, ProjectBranchesParams, ProjectConfigGetParams,
     ProjectConfigSetParams, ProjectEnvironmentConfigGetParams, ProjectEnvironmentConfigSetParams,
-    ProjectRemoveParams, ProjectSettingsValidateParams, RetriggerImageBuildParams,
+    ProjectRemoveParams, RetriggerImageBuildParams,
 };
 use crate::tools::proposal_tools::{
     ProposeAdrAcceptParams, ProposeAdrListParams, ProposeAdrRejectParams, ProposeAdrShowParams,
@@ -210,13 +210,6 @@ impl DjinnMcpServer {
                     name, args,
                 )?))
                 .await,
-            ),
-            "project_settings_validate" => map_json(
-                name,
-                self.project_settings_validate(Parameters(decode_args::<
-                    ProjectSettingsValidateParams,
-                >(name, args)?))
-                    .await,
             ),
             "get_project_stack" => map_json(
                 name,

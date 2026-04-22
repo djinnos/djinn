@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-/// Configuration for a single named MCP server, as discovered from `mcp.json`-style files
-/// or migrated from legacy `.djinn/settings.json` entries.
+/// Configuration for a single named MCP server, as discovered from
+/// `mcp.json`-style files at the project root.
 ///
 /// Either `url` (for HTTP/SSE transports) or `command` (for stdio transports) should be
 /// provided. Both may be present; `url` takes precedence.
@@ -26,28 +25,6 @@ pub struct McpServerConfig {
     pub headers: HashMap<String, String>,
 }
 
-/// The non-verification subset of `.djinn/settings.json` that the agent still
-/// reads from the worktree.
-///
-/// The verification-related fields — `setup`, `verification_rules`,
-/// `verification_timeout_secs` — were moved to Dolt's
-/// `projects.environment_config.verification` column as part of the P8 cut-
-/// over. What remains here is:
-///
-/// * `agent_mcp_defaults` — per-role MCP server defaults.
-/// * `global_skills` — skills injected into every agent prompt.
-///
-/// Both are still file-based pending a follow-up migration; the
-/// environment-config schema does not model them yet. When that lands, this
-/// whole struct goes away.
-#[derive(Debug, Deserialize, Default)]
-pub struct DjinnSettings {
-    #[serde(default)]
-    pub agent_mcp_defaults: HashMap<String, Vec<String>>,
-    #[serde(default)]
-    pub global_skills: Vec<String>,
-}
-
 fn dedupe_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut deduped = Vec::new();
@@ -59,77 +36,55 @@ fn dedupe_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
     deduped
 }
 
-pub fn default_mcp_servers_for_agent(settings: &DjinnSettings, agent_name: &str) -> Vec<String> {
-    settings
-        .agent_mcp_defaults
+/// Resolve the per-agent MCP server default list from the project's
+/// `environment_config.agent_mcp_defaults` map. A named entry for the agent
+/// wins; otherwise the `"*"` wildcard (if any) is returned; otherwise empty.
+pub fn default_mcp_servers_for_agent(
+    agent_mcp_defaults: &BTreeMap<String, Vec<String>>,
+    agent_name: &str,
+) -> Vec<String> {
+    agent_mcp_defaults
         .get(agent_name)
-        .or_else(|| settings.agent_mcp_defaults.get("*"))
+        .or_else(|| agent_mcp_defaults.get("*"))
         .cloned()
         .unwrap_or_default()
 }
 
+/// Compute the effective MCP server name list for a role:
+/// * If the role explicitly assigns servers, that list wins (empty opts out).
+/// * Otherwise, fall back to the project's `agent_mcp_defaults` entry for the
+///   agent name (or `"*"`).
 pub fn effective_mcp_server_names(
-    settings: &DjinnSettings,
+    agent_mcp_defaults: &BTreeMap<String, Vec<String>>,
     agent_name: &str,
     role_mcp_servers: Option<&[String]>,
 ) -> Vec<String> {
     match role_mcp_servers {
         Some(names) => dedupe_names(names.iter().cloned()),
-        None => dedupe_names(default_mcp_servers_for_agent(settings, agent_name)),
+        None => dedupe_names(default_mcp_servers_for_agent(agent_mcp_defaults, agent_name)),
     }
 }
 
-pub fn effective_skill_names(settings: &DjinnSettings, role_skills: &[String]) -> Vec<String> {
+/// Compute the effective skill name list for a role: project-level
+/// `global_skills` followed by role-specific skills, de-duplicated.
+pub fn effective_skill_names(global_skills: &[String], role_skills: &[String]) -> Vec<String> {
     dedupe_names(
-        settings
-            .global_skills
+        global_skills
             .iter()
             .cloned()
             .chain(role_skills.iter().cloned()),
     )
 }
 
-/// Load the non-verification project settings from `.djinn/settings.json` in
-/// the worktree.
+/// Load the MCP server registry from standard discovery files in the
+/// worktree.
 ///
-/// Returns a default (empty) `DjinnSettings` when the file is absent. Errors
-/// on malformed JSON. Verification-specific fields (setup commands, glob
-/// rules, pipeline timeout) are *not* parsed here — those live in Dolt's
-/// `environment_config.verification` column and are fetched via
-/// [`crate::verification::environment`].
-pub fn load_settings(worktree_path: &Path) -> Result<DjinnSettings, String> {
-    let settings_path = worktree_path.join(".djinn/settings.json");
-
-    match std::fs::read_to_string(&settings_path) {
-        Ok(content) => match serde_json::from_str::<DjinnSettings>(&content) {
-            Ok(settings) => {
-                tracing::info!(path = %settings_path.display(), "Loaded .djinn/settings.json");
-                Ok(settings)
-            }
-            Err(e) => Err(format!(
-                "invalid .djinn/settings.json at {}: {e}",
-                settings_path.display()
-            )),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(path = %settings_path.display(), "No .djinn/settings.json found; using defaults");
-            Ok(DjinnSettings::default())
-        }
-        Err(e) => Err(format!(
-            "failed to read .djinn/settings.json at {}: {e}",
-            settings_path.display()
-        )),
-    }
-}
-
-/// Load the MCP server registry from standard discovery files in the worktree.
-///
-/// Discovery order is `mcp.json`, `.cursor/mcp.json`, `.opencode/mcp.json`, with
-/// first-found-wins precedence by server name. Invalid files are logged and skipped.
-/// Legacy `.djinn/settings.json` `mcp_servers` entries are migrated into root `mcp.json`
-/// during registry load, but session resolution no longer reads the settings-based registry
-/// directly.
-pub fn load_mcp_server_registry(worktree_path: &Path) -> HashMap<String, McpServerConfig> {
+/// Discovery order is `mcp.json`, `.cursor/mcp.json`, `.opencode/mcp.json`,
+/// with first-found-wins precedence by server name. Invalid files are logged
+/// and skipped.
+pub fn load_mcp_server_registry(
+    worktree_path: &std::path::Path,
+) -> HashMap<String, McpServerConfig> {
     crate::verification::mcp_json::load_mcp_server_registry(worktree_path)
 }
 
@@ -196,118 +151,53 @@ pub fn verification_cache_key(commit_sha: &str, scoped_commands: &[String]) -> S
 mod tests {
     use super::*;
 
-    fn tempdir_in_tmp() -> tempfile::TempDir {
-        crate::test_helpers::test_tempdir("djinn-settings-")
-    }
-
-    fn write_settings(dir: &tempfile::TempDir, content: &str) {
-        let djinn_dir = dir.path().join(".djinn");
-        std::fs::create_dir_all(&djinn_dir).unwrap();
-        std::fs::write(djinn_dir.join("settings.json"), content).unwrap();
-    }
-
-    #[test]
-    fn load_settings_parses_agent_defaults_and_global_skills() {
-        let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{
-                "agent_mcp_defaults": {
-                    "*": ["web", "filesystem"],
-                    "worker": ["worker-only"],
-                    "chat": ["chat-web"]
-                },
-                "global_skills": ["git", "rust"]
-            }"#,
-        );
-
-        let settings = load_settings(dir.path()).expect("settings load");
-
-        assert_eq!(settings.agent_mcp_defaults["*"], vec!["web", "filesystem"]);
-        assert_eq!(settings.agent_mcp_defaults["worker"], vec!["worker-only"]);
-        assert_eq!(settings.agent_mcp_defaults["chat"], vec!["chat-web"]);
-        assert_eq!(settings.global_skills, vec!["git", "rust"]);
-    }
-
-    #[test]
-    fn load_settings_ignores_unknown_fields_post_cutover() {
-        // Verification-related fields from the pre-cut-over schema are
-        // silently ignored (serde(deny_unknown_fields) is *not* set, so they
-        // deserialize as a no-op). This keeps old settings.json files from
-        // breaking the boot path while the verification config is owned by
-        // Dolt's environment_config.verification block.
-        let dir = tempdir_in_tmp();
-        write_settings(
-            &dir,
-            r#"{
-                "setup": [{"name": "legacy", "command": "true", "timeout_secs": 1}],
-                "verification_rules": [{"match": "**", "commands": ["true"]}],
-                "verification_timeout_secs": 999,
-                "global_skills": ["git"]
-            }"#,
-        );
-
-        let settings = load_settings(dir.path()).expect("settings load");
-        assert_eq!(settings.global_skills, vec!["git"]);
-    }
-
     #[test]
     fn effective_mcp_server_names_prefers_named_default_then_wildcard() {
-        let settings = DjinnSettings {
-            agent_mcp_defaults: HashMap::from([
-                ("*".to_string(), vec!["web".to_string()]),
-                (
-                    "worker".to_string(),
-                    vec!["worker-web".to_string(), "worker-web".to_string()],
-                ),
-                ("chat".to_string(), vec!["chat-web".to_string()]),
-            ]),
-            ..Default::default()
-        };
+        let defaults: BTreeMap<String, Vec<String>> = BTreeMap::from([
+            ("*".to_string(), vec!["web".to_string()]),
+            (
+                "worker".to_string(),
+                vec!["worker-web".to_string(), "worker-web".to_string()],
+            ),
+            ("chat".to_string(), vec!["chat-web".to_string()]),
+        ]);
 
         assert_eq!(
-            effective_mcp_server_names(&settings, "worker", None),
+            effective_mcp_server_names(&defaults, "worker", None),
             vec!["worker-web"]
         );
         assert_eq!(
-            effective_mcp_server_names(&settings, "reviewer", None),
+            effective_mcp_server_names(&defaults, "reviewer", None),
             vec!["web"]
         );
         assert_eq!(
-            effective_mcp_server_names(&settings, "chat", None),
+            effective_mcp_server_names(&defaults, "chat", None),
             vec!["chat-web"]
         );
     }
 
     #[test]
     fn effective_mcp_server_names_role_assignment_overrides_defaults_and_empty_opts_out() {
-        let settings = DjinnSettings {
-            agent_mcp_defaults: HashMap::from([(
-                "*".to_string(),
-                vec!["web".to_string(), "filesystem".to_string()],
-            )]),
-            ..Default::default()
-        };
+        let defaults: BTreeMap<String, Vec<String>> = BTreeMap::from([(
+            "*".to_string(),
+            vec!["web".to_string(), "filesystem".to_string()],
+        )]);
 
         let assigned = vec!["special".to_string(), "special".to_string()];
         let opt_out: Vec<String> = Vec::new();
 
         assert_eq!(
-            effective_mcp_server_names(&settings, "worker", Some(&assigned)),
+            effective_mcp_server_names(&defaults, "worker", Some(&assigned)),
             vec!["special"]
         );
-        assert!(effective_mcp_server_names(&settings, "worker", Some(&opt_out)).is_empty());
+        assert!(effective_mcp_server_names(&defaults, "worker", Some(&opt_out)).is_empty());
     }
 
     #[test]
     fn effective_skill_names_adds_global_skills_and_dedupes() {
-        let settings = DjinnSettings {
-            global_skills: vec!["git".to_string(), "rust".to_string(), "git".to_string()],
-            ..Default::default()
-        };
-
+        let globals = vec!["git".to_string(), "rust".to_string(), "git".to_string()];
         let effective =
-            effective_skill_names(&settings, &["rust".to_string(), "testing".to_string()]);
+            effective_skill_names(&globals, &["rust".to_string(), "testing".to_string()]);
 
         assert_eq!(effective, vec!["git", "rust", "testing"]);
     }

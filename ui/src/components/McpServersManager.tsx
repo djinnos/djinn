@@ -320,8 +320,8 @@ function DefaultAssignments({
         <div>
           <h3 className="text-xl font-bold">Default Assignments</h3>
           <p className="text-sm text-muted-foreground">
-            Which MCP servers each agent type gets by default (stored in .djinn/settings.json).
-            Specialist role assignments override these.
+            Which MCP servers each agent type gets by default (stored in the project's
+            environment config). Specialist role assignments override these.
           </p>
         </div>
         {dirty && (

@@ -57,10 +57,16 @@ async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Opt
     }
 }
 
-/// Fetch + deserialize the `environment_config.verification` block for a
-/// project id. Returns an empty [`Verification`] for every failure / missing
-/// path described in the module-level docs.
-pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Verification {
+/// Fetch + deserialize the full `environment_config` blob for a project id.
+///
+/// Returns [`EnvironmentConfig::empty`] for every failure / missing path
+/// described in the module-level docs. This is the single entry point used by
+/// verification, MCP default resolution, and skills; callers extract whichever
+/// sub-field they need from the returned config.
+pub async fn environment_config_for_project_id(
+    db: &Database,
+    project_id: &str,
+) -> EnvironmentConfig {
     let raw = match ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
         .get_environment_config(project_id)
         .await
@@ -69,17 +75,17 @@ pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Ver
         Ok(None) => {
             tracing::warn!(
                 project_id = %project_id,
-                "verification::environment: no projects row; using empty verification config"
+                "verification::environment: no projects row; using empty environment config"
             );
-            return Verification::default();
+            return EnvironmentConfig::empty();
         }
         Err(e) => {
             tracing::warn!(
                 project_id = %project_id,
                 error = %e,
-                "verification::environment: failed to fetch environment_config; using empty verification config"
+                "verification::environment: failed to fetch environment_config; using empty environment config"
             );
-            return Verification::default();
+            return EnvironmentConfig::empty();
         }
     };
 
@@ -89,20 +95,40 @@ pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Ver
             // hook hasn't run yet (or the row pre-dates the hook).
             tracing::debug!(
                 project_id = %project_id,
-                "verification::environment: environment_config schema_version=0 (pre-reseed); using empty verification config"
+                "verification::environment: environment_config schema_version=0 (pre-reseed); using empty environment config"
             );
-            Verification::default()
+            EnvironmentConfig::empty()
         }
-        Ok(cfg) => cfg.verification,
+        Ok(cfg) => cfg,
         Err(e) => {
             tracing::warn!(
                 project_id = %project_id,
                 error = %e,
-                "verification::environment: failed to deserialize environment_config; using empty verification config"
+                "verification::environment: failed to deserialize environment_config; using empty environment config"
             );
-            Verification::default()
+            EnvironmentConfig::empty()
         }
     }
+}
+
+/// Fetch + deserialize the full `environment_config` blob for a workspace
+/// path. Convenience wrapper over [`environment_config_for_project_id`] for
+/// callers that only have a path (e.g. the chat endpoint + in-worktree session
+/// lifecycle), not a project id.
+pub async fn environment_config_for_path(db: &Database, worktree_path: &Path) -> EnvironmentConfig {
+    match resolve_project_id_for_path(db, worktree_path).await {
+        Some(id) => environment_config_for_project_id(db, &id).await,
+        None => EnvironmentConfig::empty(),
+    }
+}
+
+/// Fetch + deserialize the `environment_config.verification` block for a
+/// project id. Thin wrapper over [`environment_config_for_project_id`]; kept
+/// for call-site readability on the verification pipeline.
+pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Verification {
+    environment_config_for_project_id(db, project_id)
+        .await
+        .verification
 }
 
 /// Fetch + deserialize the `environment_config.verification` block for a
@@ -110,10 +136,7 @@ pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Ver
 /// for the verification pipeline which only has a path to the ephemeral
 /// mirror clone, not a project id.
 pub async fn verification_for_path(db: &Database, worktree_path: &Path) -> Verification {
-    match resolve_project_id_for_path(db, worktree_path).await {
-        Some(id) => verification_for_project_id(db, &id).await,
-        None => Verification::default(),
-    }
+    environment_config_for_path(db, worktree_path).await.verification
 }
 
 /// Convert a [`djinn_stack::environment::HookCommand`] list (the canonical

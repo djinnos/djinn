@@ -272,37 +272,6 @@ pub struct ProjectInfo {
     pub path: String,
 }
 
-// ── Command structs ──────────────────────────────────────────────────────────
-
-/// A single command entry in a project's setup or verification list.
-#[derive(Deserialize, Serialize, JsonSchema, Clone)]
-pub struct ProjectCommandSpec {
-    /// Human-readable label for this command.
-    pub name: String,
-    /// Shell command executed via `sh -c`.
-    pub command: String,
-    /// Optional timeout in seconds (default: 300).
-    pub timeout_secs: Option<i64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ProjectSettingsValidateParams {
-    /// Absolute path to the worktree containing .djinn/settings.json
-    pub worktree_path: String,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub struct ProjectSettingsValidateResponse {
-    pub valid: bool,
-    pub errors: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct StrictDjinnSettings {
-    #[serde(default, rename = "setup")]
-    _setup: Vec<ProjectCommandSpec>,
-}
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Sort local branches alphabetically and hoist `current` (if any) to the front.
@@ -1258,59 +1227,6 @@ impl DjinnMcpServer {
         })
     }
 
-    #[tool(description = "Validate .djinn/settings.json syntax and schema in a worktree.")]
-    pub async fn project_settings_validate(
-        &self,
-        Parameters(input): Parameters<ProjectSettingsValidateParams>,
-    ) -> Json<ProjectSettingsValidateResponse> {
-        let settings_path = Path::new(&input.worktree_path).join(".djinn/settings.json");
-        let mut errors = Vec::new();
-
-        let content = match std::fs::read_to_string(&settings_path) {
-            Ok(c) => c,
-            Err(e) => {
-                errors.push(format!("failed to read {}: {e}", settings_path.display()));
-                return Json(ProjectSettingsValidateResponse {
-                    valid: false,
-                    errors,
-                });
-            }
-        };
-
-        let value: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                errors.push(format!("invalid JSON syntax: {e}"));
-                return Json(ProjectSettingsValidateResponse {
-                    valid: false,
-                    errors,
-                });
-            }
-        };
-
-        if let serde_json::Value::Object(map) = &value {
-            for key in map.keys() {
-                if key != "setup" && key != "verification" {
-                    errors.push(format!(
-                        "warning: unknown top-level key '{key}' (allowed: setup, verification)"
-                    ));
-                }
-            }
-        }
-
-        if let Err(e) = serde_json::from_value::<StrictDjinnSettings>(value) {
-            errors.push(format!("schema validation failed: {e}"));
-            return Json(ProjectSettingsValidateResponse {
-                valid: false,
-                errors,
-            });
-        }
-
-        Json(ProjectSettingsValidateResponse {
-            valid: true,
-            errors,
-        })
-    }
 }
 
 #[cfg(test)]

@@ -115,6 +115,19 @@ pub struct EnvironmentConfig {
     pub lifecycle: LifecycleHooks,
     #[serde(default)]
     pub verification: Verification,
+    /// Per-agent-role MCP server defaults. Moved here from the pre-cut-over
+    /// `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
+    /// name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
+    /// any role with no explicit entry. The value is the list of MCP server
+    /// names (from root `mcp.json`) that sessions for that role should
+    /// connect to by default. Specialist role assignments override these.
+    #[serde(default)]
+    pub agent_mcp_defaults: BTreeMap<String, Vec<String>>,
+    /// Skills injected into every agent prompt regardless of role. Moved here
+    /// from the pre-cut-over `.djinn/settings.json`'s `global_skills` field.
+    /// Each entry is a skill file stem (resolved against `.djinn/skills/`).
+    #[serde(default)]
+    pub global_skills: Vec<String>,
 }
 
 impl EnvironmentConfig {
@@ -131,6 +144,8 @@ impl EnvironmentConfig {
             env: BTreeMap::new(),
             lifecycle: LifecycleHooks::default(),
             verification: Verification::default(),
+            agent_mcp_defaults: BTreeMap::new(),
+            global_skills: Vec::new(),
         }
     }
 
@@ -240,8 +255,7 @@ impl EnvironmentConfig {
         cfg
     }
 
-    /// Validate the config. Called from the MCP `_set` tool and from
-    /// `project_settings_validate` before any Dolt write.
+    /// Validate the config. Called from the MCP `_set` tool before any Dolt write.
     pub fn validate(&self) -> EnvResult<()> {
         if self.schema_version == 0 {
             return Err(EnvironmentConfigError::EmptyValue {
