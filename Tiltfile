@@ -99,6 +99,35 @@ local_resource(
     labels=['build'],
 )
 
+# --- djinn UI (Vite production build, embedded into djinn-server) -------
+# djinn-server embeds `ui/dist/` via rust-embed at compile time, so this
+# must run before `djinn-binaries` or cargo will embed a stale (or
+# placeholder) UI. Re-fires on any UI source change, which cascades into
+# a server rebuild via resource_deps below.
+#
+# For fast UI iteration the `djinn-ui` resource further down keeps the
+# Vite dev server alive at :1420 with HMR — embed at :3000/ only refreshes
+# when this resource fires (i.e. via `pnpm build`).
+local_resource(
+    'djinn-ui-dist',
+    cmd=' && '.join([
+        'cd ui',
+        '[ -d node_modules ] || pnpm install --frozen-lockfile',
+        'pnpm build',
+    ]),
+    deps=[
+        'ui/src',
+        'ui/index.html',
+        'ui/package.json',
+        'ui/pnpm-lock.yaml',
+        'ui/vite.config.ts',
+        'ui/tsconfig.json',
+        'ui/tsconfig.app.json',
+    ],
+    ignore=['ui/dist', 'ui/node_modules', 'ui/storybook-static'],
+    labels=['build'],
+)
+
 # --- djinn binaries ------------------------------------------------------
 # Host-side cargo build that produces BOTH djinn-server and djinn-agent-
 # worker in one pass. They share six workspace crates (djinn-core, djinn-
@@ -116,7 +145,7 @@ local_resource(
 local_resource(
     'djinn-binaries',
     cmd='bash scripts/tilt/build-binaries.sh',
-    deps=['server/src', 'server/crates', 'server/Cargo.toml', 'server/Cargo.lock'],
+    deps=['server/src', 'server/crates', 'server/Cargo.toml', 'server/Cargo.lock', 'ui/dist'],
     # Exclude every build artefact dir so `cargo test` on any crate (which
     # writes target/debug/** and target/test-tmp/**) doesn't re-trigger
     # the image build. The workspace has a root `target/` plus per-crate
@@ -126,6 +155,7 @@ local_resource(
     # it is fine — but the `.../cache` suffix in the old pattern matched
     # nothing.
     ignore=['server/**/target', 'server/**/test-tmp'],
+    resource_deps=['djinn-ui-dist'],
     labels=['build'],
 )
 
@@ -284,14 +314,21 @@ k8s_resource(
 )
 
 # --- Vite dev server for the React UI -----------------------------------
-# Runs on the host (not in-cluster) so HMR works over localhost and pnpm
-# caches persist. values.local.yaml's env.webUrl already points djinn-
-# server's OAuth redirect at http://localhost:1420, so everything just
-# works without Ingress. Installs deps on first boot if node_modules is
-# missing; cheap no-op otherwise.
+# Host-side (not in-cluster) so HMR works over localhost and pnpm caches
+# persist. values.local.yaml's env.webUrl already points djinn-server's
+# OAuth redirect at http://localhost:1420, so everything just works
+# without Ingress. Node_modules install is handled upstream by the
+# `djinn-ui-dist` resource.
+#
+# Two URLs end up serving the same UI during dev:
+#   http://localhost:1420  — Vite dev server, HMR, rebuilds on save
+#   http://localhost:3000  — djinn-server with the embedded build, only
+#                            refreshed when `djinn-ui-dist` fires
+# Day-to-day UI work should use :1420. :3000 is how the UI ships to
+# production (single image, same-origin) and is worth smoke-testing
+# before committing.
 local_resource(
     'djinn-ui',
-    cmd='cd ui && [ -d node_modules ] || pnpm install --frozen-lockfile',
     serve_cmd='cd ui && pnpm dev --host',
     serve_env={'VITE_DJINN_SERVER_URL': 'http://localhost:3000'},
     readiness_probe=probe(
@@ -299,7 +336,7 @@ local_resource(
         http_get=http_get_action(port=1420, path='/'),
     ),
     links=['http://localhost:1420'],
-    resource_deps=['djinn-server'],
+    resource_deps=['djinn-server', 'djinn-ui-dist'],
     labels=['djinn'],
 )
 

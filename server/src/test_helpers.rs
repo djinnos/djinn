@@ -61,7 +61,7 @@ pub async fn create_test_app_with_project() -> (axum::Router, String, tempfile::
 pub fn create_test_app_with_db(db: Database) -> axum::Router {
     let cancel = CancellationToken::new();
     let state = AppState::new(db, cancel);
-    server::router(state)
+    server::router(state, false)
 }
 
 /// Create an `AppState` backed by an in-memory database (for unit tests that

@@ -34,6 +34,11 @@ struct Cli {
     /// Flavor of the MySQL-compatible backend: mysql or dolt.
     #[arg(long, env = "DJINN_MYSQL_FLAVOR")]
     mysql_flavor: Option<String>,
+
+    /// Serve the embedded Vite-built React UI as the HTTP fallback.
+    /// Disable for headless API-only deployments.
+    #[arg(long, env = "DJINN_UI_ENABLED", default_value_t = true, action = clap::ArgAction::Set)]
+    ui_enabled: bool,
 }
 
 fn main() {
@@ -144,9 +149,9 @@ async fn async_main() {
 
     // Keep a handle on AppState so we can tear the TCP RPC listener down
     // gracefully after the HTTP server's shutdown future resolves.
-    // `server::router(state)` moves the state into the router.
+    // `server::router(...)` moves the state into the router.
     let state_for_shutdown = state.clone();
-    let router = server::router(state);
+    let router = server::router(state, cli.ui_enabled);
 
     server::run(router, cli.port, cancel).await;
 

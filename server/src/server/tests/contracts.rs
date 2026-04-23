@@ -365,7 +365,7 @@ async fn mcp_contract_board_health_detects_stale_in_progress_task() {
     let db = test_helpers::create_test_db();
     let cancel = CancellationToken::new();
     let state = AppState::new(db.clone(), cancel);
-    let app = server::router(state);
+    let app = server::router(state, false);
     let session_id = test_helpers::initialize_mcp_session(&app).await;
 
     let _ = test_helpers::mcp_call_tool(

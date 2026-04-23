@@ -1,0 +1,285 @@
+name: Release
+
+# Builds + publishes every OCI image djinn ships to ghcr.io/djinnos.
+# Replaces the split release-server / release-desktop / image-builder-
+# publish workflows. Four images land in the registry per run:
+#
+#   djinn-server              — control plane, API + embedded UI on :3000
+#   djinn-image-builder       — BuildKit wrapper used by image-controller
+#   djinn-agent-runtime-base  — heavy base: rustup, sccache, mold, LSPs
+#   djinn-agent-runtime       — thin top: runtime-base + djinn-agent-worker
+#
+# Triggers:
+#   * push to main              — refreshes `:latest` and `:sha-<short>`.
+#   * tag push `v*`             — publishes SemVer tags (`:1.2.3`, `:1.2`, `:1`).
+#   * workflow_dispatch         — manual rebuild with optional explicit tag.
+#
+# Binaries (djinn-server, djinn-agent-worker) build in dedicated jobs so
+# they can share Swatinem/rust-cache; the image jobs COPY the pre-built
+# artifact. runtime FROMs runtime-base at the current commit's sha tag
+# so the two stay coherent.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra tag to publish (e.g. v1.2.3). `latest` and `sha-<short>` are always pushed."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: djinnos
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTC_WRAPPER: ""
+
+jobs:
+  # ── Image-only jobs (no rust compile) ─────────────────────────────────
+  image-builder:
+    name: djinn-image-builder
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/djinn-image-builder
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+          flavor: latest=auto
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/docker/djinn-image-builder.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=djinn-image-builder
+          cache-to: type=gha,scope=djinn-image-builder,mode=max
+
+  runtime-base:
+    name: djinn-agent-runtime-base
+    runs-on: ubuntu-24.04
+    outputs:
+      sha_tag: ${{ steps.sha.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: sha
+        run: echo "tag=sha-$(echo ${GITHUB_SHA} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/djinn-agent-runtime-base
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+          flavor: latest=auto
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/docker/djinn-agent-runtime-base.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Heavy image (LSP tarballs, rustup, apt). GHA cache amortises
+          # cold runs — a no-op Dockerfile edit finishes in ~30s vs. 8min.
+          cache-from: type=gha,scope=djinn-agent-runtime-base
+          cache-to: type=gha,scope=djinn-agent-runtime-base,mode=max
+
+  # ── Rust binary jobs (produce artifacts the image jobs COPY in) ───────
+  server-binary:
+    name: djinn-server binary (+ UI embed)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@v4
+
+      # UI first — rust-embed reads `ui/dist/` at compile time and bakes
+      # it into the server binary. Without this step the binary would
+      # embed only the `<p>UI not built.</p>` placeholder from build.rs.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Build UI
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - run: rustup toolchain install
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: release-server
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Cargo build
+        run: cargo build --release --locked --features qdrant -p djinn-server
+      - name: Stage + strip binary
+        run: |
+          mkdir -p ../stage
+          cp target/release/djinn-server ../stage/djinn-server
+          strip ../stage/djinn-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: djinn-server-bin
+          path: stage/djinn-server
+          retention-days: 1
+          if-no-files-found: error
+
+  worker-binary:
+    name: djinn-agent-worker binary
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: release-worker
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Cargo build
+        run: cargo build --release --locked -p djinn-agent-worker
+      - name: Stage + strip binary
+        run: |
+          mkdir -p ../stage
+          cp target/release/djinn-agent-worker ../stage/djinn-agent-worker
+          strip ../stage/djinn-agent-worker
+      - uses: actions/upload-artifact@v4
+        with:
+          name: djinn-agent-worker-bin
+          path: stage/djinn-agent-worker
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── Image jobs that consume a binary ──────────────────────────────────
+  server:
+    name: djinn-server
+    needs: server-binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: djinn-server-bin
+          path: .
+      - run: chmod +x djinn-server
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/djinn-server
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+          flavor: latest=auto
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/docker/djinn-server.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  runtime:
+    name: djinn-agent-runtime
+    # Needs the pre-built worker binary and the base image at the same
+    # commit's sha tag (FROM arg below) — without both, the runtime image
+    # would either be missing the binary or built on a stale base.
+    needs: [runtime-base, worker-binary]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: djinn-agent-worker-bin
+          path: .
+      - run: chmod +x djinn-agent-worker
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/djinn-agent-runtime
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+          flavor: latest=auto
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/docker/djinn-agent-runtime.Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.OWNER }}/djinn-agent-runtime-base:${{ needs.runtime-base.outputs.sha_tag }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

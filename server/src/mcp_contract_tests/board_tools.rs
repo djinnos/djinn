@@ -32,7 +32,7 @@ async fn board_reconcile_releases_stuck_in_progress_without_active_session() {
     let state =
         crate::server::AppState::new(db.clone(), tokio_util::sync::CancellationToken::new());
     state.initialize_agents().await;
-    let app = crate::server::router(state);
+    let app = crate::server::router(state, false);
     let session_id = initialize_mcp_session(&app).await;
 
     let response = mcp_call_tool(

@@ -78,7 +78,7 @@ async fn health_reports_memory_mount_runtime_status_details() {
             },
         )))
         .await;
-    let app = server::router(state);
+    let app = server::router(state, false);
 
     let req = axum::http::Request::builder()
         .uri("/health")
@@ -139,7 +139,7 @@ async fn health_reports_task_scoped_memory_mount_view() {
             },
         )))
         .await;
-    let app = server::router(state);
+    let app = server::router(state, false);
 
     let req = axum::http::Request::builder()
         .uri("/health")

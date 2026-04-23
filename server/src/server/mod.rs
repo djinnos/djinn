@@ -16,13 +16,19 @@ mod mcp_handler;
 mod org_sync;
 mod project_tools;
 mod state;
+mod static_ui;
 pub use auth::{AuthenticatedUser, authenticate};
 pub use org_sync::{SyncReport, start_org_member_sync, sync_once};
 pub use state::AppState;
 
 /// Build the application router.
-pub fn router(state: AppState) -> Router {
-    Router::new()
+///
+/// `serve_ui` controls whether the embedded Vite SPA is served as the
+/// router's fallback. Leave it on (the default) for a single-image
+/// deployment; turn it off (via `--ui-enabled=false` / `DJINN_UI_ENABLED=0`)
+/// for headless API-only deployments where the UI lives elsewhere.
+pub fn router(state: AppState, serve_ui: bool) -> Router {
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/events", get(sse::events_handler))
         .route("/db-info", get(sse::db_info_handler))
@@ -33,9 +39,11 @@ pub fn router(state: AppState) -> Router {
         .merge(github_install::router())
         .merge(crate::mirror_fetcher::router())
         .merge(org_sync::router())
-        .merge(project_tools::router())
-        .layer(cors_layer())
-        .with_state(state)
+        .merge(project_tools::router());
+    if serve_ui {
+        router = router.fallback(static_ui::serve_static);
+    }
+    router.layer(cors_layer()).with_state(state)
 }
 
 /// CORS layer that allows any origin but — crucially — **reflects** the
