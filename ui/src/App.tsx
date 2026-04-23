@@ -9,6 +9,7 @@ import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
 import { MemoryPage } from "@/pages/MemoryPage";
 import { PulsePage } from "@/pages/PulsePage";
+import { ProposalsPage } from "@/pages/ProposalsPage";
 import { RepositoriesPage } from "@/pages/RepositoriesPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
@@ -40,6 +41,7 @@ function MainLayout() {
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/memory" element={<MemoryPage />} />
             <Route path="/pulse" element={<PulsePage />} />
+            <Route path="/proposals" element={<ProposalsPage />} />
             <Route path="/metrics" element={<Navigate to="/agents" replace />} />
 
             {/* Task session (global) */}

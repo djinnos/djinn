@@ -12,6 +12,7 @@ import {
   Settings01Icon,
   WorkflowSquare06Icon,
   Brain01Icon,
+  Idea01Icon,
   Pulse01Icon,
   GithubIcon,
 } from '@hugeicons/core-free-icons';
@@ -20,13 +21,12 @@ import logoSvg from '@/assets/logo.svg';
 import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
 import { useDevcontainerWarnings } from '@/hooks/useDevcontainerWarnings';
 import { showToast } from '@/lib/toast';
 import {
+  allProjectsProposalListQueryOptions,
   markProposalDraftNotified,
-  pulseProposalListQueryOptions,
   shouldNotifyForProposalDraft,
 } from '@/lib/pulseProposals';
 
@@ -118,16 +118,10 @@ export function Sidebar() {
   const { activeSection, setActiveSection } = useSidebarStore();
   const navigate = useNavigate();
   const location = useLocation();
-  const projects = useProjects();
-  const selectedProjectId = useSelectedProjectId();
   const { navigateToView } = useProjectRoute();
   const user = useAuthUser();
-  const selectedProjectPath = projects.find((project) => project.id === selectedProjectId)?.path ?? '';
-  const pulseProposalsQuery = useQuery({
-    ...pulseProposalListQueryOptions(selectedProjectPath),
-    enabled: !!selectedProjectPath,
-  });
-  const pulseProposalCount = selectedProjectPath ? (pulseProposalsQuery.data?.length ?? 0) : 0;
+  const proposalsQuery = useQuery(allProjectsProposalListQueryOptions());
+  const proposalCount = proposalsQuery.data?.length ?? 0;
   const { count: devcontainerWarningCount } = useDevcontainerWarnings();
 
   // Sync active section from URL
@@ -142,6 +136,8 @@ export function Sidebar() {
       setActiveSection('memory');
     } else if (location.pathname.includes('/pulse')) {
       setActiveSection('pulse');
+    } else if (location.pathname.includes('/proposals')) {
+      setActiveSection('proposals');
     } else if (location.pathname.startsWith('/repositories')) {
       setActiveSection('repositories');
     } else if (location.pathname.startsWith('/settings')) {
@@ -152,17 +148,17 @@ export function Sidebar() {
   }, [location.pathname, setActiveSection]);
 
   useEffect(() => {
-    for (const proposal of pulseProposalsQuery.data ?? []) {
+    for (const proposal of proposalsQuery.data ?? []) {
       if (!shouldNotifyForProposalDraft(proposal, user)) continue;
 
       markProposalDraftNotified(proposal.id);
       showToast.info('Architect proposal draft is ready', {
         description: proposal.originating_spike_id
           ? `Spike ${proposal.originating_spike_id} produced "${proposal.title || proposal.id}".`
-          : `"${proposal.title || proposal.id}" is ready for review in Pulse.`,
+          : `"${proposal.title || proposal.id}" is ready for review.`,
       });
     }
-  }, [pulseProposalsQuery.data, user]);
+  }, [proposalsQuery.data, user]);
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r bg-sidebar">
@@ -201,9 +197,15 @@ export function Sidebar() {
         <NavItem
           icon={<HugeiconsIcon icon={Pulse01Icon} className="h-4 w-4" />}
           label="Pulse"
-          badgeCount={pulseProposalCount}
           isActive={activeSection === 'pulse'}
           onClick={() => navigateToView('pulse')}
+        />
+        <NavItem
+          icon={<HugeiconsIcon icon={Idea01Icon} className="h-4 w-4" />}
+          label="Proposals"
+          badgeCount={proposalCount}
+          isActive={activeSection === 'proposals'}
+          onClick={() => navigateToView('proposals')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={Robot01Icon} className="h-4 w-4" />}

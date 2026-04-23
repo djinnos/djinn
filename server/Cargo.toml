@@ -4,6 +4,7 @@ resolver = "2"
 
 [workspace.dependencies]
 workspace-hack = { version = "0.1.0", path = "crates/workspace-hack" }
+globset = "0.4"
 
 [package]
 name = "djinn-server"

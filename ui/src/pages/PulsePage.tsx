@@ -5,7 +5,6 @@ import { useSelectedProject } from "@/stores/useProjectStore";
 import { callMcpTool } from "@/api/mcpClient";
 import { fetchDevcontainerStatus, type DevcontainerStatus } from "@/api/devcontainer";
 import { FreshnessStrip } from "@/components/pulse/FreshnessStrip";
-import { ArchitectProposalsSection } from "@/components/pulse/ArchitectProposalsSection";
 import { HotspotsPanel } from "@/components/pulse/HotspotsPanel";
 import { DeadCodePanel } from "@/components/pulse/DeadCodePanel";
 import { CyclesPanel } from "@/components/pulse/CyclesPanel";
@@ -188,7 +187,10 @@ function ReadyState({
   commitsSincePin: number | null;
   architectActive: boolean;
 }) {
-  const { settings, addOrphanIgnore } = usePulseSettings(projectPath);
+  // Exclusions are applied server-side now; we only need the hook
+  // here for the Dead-code panel's "mark not actually dead" callback,
+  // which still writes through to project_config via `addOrphanIgnore`.
+  const { addOrphanIgnore } = usePulseSettings(projectPath);
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 [&>*]:shrink-0">
       <div className="flex items-start gap-2">
@@ -203,16 +205,10 @@ function ReadyState({
         </div>
         <PulseSettingsSheet projectPath={projectPath} />
       </div>
-      <ArchitectProposalsSection projectPath={projectPath} />
-      <HotspotsPanel projectPath={projectPath} excludedPaths={settings.excluded_paths} />
-      <DeadCodePanel
-        projectPath={projectPath}
-        excludedPaths={settings.excluded_paths}
-        ignoredFiles={settings.orphan_ignore}
-        onIgnoreFile={addOrphanIgnore}
-      />
-      <CyclesPanel projectPath={projectPath} excludedPaths={settings.excluded_paths} />
-      <BlastRadiusPanel projectPath={projectPath} excludedPaths={settings.excluded_paths} />
+      <HotspotsPanel projectPath={projectPath} />
+      <DeadCodePanel projectPath={projectPath} onIgnoreFile={addOrphanIgnore} />
+      <CyclesPanel projectPath={projectPath} />
+      <BlastRadiusPanel projectPath={projectPath} />
     </div>
   );
 }

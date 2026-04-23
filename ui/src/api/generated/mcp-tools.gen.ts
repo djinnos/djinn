@@ -1071,9 +1071,7 @@ export namespace GetProjectStackOutputSchema {
    * 
    * Used by [`crate::environment::EnvironmentConfig::from_stack`] to
    * seed `environment_config.workspaces` during the P5 boot reseed
-   * hook. Slugs match the rule used by
-   * `djinn-graph/src/repo_map/workspaces.rs` so env-config workspace
-   * names line up end-to-end with SCIP indexer workspace names.
+   * hook.
    */
   workspaces?: StackWorkspace[]
   [k: string]: any
@@ -1150,12 +1148,6 @@ export namespace GetProjectStackOutputSchema {
    * root.
    */
   root: string
-  /**
-   * Slug derived from `root` via the same algorithm as
-   * `djinn-graph/src/repo_map/workspaces.rs::workspace_slug` — lowercase,
-   * non-alnum replaced by `-`, empty root mapped to `"root"`.
-   */
-  slug: string
   /**
    * Toolchain / version the manifest pins, in its raw form.
    * * rust: channel from `rust-toolchain.toml` or
@@ -2198,6 +2190,19 @@ export type ProjectConfigGetInput = ProjectConfigGetInputSchema.ProjectConfigGet
 export namespace ProjectConfigGetOutputSchema {
   export interface ProjectConfigGetOutput {
   auto_merge: boolean
+  /**
+   * Glob patterns the `code_graph` MCP handler drops from
+   * cycles/orphans/ranked result sets (migration 12). Canonical empty
+   * value is an empty array, not null, so the UI can bind a list
+   * editor to it without a pre-fetch fallback.
+   */
+  graph_excluded_paths?: string[]
+  /**
+   * Exact file paths the `code_graph orphans` op silently drops
+   * (migration 12). Intended for the Dead-code panel's "mark not
+   * actually dead" affordance.
+   */
+  graph_orphan_ignore?: string[]
   project: string
   status: string
   sync_enabled: boolean
@@ -2221,6 +2226,19 @@ export type ProjectConfigSetInput = ProjectConfigSetInputSchema.ProjectConfigSet
 export namespace ProjectConfigSetOutputSchema {
   export interface ProjectConfigSetOutput {
   auto_merge: boolean
+  /**
+   * Glob patterns the `code_graph` MCP handler drops from
+   * cycles/orphans/ranked result sets (migration 12). Canonical empty
+   * value is an empty array, not null, so the UI can bind a list
+   * editor to it without a pre-fetch fallback.
+   */
+  graph_excluded_paths?: string[]
+  /**
+   * Exact file paths the `code_graph orphans` op silently drops
+   * (migration 12). Intended for the Dead-code panel's "mark not
+   * actually dead" affordance.
+   */
+  graph_orphan_ignore?: string[]
   project: string
   status: string
   sync_enabled: boolean
@@ -2432,9 +2450,12 @@ export type ProposeAdrAcceptOutput = ProposeAdrAcceptOutputSchema.ProposeAdrAcce
 export namespace ProposeAdrListInputSchema {
   export interface ProposeAdrListInput {
   /**
-   * Absolute project path.
+   * Absolute project path.  Omit to list proposals across every
+   * registered project.  Each item in the response is tagged with
+   * `project_id` / `project_name` / `project_path` so the Proposals
+   * page can render cross-project lists without a second lookup.
    */
-  project: string
+  project?: string
   [k: string]: any
   }
 
@@ -2471,6 +2492,25 @@ export namespace ProposeAdrListOutputSchema {
    * Absolute filesystem path of the source file (under `proposed/`).
    */
   path: string
+  /**
+   * Djinn project UUID that owns this proposal.  Populated by the
+   * list handler so cross-project aggregation can thread items back
+   * to their project in the UI.  Omitted when the project could not
+   * be resolved from the Dolt registry.
+   */
+  project_id?: string
+  /**
+   * Display name of the owning project, sourced from the Dolt
+   * registry.  Used by the Proposals page to render per-row project
+   * chips when the "All projects" filter is active.
+   */
+  project_name?: string
+  /**
+   * Absolute filesystem root of the owning project, so clients can
+   * call `propose_adr_show`/`accept`/`reject` without a second
+   * project-lookup round-trip.
+   */
+  project_path?: string
   /**
    * Title pulled from frontmatter or the first H1.
    */
@@ -2559,6 +2599,25 @@ export namespace ProposeAdrShowOutputSchema {
    * Absolute filesystem path of the source file (under `proposed/`).
    */
   path: string
+  /**
+   * Djinn project UUID that owns this proposal.  Populated by the
+   * list handler so cross-project aggregation can thread items back
+   * to their project in the UI.  Omitted when the project could not
+   * be resolved from the Dolt registry.
+   */
+  project_id?: string
+  /**
+   * Display name of the owning project, sourced from the Dolt
+   * registry.  Used by the Proposals page to render per-row project
+   * chips when the "All projects" filter is active.
+   */
+  project_name?: string
+  /**
+   * Absolute filesystem root of the owning project, so clients can
+   * call `propose_adr_show`/`accept`/`reject` without a second
+   * project-lookup round-trip.
+   */
+  project_path?: string
   /**
    * Title pulled from frontmatter or the first H1.
    */

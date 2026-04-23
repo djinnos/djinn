@@ -79,13 +79,13 @@ describe('Sidebar component', () => {
     expect(screen.getByRole('button', { name: /Settings/ })).toBeInTheDocument();
   });
 
-  it('shows a Pulse badge matching the pending proposal count for the selected project', async () => {
+  it('shows a Proposals badge matching the cross-project pending proposal count', async () => {
     vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
       if (toolName === 'propose_adr_list') {
         return {
           items: [
-            { id: 'adr-1', title: 'Draft 1', path: '/tmp/adr-1.md' },
-            { id: 'adr-2', title: 'Draft 2', path: '/tmp/adr-2.md' },
+            { id: 'adr-1', title: 'Draft 1', path: '/tmp/adr-1.md', project_id: 'project-a' },
+            { id: 'adr-2', title: 'Draft 2', path: '/tmp/adr-2.md', project_id: 'project-b' },
           ],
         } as never;
       }
@@ -96,11 +96,11 @@ describe('Sidebar component', () => {
     render(<Sidebar />, {
       wrapperOptions: {
         routerProps: {
-          initialEntries: ['/pulse'],
+          initialEntries: ['/proposals'],
         },
       },
     });
 
-    expect(await screen.findByLabelText('Pulse has 2 pending proposals')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Proposals has 2 pending proposals')).toBeInTheDocument();
   });
 });

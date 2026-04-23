@@ -2202,7 +2202,7 @@ expression: signatures
             },
             "workspaces": {
               "default": [],
-              "description": "Per-workspace toolchain detail — one entry per manifest dir that\nthe detector considered a distinct workspace root. Populated by\n[`detect`]; empty when no manifests are present.\n\nUsed by [`crate::environment::EnvironmentConfig::from_stack`] to\nseed `environment_config.workspaces` during the P5 boot reseed\nhook. Slugs match the rule used by\n`djinn-graph/src/repo_map/workspaces.rs` so env-config workspace\nnames line up end-to-end with SCIP indexer workspace names.",
+              "description": "Per-workspace toolchain detail — one entry per manifest dir that\nthe detector considered a distinct workspace root. Populated by\n[`detect`]; empty when no manifests are present.\n\nUsed by [`crate::environment::EnvironmentConfig::from_stack`] to\nseed `environment_config.workspaces` during the P5 boot reseed\nhook.",
               "items": {
                 "$ref": "#/$defs/StackWorkspace"
               },
@@ -2238,10 +2238,6 @@ expression: signatures
               "description": "Repo-relative path to the workspace directory (forward-slash,\nnever absolute, no `..`). The empty string represents the repo\nroot.",
               "type": "string"
             },
-            "slug": {
-              "description": "Slug derived from `root` via the same algorithm as\n`djinn-graph/src/repo_map/workspaces.rs::workspace_slug` — lowercase,\nnon-alnum replaced by `-`, empty root mapped to `\"root\"`.",
-              "type": "string"
-            },
             "toolchain": {
               "description": "Toolchain / version the manifest pins, in its raw form.\n* rust: channel from `rust-toolchain.toml` or\n  `package.rust-version` (e.g. `\"stable\"`, `\"1.85.0\"`,\n  `\"nightly-2026-04-01\"`).\n* node: major from `engines.node` (e.g. `\"22\"`).\n* python: major.minor from `requires-python` (e.g. `\"3.12\"`).\n* go: `go` directive (e.g. `\"1.22\"`).\n* java/ruby: currently unused — left `None`.",
               "nullable": true,
@@ -2249,7 +2245,6 @@ expression: signatures
             }
           },
           "required": [
-            "slug",
             "root",
             "language"
           ],
@@ -4545,6 +4540,22 @@ expression: signatures
         "auto_merge": {
           "type": "boolean"
         },
+        "graph_excluded_paths": {
+          "default": [],
+          "description": "Glob patterns the `code_graph` MCP handler drops from\ncycles/orphans/ranked result sets (migration 12). Canonical empty\nvalue is an empty array, not null, so the UI can bind a list\neditor to it without a pre-fetch fallback.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "graph_orphan_ignore": {
+          "default": [],
+          "description": "Exact file paths the `code_graph orphans` op silently drops\n(migration 12). Intended for the Dead-code panel's \"mark not\nactually dead\" affordance.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "project": {
           "type": "string"
         },
@@ -4601,6 +4612,22 @@ expression: signatures
       "properties": {
         "auto_merge": {
           "type": "boolean"
+        },
+        "graph_excluded_paths": {
+          "default": [],
+          "description": "Glob patterns the `code_graph` MCP handler drops from\ncycles/orphans/ranked result sets (migration 12). Canonical empty\nvalue is an empty array, not null, so the UI can bind a list\neditor to it without a pre-fetch fallback.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "graph_orphan_ignore": {
+          "default": [],
+          "description": "Exact file paths the `code_graph orphans` op silently drops\n(migration 12). Intended for the Dead-code panel's \"mark not\nactually dead\" affordance.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "project": {
           "type": "string"
@@ -5022,13 +5049,12 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "project": {
-          "description": "Absolute project path.",
+          "default": null,
+          "description": "Absolute project path.  Omit to list proposals across every\nregistered project.  Each item in the response is tagged with\n`project_id` / `project_name` / `project_path` so the Proposals\npage can render cross-project lists without a second lookup.",
+          "nullable": true,
           "type": "string"
         }
       },
-      "required": [
-        "project"
-      ],
       "title": "ProposeAdrListParams",
       "type": "object"
     },
@@ -5059,6 +5085,21 @@ expression: signatures
             },
             "path": {
               "description": "Absolute filesystem path of the source file (under `proposed/`).",
+              "type": "string"
+            },
+            "project_id": {
+              "description": "Djinn project UUID that owns this proposal.  Populated by the\nlist handler so cross-project aggregation can thread items back\nto their project in the UI.  Omitted when the project could not\nbe resolved from the Dolt registry.",
+              "nullable": true,
+              "type": "string"
+            },
+            "project_name": {
+              "description": "Display name of the owning project, sourced from the Dolt\nregistry.  Used by the Proposals page to render per-row project\nchips when the \"All projects\" filter is active.",
+              "nullable": true,
+              "type": "string"
+            },
+            "project_path": {
+              "description": "Absolute filesystem root of the owning project, so clients can\ncall `propose_adr_show`/`accept`/`reject` without a second\nproject-lookup round-trip.",
+              "nullable": true,
               "type": "string"
             },
             "title": {
@@ -5192,6 +5233,21 @@ expression: signatures
             },
             "path": {
               "description": "Absolute filesystem path of the source file (under `proposed/`).",
+              "type": "string"
+            },
+            "project_id": {
+              "description": "Djinn project UUID that owns this proposal.  Populated by the\nlist handler so cross-project aggregation can thread items back\nto their project in the UI.  Omitted when the project could not\nbe resolved from the Dolt registry.",
+              "nullable": true,
+              "type": "string"
+            },
+            "project_name": {
+              "description": "Display name of the owning project, sourced from the Dolt\nregistry.  Used by the Proposals page to render per-row project\nchips when the \"All projects\" filter is active.",
+              "nullable": true,
+              "type": "string"
+            },
+            "project_path": {
+              "description": "Absolute filesystem root of the owning project, so clients can\ncall `propose_adr_show`/`accept`/`reject` without a second\nproject-lookup round-trip.",
+              "nullable": true,
               "type": "string"
             },
             "title": {

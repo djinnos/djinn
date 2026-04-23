@@ -30,6 +30,21 @@ export function pulseProposalListQueryOptions(projectPath: string) {
   });
 }
 
+/**
+ * Cross-project variant — calls `propose_adr_list` with no project filter so
+ * the server aggregates proposals across every registered project. Each
+ * item arrives already tagged with project_id/project_name/project_path.
+ */
+export function allProjectsProposalListQueryOptions() {
+  return queryOptions({
+    queryKey: ["proposals", "architect-proposals", "all"],
+    queryFn: async () => parseProposalItems(await callMcpTool("propose_adr_list", {})),
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
 function originatorKey(user: UserLike): string | null {
   if (!user) return null;
   const anyUser = user as Record<string, string | null | undefined>;

@@ -29,7 +29,7 @@ use crate::server::DjinnMcpServer;
 use crate::tools::epic_ops::EpicModel;
 use crate::tools::task_tools::ErrorOr;
 use crate::tools::task_tools::ops::{CommentTaskRequest, add_task_comment};
-use djinn_db::EpicRepository;
+use djinn_db::{EpicRepository, ProjectRepository};
 
 // ── Filesystem layout ────────────────────────────────────────────────────────
 
@@ -154,6 +154,22 @@ pub struct ProposedAdr {
     /// responses to keep them small.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Djinn project UUID that owns this proposal.  Populated by the
+    /// list handler so cross-project aggregation can thread items back
+    /// to their project in the UI.  Omitted when the project could not
+    /// be resolved from the Dolt registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Display name of the owning project, sourced from the Dolt
+    /// registry.  Used by the Proposals page to render per-row project
+    /// chips when the "All projects" filter is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    /// Absolute filesystem root of the owning project, so clients can
+    /// call `propose_adr_show`/`accept`/`reject` without a second
+    /// project-lookup round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
 }
 
 impl ProposedAdr {
@@ -181,6 +197,9 @@ impl ProposedAdr {
             originating_spike_id,
             mtime,
             body: if include_body { Some(body) } else { None },
+            project_id: None,
+            project_name: None,
+            project_path: None,
         })
     }
 }
@@ -205,8 +224,12 @@ fn nullable_epic_model_schema(generator: &mut schemars::SchemaGenerator) -> sche
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ProposeAdrListParams {
-    /// Absolute project path.
-    pub project: String,
+    /// Absolute project path.  Omit to list proposals across every
+    /// registered project.  Each item in the response is tagged with
+    /// `project_id` / `project_name` / `project_path` so the Proposals
+    /// page can render cross-project lists without a second lookup.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -287,40 +310,70 @@ pub struct ProposeAdrRejectResponse {
 impl DjinnMcpServer {
     /// List all ADR drafts under `.djinn/decisions/proposed/`.
     #[tool(
-        description = "ADR-051 Epic C: list ADR drafts under .djinn/decisions/proposed/. Returns frontmatter-parsed metadata (id, title, work_shape, originating_spike_id) plus filesystem modified time in `mtime` (RFC 3339). Body text is omitted; use propose_adr_show to read a single draft in full."
+        description = "ADR-051 Epic C: list ADR drafts under .djinn/decisions/proposed/. Omit `project` to aggregate proposals across every registered project; each item is tagged with project_id/project_name/project_path for cross-project rendering. Returns frontmatter-parsed metadata (id, title, work_shape, originating_spike_id) plus filesystem modified time in `mtime` (RFC 3339). Body text is omitted; use propose_adr_show to read a single draft in full."
     )]
     pub async fn propose_adr_list(
         &self,
         Parameters(p): Parameters<ProposeAdrListParams>,
     ) -> Json<ProposeAdrListResponse> {
-        let root = PathBuf::from(&p.project);
-        let dir = proposed_dir(&root);
-        if !dir.exists() {
-            return Json(ProposeAdrListResponse {
-                items: Some(vec![]),
-                error: None,
-            });
-        }
-        let entries = match fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(e) => {
-                return Json(ProposeAdrListResponse {
-                    items: None,
-                    error: Some(format!("failed to read {}: {e}", dir.display())),
-                });
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        // Build the scan set: one entry per project to walk.  The single-
+        // project branch still does a registry lookup so the response
+        // shape is identical regardless of scope — the UI always gets
+        // project_name / project_id when they're knowable.
+        let scan_targets: Vec<(Option<String>, Option<String>, PathBuf)> = match &p.project {
+            Some(project_path) => {
+                let trimmed = project_path.trim_end_matches('/').to_string();
+                let found = repo.get_by_path(&trimmed).await.ok().flatten();
+                let (pid, pname) = match &found {
+                    Some(proj) => (Some(proj.id.clone()), Some(proj.name.clone())),
+                    None => (None, None),
+                };
+                vec![(pid, pname, PathBuf::from(project_path))]
             }
+            None => match repo.list().await {
+                Ok(list) => list
+                    .into_iter()
+                    .map(|proj| (Some(proj.id), Some(proj.name), PathBuf::from(proj.path)))
+                    .collect(),
+                Err(e) => {
+                    return Json(ProposeAdrListResponse {
+                        items: None,
+                        error: Some(format!("failed to list projects: {e}")),
+                    });
+                }
+            },
         };
 
         let mut items: Vec<ProposedAdr> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+        for (project_id, project_name, root) in scan_targets {
+            let dir = proposed_dir(&root);
+            if !dir.exists() {
                 continue;
             }
-            match ProposedAdr::from_file(&path, false) {
-                Ok(adr) => items.push(adr),
+            let entries = match fs::read_dir(&dir) {
+                Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "skipping unreadable proposed ADR");
+                    tracing::warn!(path = %dir.display(), error = %e, "skipping unreadable proposed dir");
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                    continue;
+                }
+                match ProposedAdr::from_file(&path, false) {
+                    Ok(mut adr) => {
+                        adr.project_id = project_id.clone();
+                        adr.project_name = project_name.clone();
+                        adr.project_path = Some(root.display().to_string());
+                        items.push(adr);
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "skipping unreadable proposed ADR");
+                    }
                 }
             }
         }
