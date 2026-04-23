@@ -58,7 +58,6 @@ export const LANGUAGE_KEYS: LanguageKey[] = [
 ];
 
 export interface Workspace {
-  slug: string;
   root: string;
   language: string;
   toolchain?: string | null;
@@ -183,7 +182,7 @@ export interface SaveResult {
 
 /**
  * Persist a validated EnvironmentConfig. The server re-validates server-side
- * (shell-injection guards, workspace-slug dedup, etc) before writing.
+ * (shell-injection guards, workspace uniqueness, etc) before writing.
  */
 export async function saveEnvironmentConfig(
   projectId: string,

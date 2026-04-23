@@ -6,7 +6,7 @@
  *   2. Raw JSON editor — Monaco-less textarea fallback with parse errors.
  *
  * Saves call `project_environment_config_set`; server-side validation
- * (shell-injection guards, workspace slug dedup) surfaces back through
+ * (shell-injection guards, workspace uniqueness) surfaces back through
  * the MCP response.
  */
 import { useCallback, useEffect, useState } from "react";

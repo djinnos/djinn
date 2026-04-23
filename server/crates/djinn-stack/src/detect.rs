@@ -721,7 +721,6 @@ fn build_workspace(
     use crate::schema::StackWorkspace as Ws;
 
     let dir = parent_dir(&candidate.path).to_string();
-    let slug = workspace_slug(&dir);
     let body = bodies.get(&candidate.path).map(String::as_str).unwrap_or("");
 
     let (toolchain, package_manager) = match candidate.language {
@@ -762,40 +761,10 @@ fn build_workspace(
     };
 
     Ws {
-        slug,
         root: dir,
         language: candidate.language.to_string(),
         toolchain,
         package_manager,
-    }
-}
-
-/// Same algorithm as `djinn-graph/src/repo_map/workspaces.rs::workspace_slug`.
-/// Keep these two in sync — env-config workspace slugs must equal
-/// SCIP-indexer workspace slugs so downstream consumers (image Dockerfile
-/// generator, UI editor) don't need a translation table.
-pub(crate) fn workspace_slug(dir: &str) -> String {
-    if dir.is_empty() {
-        return "root".to_string();
-    }
-    let slug: String = dir
-        .split('/')
-        .flat_map(|segment| {
-            segment
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-                .collect::<String>()
-                .split('-')
-                .filter(|part| !part.is_empty())
-                .map(str::to_ascii_lowercase)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>()
-        .join("-");
-    if slug.is_empty() {
-        "root".to_string()
-    } else {
-        slug
     }
 }
 
@@ -836,15 +805,6 @@ mod tests {
         let (langs, _) = tally_languages(&files);
         assert_eq!(langs.len(), 1);
         assert_eq!(langs[0].name, "Rust");
-    }
-
-    #[test]
-    fn workspace_slug_matches_djinn_graph_rules() {
-        assert_eq!(workspace_slug(""), "root");
-        assert_eq!(workspace_slug("server"), "server");
-        assert_eq!(workspace_slug("tools/codegen"), "tools-codegen");
-        assert_eq!(workspace_slug("apps/web.app"), "apps-web-app");
-        assert_eq!(workspace_slug("Some_Dir/X"), "some-dir-x");
     }
 
     #[test]
@@ -959,7 +919,6 @@ mod tests {
             "[toolchain]\nchannel = \"1.85.0\"\n".into(),
         );
         let ws = build_workspace(candidate("server/Cargo.toml", "rust"), &bodies);
-        assert_eq!(ws.slug, "server");
         assert_eq!(ws.root, "server");
         assert_eq!(ws.language, "rust");
         assert_eq!(ws.toolchain.as_deref(), Some("1.85.0"));
@@ -986,7 +945,6 @@ mod tests {
         bodies.insert("pnpm-lock.yaml".into(), "lockfileVersion: 9\n".into());
         let ws = build_workspace(candidate("package.json", "node"), &bodies);
         assert_eq!(ws.root, "");
-        assert_eq!(ws.slug, "root");
         assert_eq!(ws.package_manager.as_deref(), Some("pnpm"));
     }
 

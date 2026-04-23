@@ -157,7 +157,7 @@ function WorkspacesSection({ config, onChange }: Props) {
   const add = () => {
     onChange({
       ...config,
-      workspaces: [...config.workspaces, { slug: "", root: "", language: "rust" }],
+      workspaces: [...config.workspaces, { root: "", language: "rust" }],
       languages: ensureLanguageEnabled(config.languages, "rust"),
     });
   };
@@ -222,7 +222,7 @@ function WorkspaceCard({
     });
   };
 
-  const headerLabel = workspace.slug || workspace.root || "new workspace";
+  const headerLabel = workspace.root || "(repo root)";
 
   return (
     <div className="rounded-md border bg-background/30">
@@ -239,20 +239,12 @@ function WorkspaceCard({
         </Button>
       </div>
       <div className="flex flex-col gap-2.5 px-3 py-3">
-        <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
-          <InlineField
-            label="Slug"
-            value={workspace.slug}
-            onChange={(v) => onChange({ slug: v })}
-            placeholder="backend"
-          />
-          <InlineField
-            label="Root"
-            value={workspace.root}
-            onChange={(v) => onChange({ root: v })}
-            placeholder="server/"
-          />
-        </div>
+        <InlineField
+          label="Root"
+          value={workspace.root}
+          onChange={(v) => onChange({ root: v })}
+          placeholder="server/ (empty = repo root)"
+        />
         <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
           <div className="flex flex-col gap-1">
             <Label className="text-xs text-muted-foreground">Language</Label>

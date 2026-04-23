@@ -63,9 +63,7 @@ pub struct Stack {
     ///
     /// Used by [`crate::environment::EnvironmentConfig::from_stack`] to
     /// seed `environment_config.workspaces` during the P5 boot reseed
-    /// hook. Slugs match the rule used by
-    /// `djinn-graph/src/repo_map/workspaces.rs` so env-config workspace
-    /// names line up end-to-end with SCIP indexer workspace names.
+    /// hook.
     #[serde(default)]
     pub workspaces: Vec<StackWorkspace>,
 }
@@ -87,10 +85,6 @@ pub struct Stack {
 /// refactor).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StackWorkspace {
-    /// Slug derived from `root` via the same algorithm as
-    /// `djinn-graph/src/repo_map/workspaces.rs::workspace_slug` — lowercase,
-    /// non-alnum replaced by `-`, empty root mapped to `"root"`.
-    pub slug: String,
     /// Repo-relative path to the workspace directory (forward-slash,
     /// never absolute, no `..`). The empty string represents the repo
     /// root.

@@ -57,8 +57,8 @@ pub enum EnvironmentConfigError {
         len: usize,
         max: usize,
     },
-    #[error("duplicate workspace slug {slug:?}")]
-    DuplicateWorkspaceSlug { slug: String },
+    #[error("duplicate workspace {root:?} ({language})")]
+    DuplicateWorkspace { root: String, language: String },
     #[error("env var key {key:?} is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)")]
     InvalidEnvKey { key: String },
     #[error("env var {key:?}: value contains disallowed newline/NUL")]
@@ -264,7 +264,6 @@ impl EnvironmentConfig {
                     _ => (None, ws.toolchain.clone()),
                 };
                 Workspace {
-                    slug: ws.slug.clone(),
                     root: ws.root.clone(),
                     language: ws.language.clone(),
                     toolchain,
@@ -474,9 +473,7 @@ impl ClangLanguage {
 // ---- workspaces ---------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Workspace {
-    pub slug: String,
     pub root: String,
     pub language: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -495,19 +492,14 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
             max: MAX_WORKSPACES,
         });
     }
-    let mut seen: HashSet<&str> = HashSet::with_capacity(workspaces.len());
+    let mut seen: HashSet<(&str, &str)> = HashSet::with_capacity(workspaces.len());
     for ws in workspaces {
-        if ws.slug.is_empty() {
-            return Err(EnvironmentConfigError::EmptyValue {
-                field: "workspaces[*].slug".into(),
+        if !seen.insert((ws.root.as_str(), ws.language.as_str())) {
+            return Err(EnvironmentConfigError::DuplicateWorkspace {
+                root: ws.root.clone(),
+                language: ws.language.clone(),
             });
         }
-        if !seen.insert(ws.slug.as_str()) {
-            return Err(EnvironmentConfigError::DuplicateWorkspaceSlug {
-                slug: ws.slug.clone(),
-            });
-        }
-        validate_identifier("workspaces[*].slug", &ws.slug)?;
         // `root` is a path within the repo; allow `/` and be lenient.
         validate_path("workspaces[*].root", &ws.root)?;
         validate_identifier("workspaces[*].language", &ws.language)?;
@@ -982,11 +974,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_workspace_slugs() {
+    fn rejects_duplicate_workspaces() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![
             Workspace {
-                slug: "server".to_owned(),
                 root: "server".to_owned(),
                 language: "rust".to_owned(),
                 toolchain: Some("stable".to_owned()),
@@ -994,8 +985,7 @@ mod tests {
                 package_manager: None,
             },
             Workspace {
-                slug: "server".to_owned(),
-                root: "server2".to_owned(),
+                root: "server".to_owned(),
                 language: "rust".to_owned(),
                 toolchain: None,
                 version: None,
@@ -1005,15 +995,39 @@ mod tests {
         let err = cfg.validate().unwrap_err();
         assert!(matches!(
             err,
-            EnvironmentConfigError::DuplicateWorkspaceSlug { .. }
+            EnvironmentConfigError::DuplicateWorkspace { .. }
         ));
+    }
+
+    #[test]
+    fn accepts_same_root_different_language() {
+        // The motivating case for dropping slugs: a polyglot repo with
+        // multiple manifests at the root (e.g. go.mod + package.json).
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![
+            Workspace {
+                root: "".to_owned(),
+                language: "go".to_owned(),
+                toolchain: None,
+                version: Some("1.22".to_owned()),
+                package_manager: None,
+            },
+            Workspace {
+                root: "".to_owned(),
+                language: "node".to_owned(),
+                toolchain: None,
+                version: Some("22".to_owned()),
+                package_manager: Some("pnpm".to_owned()),
+            },
+        ];
+        cfg.schema_version = SCHEMA_VERSION;
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn rejects_absolute_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
-            slug: "abs".to_owned(),
             root: "/etc".to_owned(),
             language: "rust".to_owned(),
             toolchain: None,
@@ -1031,7 +1045,6 @@ mod tests {
     fn rejects_dotdot_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
-            slug: "esc".to_owned(),
             root: "../outside".to_owned(),
             language: "rust".to_owned(),
             toolchain: None,
@@ -1049,7 +1062,6 @@ mod tests {
     fn accepts_nested_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
-            slug: "tools-codegen".to_owned(),
             root: "tools/codegen".to_owned(),
             language: "rust".to_owned(),
             toolchain: Some("1.85.0".to_owned()),
@@ -1065,7 +1077,6 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.workspaces = (0..(MAX_WORKSPACES + 1))
             .map(|i| Workspace {
-                slug: format!("ws-{i}"),
                 root: format!("dir{i}"),
                 language: "rust".to_owned(),
                 toolchain: None,
@@ -1192,7 +1203,6 @@ mod tests {
         // + rust-analyzer.
         let mut stack = crate::schema::Stack::empty();
         stack.workspaces = vec![crate::schema::StackWorkspace {
-            slug: "root".into(),
             root: "".into(),
             language: "rust".into(),
             toolchain: None,
@@ -1218,14 +1228,12 @@ mod tests {
         stack.package_managers = vec!["pnpm".into(), "cargo".into()];
         stack.workspaces = vec![
             crate::schema::StackWorkspace {
-                slug: "server".into(),
                 root: "server".into(),
                 language: "rust".into(),
                 toolchain: Some("stable".into()),
                 package_manager: None,
             },
             crate::schema::StackWorkspace {
-                slug: "ui".into(),
                 root: "ui".into(),
                 language: "node".into(),
                 toolchain: Some("20".into()),
@@ -1234,11 +1242,11 @@ mod tests {
         ];
         let cfg = EnvironmentConfig::from_stack(&stack);
         // Rust workspace uses `toolchain`, not `version`.
-        let rust_ws = cfg.workspaces.iter().find(|w| w.slug == "server").unwrap();
+        let rust_ws = cfg.workspaces.iter().find(|w| w.root == "server").unwrap();
         assert_eq!(rust_ws.toolchain.as_deref(), Some("stable"));
         assert!(rust_ws.version.is_none());
         // Node workspace uses `version`, not `toolchain`.
-        let node_ws = cfg.workspaces.iter().find(|w| w.slug == "ui").unwrap();
+        let node_ws = cfg.workspaces.iter().find(|w| w.root == "ui").unwrap();
         assert!(node_ws.toolchain.is_none());
         assert_eq!(node_ws.version.as_deref(), Some("20"));
         assert_eq!(node_ws.package_manager.as_deref(), Some("pnpm"));
@@ -1282,7 +1290,6 @@ mod tests {
         let mut stack = crate::schema::Stack::empty();
         stack.runtimes.rust = Some("1.84".into());
         stack.workspaces = vec![crate::schema::StackWorkspace {
-            slug: "server".into(),
             root: "server".into(),
             language: "rust".into(),
             toolchain: Some("stable".into()),

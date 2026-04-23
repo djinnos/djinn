@@ -541,7 +541,6 @@ mod tests {
         });
         cfg.workspaces = vec![
             djinn_stack::environment::Workspace {
-                slug: "server".into(),
                 root: "server".into(),
                 language: "rust".into(),
                 toolchain: Some("stable".into()),
@@ -549,7 +548,6 @@ mod tests {
                 package_manager: None,
             },
             djinn_stack::environment::Workspace {
-                slug: "tools-codegen".into(),
                 root: "tools/codegen".into(),
                 language: "rust".into(),
                 toolchain: Some("1.85.0".into()),
@@ -578,7 +576,6 @@ mod tests {
             default_package_manager: Some("pnpm".into()),
         });
         cfg.workspaces = vec![djinn_stack::environment::Workspace {
-            slug: "legacy-ui".into(),
             root: "legacy/ui".into(),
             language: "node".into(),
             toolchain: None,
@@ -637,7 +634,6 @@ mod tests {
     fn unknown_workspace_language_rejected() {
         let mut cfg = minimal_valid_config();
         cfg.workspaces = vec![djinn_stack::environment::Workspace {
-            slug: "mystery".into(),
             root: "src".into(),
             language: "zig".into(),
             toolchain: None,
