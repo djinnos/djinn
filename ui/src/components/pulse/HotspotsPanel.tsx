@@ -11,13 +11,11 @@ import {
   parseRanked,
   parseFileGroups,
   truncatePathLeft,
-  isPathExcluded,
   type RankedNode,
 } from "./pulseTypes";
 
 interface HotspotsPanelProps {
   projectPath: string;
-  excludedPaths: string[];
 }
 
 function formatScore(n: number, max: number): string {
@@ -185,7 +183,7 @@ function HotspotRow({
   );
 }
 
-export function HotspotsPanel({ projectPath, excludedPaths }: HotspotsPanelProps) {
+export function HotspotsPanel({ projectPath }: HotspotsPanelProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
@@ -202,10 +200,9 @@ export function HotspotsPanel({ projectPath, excludedPaths }: HotspotsPanelProps
     staleTime: 60_000,
   });
 
-  const filtered = (data ?? []).filter(
-    (r) => !isPathExcluded(r.display_name || r.key, excludedPaths)
-  );
-  const top = filtered.slice(0, 10);
+  // Backend (`code_graph ranked`) already applies project exclusions;
+  // just slice the first 10 for the render.
+  const top = (data ?? []).slice(0, 10);
   const maxRank = top.length ? Math.max(...top.map((r) => r.page_rank)) : 0;
 
   return (

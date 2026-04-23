@@ -27,6 +27,7 @@ time = { version = "0.3", features = ["formatting"] }
 uuid = { version = "1", features = ["v7"] }
 futures = "0.3"
 anyhow = "1"
+globset = "0.4"
 workspace-hack.workspace = true
 
 [features]

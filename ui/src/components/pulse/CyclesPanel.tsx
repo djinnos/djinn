@@ -5,11 +5,10 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { callMcpTool } from "@/api/mcpClient";
 import { showToast } from "@/lib/toast";
-import { parseCycles, truncatePathLeft, isPathExcluded } from "./pulseTypes";
+import { parseCycles, truncatePathLeft } from "./pulseTypes";
 
 interface CyclesPanelProps {
   projectPath: string;
-  excludedPaths: string[];
 }
 
 type CyclesKind = "file" | "symbol";
@@ -32,7 +31,7 @@ function openMember(displayName: string) {
   });
 }
 
-export function CyclesPanel({ projectPath, excludedPaths }: CyclesPanelProps) {
+export function CyclesPanel({ projectPath }: CyclesPanelProps) {
   // File-level cycles catch circular imports between modules — the
   // actionable case.  Symbol-level cycles catch mutual recursion and
   // trait-impl loops.  We default to `file` because circular imports
@@ -61,14 +60,12 @@ export function CyclesPanel({ projectPath, excludedPaths }: CyclesPanelProps) {
     staleTime: 60_000,
   });
 
+  // Backend (`code_graph` handler) already applies Tier 1 module-
+  // artifact suppression and the project's `graph_excluded_paths` /
+  // min_size filter — we just sort the cycles-by-size here so the
+  // biggest SCCs render first.
   const filtered = (data ?? [])
-    .map((g) => ({
-      ...g,
-      members: g.members.filter(
-        (m) => !isPathExcluded(m.display_name || m.key, excludedPaths)
-      ),
-    }))
-    .filter((g) => g.members.length >= 2)
+    .slice()
     .sort((a, b) => b.members.length - a.members.length);
 
   const toggleGroup = (index: number) => {

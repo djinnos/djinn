@@ -4,12 +4,55 @@ use djinn_core::models::Project;
 use crate::Result;
 use crate::database::Database;
 
-#[derive(Clone, Debug, serde::Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ProjectConfig {
     pub target_branch: String,
     pub auto_merge: bool,
     pub sync_enabled: bool,
     pub sync_remote: Option<String>,
+    /// Glob patterns that `code_graph` (cycles / orphans / ranked)
+    /// drops from results. Added in migration 12. Stored as a JSON
+    /// array of strings; parsed lazily on read, so an invalid JSON
+    /// blob degrades to an empty list rather than failing the query.
+    #[serde(default)]
+    pub graph_excluded_paths: Vec<String>,
+    /// Exact file paths the Dead-code panel (`code_graph orphans`)
+    /// silently drops. Added in migration 12. Same JSON-array shape
+    /// as `graph_excluded_paths`.
+    #[serde(default)]
+    pub graph_orphan_ignore: Vec<String>,
+}
+
+fn parse_json_string_list(raw: &str) -> Vec<String> {
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+fn encode_json_string_list(items: &[String]) -> String {
+    serde_json::to_string(items).unwrap_or_else(|_| "[]".into())
+}
+
+/// Validate + canonicalize a JSON-array-of-strings value before we
+/// persist it via `update_config_field`. Rejects non-array shapes and
+/// non-string elements so we don't smuggle malformed JSON into the
+/// `projects.graph_*` columns. Returns the re-serialized JSON string
+/// (trimmed of surrounding whitespace, deduplicated while preserving
+/// order) so consumers always see a canonical blob.
+fn normalize_json_string_list(raw: &str) -> core::result::Result<String, String> {
+    let parsed: Vec<String> = serde_json::from_str(raw)
+        .map_err(|e| format!("expected JSON array of strings: {e}"))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(parsed.len());
+    for item in parsed {
+        let trimmed = item.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    Ok(encode_json_string_list(&out))
 }
 
 pub struct ProjectRepository {
@@ -464,17 +507,35 @@ impl ProjectRepository {
 
     pub async fn get_config(&self, id: &str) -> Result<Option<ProjectConfig>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            ProjectConfig,
-            r#"SELECT target_branch,
-                    auto_merge AS "auto_merge!: bool",
-                    sync_enabled AS "sync_enabled!: bool",
-                    sync_remote
-             FROM projects WHERE id = ?"#,
-            id
+        // Non-macro form because `graph_excluded_paths` and
+        // `graph_orphan_ignore` (migration 12) aren't in the sqlx
+        // offline cache yet; matches the pattern used for
+        // `environment_config` / `graph_warmed_at` which also post-date
+        // the cache baseline.
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT target_branch, auto_merge, sync_enabled, sync_remote,
+                    graph_excluded_paths, graph_orphan_ignore
+               FROM projects WHERE id = ?",
         )
+        .bind(id)
         .fetch_optional(self.db.pool())
-        .await?)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let graph_excluded_paths: String =
+            row.try_get("graph_excluded_paths").unwrap_or_default();
+        let graph_orphan_ignore: String =
+            row.try_get("graph_orphan_ignore").unwrap_or_default();
+        Ok(Some(ProjectConfig {
+            target_branch: row.try_get("target_branch")?,
+            auto_merge: row.try_get("auto_merge")?,
+            sync_enabled: row.try_get("sync_enabled")?,
+            sync_remote: row.try_get("sync_remote").ok(),
+            graph_excluded_paths: parse_json_string_list(&graph_excluded_paths),
+            graph_orphan_ignore: parse_json_string_list(&graph_orphan_ignore),
+        }))
     }
 
     pub async fn update_config_field(
@@ -511,6 +572,34 @@ impl ProjectRepository {
                 sqlx::query!("UPDATE projects SET sync_remote = ? WHERE id = ?", val, id)
                     .execute(self.db.pool())
                     .await?;
+            }
+            "graph_excluded_paths" => {
+                let canonical = normalize_json_string_list(value)
+                    .map_err(|e| crate::Error::InvalidData(format!(
+                        "graph_excluded_paths: {e}"
+                    )))?;
+                // Non-macro UPDATE because the column post-dates the
+                // sqlx offline cache baseline (migration 12).
+                sqlx::query(
+                    "UPDATE projects SET graph_excluded_paths = ? WHERE id = ?",
+                )
+                .bind(&canonical)
+                .bind(id)
+                .execute(self.db.pool())
+                .await?;
+            }
+            "graph_orphan_ignore" => {
+                let canonical = normalize_json_string_list(value)
+                    .map_err(|e| crate::Error::InvalidData(format!(
+                        "graph_orphan_ignore: {e}"
+                    )))?;
+                sqlx::query(
+                    "UPDATE projects SET graph_orphan_ignore = ? WHERE id = ?",
+                )
+                .bind(&canonical)
+                .bind(id)
+                .execute(self.db.pool())
+                .await?;
             }
             _ => return Ok(None),
         }
@@ -1101,5 +1190,99 @@ mod tests {
     async fn get_stack_unknown_project_returns_none() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
         assert!(repo.get_stack("nonexistent-id").await.unwrap().is_none());
+    }
+
+    // ── Graph exclusion columns (migration 12) ───────────────────────────────
+
+    #[test]
+    fn normalize_json_string_list_rejects_non_array() {
+        assert!(normalize_json_string_list("\"foo\"").is_err());
+        assert!(normalize_json_string_list("{\"a\":1}").is_err());
+        assert!(normalize_json_string_list("not-json").is_err());
+    }
+
+    #[test]
+    fn normalize_json_string_list_dedupes_and_trims() {
+        let out = normalize_json_string_list(
+            r#"["  **/workspace-hack/**  ", "**/workspace-hack/**", "", "**/test-support/**"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            r#"["**/workspace-hack/**","**/test-support/**"]"#,
+            "trimmed, empty-dropped, deduplicated while preserving insertion order"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_config_defaults_to_empty_graph_exclusion_lists() {
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+        let project = repo
+            .create("graph-defaults", "/graph-defaults")
+            .await
+            .unwrap();
+        let cfg = repo.get_config(&project.id).await.unwrap().unwrap();
+        assert!(cfg.graph_excluded_paths.is_empty());
+        assert!(cfg.graph_orphan_ignore.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_config_field_round_trips_graph_excluded_paths() {
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+        let project = repo.create("graph-rt", "/graph-rt").await.unwrap();
+
+        let updated = repo
+            .update_config_field(
+                &project.id,
+                "graph_excluded_paths",
+                r#"["**/workspace-hack/**", "**/test-support/**"]"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.graph_excluded_paths,
+            vec!["**/workspace-hack/**".to_string(), "**/test-support/**".to_string()]
+        );
+        assert!(updated.graph_orphan_ignore.is_empty());
+
+        let refetched = repo.get_config(&project.id).await.unwrap().unwrap();
+        assert_eq!(refetched.graph_excluded_paths, updated.graph_excluded_paths);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_config_field_round_trips_graph_orphan_ignore() {
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+        let project = repo.create("graph-orphan", "/graph-orphan").await.unwrap();
+
+        let updated = repo
+            .update_config_field(
+                &project.id,
+                "graph_orphan_ignore",
+                r#"["crates/test-support/src/db.rs"]"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.graph_orphan_ignore,
+            vec!["crates/test-support/src/db.rs".to_string()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_config_field_rejects_malformed_graph_excluded_paths() {
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+        let project = repo.create("graph-bad", "/graph-bad").await.unwrap();
+
+        let err = repo
+            .update_config_field(&project.id, "graph_excluded_paths", "not-json")
+            .await
+            .unwrap_err();
+        // `InvalidData(...)` Display prefix.
+        assert!(
+            err.to_string().contains("graph_excluded_paths"),
+            "error should name the field, got: {err}"
+        );
     }
 }

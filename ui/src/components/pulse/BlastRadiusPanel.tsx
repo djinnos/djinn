@@ -9,13 +9,11 @@ import {
   parseSearchHits,
   parseFileGroups,
   truncatePathLeft,
-  isPathExcluded,
   type SearchHit,
 } from "./pulseTypes";
 
 interface BlastRadiusPanelProps {
   projectPath: string;
-  excludedPaths: string[];
 }
 
 // The slider controls max traversal depth passed to `code_graph impact`.
@@ -33,7 +31,7 @@ function useDebounced<T>(value: T, ms: number): T {
   return debounced;
 }
 
-export function BlastRadiusPanel({ projectPath, excludedPaths }: BlastRadiusPanelProps) {
+export function BlastRadiusPanel({ projectPath }: BlastRadiusPanelProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<SearchHit | null>(null);
   const [depth, setDepth] = useState(3);
@@ -74,11 +72,13 @@ export function BlastRadiusPanel({ projectPath, excludedPaths }: BlastRadiusPane
     staleTime: 30_000,
   });
 
+  // Backend (`code_graph impact` with group_by=file) already applies
+  // the project exclusions; just sort for display.
   const filteredImpact = useMemo(() => {
     return (impactData ?? [])
-      .filter((g) => !isPathExcluded(g.file, excludedPaths))
+      .slice()
       .sort((a, b) => b.occurrence_count - a.occurrence_count);
-  }, [impactData, excludedPaths]);
+  }, [impactData]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -91,9 +91,8 @@ export function BlastRadiusPanel({ projectPath, excludedPaths }: BlastRadiusPane
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  const filteredSearch = (searchData ?? []).filter(
-    (h) => !isPathExcluded(h.file ?? h.display_name, excludedPaths)
-  );
+  // Backend already filters; no client-side work needed.
+  const filteredSearch = searchData ?? [];
 
   return (
     <Card>

@@ -13,7 +13,9 @@ use crate::bridge::{
     SymbolDescription,
 };
 use crate::server::DjinnMcpServer;
+use crate::tools::graph_exclusions::GraphExclusions;
 use crate::tools::task_tools::{ErrorOr, ErrorResponse};
+use djinn_db::ProjectRepository;
 
 // ── Request types ───────────────────────────────────────────────────────────────
 
@@ -321,6 +323,41 @@ impl DjinnMcpServer {
 }
 
 impl DjinnMcpServer {
+    /// Load the per-project graph exclusions, rendered into a compiled
+    /// [`GraphExclusions`] predicate. On any lookup failure we fall
+    /// back to [`GraphExclusions::empty`], which still applies Tier 1
+    /// (universal SCIP module-artifact suppression) — this keeps
+    /// cycles/orphans/ranked output clean even for projects that are
+    /// not registered in the `projects` table (e.g. ad-hoc callers
+    /// passing a raw path).
+    async fn load_graph_exclusions(&self, project_path: &str) -> GraphExclusions {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project = match repo.get_by_path(project_path).await {
+            Ok(Some(p)) => p,
+            Ok(None) => return GraphExclusions::empty(),
+            Err(e) => {
+                tracing::debug!(
+                    project = %project_path,
+                    error = %e,
+                    "graph_exclusions: project lookup failed; using Tier 1 only",
+                );
+                return GraphExclusions::empty();
+            }
+        };
+        match repo.get_config(&project.id).await {
+            Ok(Some(config)) => GraphExclusions::from_config(&config),
+            Ok(None) => GraphExclusions::empty(),
+            Err(e) => {
+                tracing::debug!(
+                    project = %project_path,
+                    error = %e,
+                    "graph_exclusions: config read failed; using Tier 1 only",
+                );
+                GraphExclusions::empty()
+            }
+        }
+    }
+
     async fn code_graph_neighbors(
         &self,
         params: &CodeGraphParams,
@@ -343,8 +380,10 @@ impl DjinnMcpServer {
         // makes the MCP response unusably large. Sort by weight desc and cap
         // at `limit` (default 20, matching other list operations).
         let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
         let (neighbors, file_groups) = match result {
             NeighborsResult::Detailed(mut v) => {
+                v.retain(|n| !exclusions.excludes(&n.key, None, &n.display_name));
                 v.sort_by(|a, b| {
                     b.edge_weight
                         .partial_cmp(&a.edge_weight)
@@ -354,6 +393,7 @@ impl DjinnMcpServer {
                 (Some(v), None)
             }
             NeighborsResult::Grouped(mut v) => {
+                v.retain(|g| !exclusions.excludes(&g.file, Some(&g.file), &g.file));
                 v.sort_by(|a, b| b.occurrence_count.cmp(&a.occurrence_count));
                 v.truncate(limit);
                 (None, Some(v))
@@ -373,6 +413,13 @@ impl DjinnMcpServer {
         validate_kind_filter(params.kind_filter.as_deref())?;
         validate_sort_by(params.sort_by.as_deref())?;
         let limit = params.limit.unwrap_or(20) as usize;
+        // Over-fetch so filtering doesn't leave us short of the
+        // caller's requested limit. 4× is a cheap slack — on the
+        // platform repo today Tier 1 strips ~2% of ranked nodes, so
+        // 4× covers any realistic Tier 2 glob list without needing a
+        // second round-trip. Clamp to 200 to keep the cache lookup
+        // cheap and the post-filter linear.
+        let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 200);
         let nodes = self
             .state
             .repo_graph()
@@ -380,9 +427,17 @@ impl DjinnMcpServer {
                 &params.project_path,
                 params.kind_filter.as_deref(),
                 params.sort_by.as_deref(),
-                limit,
+                fetch_limit,
             )
             .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let mut nodes: Vec<RankedNode> = nodes
+            .into_iter()
+            .filter(|n| !exclusions.excludes(&n.key, None, &n.display_name))
+            .take(limit)
+            .collect();
+        // The bridge already returns ranked-order; `filter` preserves it.
+        nodes.truncate(limit);
         Ok(CodeGraphResponse::Ranked(RankedResponse { nodes }))
     }
 
@@ -416,9 +471,20 @@ impl DjinnMcpServer {
             .repo_graph()
             .impact(&params.project_path, key, depth, params.group_by.as_deref())
             .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
         let (impact, file_groups) = match result {
-            ImpactResult::Detailed(v) => (Some(v), None),
-            ImpactResult::Grouped(v) => (None, Some(v)),
+            ImpactResult::Detailed(mut v) => {
+                // ImpactEntry has no display_name; match key only (Tier
+                // 1 still catches module artifacts; Tier 2 globs bound
+                // against the SCIP key, matching the old client-side
+                // behaviour).
+                v.retain(|e| !exclusions.excludes(&e.key, None, &e.key));
+                (Some(v), None)
+            }
+            ImpactResult::Grouped(mut v) => {
+                v.retain(|g| !exclusions.excludes(&g.file, Some(&g.file), &g.file));
+                (None, Some(v))
+            }
         };
         Ok(CodeGraphResponse::Impact(ImpactResponse {
             key: key.to_string(),
@@ -434,6 +500,7 @@ impl DjinnMcpServer {
         let query = require_query(params)?;
         validate_kind_filter(params.kind_filter.as_deref())?;
         let limit = params.limit.unwrap_or(20) as usize;
+        let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 200);
         let hits = self
             .state
             .repo_graph()
@@ -441,9 +508,17 @@ impl DjinnMcpServer {
                 &params.project_path,
                 query,
                 params.kind_filter.as_deref(),
-                limit,
+                fetch_limit,
             )
             .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let hits: Vec<SearchHit> = hits
+            .into_iter()
+            .filter(|h| {
+                !exclusions.excludes(&h.key, h.file.as_deref(), &h.display_name)
+            })
+            .take(limit)
+            .collect();
         Ok(CodeGraphResponse::Search(SearchResponse {
             query: query.to_string(),
             hits,
@@ -456,15 +531,39 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         validate_kind_filter(params.kind_filter.as_deref())?;
         let min_size = params.min_size.unwrap_or(2).max(0) as usize;
+        // Ask the warmer cache for SCCs with a size floor of 2 so we
+        // can still shed an SCC whose surviving members drop below the
+        // user-requested `min_size` after exclusion filtering. We
+        // re-apply `min_size` post-filter below.
+        let fetch_floor = min_size.max(2);
         let cycles = self
             .state
             .repo_graph()
             .cycles(
                 &params.project_path,
                 params.kind_filter.as_deref(),
-                min_size,
+                fetch_floor,
             )
             .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let cycles: Vec<CycleGroup> = cycles
+            .into_iter()
+            .filter_map(|group| {
+                let members: Vec<_> = group
+                    .members
+                    .into_iter()
+                    .filter(|m| !exclusions.excludes(&m.key, None, &m.display_name))
+                    .collect();
+                if members.len() < min_size.max(2) {
+                    None
+                } else {
+                    Some(CycleGroup {
+                        size: members.len(),
+                        members,
+                    })
+                }
+            })
+            .collect();
         Ok(CodeGraphResponse::Cycles(CyclesResponse { cycles }))
     }
 
@@ -475,6 +574,7 @@ impl DjinnMcpServer {
         validate_kind_filter(params.kind_filter.as_deref())?;
         validate_visibility(params.visibility.as_deref())?;
         let limit = params.limit.unwrap_or(50) as usize;
+        let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 500);
         let orphans = self
             .state
             .repo_graph()
@@ -482,9 +582,17 @@ impl DjinnMcpServer {
                 &params.project_path,
                 params.kind_filter.as_deref(),
                 params.visibility.as_deref(),
-                limit,
+                fetch_limit,
             )
             .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let orphans: Vec<OrphanEntry> = orphans
+            .into_iter()
+            .filter(|o| {
+                !exclusions.excludes_orphan(&o.key, o.file.as_deref(), &o.display_name)
+            })
+            .take(limit)
+            .collect();
         Ok(CodeGraphResponse::Orphans(OrphansResponse { orphans }))
     }
 

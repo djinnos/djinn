@@ -8,11 +8,63 @@ use tokio::fs;
 use crate::server::DjinnMcpServer;
 use crate::tools::ObjectJson;
 use djinn_core::auth_context::current_user_token;
+use djinn_core::models::Project;
 use djinn_db::{
-    OrgConfigRepository, ProjectImage, ProjectImageStatus, ProjectRepository,
+    OrgConfigRepository, ProjectConfig, ProjectImage, ProjectImageStatus, ProjectRepository,
     RepoGraphCacheRepository,
 };
 use djinn_stack::Stack;
+
+/// Build a success-shape `ProjectConfigResponse` from a fully-populated
+/// [`ProjectConfig`]. Consolidates the six struct-field copies that
+/// used to live in every match arm of `project_config_get` and
+/// `project_config_set`.
+fn project_config_ok(project_path: &str, config: ProjectConfig) -> ProjectConfigResponse {
+    ProjectConfigResponse {
+        status: "ok".into(),
+        project: project_path.to_owned(),
+        target_branch: config.target_branch,
+        auto_merge: config.auto_merge,
+        sync_enabled: config.sync_enabled,
+        sync_remote: config.sync_remote,
+        graph_excluded_paths: config.graph_excluded_paths,
+        graph_orphan_ignore: config.graph_orphan_ignore,
+    }
+}
+
+/// Fallback shape used when `get_config` returns `None` (no row) or
+/// an error — we still want to echo back the denormalized fields from
+/// the `projects` table itself. Graph-exclusion lists aren't in the
+/// `Project` struct, so they default to empty (same as a freshly
+/// migrated row).
+fn project_config_fallback(status: String, project: &Project) -> ProjectConfigResponse {
+    ProjectConfigResponse {
+        status,
+        project: project.path.clone(),
+        target_branch: project.target_branch.clone(),
+        auto_merge: project.auto_merge,
+        sync_enabled: project.sync_enabled,
+        sync_remote: project.sync_remote.clone(),
+        graph_excluded_paths: Vec::new(),
+        graph_orphan_ignore: Vec::new(),
+    }
+}
+
+/// Error shape used when the project lookup itself fails, so we don't
+/// even have a `Project` to echo. Fills the graph-exclusion lists with
+/// empty vecs because the caller's form binding expects arrays.
+fn project_config_error(project_ref: &str, status: String) -> ProjectConfigResponse {
+    ProjectConfigResponse {
+        status,
+        project: project_ref.to_owned(),
+        target_branch: "main".into(),
+        auto_merge: true,
+        sync_enabled: false,
+        sync_remote: None,
+        graph_excluded_paths: Vec::new(),
+        graph_orphan_ignore: Vec::new(),
+    }
+}
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
@@ -262,6 +314,17 @@ pub struct ProjectConfigResponse {
     pub auto_merge: bool,
     pub sync_enabled: bool,
     pub sync_remote: Option<String>,
+    /// Glob patterns the `code_graph` MCP handler drops from
+    /// cycles/orphans/ranked result sets (migration 12). Canonical empty
+    /// value is an empty array, not null, so the UI can bind a list
+    /// editor to it without a pre-fetch fallback.
+    #[serde(default)]
+    pub graph_excluded_paths: Vec<String>,
+    /// Exact file paths the `code_graph orphans` op silently drops
+    /// (migration 12). Intended for the Dead-code panel's "mark not
+    /// actually dead" affordance.
+    #[serde(default)]
+    pub graph_orphan_ignore: Vec<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -756,51 +819,19 @@ impl DjinnMcpServer {
         let project = match repo.get_by_path(&input.project).await {
             Ok(Some(p)) => p,
             Ok(None) => {
-                return Json(ProjectConfigResponse {
-                    status: format!("error: project not found: {}", input.project),
-                    project: input.project,
-                    target_branch: "main".into(),
-                    auto_merge: true,
-                    sync_enabled: false,
-                    sync_remote: None,
-                });
+                return Json(project_config_error(
+                    &input.project,
+                    format!("error: project not found: {}", input.project),
+                ));
             }
             Err(e) => {
-                return Json(ProjectConfigResponse {
-                    status: format!("error: {e}"),
-                    project: input.project,
-                    target_branch: "main".into(),
-                    auto_merge: true,
-                    sync_enabled: false,
-                    sync_remote: None,
-                });
+                return Json(project_config_error(&input.project, format!("error: {e}")));
             }
         };
         match repo.get_config(&project.id).await {
-            Ok(Some(config)) => Json(ProjectConfigResponse {
-                status: "ok".into(),
-                project: project.path,
-                target_branch: config.target_branch,
-                auto_merge: config.auto_merge,
-                sync_enabled: config.sync_enabled,
-                sync_remote: config.sync_remote,
-            }),
-            Ok(None) => Json(ProjectConfigResponse {
-                status: "ok".into(),
-                project: project.path,
-                target_branch: project.target_branch,
-                auto_merge: project.auto_merge,
-                sync_enabled: project.sync_enabled,
-                sync_remote: project.sync_remote,
-            }),
-            Err(e) => Json(ProjectConfigResponse {
-                status: format!("error: {e}"),
-                project: project.path,
-                target_branch: project.target_branch,
-                auto_merge: project.auto_merge,
-                sync_enabled: project.sync_enabled,
-                sync_remote: project.sync_remote,
-            }),
+            Ok(Some(config)) => Json(project_config_ok(&project.path, config)),
+            Ok(None) => Json(project_config_fallback("ok".into(), &project)),
+            Err(e) => Json(project_config_fallback(format!("error: {e}"), &project)),
         }
     }
 
@@ -813,24 +844,13 @@ impl DjinnMcpServer {
         let project = match repo.get_by_path(&input.project).await {
             Ok(Some(project)) => project,
             Ok(None) => {
-                return Json(ProjectConfigResponse {
-                    status: format!("error: project not found: {}", input.project),
-                    project: input.project,
-                    target_branch: "main".into(),
-                    auto_merge: true,
-                    sync_enabled: false,
-                    sync_remote: None,
-                });
+                return Json(project_config_error(
+                    &input.project,
+                    format!("error: project not found: {}", input.project),
+                ));
             }
             Err(e) => {
-                return Json(ProjectConfigResponse {
-                    status: format!("error: {e}"),
-                    project: input.project,
-                    target_branch: "main".into(),
-                    auto_merge: true,
-                    sync_enabled: false,
-                    sync_remote: None,
-                });
+                return Json(project_config_error(&input.project, format!("error: {e}")));
             }
         };
 
@@ -838,30 +858,12 @@ impl DjinnMcpServer {
             .update_config_field(&project.id, &input.key, &input.value)
             .await
         {
-            Ok(Some(config)) => Json(ProjectConfigResponse {
-                status: "ok".into(),
-                project: project.path,
-                target_branch: config.target_branch,
-                auto_merge: config.auto_merge,
-                sync_enabled: config.sync_enabled,
-                sync_remote: config.sync_remote,
-            }),
-            Ok(None) => Json(ProjectConfigResponse {
-                status: format!("error: invalid key '{}'", input.key),
-                project: project.path,
-                target_branch: project.target_branch,
-                auto_merge: project.auto_merge,
-                sync_enabled: project.sync_enabled,
-                sync_remote: project.sync_remote,
-            }),
-            Err(e) => Json(ProjectConfigResponse {
-                status: format!("error: {e}"),
-                project: project.path,
-                target_branch: project.target_branch,
-                auto_merge: project.auto_merge,
-                sync_enabled: project.sync_enabled,
-                sync_remote: project.sync_remote,
-            }),
+            Ok(Some(config)) => Json(project_config_ok(&project.path, config)),
+            Ok(None) => Json(project_config_fallback(
+                format!("error: invalid key '{}'", input.key),
+                &project,
+            )),
+            Err(e) => Json(project_config_fallback(format!("error: {e}"), &project)),
         }
     }
     /// List local git branches in a project's server-owned clone.

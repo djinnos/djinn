@@ -173,7 +173,7 @@ export function parseNeighbors(value: unknown): GraphNeighbor[] {
     .filter((r) => r.key.length > 0);
 }
 
-// ── Path filtering / display helpers ────────────────────────────────────────
+// ── Display helpers ─────────────────────────────────────────────────────────
 
 /** Truncate a long path from the left: `/a/b/c/d.rs` → `…/c/d.rs`. */
 export function truncatePathLeft(path: string, maxLen = 56): string {
@@ -181,53 +181,6 @@ export function truncatePathLeft(path: string, maxLen = 56): string {
   const tail = path.slice(path.length - maxLen + 1);
   const slash = tail.indexOf("/");
   return "…" + (slash >= 0 ? tail.slice(slash) : tail);
-}
-
-/** Glob-match a path against a single pattern. Supports `*` and `**`. */
-function globToRegex(glob: string): RegExp {
-  // Escape regex special chars except *
-  let re = "";
-  let i = 0;
-  while (i < glob.length) {
-    const c = glob[i];
-    if (c === "*") {
-      if (glob[i + 1] === "*") {
-        re += ".*";
-        i += 2;
-        if (glob[i] === "/") i += 1;
-        continue;
-      }
-      re += "[^/]*";
-      i += 1;
-      continue;
-    }
-    if ("\\^$.|?+()[]{}".includes(c)) re += "\\" + c;
-    else re += c;
-    i += 1;
-  }
-  return new RegExp("^" + re + "$");
-}
-
-const globCache = new Map<string, RegExp>();
-function compile(glob: string): RegExp {
-  let re = globCache.get(glob);
-  if (!re) {
-    re = globToRegex(glob);
-    globCache.set(glob, re);
-  }
-  return re;
-}
-
-export function isPathExcluded(path: string, patterns: string[]): boolean {
-  if (!patterns.length) return false;
-  return patterns.some((p) => {
-    if (!p.trim()) return false;
-    try {
-      return compile(p).test(path);
-    } catch {
-      return false;
-    }
-  });
 }
 
 /** Heuristic: extract a file path from a node key (file keys are bare paths). */

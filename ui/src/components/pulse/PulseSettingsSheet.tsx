@@ -145,7 +145,9 @@ export function PulseSettingsSheet({ projectPath }: PulseSettingsSheetProps) {
             </span>
           </div>
           <DialogDescription>
-            Calibrate what Pulse shows for this project. Settings are stored locally.
+            Calibrate what Pulse shows for this project. Exclusions are
+            stored server-side and apply to every code_graph query —
+            CLI, MCP, and the UI all see the same filtered results.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-6 pt-2">

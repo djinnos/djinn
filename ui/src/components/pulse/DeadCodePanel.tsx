@@ -11,14 +11,11 @@ import { cn } from "@/lib/utils";
 import {
   parseOrphans,
   truncatePathLeft,
-  isPathExcluded,
   type OrphanEntry,
 } from "./pulseTypes";
 
 interface DeadCodePanelProps {
   projectPath: string;
-  excludedPaths: string[];
-  ignoredFiles: string[];
   onIgnoreFile: (filePath: string) => void;
 }
 
@@ -214,8 +211,6 @@ function ConfidenceSection({
 
 export function DeadCodePanel({
   projectPath,
-  excludedPaths,
-  ignoredFiles,
   onIgnoreFile,
 }: DeadCodePanelProps) {
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
@@ -236,14 +231,13 @@ export function DeadCodePanel({
 
   const grouped = useMemo(() => {
     if (!data) return [] as DeadFile[];
-    const visible = data.filter((o) => {
-      if (!o.file) return false;
-      if (isPathExcluded(o.file, excludedPaths)) return false;
-      if (ignoredFiles.includes(o.file)) return false;
-      return true;
-    });
+    // Backend (`code_graph orphans`) already applies the project's
+    // `graph_excluded_paths` globs and `graph_orphan_ignore` exact-
+    // match list; we only need the `!o.file` guard, which is about
+    // shape rather than exclusion.
+    const visible = data.filter((o) => !!o.file);
     return groupByFile(visible);
-  }, [data, excludedPaths, ignoredFiles]);
+  }, [data]);
 
   const high = grouped.filter((f) => f.confidence === "high");
   const medium = grouped.filter((f) => f.confidence === "medium");
