@@ -150,8 +150,8 @@ pub async fn verification_for_path(db: &Database, worktree_path: &Path) -> Verif
 /// best-effort; `Parallel` is flattened in declaration order (no actual
 /// parallelism), matching the sequential behaviour of the old setup loop.
 /// Both fallbacks emit a warn log so anyone leaning on exec/parallel in
-/// `environment_config.verification.setup` finds out up-front that the
-/// agent-side runner doesn't yet honour those variants.
+/// `environment_config.lifecycle.pre_verification` finds out up-front that
+/// the agent-side runner doesn't yet honour those variants.
 pub fn hook_commands_to_specs(
     hooks: &[djinn_stack::environment::HookCommand],
 ) -> Vec<djinn_core::commands::CommandSpec> {
@@ -169,7 +169,7 @@ pub fn hook_commands_to_specs(
             djinn_stack::environment::HookCommand::Exec(argv) => {
                 tracing::warn!(
                     index = idx,
-                    "verification::environment: Exec-form setup hooks are flattened to `sh -c`; prefer Shell form in environment_config.verification.setup"
+                    "verification::environment: Exec-form setup hooks are flattened to `sh -c`; prefer Shell form in environment_config.lifecycle.pre_verification"
                 );
                 let joined = shell_join_argv(argv);
                 specs.push(djinn_core::commands::CommandSpec {
@@ -247,7 +247,6 @@ mod tests {
         db.ensure_initialized().await.unwrap();
         let v = verification_for_project_id(&db, "does-not-exist").await;
         assert!(v.rules.is_empty());
-        assert!(v.setup.is_empty());
     }
 
     #[tokio::test]
@@ -262,7 +261,6 @@ mod tests {
             .unwrap();
         let v = verification_for_project_id(&db, "p1").await;
         assert!(v.rules.is_empty());
-        assert!(v.setup.is_empty());
     }
 
     #[tokio::test]

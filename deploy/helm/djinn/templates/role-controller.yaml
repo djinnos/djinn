@@ -20,6 +20,11 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  # Per-project environment_config ConfigMap (mounted into warm + task-run
+  # Pods) and per-build ConfigMaps carrying the image-builder Dockerfile.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
   # Read-only on events, useful for surfacing scheduler errors back to the UI.
   - apiGroups: [""]
     resources: ["events"]

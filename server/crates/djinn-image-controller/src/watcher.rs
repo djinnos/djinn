@@ -239,7 +239,19 @@ async fn handle_event(
         .clone()
         .unwrap_or_else(|| "<unknown>".into());
 
-    let dedupe_key = format!("{project_id}:{hash_prefix}:{}", outcome.kind_str());
+    // Include the Job's UID in the dedupe key so a deleted-and-recreated
+    // Job (same name, same hash_prefix) gets its own reconciliation slot.
+    // Previously the key was `(project_id, hash_prefix, outcome)` which
+    // meant re-dispatching the same-hash build after a manual job delete
+    // (or after the in-memory set was populated by a prior run) silently
+    // skipped the DB status flip, leaving image_status pinned at
+    // "building" even though the fresh Job completed successfully.
+    let job_uid = job
+        .metadata
+        .uid
+        .clone()
+        .unwrap_or_else(|| job_name.clone());
+    let dedupe_key = format!("{project_id}:{hash_prefix}:{}:{}", outcome.kind_str(), job_uid);
     if seen.contains(&dedupe_key) {
         debug!(
             project_id,

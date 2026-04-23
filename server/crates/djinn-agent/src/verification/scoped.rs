@@ -224,10 +224,7 @@ mod tests {
     }
 
     fn make_verification(rules: Vec<VerificationRule>) -> Verification {
-        Verification {
-            setup: Vec::new(),
-            rules,
-        }
+        Verification { rules }
     }
 
     async fn seed_project_with_verification(

@@ -13,7 +13,6 @@ use crate::actors::slot::helpers::format_command_details;
 use crate::commands::run_commands;
 use crate::context::AgentContext;
 use crate::verification::environment::hook_commands_to_specs;
-use djinn_stack::environment::Verification;
 
 /// Resolved prompt-context fragments produced after running project setup
 /// commands and resolving the verification configuration.
@@ -35,9 +34,9 @@ pub(crate) struct SetupError {
 /// Run project setup commands (if any), format them for the prompt, and
 /// resolve verification commands + rules.
 ///
-/// The setup/verification config is sourced from Dolt's
-/// `projects.environment_config.verification` column (post-P8 cut-over);
-/// callers fetch it upstream and pass the [`Verification`] block in.
+/// Setup commands come from `environment_config.lifecycle.pre_verification`
+/// and rules come from `environment_config.verification.rules`; callers
+/// fetch both upstream and pass them in.
 ///
 /// This mirrors the byte-for-byte behaviour of the former inline block in
 /// `run_task_lifecycle`:
@@ -50,7 +49,8 @@ pub(crate) struct SetupError {
 /// The caller is responsible for all task-status transitions and worktree
 /// teardown on error — this function does not touch either.
 pub(crate) async fn resolve_setup_and_verification_context(
-    verification: Verification,
+    pre_verification_hooks: Vec<djinn_stack::environment::HookCommand>,
+    verification_rules: Vec<djinn_stack::environment::VerificationRule>,
     role_verification_command: Option<&str>,
     worktree_path: &Path,
     task_id: &str,
@@ -65,8 +65,7 @@ pub(crate) async fn resolve_setup_and_verification_context(
             ));
     };
 
-    let setup_specs = hook_commands_to_specs(&verification.setup);
-    let verification_rules = verification.rules;
+    let setup_specs = hook_commands_to_specs(&pre_verification_hooks);
     let prompt_setup_commands = format_command_details(&setup_specs);
     // Role-level verification_command overrides the project's environment
     // config when set.

@@ -196,6 +196,18 @@ impl PlannedIndexerCommand {
         // empirically sufficient to keep `rust-analyzer scip` warm
         // without melting the box.
         command.env("CARGO_BUILD_JOBS", "4");
+        // For Rust: rust-analyzer is a rustup shim that honors the
+        // repo's `rust-toolchain.toml`. If the pin points at a version
+        // whose `rust-analyzer` component we didn't install in the
+        // image, rustup errors with "Unknown binary 'rust-analyzer'".
+        // Force rustup to use the image's default toolchain (where we
+        // did install rust-analyzer) regardless of the repo's pin.
+        // The SCIP output is toolchain-independent for our purposes —
+        // we want symbol resolution, not edition-sensitive type
+        // inference — so this is safe.
+        if self.indexer == SupportedIndexer::RustAnalyzer {
+            command.env("RUSTUP_TOOLCHAIN", "stable");
+        }
         command
     }
 }

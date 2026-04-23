@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use djinn_stack::environment::{
-    Distro, EnvironmentConfig, HookCommand, Languages, NodeLanguage, RustLanguage,
+    EnvironmentConfig, HookCommand, Languages, NodeLanguage, RustLanguage,
 };
 use thiserror::Error;
 
@@ -113,6 +113,7 @@ pub fn generate_dockerfile(
     emit_from(&mut df, config);
     emit_copy_scripts(&mut df);
     emit_base(&mut df, config);
+    emit_path(&mut df);
     emit_system_packages(&mut df, config);
     emit_agent_worker(&mut df, agent_worker);
     emit_language_blocks(&mut df, config)?;
@@ -131,12 +132,14 @@ pub fn generate_dockerfile(
 
 // ---- section emitters ---------------------------------------------------
 
-fn emit_from(df: &mut String, config: &EnvironmentConfig) {
-    let image = match config.base.distro {
-        Distro::Debian => format!("debian:{}", config.base.variant),
-        Distro::Alpine => format!("alpine:{}", config.base.variant),
-    };
-    writeln!(df, "FROM {image}").unwrap();
+// Base image is hard-coded since the 2026-04-22 cleanup — djinn's image
+// runs verification only (clippy/check/test/lint), never ships anything,
+// so the libc flavor is irrelevant.
+const BASE_IMAGE: &str = "debian:bookworm-slim";
+const BASE_SETUP_SCRIPT: &str = "base-debian.sh";
+
+fn emit_from(df: &mut String, _config: &EnvironmentConfig) {
+    writeln!(df, "FROM {BASE_IMAGE}").unwrap();
 }
 
 fn emit_copy_scripts(df: &mut String) {
@@ -144,41 +147,52 @@ fn emit_copy_scripts(df: &mut String) {
     writeln!(df, "RUN chmod -R 0755 /tmp/djinn-scripts").unwrap();
 }
 
-fn emit_base(df: &mut String, config: &EnvironmentConfig) {
-    let base = match config.base.distro {
-        Distro::Debian => "base-debian.sh",
-        Distro::Alpine => "base-alpine.sh",
-    };
-    writeln!(df, "RUN /tmp/djinn-scripts/{base}").unwrap();
+fn emit_base(df: &mut String, _config: &EnvironmentConfig) {
+    writeln!(df, "RUN /tmp/djinn-scripts/{BASE_SETUP_SCRIPT}").unwrap();
+}
+
+// Canonical PATH + language-toolchain env for the generated image.
+//
+// install-rust.sh / install-node.sh / ... drop shell fragments in
+// /etc/profile.d that set PATH + RUSTUP_HOME + CARGO_HOME, but those
+// fragments only fire for LOGIN shells — the agent-worker spawns
+// subprocesses (cargo, rust-analyzer, pnpm) via `Command::new`, which
+// inherits the image-level ENV. Without these lines `rust-analyzer`
+// is on PATH as a rustup shim, but rustup looks at $HOME/.rustup
+// (empty), reports "no installed toolchains", and fails the SCIP step.
+//
+// Paths and vars that don't exist at runtime are harmless — PATH skips
+// over missing dirs, rustup ignores RUSTUP_HOME if Rust isn't installed.
+// Listing everything unconditionally keeps the emitter simple and the
+// generated hash stable across language toggles.
+const IMAGE_PATH: &str =
+    "/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+fn emit_path(df: &mut String) {
+    writeln!(df, "ENV PATH={IMAGE_PATH}").unwrap();
+    writeln!(df, "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo").unwrap();
 }
 
 fn emit_system_packages(df: &mut String, config: &EnvironmentConfig) {
-    let apt = space_join_sorted(&config.system_packages.apt);
-    let apk = space_join_sorted(&config.system_packages.apk);
-    match (apt.is_empty(), apk.is_empty()) {
-        (true, true) => {}
-        (false, true) => writeln!(
-            df,
-            "RUN APT_PACKAGES=\"{apt}\" /tmp/djinn-scripts/install-system.sh"
-        )
-        .unwrap(),
-        (true, false) => writeln!(
-            df,
-            "RUN APK_PACKAGES=\"{apk}\" /tmp/djinn-scripts/install-system.sh"
-        )
-        .unwrap(),
-        (false, false) => writeln!(
-            df,
-            "RUN APT_PACKAGES=\"{apt}\" APK_PACKAGES=\"{apk}\" /tmp/djinn-scripts/install-system.sh"
-        )
-        .unwrap(),
+    let apt = space_join_sorted(&config.system_packages);
+    if apt.is_empty() {
+        return;
     }
+    writeln!(
+        df,
+        "RUN APT_PACKAGES=\"{apt}\" /tmp/djinn-scripts/install-system.sh"
+    )
+    .unwrap();
 }
 
 fn emit_agent_worker(df: &mut String, agent_worker: &AgentWorkerImage) {
+    // The agent-runtime image ships the binary at /usr/local/bin/
+    // (matches its own ENTRYPOINT). We copy it into the project image
+    // at /opt/djinn/bin/ so our PATH-prefix install script can guarantee
+    // it wins over user-installed tools with overlapping names.
     writeln!(
         df,
-        "COPY --from={} /opt/djinn/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker",
+        "COPY --from={} /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker",
         agent_worker.full_ref()
     )
     .unwrap();
@@ -209,23 +223,20 @@ fn emit_language_blocks(
     Ok(())
 }
 
+// `rust-analyzer` is mandatory (the warm-graph SCIP indexer calls it), so
+// it's hard-coded rather than left to the environment config. `targets`
+// was dropped entirely in the 2026-04-22 cleanup — djinn's workflow
+// (clippy/check/test against the host target) never needs cross-targets.
+const RUST_COMPONENTS: &str = "rust-analyzer";
+
 fn emit_rust_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(rust) = &languages.rust else { return };
     let toolchains = aggregate_rust_toolchains(rust, config);
-    let components = space_join_sorted(&rust.components);
-    let targets = space_join_sorted(&rust.targets);
-    let mut line = format!(
-        "RUN TOOLCHAINS=\"{}\" DEFAULT_TOOLCHAIN=\"{}\"",
+    let line = format!(
+        "RUN TOOLCHAINS=\"{}\" DEFAULT_TOOLCHAIN=\"{}\" COMPONENTS=\"{RUST_COMPONENTS}\" /tmp/djinn-scripts/install-rust.sh",
         space_join(toolchains.iter().copied()),
         rust.default_toolchain
     );
-    if !components.is_empty() {
-        line.push_str(&format!(" COMPONENTS=\"{components}\""));
-    }
-    if !targets.is_empty() {
-        line.push_str(&format!(" TARGETS=\"{targets}\""));
-    }
-    line.push_str(" /tmp/djinn-scripts/install-rust.sh");
     writeln!(df, "{line}").unwrap();
 }
 
@@ -311,18 +322,21 @@ fn aggregate_node_pms<'a>(
     out
 }
 
+// SCIP indexer is hard-coded per language. Previously the env-config
+// carried a per-language override, but in practice the mapping is fixed
+// (scip-python for python, scip-go for go, etc.) — the 2026-04-22 cleanup
+// dropped the field.
+const PYTHON_SCIP_INDEXER: &str = "scip-python";
+const GO_SCIP_INDEXER: &str = "scip-go";
+
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(python) = &languages.python else { return };
     let versions = aggregate_simple(&python.default_version, config, "python");
-    let mut line = format!(
-        "RUN PYTHON_VERSIONS=\"{}\" DEFAULT_PYTHON=\"{}\"",
+    let line = format!(
+        "RUN PYTHON_VERSIONS=\"{}\" DEFAULT_PYTHON=\"{}\" SCIP_INDEXER=\"{PYTHON_SCIP_INDEXER}\" /tmp/djinn-scripts/install-python.sh",
         space_join(versions.iter().copied()),
         python.default_version
     );
-    if let Some(idx) = &python.scip_indexer {
-        line.push_str(&format!(" SCIP_INDEXER=\"{idx}\""));
-    }
-    line.push_str(" /tmp/djinn-scripts/install-python.sh");
     writeln!(df, "{line}").unwrap();
 }
 
@@ -330,11 +344,10 @@ fn emit_go_block(df: &mut String, languages: &Languages, _config: &EnvironmentCo
     let Some(go) = &languages.go else { return };
     // Go is intentionally single-version — multi-toolchain is handled
     // by `go install golang.org/dl/go<X>` at runtime, not at image build.
-    let mut line = format!("RUN GO_VERSION=\"{}\"", go.default_version);
-    if let Some(idx) = &go.scip_indexer {
-        line.push_str(&format!(" SCIP_INDEXER=\"{idx}\""));
-    }
-    line.push_str(" /tmp/djinn-scripts/install-go.sh");
+    let line = format!(
+        "RUN GO_VERSION=\"{}\" SCIP_INDEXER=\"{GO_SCIP_INDEXER}\" /tmp/djinn-scripts/install-go.sh",
+        go.default_version
+    );
     writeln!(df, "{line}").unwrap();
 }
 
@@ -525,8 +538,6 @@ mod tests {
         let mut cfg = minimal_valid_config();
         cfg.languages.rust = Some(djinn_stack::environment::RustLanguage {
             default_toolchain: "stable".into(),
-            components: vec!["rust-analyzer".into()],
-            targets: vec![],
         });
         cfg.workspaces = vec![
             djinn_stack::environment::Workspace {
@@ -565,7 +576,6 @@ mod tests {
         cfg.languages.node = Some(djinn_stack::environment::NodeLanguage {
             default_version: "22".into(),
             default_package_manager: Some("pnpm".into()),
-            scip_indexer: None,
         });
         cfg.workspaces = vec![djinn_stack::environment::Workspace {
             slug: "legacy-ui".into(),
@@ -583,7 +593,7 @@ mod tests {
     #[test]
     fn system_packages_sort_deduplicate_and_become_env_inline() {
         let mut cfg = minimal_valid_config();
-        cfg.system_packages.apt = vec![
+        cfg.system_packages = vec![
             "postgresql-client".into(),
             "jq".into(),
             "jq".into(),
@@ -641,12 +651,12 @@ mod tests {
     }
 
     #[test]
-    fn alpine_switches_base_image_and_script() {
-        let mut cfg = minimal_valid_config();
-        cfg.base.distro = Distro::Alpine;
-        cfg.base.variant = "3.20".into();
+    fn base_image_is_hard_coded_to_debian_bookworm_slim() {
+        // Alpine support was dropped in the 2026-04-22 cleanup; the base
+        // is now fixed regardless of what the config carried.
+        let cfg = minimal_valid_config();
         let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
-        assert!(df.dockerfile.contains("FROM alpine:3.20"));
-        assert!(df.dockerfile.contains("/tmp/djinn-scripts/base-alpine.sh"));
+        assert!(df.dockerfile.contains("FROM debian:bookworm-slim"));
+        assert!(df.dockerfile.contains("/tmp/djinn-scripts/base-debian.sh"));
     }
 }

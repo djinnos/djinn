@@ -181,7 +181,7 @@ exec buildctl \
     --frontend dockerfile.v0 \
     --local context={ctx_dir} \
     --local dockerfile={ctx_dir} \
-    --output type=image,name="$IMAGE_TAG",push=true \
+    --output type=image,name="$IMAGE_TAG",push=true,oci-mediatypes=true \
     --export-cache type=registry,ref={registry}/cache/{project_id},mode=max \
     --import-cache type=registry,ref={registry}/cache/{project_id}
 "#,
@@ -221,7 +221,10 @@ exec buildctl \
                 ..VolumeMount::default()
             },
         ]),
-        command: Some(vec!["/bin/sh".into(), "-c".into(), builder_script]),
+        // /bin/sh on node:22-slim (Debian) is dash, which doesn't support
+        // `set -o pipefail`. The image-builder Dockerfile installs bash
+        // explicitly for this reason.
+        command: Some(vec!["/bin/bash".into(), "-c".into(), builder_script]),
         ..Container::default()
     };
 

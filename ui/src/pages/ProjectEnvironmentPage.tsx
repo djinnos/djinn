@@ -38,6 +38,7 @@ import {
   type EnvironmentConfig,
   fetchEnvironmentConfig,
   normalizeConfig,
+  resetEnvironmentConfig,
   saveEnvironmentConfig,
 } from "@/api/environmentConfig";
 import { useProjects } from "@/stores/useProjectStore";
@@ -151,13 +152,27 @@ export function ProjectEnvironmentPage() {
   };
 
   const handleResetFromDetection = async () => {
-    // P7 placeholder — actual reseed requires a server-side delete path
-    // that doesn't yet exist; offer the confirmation + a "not implemented
-    // yet" toast for now so the affordance is discoverable.
-    showToast.info("Reset from auto-detection coming soon", {
-      description:
-        "The backend path for wiping environment_config back to auto-detection will ship in a follow-up.",
-    });
+    if (!projectId) return;
+    setSaving(true);
+    try {
+      const result = await resetEnvironmentConfig(projectId);
+      if (!result.ok || !result.config) {
+        showToast.error("Reset failed", { description: result.error });
+        return;
+      }
+      setConfig(result.config);
+      setRawText(JSON.stringify(result.config, null, 2));
+      setRawError(null);
+      setSeeded(true);
+      showToast.success("Config reset to auto-detected", {
+        description: "Image will rebuild on the next mirror-fetch tick.",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Reset failed";
+      showToast.error("Reset failed", { description: message });
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (!projectId) {

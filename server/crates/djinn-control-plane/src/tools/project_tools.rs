@@ -238,6 +238,22 @@ pub struct ProjectEnvironmentConfigSetResponse {
     pub error: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectEnvironmentConfigResetParams {
+    /// Project UUID.
+    pub project: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectEnvironmentConfigResetResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The freshly-generated auto-detected config, on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<ObjectJson>,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct ProjectConfigResponse {
     pub status: String,
@@ -1224,6 +1240,91 @@ impl DjinnMcpServer {
         Json(ProjectEnvironmentConfigSetResponse {
             status: "ok".into(),
             error: None,
+        })
+    }
+
+    /// Regenerate `environment_config` from the project's current `stack`
+    /// column and persist it. Mirrors the boot reseed hook but runs on
+    /// demand — the UI's "Reset from auto-detection" button calls this.
+    /// The freshly-generated config is tagged `source: AutoDetected`,
+    /// so the next boot reseed will still skip it (schema_version >= 1).
+    #[tool(
+        description = "Regenerate projects.environment_config from projects.stack, overwriting any user edits. Returns the freshly-generated config. Fails if the stack column is empty (no detection has run yet)."
+    )]
+    pub async fn project_environment_config_reset(
+        &self,
+        Parameters(input): Parameters<ProjectEnvironmentConfigResetParams>,
+    ) -> Json<ProjectEnvironmentConfigResetResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let stack_raw = match repo.get_stack(&input.project).await {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                return Json(ProjectEnvironmentConfigResetResponse {
+                    status: "error".into(),
+                    error: Some(format!("project not found: {}", input.project)),
+                    config: None,
+                });
+            }
+            Err(err) => {
+                return Json(ProjectEnvironmentConfigResetResponse {
+                    status: "error".into(),
+                    error: Some(format!("db error: {err}")),
+                    config: None,
+                });
+            }
+        };
+        let trimmed = stack_raw.trim();
+        if trimmed.is_empty() || trimmed == "{}" {
+            return Json(ProjectEnvironmentConfigResetResponse {
+                status: "error".into(),
+                error: Some(
+                    "project has no detected stack yet — wait for the next mirror-fetch tick and retry"
+                        .into(),
+                ),
+                config: None,
+            });
+        }
+        let stack: djinn_stack::schema::Stack = match serde_json::from_str(trimmed) {
+            Ok(s) => s,
+            Err(err) => {
+                return Json(ProjectEnvironmentConfigResetResponse {
+                    status: "error".into(),
+                    error: Some(format!("parse stack: {err}")),
+                    config: None,
+                });
+            }
+        };
+
+        let cfg = djinn_stack::environment::EnvironmentConfig::from_stack(&stack);
+        if let Err(err) = cfg.validate() {
+            return Json(ProjectEnvironmentConfigResetResponse {
+                status: "error".into(),
+                error: Some(format!("validate: {err}")),
+                config: None,
+            });
+        }
+
+        if let Err(err) = self
+            .state
+            .apply_environment_config(&input.project, &cfg)
+            .await
+        {
+            return Json(ProjectEnvironmentConfigResetResponse {
+                status: "error".into(),
+                error: Some(format!("apply: {err}")),
+                config: None,
+            });
+        }
+
+        let json = match serde_json::to_value(&cfg) {
+            Ok(serde_json::Value::Object(map)) => Some(ObjectJson::from(serde_json::Value::Object(map))),
+            _ => None,
+        };
+        Json(ProjectEnvironmentConfigResetResponse {
+            status: "ok".into(),
+            error: None,
+            config: json,
         })
     }
 

@@ -6,7 +6,7 @@ use anyhow::Result;
 use djinn_core::commands::{CommandResult, CommandSpec};
 use djinn_db::VerificationCacheRepository;
 
-use super::environment::{hook_commands_to_specs, verification_for_project_id};
+use super::environment::{environment_config_for_project_id, hook_commands_to_specs};
 use super::settings::verification_cache_key;
 
 #[derive(Debug, Clone)]
@@ -20,9 +20,9 @@ pub struct VerificationResult {
 
 /// Run setup + verification commands for a commit.
 ///
-/// Setup commands are read from Dolt's
-/// `projects.environment_config.verification.setup` column (post-P8
-/// cut-over). They always run, even on cache hit.
+/// Setup commands are read from
+/// `environment_config.lifecycle.pre_verification` in Dolt. They always
+/// run, even on cache hit.
 ///
 /// Verification commands are skipped when a passing cached result exists for
 /// `(project_id, cache_key)` where `cache_key` encodes both the commit SHA and
@@ -41,8 +41,9 @@ pub async fn verify_commit(
     let start = Instant::now();
     let cache_repo = VerificationCacheRepository::new(db.clone());
 
-    let verification = verification_for_project_id(db, project_id).await;
-    let setup_commands: Vec<CommandSpec> = hook_commands_to_specs(&verification.setup);
+    let env_config = environment_config_for_project_id(db, project_id).await;
+    let setup_commands: Vec<CommandSpec> =
+        hook_commands_to_specs(&env_config.lifecycle.pre_verification);
 
     let setup_results = run_commands(&setup_commands, worktree_path)
         .await
@@ -136,7 +137,7 @@ mod tests {
         seed_project(db, project_id).await;
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let mut cfg = EnvironmentConfig::empty();
-        cfg.verification.setup = setup;
+        cfg.lifecycle.pre_verification = setup;
         let raw = serde_json::to_string(&cfg).unwrap();
         repo.set_environment_config(project_id, &raw).await.unwrap();
     }

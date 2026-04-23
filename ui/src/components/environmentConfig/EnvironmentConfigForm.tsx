@@ -1,13 +1,18 @@
 /**
  * EnvironmentConfigForm — the form-based editor for a single project's
- * `environment_config`. Panes: Base image, Languages, Workspaces,
- * System packages, Env vars, Lifecycle hooks, Verification.
+ * `environment_config`. Panes: Base image, Workspaces, System packages,
+ * Env vars, Lifecycle hooks, Verification.
+ *
+ * Workspaces are the primary unit of toolchain config: each workspace
+ * pins its own language + toolchain/version, and the image-builder
+ * aggregates the union across workspaces (e.g. `NODE_VERSIONS="20 22"`).
+ * Per-language image knobs (`components`, `scip_indexer`) are synthesized
+ * from the workspace list on save — see `ensureLanguageEnabled`.
  *
  * The form binds against the normalized `EnvironmentConfig` shape from
  * `@/api/environmentConfig`; any field unknown to the form passes through
  * untouched so manual JSON edits round-trip cleanly.
  */
-import { useCallback } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Delete02Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
 
@@ -40,8 +45,6 @@ interface Props {
 export function EnvironmentConfigForm({ config, onChange }: Props) {
   return (
     <div className="flex flex-col gap-8">
-      <BaseImageSection config={config} onChange={onChange} />
-      <LanguagesSection config={config} onChange={onChange} />
       <WorkspacesSection config={config} onChange={onChange} />
       <SystemPackagesSection config={config} onChange={onChange} />
       <EnvVarsSection config={config} onChange={onChange} />
@@ -51,51 +54,14 @@ export function EnvironmentConfigForm({ config, onChange }: Props) {
   );
 }
 
-// ── Base image ──────────────────────────────────────────────────────────
+// Base image distro/variant is intentionally not in the form. Djinn's
+// image runs verification only (clippy/check/test/lint) — it doesn't
+// ship anything, so libc flavor and package-manager choice are a detail
+// almost no one should be reasoning about. The `base` field still exists
+// on `EnvironmentConfig` and round-trips through the Raw JSON editor for
+// the rare case where someone genuinely needs alpine.
 
-function BaseImageSection({ config, onChange }: Props) {
-  return (
-    <Section
-      title="Base image"
-      description="Starting point for the generated Dockerfile. Variant must match an available Debian/Alpine tag on Docker Hub."
-    >
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div className="flex flex-col gap-1.5">
-          <Label>Distro</Label>
-          <Select
-            value={config.base.distro}
-            onValueChange={(v) => {
-              if (v === "debian" || v === "alpine") {
-                onChange({ ...config, base: { ...config.base, distro: v } });
-              }
-            }}
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="debian">debian</SelectItem>
-              <SelectItem value="alpine">alpine</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label>Variant</Label>
-          <Input
-            value={config.base.variant}
-            onChange={(e) =>
-              onChange({ ...config, base: { ...config.base, variant: e.target.value } })
-            }
-            placeholder="bookworm-slim"
-            className="font-mono text-xs"
-          />
-        </div>
-      </div>
-    </Section>
-  );
-}
-
-// ── Languages ───────────────────────────────────────────────────────────
+// ── Language helpers (consumed by the Workspaces section) ──────────────
 
 const LANGUAGE_LABELS: Record<LanguageKey, string> = {
   rust: "Rust",
@@ -108,90 +74,20 @@ const LANGUAGE_LABELS: Record<LanguageKey, string> = {
   clang: "Clang",
 };
 
-function LanguagesSection({ config, onChange }: Props) {
-  const set = (langs: Languages) => onChange({ ...config, languages: langs });
-
-  return (
-    <Section
-      title="Languages"
-      description="Enable a language to install its toolchain in the generated image. Per-workspace overrides below."
-    >
-      <div className="flex flex-col gap-3">
-        {LANGUAGE_KEYS.map((lang) => (
-          <LanguageBlock
-            key={lang}
-            lang={lang}
-            languages={config.languages}
-            onChange={set}
-          />
-        ))}
-      </div>
-    </Section>
-  );
-}
-
-function LanguageBlock({
-  lang,
-  languages,
-  onChange,
-}: {
-  lang: LanguageKey;
-  languages: Languages;
-  onChange: (next: Languages) => void;
-}) {
-  const enabled = languages[lang] !== undefined;
-
-  const toggle = () => {
-    if (enabled) {
-      const next = { ...languages };
-      delete next[lang];
-      onChange(next);
-    } else {
-      onChange({ ...languages, [lang]: defaultLanguageBlock(lang) });
-    }
-  };
-
-  return (
-    <div className="rounded-md border bg-background/30">
-      <div className="flex items-center justify-between gap-2 border-b border-border/40 px-3 py-2">
-        <span className="text-sm font-medium">{LANGUAGE_LABELS[lang]}</span>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          onClick={toggle}
-          className={
-            "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors " +
-            (enabled ? "bg-primary" : "bg-muted")
-          }
-        >
-          <span
-            className={
-              "inline-block h-4 w-4 transform rounded-full bg-background shadow transition-transform " +
-              (enabled ? "translate-x-4" : "translate-x-0.5")
-            }
-          />
-        </button>
-      </div>
-      {enabled && (
-        <div className="px-3 py-3">
-          <LanguageFields lang={lang} languages={languages} onChange={onChange} />
-        </div>
-      )}
-    </div>
-  );
-}
-
+// Seed for `config.languages.*` when a workspace enables a language.
+// `default_*` values are fallbacks for workspaces that leave `version`
+// blank — the image-builder unions them with per-workspace pins and
+// emits install lines for the full set.
 function defaultLanguageBlock(lang: LanguageKey): NonNullable<Languages[LanguageKey]> {
   switch (lang) {
     case "rust":
-      return { default_toolchain: "stable", components: ["rust-analyzer"], targets: [] };
+      return { default_toolchain: "stable" };
     case "node":
-      return { default_version: "22", default_package_manager: "pnpm", scip_indexer: "scip-typescript" };
+      return { default_version: "22", default_package_manager: "pnpm" };
     case "python":
-      return { default_version: "3.12", scip_indexer: "scip-python" };
+      return { default_version: "3.12" };
     case "go":
-      return { default_version: "1.22", scip_indexer: "scip-go" };
+      return { default_version: "1.22" };
     case "java":
       return { default_version: "21" };
     case "ruby":
@@ -201,93 +97,6 @@ function defaultLanguageBlock(lang: LanguageKey): NonNullable<Languages[Language
     case "clang":
       return { default_version: "17" };
   }
-}
-
-function LanguageFields({
-  lang,
-  languages,
-  onChange,
-}: {
-  lang: LanguageKey;
-  languages: Languages;
-  onChange: (next: Languages) => void;
-}) {
-  // Narrowed via `unknown` cast — each language has a slightly different
-  // shape but the UI only reads the fields the shape actually has.
-  const block = languages[lang] as unknown as Record<string, unknown>;
-  const update = (patch: Record<string, unknown>) => {
-    onChange({ ...languages, [lang]: { ...block, ...patch } });
-  };
-
-  if (lang === "rust") {
-    const components = (block.components as string[] | undefined) ?? [];
-    const targets = (block.targets as string[] | undefined) ?? [];
-    return (
-      <div className="flex flex-col gap-2.5">
-        <InlineField
-          label="Default toolchain"
-          value={(block.default_toolchain as string) ?? ""}
-          onChange={(v) => update({ default_toolchain: v })}
-          placeholder="stable"
-        />
-        <StringListField
-          label="Components"
-          values={components}
-          onChange={(v) => update({ components: v })}
-          placeholder="rust-analyzer"
-        />
-        <StringListField
-          label="Targets"
-          values={targets}
-          onChange={(v) => update({ targets: v })}
-          placeholder="wasm32-unknown-unknown"
-        />
-      </div>
-    );
-  }
-
-  if (lang === "node") {
-    return (
-      <div className="grid grid-cols-1 gap-2.5 md:grid-cols-3">
-        <InlineField
-          label="Default version"
-          value={(block.default_version as string) ?? ""}
-          onChange={(v) => update({ default_version: v })}
-          placeholder="22"
-        />
-        <InlineField
-          label="Package manager"
-          value={(block.default_package_manager as string) ?? ""}
-          onChange={(v) => update({ default_package_manager: v || null })}
-          placeholder="pnpm"
-        />
-        <InlineField
-          label="SCIP indexer"
-          value={(block.scip_indexer as string) ?? ""}
-          onChange={(v) => update({ scip_indexer: v || null })}
-          placeholder="scip-typescript"
-        />
-      </div>
-    );
-  }
-
-  // Generic shape: default_version + scip_indexer
-  return (
-    <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
-      <InlineField
-        label="Default version"
-        value={(block.default_version as string) ?? ""}
-        onChange={(v) => update({ default_version: v })}
-        placeholder="latest"
-      />
-      <InlineField
-        label="SCIP indexer"
-        value={(block.scip_indexer as string) ?? ""}
-        onChange={(v) => update({ scip_indexer: v || null })}
-        placeholder="(optional)"
-      />
-    </div>
-  );
 }
 
 function InlineField({
@@ -314,192 +123,178 @@ function InlineField({
   );
 }
 
-function StringListField({
-  label,
-  values,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  values: string[];
-  onChange: (v: string[]) => void;
-  placeholder?: string;
-}) {
-  const update = (idx: number, v: string) => {
-    const next = values.slice();
-    next[idx] = v;
-    onChange(next);
-  };
-  const remove = (idx: number) => {
-    const next = values.slice();
-    next.splice(idx, 1);
-    onChange(next);
-  };
-  return (
-    <div className="flex flex-col gap-1">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      <div className="flex flex-col gap-1.5">
-        {values.map((v, idx) => (
-          <div key={idx} className="flex items-center gap-1.5">
-            <Input
-              value={v}
-              onChange={(e) => update(idx, e.target.value)}
-              placeholder={placeholder}
-              className="font-mono text-xs"
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-red-400"
-              onClick={() => remove(idx)}
-            >
-              <HugeiconsIcon icon={Delete02Icon} size={12} />
-            </Button>
-          </div>
-        ))}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-7 w-fit gap-1 px-2 text-xs text-muted-foreground"
-          onClick={() => onChange([...values, ""])}
-        >
-          <HugeiconsIcon icon={PlusSignIcon} size={12} />
-          Add
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 // ── Workspaces ──────────────────────────────────────────────────────────
 
 function WorkspacesSection({ config, onChange }: Props) {
-  const update = useCallback(
-    (next: Workspace[]) => onChange({ ...config, workspaces: next }),
-    [config, onChange],
-  );
+  // A workspace pinned to language X is meaningless unless the image
+  // actually installs X, so any path that sets/changes a workspace's
+  // language auto-enables that language in config.languages (with the
+  // same defaults the toggle uses). We never auto-disable — removing
+  // the last Go workspace doesn't nuke Go config, since the user may
+  // want it installed for scripts or tests.
+  const ensureLanguageEnabled = (langs: Languages, lang: string): Languages => {
+    if (!LANGUAGE_KEYS.includes(lang as LanguageKey)) return langs;
+    if (langs[lang as LanguageKey] !== undefined) return langs;
+    return { ...langs, [lang]: defaultLanguageBlock(lang as LanguageKey) };
+  };
 
   const updateAt = (idx: number, patch: Partial<Workspace>) => {
-    const next = config.workspaces.slice();
-    next[idx] = { ...next[idx], ...patch };
-    update(next);
+    const nextWorkspaces = config.workspaces.slice();
+    nextWorkspaces[idx] = { ...nextWorkspaces[idx], ...patch };
+    const nextLanguages =
+      typeof patch.language === "string"
+        ? ensureLanguageEnabled(config.languages, patch.language)
+        : config.languages;
+    onChange({ ...config, workspaces: nextWorkspaces, languages: nextLanguages });
   };
 
   const remove = (idx: number) => {
     const next = config.workspaces.slice();
     next.splice(idx, 1);
-    update(next);
+    onChange({ ...config, workspaces: next });
   };
 
   const add = () => {
-    update([
-      ...config.workspaces,
-      { slug: "", root: "", language: "rust" },
-    ]);
+    onChange({
+      ...config,
+      workspaces: [...config.workspaces, { slug: "", root: "", language: "rust" }],
+      languages: ensureLanguageEnabled(config.languages, "rust"),
+    });
   };
 
   return (
     <Section
       title="Workspaces"
-      description="Per-workspace toolchain overrides. Slug is unique per project; root is a repo-relative path. Rust workspaces use `toolchain`, others use `version`."
+      description="Each workspace is a manifest directory (Cargo.toml, package.json, etc.) with its own toolchain. The image installs the union of all pinned versions; the language picker controls which fields apply."
     >
-      <div className="overflow-x-auto rounded-md border">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-white/[0.02] text-[11px] uppercase tracking-wide text-muted-foreground">
-            <tr>
-              <th className="px-2 py-2 font-medium">Slug</th>
-              <th className="px-2 py-2 font-medium">Root</th>
-              <th className="px-2 py-2 font-medium">Language</th>
-              <th className="px-2 py-2 font-medium">Toolchain</th>
-              <th className="px-2 py-2 font-medium">Version</th>
-              <th className="px-2 py-2 font-medium">Package mgr.</th>
-              <th className="px-2 py-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {config.workspaces.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-2 py-3 text-muted-foreground">
-                  No workspaces configured. Detection populates these on first boot.
-                </td>
-              </tr>
-            )}
-            {config.workspaces.map((ws, idx) => (
-              <tr key={idx} className="border-t border-border/40">
-                <td className="px-2 py-1.5">
-                  <Input
-                    value={ws.slug}
-                    onChange={(e) => updateAt(idx, { slug: e.target.value })}
-                    className="h-7 font-mono text-xs"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  <Input
-                    value={ws.root}
-                    onChange={(e) => updateAt(idx, { root: e.target.value })}
-                    className="h-7 font-mono text-xs"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  <Input
-                    value={ws.language}
-                    onChange={(e) => updateAt(idx, { language: e.target.value })}
-                    className="h-7 w-24 font-mono text-xs"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  <Input
-                    value={ws.toolchain ?? ""}
-                    onChange={(e) => updateAt(idx, { toolchain: e.target.value || null })}
-                    className="h-7 font-mono text-xs"
-                    placeholder="—"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  <Input
-                    value={ws.version ?? ""}
-                    onChange={(e) => updateAt(idx, { version: e.target.value || null })}
-                    className="h-7 font-mono text-xs"
-                    placeholder="—"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  <Input
-                    value={ws.package_manager ?? ""}
-                    onChange={(e) => updateAt(idx, { package_manager: e.target.value || null })}
-                    className="h-7 font-mono text-xs"
-                    placeholder="—"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 w-7 p-0 text-muted-foreground hover:text-red-400"
-                    onClick={() => remove(idx)}
-                  >
-                    <HugeiconsIcon icon={Delete02Icon} size={12} />
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="flex flex-col gap-3">
+        {config.workspaces.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            No workspaces configured. Detection populates these on first boot.
+          </p>
+        )}
+        {config.workspaces.map((ws, idx) => (
+          <WorkspaceCard
+            key={idx}
+            workspace={ws}
+            onChange={(patch) => updateAt(idx, patch)}
+            onRemove={() => remove(idx)}
+          />
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-fit gap-1.5 text-xs"
+          onClick={add}
+        >
+          <HugeiconsIcon icon={PlusSignIcon} size={12} />
+          Add workspace
+        </Button>
       </div>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="mt-3 w-fit gap-1.5 text-xs"
-        onClick={add}
-      >
-        <HugeiconsIcon icon={PlusSignIcon} size={12} />
-        Add workspace
-      </Button>
     </Section>
+  );
+}
+
+function WorkspaceCard({
+  workspace,
+  onChange,
+  onRemove,
+}: {
+  workspace: Workspace;
+  onChange: (patch: Partial<Workspace>) => void;
+  onRemove: () => void;
+}) {
+  const isRust = workspace.language === "rust";
+  const isNode = workspace.language === "node";
+
+  // When the language changes, drop field values that no longer apply so
+  // the saved JSON stays minimal and validation-friendly. Rust uses
+  // `toolchain`, Node uses `version` + `package_manager`, everything else
+  // uses `version` only.
+  const handleLanguageChange = (lang: string | null) => {
+    if (!lang) return;
+    onChange({
+      language: lang,
+      toolchain: lang === "rust" ? (workspace.toolchain ?? null) : null,
+      version: lang === "rust" ? null : (workspace.version ?? null),
+      package_manager: lang === "node" ? (workspace.package_manager ?? null) : null,
+    });
+  };
+
+  const headerLabel = workspace.slug || workspace.root || "new workspace";
+
+  return (
+    <div className="rounded-md border bg-background/30">
+      <div className="flex items-center justify-between gap-2 border-b border-border/40 px-3 py-2">
+        <span className="font-mono text-xs text-muted-foreground">{headerLabel}</span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 w-7 p-0 text-muted-foreground hover:text-red-400"
+          onClick={onRemove}
+        >
+          <HugeiconsIcon icon={Delete02Icon} size={12} />
+        </Button>
+      </div>
+      <div className="flex flex-col gap-2.5 px-3 py-3">
+        <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+          <InlineField
+            label="Slug"
+            value={workspace.slug}
+            onChange={(v) => onChange({ slug: v })}
+            placeholder="backend"
+          />
+          <InlineField
+            label="Root"
+            value={workspace.root}
+            onChange={(v) => onChange({ root: v })}
+            placeholder="server/"
+          />
+        </div>
+        <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-muted-foreground">Language</Label>
+            <Select value={workspace.language} onValueChange={handleLanguageChange}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LANGUAGE_KEYS.map((lang) => (
+                  <SelectItem key={lang} value={lang}>
+                    {LANGUAGE_LABELS[lang]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {isRust ? (
+            <InlineField
+              label="Toolchain"
+              value={workspace.toolchain ?? ""}
+              onChange={(v) => onChange({ toolchain: v || null })}
+              placeholder="stable"
+            />
+          ) : (
+            <InlineField
+              label="Version"
+              value={workspace.version ?? ""}
+              onChange={(v) => onChange({ version: v || null })}
+              placeholder="latest"
+            />
+          )}
+        </div>
+        {isNode && (
+          <InlineField
+            label="Package manager"
+            value={workspace.package_manager ?? ""}
+            onChange={(v) => onChange({ package_manager: v || null })}
+            placeholder="pnpm"
+          />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -509,50 +304,22 @@ function SystemPackagesSection({ config, onChange }: Props) {
   return (
     <Section
       title="System packages"
-      description="One package name per line. apt is used on debian, apk on alpine."
+      description="One apt package name per line. For anything that isn't in apt (curl installs like `protoc`, binary downloads, etc.), use a `post_build` lifecycle hook so it bakes into the image."
     >
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div className="flex flex-col gap-1">
-          <Label>apt (debian)</Label>
-          <Textarea
-            value={config.system_packages.apt.join("\n")}
-            onChange={(e) =>
-              onChange({
-                ...config,
-                system_packages: {
-                  ...config.system_packages,
-                  apt: e.target.value
-                    .split("\n")
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                },
-              })
-            }
-            placeholder="postgresql-client"
-            className="min-h-[100px] font-mono text-xs"
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label>apk (alpine)</Label>
-          <Textarea
-            value={config.system_packages.apk.join("\n")}
-            onChange={(e) =>
-              onChange({
-                ...config,
-                system_packages: {
-                  ...config.system_packages,
-                  apk: e.target.value
-                    .split("\n")
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                },
-              })
-            }
-            placeholder="postgresql-client"
-            className="min-h-[100px] font-mono text-xs"
-          />
-        </div>
-      </div>
+      <Textarea
+        value={config.system_packages.join("\n")}
+        onChange={(e) =>
+          onChange({
+            ...config,
+            system_packages: e.target.value
+              .split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean),
+          })
+        }
+        placeholder="postgresql-client"
+        className="min-h-[100px] font-mono text-xs"
+      />
     </Section>
   );
 }
@@ -639,13 +406,14 @@ function LifecycleSection({ config, onChange }: Props) {
   return (
     <Section
       title="Lifecycle hooks"
-      description="post_build runs as RUN lines in the generated image; pre_warm runs in the warm Pod; pre_task runs in each task-run Pod."
+      description="post_build bakes into the image (paid once). The three pre_* hooks run every Pod start (paid every time)."
     >
       <Tabs defaultValue="post_build" className="flex w-full flex-col">
         <TabsList className="w-fit">
           <TabsTrigger value="post_build">post_build</TabsTrigger>
-          <TabsTrigger value="pre_warm">pre_warm</TabsTrigger>
+          <TabsTrigger value="pre_anything">pre_anything</TabsTrigger>
           <TabsTrigger value="pre_task">pre_task</TabsTrigger>
+          <TabsTrigger value="pre_verification">pre_verification</TabsTrigger>
         </TabsList>
         <TabsContent value="post_build" className="mt-3">
           <HookCommandList
@@ -653,16 +421,16 @@ function LifecycleSection({ config, onChange }: Props) {
             onChange={(next) =>
               onChange({ ...config, lifecycle: { ...config.lifecycle, post_build: next } })
             }
-            emptyHint="No post-build hooks. Commands here are baked into the image as RUN lines."
+            emptyHint="Anything you want bundled into the image goes here. Runs as RUN lines at image-build time — `curl -L … | tar -x`, `pip install`, custom binary installs — paid once per config change, not per Pod start."
           />
         </TabsContent>
-        <TabsContent value="pre_warm" className="mt-3">
+        <TabsContent value="pre_anything" className="mt-3">
           <HookCommandList
-            hooks={config.lifecycle.pre_warm}
+            hooks={config.lifecycle.pre_anything}
             onChange={(next) =>
-              onChange({ ...config, lifecycle: { ...config.lifecycle, pre_warm: next } })
+              onChange({ ...config, lifecycle: { ...config.lifecycle, pre_anything: next } })
             }
-            emptyHint="No pre-warm hooks. Commands here run before the canonical graph indexers."
+            emptyHint="Runs in every Pod djinn starts (warm AND task-run), before any djinn work. Use for per-Pod setup that doesn't belong in the image."
           />
         </TabsContent>
         <TabsContent value="pre_task" className="mt-3">
@@ -671,7 +439,19 @@ function LifecycleSection({ config, onChange }: Props) {
             onChange={(next) =>
               onChange({ ...config, lifecycle: { ...config.lifecycle, pre_task: next } })
             }
-            emptyHint="No pre-task hooks. Commands here run before the supervisor starts in each task Pod."
+            emptyHint="Task-run Pods only. Runs after pre_anything, before the supervisor starts."
+          />
+        </TabsContent>
+        <TabsContent value="pre_verification" className="mt-3">
+          <HookCommandList
+            hooks={config.lifecycle.pre_verification}
+            onChange={(next) =>
+              onChange({
+                ...config,
+                lifecycle: { ...config.lifecycle, pre_verification: next },
+              })
+            }
+            emptyHint="Runs once per task, before any verification rule fires. Typical use: pnpm install, cargo build, etc."
           />
         </TabsContent>
       </Tabs>
@@ -682,9 +462,6 @@ function LifecycleSection({ config, onChange }: Props) {
 // ── Verification ────────────────────────────────────────────────────────
 
 function VerificationSection({ config, onChange }: Props) {
-  const updateSetup = (next: EnvironmentConfig["verification"]["setup"]) => {
-    onChange({ ...config, verification: { ...config.verification, setup: next } });
-  };
   const updateRules = (next: EnvironmentConfig["verification"]["rules"]) => {
     onChange({ ...config, verification: { ...config.verification, rules: next } });
   };
@@ -695,24 +472,10 @@ function VerificationSection({ config, onChange }: Props) {
   return (
     <Section
       title="Verification"
-      description="Commands that prove a task-run succeeded. Rules match on changed files via glob; commands run in the verification Pod."
+      description="Commands that prove a task-run succeeded. Rules match on changed files via glob; commands run in the verification Pod. Prep commands live under Lifecycle → pre_verification."
     >
       <div className="flex flex-col gap-6">
         <div>
-          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Setup
-          </h4>
-          <HookCommandList
-            hooks={config.verification.setup}
-            onChange={updateSetup}
-            emptyHint="No setup hooks. These run before the match-based rule commands."
-          />
-        </div>
-
-        <div>
-          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Rules
-          </h4>
           <div className="flex flex-col gap-2">
             {config.verification.rules.length === 0 && (
               <p className="text-xs text-muted-foreground">No verification rules configured.</p>

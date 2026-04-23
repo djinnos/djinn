@@ -98,6 +98,12 @@ spec:
               value: "kubernetes"
             - name: DJINN_IMAGE_BUILDER_IMAGE
               value: {{ .Values.imagePipeline.builderImage | quote }}
+            # Fully-qualified ref used in `COPY --from=<ref>` in each
+            # generated project Dockerfile. Must be pullable from inside
+            # the cluster (i.e. include the registry host). Local-dev
+            # sets this to `localhost:5001/djinn-agent-runtime:dev`.
+            - name: DJINN_IMAGE_AGENT_WORKER_IMAGE
+              value: {{ .Values.image.runtime | quote }}
             # Image-pipeline hostnames are computed from the release name
             # here so the Rust controller doesn't fall back to its
             # hardcoded `djinn-`-prefixed defaults when the Helm release

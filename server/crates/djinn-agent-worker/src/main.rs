@@ -371,10 +371,10 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/workspace"));
 
-    // P5: load the project's EnvironmentConfig from the ConfigMap mount
-    // and run its pre_warm hooks before the canonical-graph pipeline.
-    // An absent mount is fine — the warm Pod runs without hooks, which
-    // is what the pre-cut-over behaviour would give us anyway.
+    // Load the project's EnvironmentConfig from the ConfigMap mount and
+    // run `pre_anything` hooks (which run in every Pod djinn starts)
+    // before the canonical-graph pipeline. An absent mount is fine — the
+    // warm Pod runs without hooks, matching pre-cut-over behaviour.
     let env_config_path = PathBuf::from(lifecycle::ENV_CONFIG_MOUNT_FILE);
     match lifecycle::load_environment_config(&env_config_path).await {
         Ok(Some(cfg)) => {
@@ -382,14 +382,14 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
                 project_id,
                 schema_version = cfg.schema_version,
                 workspace_count = cfg.workspaces.len(),
-                pre_warm_hooks = cfg.lifecycle.pre_warm.len(),
+                pre_anything_hooks = cfg.lifecycle.pre_anything.len(),
                 "environment_config loaded from {}",
                 env_config_path.display()
             );
             if let Err(e) = lifecycle::run_phase(
                 &lifecycle_root,
-                "pre_warm",
-                &cfg.lifecycle.pre_warm,
+                "pre_anything",
+                &cfg.lifecycle.pre_anything,
             )
             .await
             {
@@ -397,7 +397,7 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
                     project_id,
                     project_root = %lifecycle_root.display(),
                     error = %format!("{e:#}"),
-                    "pre_warm hook failed; continuing with warm-graph anyway"
+                    "pre_anything hook failed; continuing with warm-graph anyway"
                 );
             }
         }

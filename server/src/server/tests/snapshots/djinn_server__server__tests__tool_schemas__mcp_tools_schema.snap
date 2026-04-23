@@ -4684,6 +4684,58 @@ expression: signatures
   },
   {
     "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Project UUID.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ProjectEnvironmentConfigResetParams",
+      "type": "object"
+    },
+    "name": "project_environment_config_reset",
+    "output_schema": {
+      "$defs": {
+        "ObjectJson": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectJson"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "The freshly-generated auto-detected config, on success."
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ProjectEnvironmentConfigResetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
       "$defs": {
         "ObjectJson": {
           "additionalProperties": true,

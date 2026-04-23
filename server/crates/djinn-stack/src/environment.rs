@@ -102,13 +102,13 @@ pub struct EnvironmentConfig {
     #[serde(default)]
     pub source: ConfigSource,
     #[serde(default)]
-    pub base: BaseImage,
-    #[serde(default)]
     pub languages: Languages,
     #[serde(default)]
     pub workspaces: Vec<Workspace>,
+    /// apt packages installed in the image. Alpine was dropped in the
+    /// 2026-04-22 cleanup — every image is `debian:bookworm-slim` now.
     #[serde(default)]
-    pub system_packages: SystemPackages,
+    pub system_packages: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -137,10 +137,9 @@ impl EnvironmentConfig {
         Self {
             schema_version: SCHEMA_VERSION,
             source: ConfigSource::AutoDetected,
-            base: BaseImage::default(),
             languages: Languages::default(),
             workspaces: Vec::new(),
-            system_packages: SystemPackages::default(),
+            system_packages: Vec::new(),
             env: BTreeMap::new(),
             lifecycle: LifecycleHooks::default(),
             verification: Verification::default(),
@@ -155,17 +154,11 @@ impl EnvironmentConfig {
     ///
     /// Populates:
     /// * `schema_version`, `source = AutoDetected`
-    /// * `base` — default debian/bookworm-slim
-    /// * `languages.*` — one entry per language the stack detected a
-    ///   runtime for. Rust is populated even when `stack.runtimes.rust`
-    ///   is `None`, as long as `Stack.workspaces` has a Rust entry
-    ///   (covers the bare "Cargo.toml without rust-toolchain.toml"
-    ///   case). `rust-analyzer` is included in components by default
-    ///   so the warm-graph SCIP pipeline works out of the box.
+    /// * `languages.*` — one entry per language detected in the stack.
     /// * `workspaces` — one entry per `StackWorkspace`, with
     ///   toolchain/version routed to the right field per language.
-    /// * `env`, `system_packages`, `lifecycle`, `verification` —
-    ///   empty (user fills them in via the UI).
+    /// * `verification.rules` — safe default rules for Rust / Go workspaces.
+    /// * `env`, `system_packages`, `lifecycle` — empty.
     pub fn from_stack(stack: &crate::schema::Stack) -> Self {
         let mut cfg = Self::empty();
         cfg.source = ConfigSource::AutoDetected;
@@ -189,8 +182,6 @@ impl EnvironmentConfig {
                     .rust
                     .clone()
                     .unwrap_or_else(|| "stable".to_string()),
-                components: vec!["rust-analyzer".to_string()],
-                targets: vec![],
             });
         }
         if has_node {
@@ -206,7 +197,6 @@ impl EnvironmentConfig {
             cfg.languages.node = Some(NodeLanguage {
                 default_version,
                 default_package_manager: default_pm,
-                scip_indexer: Some("scip-typescript".to_string()),
             });
         }
         if has_python {
@@ -216,7 +206,6 @@ impl EnvironmentConfig {
                     .python
                     .clone()
                     .unwrap_or_else(|| "3.12".to_string()),
-                scip_indexer: Some("scip-python".to_string()),
             });
         }
         if has_go {
@@ -226,19 +215,52 @@ impl EnvironmentConfig {
                     .go
                     .clone()
                     .unwrap_or_else(|| "1.22".to_string()),
-                scip_indexer: Some("scip-go".to_string()),
             });
         }
 
         // Workspace entries — route StackWorkspace.toolchain to the
         // right field per language: Rust uses `toolchain`, others use
         // `version`.
+        // Populate the toolchain/version fields so the UI shows a concrete
+        // value for every workspace. Priority: (1) the workspace's own pin
+        // from its manifest, (2) the project-wide detected runtime, (3) the
+        // language's hard default. Means a Rust workspace without its own
+        // `rust-toolchain.toml` still displays `stable` rather than an empty
+        // placeholder, and the user can edit it from there.
         cfg.workspaces = stack
             .workspaces
             .iter()
             .map(|ws| {
                 let (toolchain, version) = match ws.language.as_str() {
-                    "rust" => (ws.toolchain.clone(), None),
+                    "rust" => {
+                        let tc = ws
+                            .toolchain
+                            .clone()
+                            .or_else(|| stack.runtimes.rust.clone())
+                            .or_else(|| Some("stable".to_string()));
+                        (tc, None)
+                    }
+                    "node" => (
+                        None,
+                        ws.toolchain
+                            .clone()
+                            .or_else(|| stack.runtimes.node.clone())
+                            .or_else(|| Some("22".to_string())),
+                    ),
+                    "python" => (
+                        None,
+                        ws.toolchain
+                            .clone()
+                            .or_else(|| stack.runtimes.python.clone())
+                            .or_else(|| Some("3.12".to_string())),
+                    ),
+                    "go" => (
+                        None,
+                        ws.toolchain
+                            .clone()
+                            .or_else(|| stack.runtimes.go.clone())
+                            .or_else(|| Some("1.22".to_string())),
+                    ),
                     _ => (None, ws.toolchain.clone()),
                 };
                 Workspace {
@@ -250,6 +272,18 @@ impl EnvironmentConfig {
                     package_manager: ws.package_manager.clone(),
                 }
             })
+            .collect();
+
+        // Auto-populate verification rules per detected workspace using
+        // language-primitive commands that succeed without project-
+        // specific configuration. Node/Python/Java/Ruby/Dotnet/Clang
+        // are skipped because their verification surface depends on
+        // package.json scripts / pyproject extras / pom targets that
+        // the user has to wire explicitly. Rust + Go have a safe default.
+        cfg.verification.rules = stack
+            .workspaces
+            .iter()
+            .filter_map(|ws| default_verification_rule(&ws.language, &ws.root))
             .collect();
 
         cfg
@@ -268,10 +302,9 @@ impl EnvironmentConfig {
                 supported: SCHEMA_VERSION,
             });
         }
-        self.base.validate()?;
         self.languages.validate()?;
         validate_workspaces(&self.workspaces)?;
-        self.system_packages.validate()?;
+        validate_package_list("system_packages", &self.system_packages)?;
         validate_env(&self.env)?;
         self.lifecycle.validate()?;
         self.verification.validate()?;
@@ -282,49 +315,6 @@ impl EnvironmentConfig {
 impl Default for EnvironmentConfig {
     fn default() -> Self {
         Self::empty()
-    }
-}
-
-// ---- base image ----------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Distro {
-    Debian,
-    Alpine,
-}
-
-impl Default for Distro {
-    fn default() -> Self {
-        Self::Debian
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct BaseImage {
-    #[serde(default)]
-    pub distro: Distro,
-    #[serde(default = "BaseImage::default_variant")]
-    pub variant: String,
-}
-
-impl BaseImage {
-    fn default_variant() -> String {
-        "bookworm-slim".to_owned()
-    }
-
-    fn validate(&self) -> EnvResult<()> {
-        validate_identifier("base.variant", &self.variant)
-    }
-}
-
-impl Default for BaseImage {
-    fn default() -> Self {
-        Self {
-            distro: Distro::default(),
-            variant: Self::default_variant(),
-        }
     }
 }
 
@@ -381,33 +371,28 @@ impl Languages {
     }
 }
 
+// Per-language knobs were pared down in the 2026-04-22 cleanup: the SCIP
+// indexer, Rust `components`, and Rust `targets` are now image-builder
+// concerns (hard-coded per language there). We tolerate unknown fields
+// on read so old rows that still carry those keys deserialize cleanly.
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct RustLanguage {
     pub default_toolchain: String,
-    #[serde(default)]
-    pub components: Vec<String>,
-    #[serde(default)]
-    pub targets: Vec<String>,
 }
 
 impl RustLanguage {
     fn validate(&self) -> EnvResult<()> {
         validate_identifier("languages.rust.default_toolchain", &self.default_toolchain)?;
-        validate_identifier_list("languages.rust.components", &self.components)?;
-        validate_identifier_list("languages.rust.targets", &self.targets)?;
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct NodeLanguage {
     pub default_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_package_manager: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scip_indexer: Option<String>,
 }
 
 impl NodeLanguage {
@@ -416,118 +401,73 @@ impl NodeLanguage {
         if let Some(pm) = &self.default_package_manager {
             validate_identifier("languages.node.default_package_manager", pm)?;
         }
-        if let Some(idx) = &self.scip_indexer {
-            validate_identifier("languages.node.scip_indexer", idx)?;
-        }
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct PythonLanguage {
     pub default_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scip_indexer: Option<String>,
 }
 
 impl PythonLanguage {
     fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.python.default_version", &self.default_version)?;
-        if let Some(idx) = &self.scip_indexer {
-            validate_identifier("languages.python.scip_indexer", idx)?;
-        }
-        Ok(())
+        validate_identifier("languages.python.default_version", &self.default_version)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct GoLanguage {
     pub default_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scip_indexer: Option<String>,
 }
 
 impl GoLanguage {
     fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.go.default_version", &self.default_version)?;
-        if let Some(idx) = &self.scip_indexer {
-            validate_identifier("languages.go.scip_indexer", idx)?;
-        }
-        Ok(())
+        validate_identifier("languages.go.default_version", &self.default_version)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct JavaLanguage {
     pub default_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scip_indexer: Option<String>,
 }
 
 impl JavaLanguage {
     fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.java.default_version", &self.default_version)?;
-        if let Some(idx) = &self.scip_indexer {
-            validate_identifier("languages.java.scip_indexer", idx)?;
-        }
-        Ok(())
+        validate_identifier("languages.java.default_version", &self.default_version)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct RubyLanguage {
     pub default_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scip_indexer: Option<String>,
 }
 
 impl RubyLanguage {
     fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.ruby.default_version", &self.default_version)?;
-        if let Some(idx) = &self.scip_indexer {
-            validate_identifier("languages.ruby.scip_indexer", idx)?;
-        }
-        Ok(())
+        validate_identifier("languages.ruby.default_version", &self.default_version)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct DotnetLanguage {
     pub default_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scip_indexer: Option<String>,
 }
 
 impl DotnetLanguage {
     fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.dotnet.default_version", &self.default_version)?;
-        if let Some(idx) = &self.scip_indexer {
-            validate_identifier("languages.dotnet.scip_indexer", idx)?;
-        }
-        Ok(())
+        validate_identifier("languages.dotnet.default_version", &self.default_version)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ClangLanguage {
     pub default_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scip_indexer: Option<String>,
 }
 
 impl ClangLanguage {
     fn validate(&self) -> EnvResult<()> {
-        validate_identifier("languages.clang.default_version", &self.default_version)?;
-        if let Some(idx) = &self.scip_indexer {
-            validate_identifier("languages.clang.scip_indexer", idx)?;
-        }
-        Ok(())
+        validate_identifier("languages.clang.default_version", &self.default_version)
     }
 }
 
@@ -585,23 +525,6 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
 }
 
 // ---- system packages ----------------------------------------------------
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SystemPackages {
-    #[serde(default)]
-    pub apt: Vec<String>,
-    #[serde(default)]
-    pub apk: Vec<String>,
-}
-
-impl SystemPackages {
-    fn validate(&self) -> EnvResult<()> {
-        validate_package_list("system_packages.apt", &self.apt)?;
-        validate_package_list("system_packages.apk", &self.apk)?;
-        Ok(())
-    }
-}
 
 fn validate_package_list(field: &str, pkgs: &[String]) -> EnvResult<()> {
     if pkgs.len() > MAX_SYSTEM_PACKAGES {
@@ -755,25 +678,37 @@ impl HookCommand {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+// Not `deny_unknown_fields`: the 2026-04-22 rename `pre_warm` → `pre_anything`
+// means older rows carry a `pre_warm` key that we need to tolerate on read.
+// The serde `alias` below routes that legacy key into `pre_anything`.
 pub struct LifecycleHooks {
-    /// `RUN` lines appended to the generated Dockerfile. Runs at image-build
-    /// time, not at warm/task time.
+    /// `RUN` lines appended to the generated Dockerfile. Bundle anything
+    /// you want baked into the image here (apt packages are the easy path;
+    /// curl-installs like `protoc` go here).
     #[serde(default)]
     pub post_build: Vec<HookCommand>,
-    /// Runs in the warm Pod before indexers kick off.
-    #[serde(default)]
-    pub pre_warm: Vec<HookCommand>,
+    /// Runs in every Pod djinn starts (warm AND task-run), before any
+    /// djinn work. The pre-2026-04-22 `pre_warm` field routes here via
+    /// the serde alias.
+    #[serde(default, alias = "pre_warm")]
+    pub pre_anything: Vec<HookCommand>,
     /// Runs in the task-run Pod before the supervisor starts.
     #[serde(default)]
     pub pre_task: Vec<HookCommand>,
+    /// Runs once in the task-run Pod, before any verification rule fires.
+    /// Typically `pnpm install` / `cargo build` / similar — commands that
+    /// prepare the workspace so the `verification.rules` commands succeed.
+    /// Previously lived as `verification.setup`.
+    #[serde(default)]
+    pub pre_verification: Vec<HookCommand>,
 }
 
 impl LifecycleHooks {
     fn validate(&self) -> EnvResult<()> {
         validate_hook_list("lifecycle.post_build", &self.post_build)?;
-        validate_hook_list("lifecycle.pre_warm", &self.pre_warm)?;
+        validate_hook_list("lifecycle.pre_anything", &self.pre_anything)?;
         validate_hook_list("lifecycle.pre_task", &self.pre_task)?;
+        validate_hook_list("lifecycle.pre_verification", &self.pre_verification)?;
         Ok(())
     }
 }
@@ -810,19 +745,15 @@ pub struct VerificationRule {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Verification {
-    /// Commands that set the workspace up before verification runs. Moved
-    /// here from the pre-cut-over `.djinn/settings.json`'s `setup` field.
-    #[serde(default)]
-    pub setup: Vec<HookCommand>,
     /// Rules moved verbatim from `projects.verification_rules` by the P5
-    /// boot reseed hook.
+    /// boot reseed hook. The former `setup` field lives at
+    /// `lifecycle.pre_verification` now.
     #[serde(default)]
     pub rules: Vec<VerificationRule>,
 }
 
 impl Verification {
     fn validate(&self) -> EnvResult<()> {
-        validate_hook_list("verification.setup", &self.setup)?;
         if self.rules.len() > MAX_VERIFICATION_RULES {
             return Err(EnvironmentConfigError::ListTooLong {
                 field: "verification.rules".into(),
@@ -864,6 +795,57 @@ impl Verification {
     }
 }
 
+/// Auto-detected verification rule for a workspace, if its language has
+/// a safe language-primitive command set. Returns `None` for languages
+/// whose verification surface depends on project-specific configuration
+/// (Node/Python/Java/Ruby/Dotnet/Clang) — those rules are author-only.
+///
+/// `root` is the repo-relative workspace root (empty string for a
+/// root-level workspace). Commands run from the repo root so we embed
+/// the manifest path; the glob likewise anchors under `root`.
+fn default_verification_rule(language: &str, root: &str) -> Option<VerificationRule> {
+    // Build the glob prefix: empty root → match repo root; otherwise
+    // `root/**` style match. Normalize trailing `/` so we don't end up
+    // with `server//**`.
+    let root_trim = root.trim_end_matches('/');
+    let glob_prefix = if root_trim.is_empty() {
+        String::new()
+    } else {
+        format!("{root_trim}/")
+    };
+    match language {
+        "rust" => {
+            let manifest = if root_trim.is_empty() {
+                "Cargo.toml".to_string()
+            } else {
+                format!("{root_trim}/Cargo.toml")
+            };
+            // `cargo clippy -- -D warnings` is a strict superset of
+            // `cargo check` (it runs the type checker AND clippy lints),
+            // so we skip the redundant `cargo check` invocation.
+            Some(VerificationRule {
+                match_pattern: format!("{glob_prefix}**/*.rs"),
+                commands: vec![
+                    format!("cargo clippy --manifest-path {manifest} -- -D warnings"),
+                    format!("cargo test --manifest-path {manifest}"),
+                ],
+            })
+        }
+        "go" => {
+            let scope = if root_trim.is_empty() {
+                "./...".to_string()
+            } else {
+                format!("./{root_trim}/...")
+            };
+            Some(VerificationRule {
+                match_pattern: format!("{glob_prefix}**/*.go"),
+                commands: vec![format!("go vet {scope}"), format!("go test {scope}")],
+            })
+        }
+        _ => None,
+    }
+}
+
 // ---- string validators --------------------------------------------------
 
 /// Accept `[A-Za-z0-9._-]+` — the character set that's safe in a `RUN`
@@ -889,20 +871,6 @@ fn validate_identifier(field: &str, value: &str) -> EnvResult<()> {
             field: field.into(),
             value: value.into(),
         });
-    }
-    Ok(())
-}
-
-fn validate_identifier_list(field: &str, values: &[String]) -> EnvResult<()> {
-    if values.len() > MAX_LANGUAGE_LIST {
-        return Err(EnvironmentConfigError::ListTooLong {
-            field: field.into(),
-            len: values.len(),
-            max: MAX_LANGUAGE_LIST,
-        });
-    }
-    for value in values {
-        validate_identifier(field, value)?;
     }
     Ok(())
 }
@@ -995,20 +963,7 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.languages.rust = Some(RustLanguage {
             default_toolchain: "stable; rm -rf /".to_owned(),
-            components: vec![],
-            targets: vec![],
         });
-        let err = cfg.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            EnvironmentConfigError::UnsafeIdentifier { .. }
-        ));
-    }
-
-    #[test]
-    fn rejects_shell_injection_in_distro_variant() {
-        let mut cfg = valid_minimal();
-        cfg.base.variant = "bookworm$(whoami)".to_owned();
         let err = cfg.validate().unwrap_err();
         assert!(matches!(
             err,
@@ -1021,8 +976,6 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.languages.rust = Some(RustLanguage {
             default_toolchain: "nightly-2026-04-01".to_owned(),
-            components: vec!["rust-analyzer".to_owned()],
-            targets: vec![],
         });
         cfg.schema_version = SCHEMA_VERSION;
         assert!(cfg.validate().is_ok());
@@ -1146,7 +1099,7 @@ mod tests {
     #[test]
     fn accepts_package_plus_sign() {
         let mut cfg = valid_minimal();
-        cfg.system_packages.apt = vec!["libstdc++-dev".to_owned()];
+        cfg.system_packages = vec!["libstdc++-dev".to_owned()];
         cfg.schema_version = SCHEMA_VERSION;
         assert!(cfg.validate().is_ok());
     }
@@ -1154,7 +1107,7 @@ mod tests {
     #[test]
     fn rejects_package_shell_meta() {
         let mut cfg = valid_minimal();
-        cfg.system_packages.apt = vec!["bash;evil".to_owned()];
+        cfg.system_packages = vec!["bash;evil".to_owned()];
         let err = cfg.validate().unwrap_err();
         assert!(matches!(
             err,
@@ -1196,7 +1149,7 @@ mod tests {
             "schema_version": 1,
             "lifecycle": {
                 "post_build": ["echo build-time"],
-                "pre_warm": [["bash", "-lc", "echo ready"]],
+                "pre_anything": [["bash", "-lc", "echo ready"]],
                 "pre_task": [{"index": "scip-python", "deps": "pip install -e ."}]
             }
         }"#;
@@ -1205,12 +1158,30 @@ mod tests {
             cfg.lifecycle.post_build[0],
             HookCommand::Shell(_)
         ));
-        assert!(matches!(cfg.lifecycle.pre_warm[0], HookCommand::Exec(_)));
+        assert!(matches!(cfg.lifecycle.pre_anything[0], HookCommand::Exec(_)));
         assert!(matches!(
             cfg.lifecycle.pre_task[0],
             HookCommand::Parallel(_)
         ));
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_pre_warm_alias_routes_to_pre_anything() {
+        // Older rows still carry `pre_warm` — the serde alias should
+        // keep them loadable post-rename.
+        let raw = r#"{
+            "schema_version": 1,
+            "lifecycle": {
+                "pre_warm": ["echo legacy"]
+            }
+        }"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.lifecycle.pre_anything.len(), 1);
+        assert!(matches!(
+            cfg.lifecycle.pre_anything[0],
+            HookCommand::Shell(_)
+        ));
     }
 
     #[test]
@@ -1232,9 +1203,10 @@ mod tests {
         assert_eq!(cfg.source, ConfigSource::AutoDetected);
         let rust = cfg.languages.rust.as_ref().expect("rust block");
         assert_eq!(rust.default_toolchain, "stable");
-        assert!(rust.components.contains(&"rust-analyzer".to_string()));
         assert_eq!(cfg.workspaces.len(), 1);
-        assert!(cfg.workspaces[0].toolchain.is_none());
+        // Unpinned workspace now falls back to the language default so
+        // the UI can show a concrete toolchain.
+        assert_eq!(cfg.workspaces[0].toolchain.as_deref(), Some("stable"));
         assert!(cfg.workspaces[0].version.is_none());
     }
 
@@ -1322,28 +1294,26 @@ mod tests {
 
     #[test]
     fn plan_example_config_validates() {
-        // The JSON example from the plan, lightly condensed — this is the
-        // shape P3's image-builder golden tests will feed into the
-        // Dockerfile generator.
+        // Canonical post-2026-04-22-cleanup shape, matching what the
+        // image-builder golden tests feed into the Dockerfile generator.
         let raw = r#"{
             "schema_version": 1,
             "source": "auto-detected",
-            "base": {"distro": "debian", "variant": "bookworm-slim"},
             "languages": {
-                "rust":   {"default_toolchain": "stable", "components": ["rust-analyzer"], "targets": []},
-                "node":   {"default_version": "22", "default_package_manager": "pnpm", "scip_indexer": "scip-typescript"},
-                "python": {"default_version": "3.12", "scip_indexer": "scip-python"},
-                "go":     {"default_version": "1.22", "scip_indexer": "scip-go"}
+                "rust":   {"default_toolchain": "stable"},
+                "node":   {"default_version": "22", "default_package_manager": "pnpm"},
+                "python": {"default_version": "3.12"},
+                "go":     {"default_version": "1.22"}
             },
             "workspaces": [
                 {"slug": "server", "root": "server", "language": "rust", "toolchain": "stable"},
                 {"slug": "tools-codegen", "root": "tools/codegen", "language": "rust", "toolchain": "1.85.0"},
                 {"slug": "ui", "root": "ui", "language": "node", "version": "20", "package_manager": "pnpm"}
             ],
-            "system_packages": {"apt": ["postgresql-client"], "apk": []},
+            "system_packages": ["postgresql-client"],
             "env": {"RUST_LOG": "info"},
-            "lifecycle": {"post_build": [], "pre_warm": [], "pre_task": []},
-            "verification": {"setup": [], "rules": []}
+            "lifecycle": {"post_build": [], "pre_anything": [], "pre_task": [], "pre_verification": []},
+            "verification": {"rules": []}
         }"#;
         let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
         cfg.validate().unwrap();

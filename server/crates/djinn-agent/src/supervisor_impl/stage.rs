@@ -211,22 +211,21 @@ pub(crate) async fn execute_stage(
     .await;
 
     // ── Setup commands + verification context ────────────────────────────────
-    // Post-P8 cut-over: the verification block lives in Dolt's
-    // `projects.environment_config`. Fetch it here and pass the parsed
-    // struct into the lifecycle helper. Missing / malformed configs degrade
-    // to an empty `Verification` (see `verification::environment`).
-    let verification =
-        crate::verification::environment::verification_for_project_id(
-            &agent_context.db,
-            &task.project_id,
-        )
-        .await;
+    // Pre-verification hooks come from `lifecycle.pre_verification`,
+    // rules from `verification.rules`. Missing / malformed configs degrade
+    // to empty lists (see `verification::environment`).
+    let env_config = crate::verification::environment::environment_config_for_project_id(
+        &agent_context.db,
+        &task.project_id,
+    )
+    .await;
     let SetupAndVerificationContext {
         prompt_setup_commands,
         prompt_verification_commands,
         prompt_verification_rules,
     } = match resolve_setup_and_verification_context(
-        verification,
+        env_config.lifecycle.pre_verification,
+        env_config.verification.rules,
         role_verification_command.as_deref(),
         worktree_path,
         &task.id,

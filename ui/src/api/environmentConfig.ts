@@ -12,28 +12,18 @@ import { callMcpTool } from "@/api/mcpClient";
 export const SCHEMA_VERSION = 1;
 
 export type ConfigSource = "auto-detected" | "user-edited";
-export type Distro = "debian" | "alpine";
-
-export interface BaseImage {
-  distro: Distro;
-  variant: string;
-}
 
 export interface RustLanguage {
   default_toolchain: string;
-  components?: string[];
-  targets?: string[];
 }
 
 export interface NodeLanguage {
   default_version: string;
   default_package_manager?: string | null;
-  scip_indexer?: string | null;
 }
 
 export interface SimpleLanguage {
   default_version: string;
-  scip_indexer?: string | null;
 }
 
 export type PythonLanguage = SimpleLanguage;
@@ -76,11 +66,6 @@ export interface Workspace {
   package_manager?: string | null;
 }
 
-export interface SystemPackages {
-  apt: string[];
-  apk: string[];
-}
-
 /**
  * A lifecycle / verification / setup command.
  *
@@ -94,8 +79,9 @@ export type HookCommand =
 
 export interface LifecycleHooks {
   post_build: HookCommand[];
-  pre_warm: HookCommand[];
+  pre_anything: HookCommand[];
   pre_task: HookCommand[];
+  pre_verification: HookCommand[];
 }
 
 export interface VerificationRule {
@@ -104,17 +90,15 @@ export interface VerificationRule {
 }
 
 export interface Verification {
-  setup: HookCommand[];
   rules: VerificationRule[];
 }
 
 export interface EnvironmentConfig {
   schema_version: number;
   source: ConfigSource;
-  base: BaseImage;
   languages: Languages;
   workspaces: Workspace[];
-  system_packages: SystemPackages;
+  system_packages: string[];
   env: Record<string, string>;
   lifecycle: LifecycleHooks;
   verification: Verification;
@@ -125,40 +109,46 @@ export interface EnvironmentConfig {
  * `EnvironmentConfig`. Applies the same defaults `EnvironmentConfig::empty()`
  * does on the Rust side so the form bindings never have to branch on
  * `undefined` for required nested shapes.
+ *
+ * Tolerates the pre-cleanup field name `pre_warm` by routing it into
+ * `pre_anything` — matches the serde `alias` on the Rust side.
  */
 export function normalizeConfig(
   raw: unknown | null | undefined,
 ): EnvironmentConfig {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const base = (obj.base ?? {}) as Partial<BaseImage>;
-  const system = (obj.system_packages ?? {}) as Partial<SystemPackages>;
-  const lifecycle = (obj.lifecycle ?? {}) as Partial<LifecycleHooks>;
+  const lifecycle = (obj.lifecycle ?? {}) as Record<string, unknown>;
   const verification = (obj.verification ?? {}) as Partial<Verification>;
   const env = (obj.env ?? {}) as Record<string, string>;
+  const systemPackages = Array.isArray(obj.system_packages)
+    ? (obj.system_packages as string[])
+    : [];
+  const preAnything = Array.isArray(lifecycle.pre_anything)
+    ? (lifecycle.pre_anything as HookCommand[])
+    : Array.isArray(lifecycle.pre_warm)
+      ? (lifecycle.pre_warm as HookCommand[])
+      : [];
   return {
     schema_version:
       typeof obj.schema_version === "number" ? obj.schema_version : SCHEMA_VERSION,
     source: (obj.source === "user-edited" ? "user-edited" : "auto-detected") as ConfigSource,
-    base: {
-      distro: (base.distro === "alpine" ? "alpine" : "debian") as Distro,
-      variant: typeof base.variant === "string" && base.variant.length > 0
-        ? base.variant
-        : "bookworm-slim",
-    },
     languages: (obj.languages ?? {}) as Languages,
     workspaces: Array.isArray(obj.workspaces) ? (obj.workspaces as Workspace[]) : [],
-    system_packages: {
-      apt: Array.isArray(system.apt) ? system.apt : [],
-      apk: Array.isArray(system.apk) ? system.apk : [],
-    },
+    system_packages: systemPackages,
     env: { ...env },
     lifecycle: {
-      post_build: Array.isArray(lifecycle.post_build) ? lifecycle.post_build : [],
-      pre_warm: Array.isArray(lifecycle.pre_warm) ? lifecycle.pre_warm : [],
-      pre_task: Array.isArray(lifecycle.pre_task) ? lifecycle.pre_task : [],
+      post_build: Array.isArray(lifecycle.post_build)
+        ? (lifecycle.post_build as HookCommand[])
+        : [],
+      pre_anything: preAnything,
+      pre_task: Array.isArray(lifecycle.pre_task)
+        ? (lifecycle.pre_task as HookCommand[])
+        : [],
+      pre_verification: Array.isArray(lifecycle.pre_verification)
+        ? (lifecycle.pre_verification as HookCommand[])
+        : [],
     },
     verification: {
-      setup: Array.isArray(verification.setup) ? verification.setup : [],
       rules: Array.isArray(verification.rules) ? verification.rules : [],
     },
   };
@@ -207,4 +197,29 @@ export async function saveEnvironmentConfig(
     return { ok: false, error: response.error ?? "save failed" };
   }
   return { ok: true };
+}
+
+export interface ResetResult {
+  ok: boolean;
+  error?: string;
+  config?: EnvironmentConfig;
+}
+
+/**
+ * Discard the current `environment_config` and regenerate it from the
+ * project's detected stack. Server-side: mirrors the boot reseed hook
+ * but runs on demand. Fails if the project's stack column is still
+ * empty (detection hasn't run yet).
+ */
+export async function resetEnvironmentConfig(projectId: string): Promise<ResetResult> {
+  const response = await callMcpTool("project_environment_config_reset", {
+    project: projectId,
+  });
+  if (response.status !== "ok") {
+    return { ok: false, error: response.error ?? "reset failed" };
+  }
+  return {
+    ok: true,
+    config: normalizeConfig(response.config ?? null),
+  };
 }

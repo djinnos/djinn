@@ -6,15 +6,24 @@
 #     --namespace djinn --create-namespace
 #
 # Assumptions: images have been built locally and pushed to the in-cluster
-# registry at localhost:5001 via `make image-push-local`. The kind node's
-# containerd is wired (via scripts/kind/setup-kind.sh) to resolve
-# `localhost:5001/...` through the registry container, so IfNotPresent is
-# safe — the node pulls once and keeps the layer cached.
+# registry at localhost:5001. Tilt hot-rebuilds the `:dev` tag in place on
+# source changes, so pullPolicy must be Always — otherwise kubelet reuses
+# the cached layer and new pods boot the stale binary. Pull is cheap since
+# the registry is intra-cluster.
 
 image:
   server: localhost:5001/djinn-server:dev
-  runtime: localhost:5001/djinn-agent-runtime:dev
-  pullPolicy: IfNotPresent
+  # `kind-registry:5000` and `localhost:5001` point at the same registry
+  # (the kind-registry container is attached to both the bridge and kind
+  # Docker networks — `scripts/kind/setup-kind.sh`). We prefer the
+  # `kind-registry` name because BuildKit inside the cluster resolves it
+  # over cluster DNS; kubelet on the kind node resolves it via Docker's
+  # embedded DNS. `localhost:5001` only works for containerd's mirror
+  # lookup, not for BuildKit's resolver — so any ref that gets embedded
+  # in a generated Dockerfile (for `COPY --from=<ref>`) must use the
+  # `kind-registry` form or buildctl fails with "connection refused".
+  runtime: kind-registry:5000/djinn-agent-runtime:dev
+  pullPolicy: Always
 
 # Kind uses rancher.io/local-path as the default storage class, which
 # dynamically provisions hostPath-backed PVs under the kind node. Since
@@ -102,6 +111,15 @@ langfuse:
 # Zot PVC to it so `kind` clusters bind without hunting for the cluster
 # default, and drop the size way down so the whole stack fits on a laptop.
 imagePipeline:
+  # In-kind, use the host-side kind-registry container for BOTH builder
+  # pushes AND kubelet pulls. Both paths can reach it:
+  #   * BuildKit pods resolve kind-registry over cluster DNS (the container
+  #     is attached to the kind Docker network at 172.29.0.3).
+  #   * kubelet on the kind node resolves kind-registry via Docker's
+  #     embedded DNS on the same network.
+  # The in-cluster Zot is unreachable from kubelet because its ClusterIP
+  # is on the service network (10.96.0.0/16) which only pods can route to.
+  registryHost: "kind-registry:5000"
   # Local-built builder image (see Tiltfile's djinn-image-builder-image
   # resource). ghcr.io/djinnos/djinn-image-builder:latest is org-private;
   # anonymous pulls 401 inside kind. Override to the in-cluster registry.
@@ -111,6 +129,12 @@ imagePipeline:
     # not expect TLS. Prod environments that front Zot with an Ingress +
     # TLS should leave this at its chart default (false).
     zotPlaintext: true
+    # Additional registries that must be treated as plain-HTTP by the
+    # daemon's resolver (used by `COPY --from=<ref>` in generated
+    # Dockerfiles). kind-registry is the host's kind-registry container,
+    # reachable over the kind Docker network at this name.
+    insecureRegistries:
+      - kind-registry:5000
   zot:
     # kubelet on the kind node pulls per-project devcontainer images from
     # this registry; wiring pull-secrets onto every Job is more friction

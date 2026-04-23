@@ -106,6 +106,10 @@ exec {bin} warm-graph "{project_id}"
         // the canonical project root, bypassing the DB's server-local
         // `projects.path`.
         env_var("DJINN_PROJECT_ROOT", &project_root),
+        // Verbose logging for djinn crates so SCIP indexer discovery +
+        // invocation failures surface in the Pod log instead of being
+        // silently absent.
+        env_var("RUST_LOG", "info,djinn=debug"),
     ];
     // Forward the server's DB configuration so `bootstrap_warm_database`
     // in djinn-agent-worker connects to the same Dolt/MySQL instance as

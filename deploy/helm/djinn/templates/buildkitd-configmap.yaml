@@ -9,6 +9,7 @@ Without this, buildkitd's push step errors with
 negotiates TLS against every registry by default.
 */}}
 {{- if .Values.imagePipeline.buildkitd.zotPlaintext -}}
+{{- $primary := include "djinn.imagePipeline.registryHost" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -21,6 +22,12 @@ data:
   buildkitd.toml: |
     debug = false
 
-    [registry."{{ include "djinn.imagePipeline.registryHost" . }}"]
+    [registry."{{ $primary }}"]
       http = true
+{{- range .Values.imagePipeline.buildkitd.insecureRegistries }}
+{{- if ne . $primary }}
+    [registry."{{ . }}"]
+      http = true
+{{- end }}
+{{- end }}
 {{- end }}
