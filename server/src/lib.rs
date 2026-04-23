@@ -1,7 +1,6 @@
 #![warn(unreachable_pub)]
 
 pub mod db;
-pub mod embedded;
 pub mod error;
 pub mod events;
 pub mod mirror_fetcher;
