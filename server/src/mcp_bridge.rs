@@ -946,7 +946,7 @@ impl RepoGraphOps for RepoGraphBridge {
                     let src = graph.node(edge.source());
                     if let Some(src_sym) = src.symbol.as_deref()
                         && let Some(src_crate) = scip_crate_name(src_sym)
-                        && Some(src_crate) != own_crate.as_deref()
+                        && Some(src_crate) != own_crate
                     {
                         used_outside_crate = true;
                     }
@@ -1562,10 +1562,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
         // Resolve all keys once.
         let resolve = |key: &str| -> Option<petgraph::graph::NodeIndex> {
-            match resolve_node(&graph, key) {
-                Ok(idx) => Some(idx),
-                Err(_) => None,
-            }
+            resolve_node(&graph, key).ok()
         };
         let entry_ix: Vec<petgraph::graph::NodeIndex> =
             seed_entries.iter().filter_map(|k| resolve(k)).collect();

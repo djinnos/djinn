@@ -42,14 +42,17 @@ pub async fn reseed_empty_configs(db: &Database) -> ReseedStats {
         Ok(rows) => rows,
         Err(err) => {
             tracing::warn!(error = %err, "reseed_empty_configs: list_for_reseed failed");
-            let mut s = ReseedStats::default();
-            s.errors += 1;
-            return s;
+            return ReseedStats {
+                errors: 1,
+                ..Default::default()
+            };
         }
     };
 
-    let mut stats = ReseedStats::default();
-    stats.inspected = rows.len();
+    let mut stats = ReseedStats {
+        inspected: rows.len(),
+        ..Default::default()
+    };
 
     for row in rows {
         if !needs_reseed(&row.environment_config) {

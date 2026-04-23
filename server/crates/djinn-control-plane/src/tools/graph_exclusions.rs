@@ -121,10 +121,10 @@ impl GraphExclusions {
         if self.globs.is_empty() {
             return false;
         }
-        if let Some(f) = file {
-            if self.globs.is_match(f) {
-                return true;
-            }
+        if let Some(f) = file
+            && self.globs.is_match(f)
+        {
+            return true;
         }
         self.globs.is_match(display_name) || self.globs.is_match(key)
     }
@@ -138,10 +138,7 @@ impl GraphExclusions {
         if self.excludes(key, file, display_name) {
             return true;
         }
-        match file {
-            Some(f) if self.orphan_ignore.contains(f) => true,
-            _ => false,
-        }
+        matches!(file, Some(f) if self.orphan_ignore.contains(f))
     }
 }
 

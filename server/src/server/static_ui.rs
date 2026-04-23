@@ -22,7 +22,7 @@ use rust_embed::RustEmbed;
 #[folder = "../ui/dist/"]
 struct UiAssets;
 
-pub async fn serve_static(uri: Uri) -> Response<Body> {
+pub(super) async fn serve_static(uri: Uri) -> Response<Body> {
     let requested = uri.path().trim_start_matches('/');
     let (path, status) = match UiAssets::get(requested) {
         Some(_) if !requested.is_empty() => (requested.to_string(), StatusCode::OK),

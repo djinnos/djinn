@@ -1174,7 +1174,6 @@ fn repo_err_to_errno(error: impl std::fmt::Display) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     use crate::memory_fs::MemoryViewSelection;
     use crate::server::AppState;

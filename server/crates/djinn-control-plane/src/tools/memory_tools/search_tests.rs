@@ -53,7 +53,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_diff_returns_error_for_db_only_notes() {
-        let tmp = workspace_tempdir();
+        let _tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let (tx, _rx) = broadcast::channel(256);
@@ -133,7 +133,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_diff_returns_error_for_note_not_found() {
-        let tmp = workspace_tempdir();
+        let _tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let (tx, _rx) = broadcast::channel(256);
@@ -212,7 +212,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_history_returns_error_for_db_only_notes() {
-        let tmp = workspace_tempdir();
+        let _tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let (tx, _rx) = broadcast::channel(256);

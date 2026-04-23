@@ -535,47 +535,53 @@ mod tests {
     #[test]
     fn is_job_failed_true_when_failed_count_nonzero() {
         use k8s_openapi::api::batch::v1::JobStatus;
-        let mut job = Job::default();
-        job.status = Some(JobStatus {
-            failed: Some(1),
+        let job = Job {
+            status: Some(JobStatus {
+                failed: Some(1),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         assert!(is_job_failed(&job));
     }
 
     #[test]
     fn is_job_failed_true_when_failed_condition_is_true() {
         use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
-        let mut job = Job::default();
-        job.status = Some(JobStatus {
-            conditions: Some(vec![JobCondition {
-                type_: "Failed".into(),
-                status: "True".into(),
-                last_probe_time: None,
-                last_transition_time: None,
-                message: Some("BackoffLimitExceeded".into()),
-                reason: Some("BackoffLimitExceeded".into()),
-            }]),
+        let job = Job {
+            status: Some(JobStatus {
+                conditions: Some(vec![JobCondition {
+                    type_: "Failed".into(),
+                    status: "True".into(),
+                    last_probe_time: None,
+                    last_transition_time: None,
+                    message: Some("BackoffLimitExceeded".into()),
+                    reason: Some("BackoffLimitExceeded".into()),
+                }]),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         assert!(is_job_failed(&job));
     }
 
     #[test]
     fn is_job_failed_false_when_complete_condition_present() {
         use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
-        let mut job = Job::default();
-        job.status = Some(JobStatus {
-            conditions: Some(vec![JobCondition {
-                type_: "Complete".into(),
-                status: "True".into(),
-                last_probe_time: None,
-                last_transition_time: None,
-                message: None,
-                reason: None,
-            }]),
+        let job = Job {
+            status: Some(JobStatus {
+                conditions: Some(vec![JobCondition {
+                    type_: "Complete".into(),
+                    status: "True".into(),
+                    last_probe_time: None,
+                    last_transition_time: None,
+                    message: None,
+                    reason: None,
+                }]),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         assert!(!is_job_failed(&job));
     }
 }

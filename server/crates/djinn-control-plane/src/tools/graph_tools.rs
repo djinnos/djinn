@@ -545,7 +545,7 @@ impl DjinnMcpServer {
             }
             NeighborsResult::Grouped(mut v) => {
                 v.retain(|g| !exclusions.excludes(&g.file, Some(&g.file), &g.file));
-                v.sort_by(|a, b| b.occurrence_count.cmp(&a.occurrence_count));
+                v.sort_by_key(|g| std::cmp::Reverse(g.occurrence_count));
                 v.truncate(limit);
                 (None, Some(v))
             }

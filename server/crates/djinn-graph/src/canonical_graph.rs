@@ -1006,7 +1006,6 @@ mod tests {
         use djinn_stack::{LanguageStat, ManifestSignals, Runtimes, Stack};
 
         let tmp = workspace_tempdir("canonical-graph-");
-        let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
         let ctx = TestWarmContext::new(db.clone());
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());

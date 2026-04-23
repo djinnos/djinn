@@ -298,7 +298,7 @@ impl DjinnMcpServer {
             }
         }
         // Sort by total_dependents desc so the highest-impact symbols win.
-        blast_radius.sort_by(|a, b| b.total_dependents.cmp(&a.total_dependents));
+        blast_radius.sort_by_key(|e| std::cmp::Reverse(e.total_dependents));
         blast_radius.truncate(caps.blast_radius);
 
         // Step 6: hotspot overlap — retain entries whose file is in
