@@ -9,7 +9,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-IMAGE_TAG="${IMAGE_TAG:-localhost:5001/djinn-server:dev}"
+# Tilt's `custom_build` invokes this with $EXPECTED_REF set to a per-build
+# content-hashed tag (e.g. localhost:5001/djinn-server:tilt-build-…); that ref
+# ends up rewritten into the Deployment's PodSpec so K8s actually rolls the
+# pod. Standalone callers can override via $IMAGE_TAG or fall back to :dev.
+IMAGE_TAG="${EXPECTED_REF:-${IMAGE_TAG:-localhost:5001/djinn-server:dev}}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$REPO_ROOT/.tilt/artifacts}"
 BINARY="$ARTIFACTS_DIR/djinn-server"
 

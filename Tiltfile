@@ -88,12 +88,24 @@ local_resource(
 
 # --- djinn-server image --------------------------------------------------
 # Thin wrap: debian-slim + the freshly-built djinn-server binary + tini.
-# Waits on djinn-binaries so the binary exists before docker build runs.
-local_resource(
-    'djinn-server-image',
-    cmd='bash scripts/tilt/wrap-server-image.sh',
-    resource_deps=['djinn-binaries'],
-    labels=['build'],
+# `custom_build` (vs. `local_resource` + stable :dev tag) is what makes the
+# pod actually roll on binary changes: Tilt generates a per-build $EXPECTED_REF,
+# the wrap script builds + pushes under that tag, and Tilt rewrites the
+# Deployment PodSpec to point at it — so K8s sees a new image ref and rolls.
+# With a stable :dev tag + `local_resource`, docker push would update the
+# registry digest but the PodSpec field would be unchanged, so the running
+# pod kept the stale binary (cf. the "missing field project" MCP error in
+# the Proposals UI on 2026-04-22). `skips_local_docker=True` because the
+# script owns the push to localhost:5001 directly.
+custom_build(
+    ref='localhost:5001/djinn-server',
+    command='bash scripts/tilt/wrap-server-image.sh',
+    deps=[
+        '.tilt/artifacts/djinn-server',
+        'scripts/tilt/wrap-server-image.sh',
+    ],
+    skips_local_docker=True,
+    disable_push=True,
 )
 
 # --- djinn-agent-runtime image -------------------------------------------
@@ -102,10 +114,18 @@ local_resource(
 # (and thus DJINN_TASKRUN_IMAGE on the controller) points at. Not
 # referenced by any PodSpec at render time — the controller plugs the ref
 # into Jobs it creates at dispatch time, so Tilt can't rewrite anything,
-# hence the stable-tag pattern.
+# hence the stable-tag pattern. `deps` must include the binary artifact so
+# the wrap re-runs when djinn-binaries produces a fresh worker; resource_deps
+# alone is ordering-only, not a file trigger, so without this line every
+# source edit landed in a freshly compiled binary that the next Job never saw.
 local_resource(
     'djinn-agent-runtime-image',
     cmd='bash scripts/tilt/wrap-agent-runtime-image.sh',
+    deps=[
+        '.tilt/artifacts/djinn-agent-worker',
+        'scripts/tilt/wrap-agent-runtime-image.sh',
+        'server/docker/djinn-agent-runtime.Dockerfile',
+    ],
     resource_deps=['djinn-binaries', 'djinn-agent-runtime-base-image'],
     labels=['build'],
 )
@@ -193,7 +213,7 @@ k8s_resource(
         port_forward(3000, 3000, name='api-ui'),
         port_forward(8443, 8443, name='worker-rpc'),
     ],
-    resource_deps=['djinn-agent-runtime-image'],
+    resource_deps=['djinn-binaries', 'djinn-agent-runtime-image'],
     labels=['djinn'],
 )
 k8s_resource(
