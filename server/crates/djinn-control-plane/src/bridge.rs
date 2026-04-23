@@ -3,12 +3,12 @@
 /// The server implements each trait for its concrete handle types
 /// (CoordinatorHandle, SlotPoolHandle, LspManager, AppState).
 /// McpState holds Arc<dyn Trait> so the MCP layer never imports server types.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct SemanticQueryEmbedding {
@@ -214,6 +214,71 @@ pub struct EdgeEntry {
     pub edge_weight: f64,
 }
 
+/// A single `(file, start_line, end_line)` hunk from a parsed diff. The
+/// caller supplies one of these per `git diff --unified=0` hunk when
+/// invoking the `diff_touches` op on the `code_graph` tool.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ChangedRange {
+    /// Repository-relative path of the file the hunk lives in.
+    pub file: String,
+    /// Inclusive 1-indexed first line of the hunk.
+    pub start_line: u32,
+    /// Inclusive 1-indexed last line of the hunk. Defaults to `start_line`
+    /// when the caller passed a single-line hunk.
+    pub end_line: Option<u32>,
+}
+
+/// A single symbol (or file) whose definition range encloses a queried
+/// line span. Emitted by the `symbols_at` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SymbolAtHit {
+    /// Canonical node key — SCIP symbol string for symbol hits, file path
+    /// (file: prefix) for file hits.
+    pub key: String,
+    /// Either `"file"` or `"symbol"`.
+    pub kind: String,
+    pub display_name: String,
+    pub file: Option<String>,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+    pub visibility: Option<String>,
+    pub symbol_kind: Option<String>,
+}
+
+/// Result of a `diff_touches` query — the set of base-graph symbols whose
+/// definition ranges overlap any of the caller's diff hunks, plus the
+/// affected-file and unknown-file rollups.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DiffTouchesResult {
+    pub touched_symbols: Vec<TouchedSymbol>,
+    /// Files from the caller's `changed_ranges` that resolved to at least
+    /// one base-graph file node (deduplicated, preserves input order).
+    pub affected_files: Vec<String>,
+    /// Files from the caller's `changed_ranges` that have no matching
+    /// file node in the base graph — i.e. pure additions, untracked
+    /// files, or paths that fall outside SCIP coverage.
+    pub unknown_files: Vec<String>,
+}
+
+/// A single touched symbol surfaced by the `diff_touches` op, enriched
+/// with fan-in/fan-out counts so callers can triage blast radius without
+/// issuing a follow-up `neighbors` query.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TouchedSymbol {
+    pub key: String,
+    pub display_name: String,
+    pub kind: String,
+    pub symbol_kind: Option<String>,
+    pub visibility: Option<String>,
+    pub file: Option<String>,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+    /// Incoming edge count in the base graph.
+    pub fan_in: usize,
+    /// Outgoing edge count in the base graph.
+    pub fan_out: usize,
+}
+
 /// Result of a `status` query — a peek at the persisted canonical graph cache
 /// for a project. No warming side effects.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -255,6 +320,124 @@ pub struct ImpactEntry {
 }
 
 /// Either symbol-level neighbors/impact or per-file rollup.
+/// A single public-surface entry emitted by the `api_surface` op.
+///
+/// Enriches each symbol with its fan-in/fan-out and a "used outside its
+/// own crate" flag so callers can reason about which exports are actually
+/// consumed by downstream crates vs. internal-only API.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ApiSurfaceEntry {
+    pub key: String,
+    pub display_name: String,
+    pub symbol_kind: Option<String>,
+    pub file: Option<String>,
+    pub visibility: Option<String>,
+    /// Whether the symbol's SCIP `documentation` field has at least one
+    /// non-empty line.
+    pub doc_present: bool,
+    pub fan_in: usize,
+    pub fan_out: usize,
+    /// True when at least one incoming edge's source node lives in a
+    /// different crate than this symbol. Derived from the SCIP key's
+    /// `<tool> <scheme> <crate-name> <version> ...` preamble.
+    pub used_outside_crate: bool,
+}
+
+/// A single boundary-check rule — a pair of globs. Every rule is
+/// treated as a forbidden edge; callers submit only the rules they want
+/// flagged as violations.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BoundaryRule {
+    pub from_glob: String,
+    pub to_glob: String,
+}
+
+/// A single violation emitted by the `boundary_check` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BoundaryViolation {
+    /// Index of the rule in the caller's input array.
+    pub rule_index: usize,
+    pub from_key: String,
+    pub to_key: String,
+    pub edge_kind: String,
+    pub from_file: Option<String>,
+    pub to_file: Option<String>,
+    /// V1: set to `Some(vec![from_key, to_key])` — the direct edge is
+    /// the witness. Multi-hop transitive witnessing is deferred.
+    pub witness_path: Option<Vec<String>>,
+}
+
+/// A single hotspot entry emitted by `hotspots`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HotspotEntry {
+    pub file: String,
+    /// Distinct commits in the window that touched this file.
+    pub churn: usize,
+    /// Sum of PageRank over every symbol node whose `file_path` is this file.
+    pub centrality: f64,
+    /// `churn * centrality`.
+    pub composite_score: f64,
+    /// Up to three display names of the highest-PageRank symbols in the file.
+    pub top_symbols: Vec<String>,
+}
+
+/// Scalar graph snapshot emitted by `metrics_at`. Reflects the
+/// currently-pinned canonical graph commit.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MetricsAtResult {
+    /// The canonical commit these metrics pertain to.
+    pub commit: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub cycle_count: usize,
+    /// Histogram bucketing SCCs by member count.
+    pub cycles_by_size_histogram: BTreeMap<usize, usize>,
+    pub god_object_count: usize,
+    pub orphan_count: usize,
+    pub public_api_count: usize,
+    pub doc_coverage_pct: f64,
+}
+
+/// A single dead-symbol entry emitted by `dead_symbols`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DeadSymbolEntry {
+    pub key: String,
+    pub display_name: String,
+    pub symbol_kind: Option<String>,
+    pub file: Option<String>,
+    pub visibility: Option<String>,
+    /// Echoed from the caller's `confidence` argument (`"high"`, `"med"`, `"low"`).
+    pub confidence: String,
+}
+
+/// A single deprecated-symbol hit plus its callers, emitted by
+/// `deprecated_callers`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DeprecatedHit {
+    pub deprecated_symbol: String,
+    pub deprecated_display_name: String,
+    pub deprecated_file: Option<String>,
+    pub callers: Vec<CallerRef>,
+}
+
+/// Caller reference pointed at by [`DeprecatedHit`].
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CallerRef {
+    pub key: String,
+    pub display_name: String,
+    pub file: Option<String>,
+}
+
+/// A single hot-path hit emitted by `touches_hot_path`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HotPathHit {
+    pub symbol: String,
+    /// Number of entry→sink pairs whose shortest path includes `symbol`.
+    pub on_path_count: usize,
+    /// One example path containing `symbol` (entry → … → sink).
+    pub example_path: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum NeighborsResult {
@@ -366,4 +549,90 @@ pub trait RepoGraphOps: Send + Sync {
     /// empty for this project, returns `warmed: false` with the timestamp/
     /// commit fields set to `None`.
     async fn status(&self, project_path: &str) -> Result<GraphStatus, String>;
+
+    /// Resolve a `(file, start_line, end_line?)` tuple into the set of
+    /// base-graph symbols whose definition range encloses the queried
+    /// lines. Used for diff-hunk → symbol mapping during PR review.
+    async fn symbols_at(
+        &self,
+        project_path: &str,
+        file: &str,
+        start_line: u32,
+        end_line: Option<u32>,
+    ) -> Result<Vec<SymbolAtHit>, String>;
+
+    /// Map a list of changed line ranges (parsed from
+    /// `git diff --unified=0 base..head`) to the set of base-graph
+    /// symbols they touch, with fan-in/fan-out and file grouping.
+    ///
+    /// Runs entirely against the already-warmed canonical graph on the
+    /// project's base branch — it does NOT build a head graph.
+    async fn diff_touches(
+        &self,
+        project_path: &str,
+        changed_ranges: &[ChangedRange],
+    ) -> Result<DiffTouchesResult, String>;
+
+    /// List every public (or private/any, per `visibility`) symbol in
+    /// the base graph, enriched with fan-in / fan-out and a
+    /// "used outside crate" signal.
+    async fn api_surface(
+        &self,
+        project_path: &str,
+        module_glob: Option<&str>,
+        visibility: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ApiSurfaceEntry>, String>;
+
+    /// Match edges whose source matches `from_glob` AND target matches
+    /// `to_glob`, returning the forbidden ones.
+    async fn boundary_check(
+        &self,
+        project_path: &str,
+        rules: &[BoundaryRule],
+    ) -> Result<Vec<BoundaryViolation>, String>;
+
+    /// Churn × centrality ranking over files in the project.
+    async fn hotspots(
+        &self,
+        project_path: &str,
+        window_days: u32,
+        file_glob: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<HotspotEntry>, String>;
+
+    /// Scalar graph snapshot of the currently-pinned canonical graph.
+    async fn metrics_at(
+        &self,
+        project_path: &str,
+    ) -> Result<MetricsAtResult, String>;
+
+    /// Symbols with zero incoming edges from the entry-point set
+    /// (main + tests + crate-root re-exports), tiered by caller
+    /// confidence.
+    async fn dead_symbols(
+        &self,
+        project_path: &str,
+        confidence: &str,
+        limit: usize,
+    ) -> Result<Vec<DeadSymbolEntry>, String>;
+
+    /// Scan symbols whose `documentation` or `signature` contains a
+    /// `#[deprecated]` / `@deprecated` marker, and return their callers.
+    async fn deprecated_callers(
+        &self,
+        project_path: &str,
+        limit: usize,
+    ) -> Result<Vec<DeprecatedHit>, String>;
+
+    /// Given entry-point and sink keys (plus queried symbols), return
+    /// which queried symbols sit on any shortest path from any entry
+    /// to any sink.
+    async fn touches_hot_path(
+        &self,
+        project_path: &str,
+        seed_entries: &[String],
+        seed_sinks: &[String],
+        symbols: &[String],
+    ) -> Result<Vec<HotPathHit>, String>;
 }

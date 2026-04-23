@@ -323,6 +323,91 @@ pub mod stubs {
                 commits_since_pin: None,
             })
         }
+        async fn symbols_at(
+            &self,
+            _: &str,
+            _: &str,
+            _: u32,
+            _: Option<u32>,
+        ) -> Result<Vec<crate::bridge::SymbolAtHit>, String> {
+            Ok(vec![])
+        }
+        async fn diff_touches(
+            &self,
+            _: &str,
+            _: &[crate::bridge::ChangedRange],
+        ) -> Result<crate::bridge::DiffTouchesResult, String> {
+            Ok(crate::bridge::DiffTouchesResult {
+                touched_symbols: vec![],
+                affected_files: vec![],
+                unknown_files: vec![],
+            })
+        }
+        async fn api_surface(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::ApiSurfaceEntry>, String> {
+            Ok(vec![])
+        }
+        async fn boundary_check(
+            &self,
+            _: &str,
+            _: &[crate::bridge::BoundaryRule],
+        ) -> Result<Vec<crate::bridge::BoundaryViolation>, String> {
+            Ok(vec![])
+        }
+        async fn hotspots(
+            &self,
+            _: &str,
+            _: u32,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::HotspotEntry>, String> {
+            Ok(vec![])
+        }
+        async fn metrics_at(
+            &self,
+            _: &str,
+        ) -> Result<crate::bridge::MetricsAtResult, String> {
+            Ok(crate::bridge::MetricsAtResult {
+                commit: String::new(),
+                node_count: 0,
+                edge_count: 0,
+                cycle_count: 0,
+                cycles_by_size_histogram: std::collections::BTreeMap::new(),
+                god_object_count: 0,
+                orphan_count: 0,
+                public_api_count: 0,
+                doc_coverage_pct: 0.0,
+            })
+        }
+        async fn dead_symbols(
+            &self,
+            _: &str,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::DeadSymbolEntry>, String> {
+            Ok(vec![])
+        }
+        async fn deprecated_callers(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::DeprecatedHit>, String> {
+            Ok(vec![])
+        }
+        async fn touches_hot_path(
+            &self,
+            _: &str,
+            _: &[String],
+            _: &[String],
+            _: &[String],
+        ) -> Result<Vec<crate::bridge::HotPathHit>, String> {
+            Ok(vec![])
+        }
     }
 
     /// Build a McpState backed only by an in-memory database (no live actors).

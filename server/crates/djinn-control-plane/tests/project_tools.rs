@@ -173,3 +173,99 @@ async fn project_config_get_set_round_trip() {
     assert_eq!(got["status"], "ok");
     assert_eq!(got["target_branch"], "develop");
 }
+
+#[tokio::test]
+async fn project_graph_exclusions_set_and_get_round_trip() {
+    let harness = McpTestHarness::new().await;
+    let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;
+
+    let set = harness
+        .call_tool(
+            "project_graph_exclusions_set",
+            json!({
+                "project": project.path.clone(),
+                "graph_excluded_paths": ["**/workspace-hack/**", "**/target/**"],
+                "graph_orphan_ignore": ["crates/test-support/src/fixtures.rs"],
+            }),
+        )
+        .await
+        .expect("project_graph_exclusions_set should dispatch");
+    assert_eq!(set["status"], "ok");
+    let paths = set["graph_excluded_paths"].as_array().expect("paths array");
+    assert_eq!(paths.len(), 2);
+    assert!(paths.iter().any(|p| p == "**/workspace-hack/**"));
+
+    let got = harness
+        .call_tool(
+            "project_graph_exclusions_get",
+            json!({"project": project.path.clone()}),
+        )
+        .await
+        .expect("project_graph_exclusions_get should dispatch");
+    assert_eq!(got["status"], "ok");
+    assert_eq!(got["graph_excluded_paths"].as_array().unwrap().len(), 2);
+    assert_eq!(got["graph_orphan_ignore"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn project_graph_exclusions_partial_update_leaves_other_field_untouched() {
+    // `graph_excluded_paths: None` + `graph_orphan_ignore: Some(..)` must
+    // NOT clobber the previously-set paths. Validates the partial-update
+    // contract — we issue two updates and check both survive.
+    let harness = McpTestHarness::new().await;
+    let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;
+
+    // Seed both.
+    let _ = harness
+        .call_tool(
+            "project_graph_exclusions_set",
+            json!({
+                "project": project.path.clone(),
+                "graph_excluded_paths": ["**/vendor/**"],
+                "graph_orphan_ignore": ["a.rs"],
+            }),
+        )
+        .await
+        .expect("initial set");
+
+    // Now update only the orphan list.
+    let set = harness
+        .call_tool(
+            "project_graph_exclusions_set",
+            json!({
+                "project": project.path.clone(),
+                "graph_orphan_ignore": ["a.rs", "b.rs"],
+            }),
+        )
+        .await
+        .expect("partial update");
+    assert_eq!(set["status"], "ok");
+    // `**/vendor/**` must still be there.
+    let paths = set["graph_excluded_paths"].as_array().expect("paths");
+    assert!(
+        paths.iter().any(|p| p == "**/vendor/**"),
+        "partial update erased graph_excluded_paths: {paths:?}"
+    );
+    assert_eq!(set["graph_orphan_ignore"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn project_graph_exclusions_get_missing_project_errors() {
+    let harness = McpTestHarness::new().await;
+
+    let got = harness
+        .call_tool(
+            "project_graph_exclusions_get",
+            json!({"project": "/nonexistent/path"}),
+        )
+        .await
+        .expect("dispatch should succeed");
+    assert!(
+        got["status"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("error: project not found"),
+        "expected 'project not found' error, got {:?}",
+        got["status"]
+    );
+}

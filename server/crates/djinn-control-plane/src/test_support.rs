@@ -46,10 +46,12 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 use serde_json::Value;
 
 use crate::bridge::{
-    CoordinatorOps, CoordinatorStatus, CycleGroup, EdgeEntry, GitOps, GraphStatus, ImpactResult,
-    LspOps, LspWarning, NeighborsResult, OrphanEntry, PathResult, PoolStatus, RankedNode,
+    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CoordinatorOps,
+    CoordinatorStatus, CycleGroup, DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeEntry,
+    GitOps, GraphStatus, HotPathHit, HotspotEntry, ImpactResult, LspOps, LspWarning,
+    MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, PoolStatus, RankedNode,
     RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps,
-    SymbolDescription,
+    SymbolAtHit, SymbolDescription,
 };
 use crate::server::DjinnMcpServer;
 use crate::state::McpState;
@@ -262,6 +264,91 @@ impl RepoGraphOps for StubRepoGraph {
             pinned_commit: None,
             commits_since_pin: None,
         })
+    }
+    async fn symbols_at(
+        &self,
+        _project_path: &str,
+        _file: &str,
+        _start_line: u32,
+        _end_line: Option<u32>,
+    ) -> std::result::Result<Vec<SymbolAtHit>, String> {
+        Ok(Vec::new())
+    }
+    async fn diff_touches(
+        &self,
+        _project_path: &str,
+        _changed_ranges: &[ChangedRange],
+    ) -> std::result::Result<DiffTouchesResult, String> {
+        Ok(DiffTouchesResult {
+            touched_symbols: Vec::new(),
+            affected_files: Vec::new(),
+            unknown_files: Vec::new(),
+        })
+    }
+    async fn api_surface(
+        &self,
+        _project_path: &str,
+        _module_glob: Option<&str>,
+        _visibility: Option<&str>,
+        _limit: usize,
+    ) -> std::result::Result<Vec<ApiSurfaceEntry>, String> {
+        Ok(Vec::new())
+    }
+    async fn boundary_check(
+        &self,
+        _project_path: &str,
+        _rules: &[BoundaryRule],
+    ) -> std::result::Result<Vec<BoundaryViolation>, String> {
+        Ok(Vec::new())
+    }
+    async fn hotspots(
+        &self,
+        _project_path: &str,
+        _window_days: u32,
+        _file_glob: Option<&str>,
+        _limit: usize,
+    ) -> std::result::Result<Vec<HotspotEntry>, String> {
+        Ok(Vec::new())
+    }
+    async fn metrics_at(
+        &self,
+        _project_path: &str,
+    ) -> std::result::Result<MetricsAtResult, String> {
+        Ok(MetricsAtResult {
+            commit: String::new(),
+            node_count: 0,
+            edge_count: 0,
+            cycle_count: 0,
+            cycles_by_size_histogram: std::collections::BTreeMap::new(),
+            god_object_count: 0,
+            orphan_count: 0,
+            public_api_count: 0,
+            doc_coverage_pct: 0.0,
+        })
+    }
+    async fn dead_symbols(
+        &self,
+        _project_path: &str,
+        _confidence: &str,
+        _limit: usize,
+    ) -> std::result::Result<Vec<DeadSymbolEntry>, String> {
+        Ok(Vec::new())
+    }
+    async fn deprecated_callers(
+        &self,
+        _project_path: &str,
+        _limit: usize,
+    ) -> std::result::Result<Vec<DeprecatedHit>, String> {
+        Ok(Vec::new())
+    }
+    async fn touches_hot_path(
+        &self,
+        _project_path: &str,
+        _seed_entries: &[String],
+        _seed_sinks: &[String],
+        _symbols: &[String],
+    ) -> std::result::Result<Vec<HotPathHit>, String> {
+        Ok(Vec::new())
     }
 }
 

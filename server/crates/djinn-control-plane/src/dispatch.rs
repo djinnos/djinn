@@ -15,6 +15,7 @@ use crate::tools::execution_tools::{ExecutionKillTaskParams, SessionForTaskParam
 use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
 use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
 use crate::tools::graph_tools::CodeGraphParams;
+use crate::tools::pr_review_tools::PrReviewContextParams;
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
@@ -25,7 +26,8 @@ use crate::tools::project_tools::{
     GetProjectDevcontainerStatusParams, GetProjectStackParams, GithubListReposParams,
     ProjectAddFromGithubParams, ProjectBranchesParams, ProjectConfigGetParams,
     ProjectConfigSetParams, ProjectEnvironmentConfigGetParams,
-    ProjectEnvironmentConfigResetParams, ProjectEnvironmentConfigSetParams, ProjectRemoveParams,
+    ProjectEnvironmentConfigResetParams, ProjectEnvironmentConfigSetParams,
+    ProjectGraphExclusionsGetParams, ProjectGraphExclusionsSetParams, ProjectRemoveParams,
     RetriggerImageBuildParams,
 };
 use crate::tools::proposal_tools::{
@@ -210,6 +212,20 @@ impl DjinnMcpServer {
                 self.project_config_set(Parameters(decode_args::<ProjectConfigSetParams>(
                     name, args,
                 )?))
+                .await,
+            ),
+            "project_graph_exclusions_get" => map_json(
+                name,
+                self.project_graph_exclusions_get(Parameters(decode_args::<
+                    ProjectGraphExclusionsGetParams,
+                >(name, args)?))
+                .await,
+            ),
+            "project_graph_exclusions_set" => map_json(
+                name,
+                self.project_graph_exclusions_set(Parameters(decode_args::<
+                    ProjectGraphExclusionsSetParams,
+                >(name, args)?))
                 .await,
             ),
             "get_project_stack" => map_json(
@@ -583,6 +599,13 @@ impl DjinnMcpServer {
                 name,
                 self.code_graph(Parameters(decode_args::<CodeGraphParams>(name, args)?))
                     .await,
+            ),
+            "pr_review_context" => map_error_or(
+                name,
+                self.pr_review_context(Parameters(decode_args::<PrReviewContextParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "github_search" => map_error_or(
                 name,

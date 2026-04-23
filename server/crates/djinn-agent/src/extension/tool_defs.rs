@@ -327,8 +327,16 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
          orphans (zero-incoming-reference nodes filtered by visibility public|private|any), \
          path (shortest dependency path from→to), \
          edges (enumerate edges matching from_glob→to_glob), \
-         diff (what changed since the previous canonical graph — only since=previous supported), \
-         describe (symbol signature/documentation without an LSP round trip).".to_string(),
+         symbols_at (given (file, start_line, end_line?), return SCIP symbols whose definition range encloses those lines — lookup for diff-hunk → symbols mapping), \
+         diff_touches (given a list of changed line ranges (parsed from `git diff --unified=0 base..head`), return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current `main` — this op does NOT build a head graph), \
+         describe (symbol signature/documentation without an LSP round trip), \
+         api_surface (every public symbol with fan-in/out and used-outside-crate flag; filter via module_glob/visibility), \
+         boundary_check (detect forbidden from_glob→to_glob edges via `rules` list), \
+         hotspots (file churn × PageRank centrality ranking; window_days controls look-back, file_glob narrows the file set), \
+         metrics_at (scalar graph snapshot: node/edge/cycle counts, god-objects at p95 total-degree, orphan count, public API size + doc coverage), \
+         dead_symbols (symbols with zero incoming edges from entry-points; confidence=high|med|low tunes dyn-dispatch tolerance), \
+         deprecated_callers (symbols whose signature/documentation contains `#[deprecated]` or `@deprecated`, with caller list), \
+         touches_hot_path (given entry-point and sink SCIP keys plus queried symbols, return which sit on any entry→sink shortest path).".to_string(),
         object!({
             "type": "object",
             "required": ["operation", "project_path"],
@@ -337,7 +345,11 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                     "type": "string",
                     "enum": [
                         "neighbors", "ranked", "impact", "implementations",
-                        "search", "cycles", "orphans", "path", "edges", "diff", "describe"
+                        "search", "cycles", "orphans", "path", "edges",
+                        "symbols_at", "diff_touches", "describe",
+                        "api_surface", "boundary_check", "hotspots",
+                        "metrics_at", "dead_symbols", "deprecated_callers",
+                        "touches_hot_path"
                     ],
                     "description": "Graph query to perform"
                 },
@@ -384,10 +396,6 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                     "type": "string",
                     "description": "Destination path glob for edges"
                 },
-                "since": {
-                    "type": "string",
-                    "description": "Diff base selector for diff (currently only 'previous')"
-                },
                 "min_size": {
                     "type": "integer",
                     "minimum": 2,
@@ -416,6 +424,178 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                 "edge_kind": {
                     "type": "string",
                     "description": "Edge-kind filter for edges"
+                },
+                "file": {
+                    "type": "string",
+                    "description": "Repository-relative file path (required for symbols_at)"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed inclusive start line (required for symbols_at)"
+                },
+                "end_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed inclusive end line for symbols_at (defaults to start_line)"
+                },
+                "changed_ranges": {
+                    "type": "array",
+                    "description": "List of changed line ranges for diff_touches (parsed from `git diff --unified=0 base..head`)",
+                    "items": {
+                        "type": "object",
+                        "required": ["file", "start_line"],
+                        "properties": {
+                            "file": {
+                                "type": "string",
+                                "description": "Repository-relative path of the changed file"
+                            },
+                            "start_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "1-indexed inclusive first line of the hunk"
+                            },
+                            "end_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "1-indexed inclusive last line of the hunk (defaults to start_line)"
+                            }
+                        }
+                    }
+                },
+                "module_glob": {
+                    "type": "string",
+                    "description": "File-path glob restricting api_surface to a subset of symbols"
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["high", "med", "low"],
+                    "description": "Confidence tier for dead_symbols (default high)"
+                },
+                "window_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Churn look-back window in days for hotspots (default 90, clamped to 365)"
+                },
+                "file_glob": {
+                    "type": "string",
+                    "description": "File-path glob restricting hotspots to a subset of files"
+                },
+                "rules": {
+                    "type": "array",
+                    "description": "Boundary rules for boundary_check. Every submitted rule is treated as a forbidden edge; matching edges are reported as violations.",
+                    "items": {
+                        "type": "object",
+                        "required": ["from_glob", "to_glob"],
+                        "properties": {
+                            "from_glob": {
+                                "type": "string",
+                                "description": "Source path glob"
+                            },
+                            "to_glob": {
+                                "type": "string",
+                                "description": "Destination path glob"
+                            }
+                        }
+                    }
+                },
+                "seed_entries": {
+                    "type": "array",
+                    "description": "Entry-point SCIP symbol keys for touches_hot_path",
+                    "items": {"type": "string"}
+                },
+                "seed_sinks": {
+                    "type": "array",
+                    "description": "Sink SCIP symbol keys for touches_hot_path",
+                    "items": {"type": "string"}
+                },
+                "symbols": {
+                    "type": "array",
+                    "description": "Queried symbol keys for touches_hot_path",
+                    "items": {"type": "string"}
+                }
+            }
+        }),
+    )
+}
+
+pub(crate) fn tool_pr_review_context() -> RmcpTool {
+    RmcpTool::new(
+        "pr_review_context".to_string(),
+        "Given a PR's changed line ranges (parsed from `git diff --unified=0 base..head`), assemble the base-graph signals that matter for review in one call: touched symbols with fan-in/out, blast radius, hotspot overlap, touched cycles, deprecated-caller hits, hot-path overlap, and architecture-boundary violations. Base-graph-only — does NOT build a head graph, detect newly-introduced cycles, or parse the diff text for removed-API detection. Every list is capped (defaults: touched_symbols=100, blast_radius=50, hotspot_overlap=20, touched_cycles=20, touched_boundary_violations=50, touched_deprecated=20, hot_path_overlap=20)."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["project_path", "changed_ranges"],
+            "properties": {
+                "project_path": {
+                    "type": "string",
+                    "description": "Absolute path to project root"
+                },
+                "changed_ranges": {
+                    "type": "array",
+                    "description": "List of changed line ranges parsed from `git diff --unified=0 base..head`",
+                    "items": {
+                        "type": "object",
+                        "required": ["file", "start_line"],
+                        "properties": {
+                            "file": {
+                                "type": "string",
+                                "description": "Repository-relative path of the changed file"
+                            },
+                            "start_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "1-indexed inclusive first line of the hunk"
+                            },
+                            "end_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "1-indexed inclusive last line of the hunk (defaults to start_line)"
+                            }
+                        }
+                    }
+                },
+                "seed_entries": {
+                    "type": "array",
+                    "description": "Entry-point SCIP keys for hot-path overlap (optional)",
+                    "items": {"type": "string"}
+                },
+                "seed_sinks": {
+                    "type": "array",
+                    "description": "Sink SCIP keys for hot-path overlap (optional)",
+                    "items": {"type": "string"}
+                },
+                "boundary_rules": {
+                    "type": "array",
+                    "description": "Architecture boundary rules; when empty, boundary analysis is skipped",
+                    "items": {
+                        "type": "object",
+                        "required": ["from_glob", "to_glob", "forbidden"],
+                        "properties": {
+                            "from_glob": {"type": "string"},
+                            "to_glob": {"type": "string"},
+                            "forbidden": {"type": "boolean"}
+                        }
+                    }
+                },
+                "hotspots_window_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Churn look-back window for hotspot overlap (default 90)"
+                },
+                "caps": {
+                    "type": "object",
+                    "description": "Per-list result caps; missing fields use defaults",
+                    "properties": {
+                        "touched_symbols": {"type": "integer", "minimum": 0},
+                        "blast_radius": {"type": "integer", "minimum": 0},
+                        "hotspot_overlap": {"type": "integer", "minimum": 0},
+                        "touched_cycles": {"type": "integer", "minimum": 0},
+                        "touched_boundary_violations": {"type": "integer", "minimum": 0},
+                        "touched_deprecated": {"type": "integer", "minimum": 0},
+                        "hot_path_overlap": {"type": "integer", "minimum": 0}
+                    }
                 }
             }
         }),
@@ -644,6 +824,13 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         .map(|i| i + 1)
         .unwrap_or(tool_values.len());
     tool_values.insert(lsp_pos, serialize_tool(tool_code_graph(), true));
+    // Phase 3: the `pr_review_context` meta-tool rides the same Architect-only
+    // access contract as `code_graph` — it's a base-graph analysis surface
+    // aimed at PR review.
+    tool_values.insert(
+        lsp_pos + 1,
+        serialize_tool(tool_pr_review_context(), true),
+    );
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }

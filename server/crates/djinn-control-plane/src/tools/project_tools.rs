@@ -189,6 +189,41 @@ pub struct ProjectConfigSetParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ProjectGraphExclusionsGetParams {
+    /// Project path (same shape accepted by `project_config_get`).
+    pub project: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectGraphExclusionsResponse {
+    pub status: String,
+    pub project: String,
+    /// Glob patterns stripped from cycles/orphans/ranked/impact/edges
+    /// output. Empty array means no per-project globs; Tier 1 (universal
+    /// SCIP-artifact filter) still applies.
+    #[serde(default)]
+    pub graph_excluded_paths: Vec<String>,
+    /// Exact file paths the `code_graph orphans` op silently drops.
+    #[serde(default)]
+    pub graph_orphan_ignore: Vec<String>,
+}
+
+/// Partial-update payload. Either field may be `None` — the repository
+/// leaves the corresponding column untouched when the caller only wants
+/// to rewrite one of the two lists.
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectGraphExclusionsSetParams {
+    pub project: String,
+    /// When present, replaces `graph_excluded_paths` wholesale. Empty
+    /// vec resets to zero globs (Tier 1 still applies).
+    #[serde(default)]
+    pub graph_excluded_paths: Option<Vec<String>>,
+    /// When present, replaces `graph_orphan_ignore` wholesale.
+    #[serde(default)]
+    pub graph_orphan_ignore: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct GetProjectStackParams {
     /// Project UUID whose detected stack should be returned.
     pub project: String,
@@ -866,6 +901,158 @@ impl DjinnMcpServer {
             Err(e) => Json(project_config_fallback(format!("error: {e}"), &project)),
         }
     }
+
+    #[tool(
+        description = "Get the `code_graph` noise filter for a project: `graph_excluded_paths` (globs dropped from cycles/orphans/ranked/impact/edges) and `graph_orphan_ignore` (exact paths the `orphans` op drops)."
+    )]
+    pub async fn project_graph_exclusions_get(
+        &self,
+        Parameters(input): Parameters<ProjectGraphExclusionsGetParams>,
+    ) -> Json<ProjectGraphExclusionsResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project = match repo.get_by_path(&input.project).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return Json(ProjectGraphExclusionsResponse {
+                    status: format!("error: project not found: {}", input.project),
+                    project: input.project,
+                    graph_excluded_paths: Vec::new(),
+                    graph_orphan_ignore: Vec::new(),
+                });
+            }
+            Err(e) => {
+                return Json(ProjectGraphExclusionsResponse {
+                    status: format!("error: {e}"),
+                    project: input.project,
+                    graph_excluded_paths: Vec::new(),
+                    graph_orphan_ignore: Vec::new(),
+                });
+            }
+        };
+        match repo.get_config(&project.id).await {
+            Ok(Some(config)) => Json(ProjectGraphExclusionsResponse {
+                status: "ok".into(),
+                project: project.path,
+                graph_excluded_paths: config.graph_excluded_paths,
+                graph_orphan_ignore: config.graph_orphan_ignore,
+            }),
+            Ok(None) => Json(ProjectGraphExclusionsResponse {
+                status: "ok".into(),
+                project: project.path,
+                graph_excluded_paths: Vec::new(),
+                graph_orphan_ignore: Vec::new(),
+            }),
+            Err(e) => Json(ProjectGraphExclusionsResponse {
+                status: format!("error: {e}"),
+                project: project.path,
+                graph_excluded_paths: Vec::new(),
+                graph_orphan_ignore: Vec::new(),
+            }),
+        }
+    }
+
+    #[tool(
+        description = "Set the `code_graph` noise filter for a project. Either field may be omitted; only supplied lists are rewritten. Changing the filter is zero-cost — the canonical warmer cache is untouched and the filter applies at query time."
+    )]
+    pub async fn project_graph_exclusions_set(
+        &self,
+        Parameters(input): Parameters<ProjectGraphExclusionsSetParams>,
+    ) -> Json<ProjectGraphExclusionsResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project = match repo.get_by_path(&input.project).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return Json(ProjectGraphExclusionsResponse {
+                    status: format!("error: project not found: {}", input.project),
+                    project: input.project,
+                    graph_excluded_paths: Vec::new(),
+                    graph_orphan_ignore: Vec::new(),
+                });
+            }
+            Err(e) => {
+                return Json(ProjectGraphExclusionsResponse {
+                    status: format!("error: {e}"),
+                    project: input.project,
+                    graph_excluded_paths: Vec::new(),
+                    graph_orphan_ignore: Vec::new(),
+                });
+            }
+        };
+
+        // Issue one update_config_field per supplied list. The repo
+        // method already validates the JSON round-trip so bad input
+        // surfaces as an error rather than a corrupt write.
+        if let Some(globs) = &input.graph_excluded_paths {
+            let serialized = match serde_json::to_string(globs) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Json(ProjectGraphExclusionsResponse {
+                        status: format!("error: encode graph_excluded_paths: {e}"),
+                        project: project.path,
+                        graph_excluded_paths: Vec::new(),
+                        graph_orphan_ignore: Vec::new(),
+                    });
+                }
+            };
+            if let Err(e) = repo
+                .update_config_field(&project.id, "graph_excluded_paths", &serialized)
+                .await
+            {
+                return Json(ProjectGraphExclusionsResponse {
+                    status: format!("error: {e}"),
+                    project: project.path,
+                    graph_excluded_paths: Vec::new(),
+                    graph_orphan_ignore: Vec::new(),
+                });
+            }
+        }
+        if let Some(orphans) = &input.graph_orphan_ignore {
+            let serialized = match serde_json::to_string(orphans) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Json(ProjectGraphExclusionsResponse {
+                        status: format!("error: encode graph_orphan_ignore: {e}"),
+                        project: project.path,
+                        graph_excluded_paths: Vec::new(),
+                        graph_orphan_ignore: Vec::new(),
+                    });
+                }
+            };
+            if let Err(e) = repo
+                .update_config_field(&project.id, "graph_orphan_ignore", &serialized)
+                .await
+            {
+                return Json(ProjectGraphExclusionsResponse {
+                    status: format!("error: {e}"),
+                    project: project.path,
+                    graph_excluded_paths: Vec::new(),
+                    graph_orphan_ignore: Vec::new(),
+                });
+            }
+        }
+
+        match repo.get_config(&project.id).await {
+            Ok(Some(config)) => Json(ProjectGraphExclusionsResponse {
+                status: "ok".into(),
+                project: project.path,
+                graph_excluded_paths: config.graph_excluded_paths,
+                graph_orphan_ignore: config.graph_orphan_ignore,
+            }),
+            Ok(None) => Json(ProjectGraphExclusionsResponse {
+                status: "ok".into(),
+                project: project.path,
+                graph_excluded_paths: Vec::new(),
+                graph_orphan_ignore: Vec::new(),
+            }),
+            Err(e) => Json(ProjectGraphExclusionsResponse {
+                status: format!("error: {e}"),
+                project: project.path,
+                graph_excluded_paths: Vec::new(),
+                graph_orphan_ignore: Vec::new(),
+            }),
+        }
+    }
+
     /// List local git branches in a project's server-owned clone.
     #[tool(
         description = "List local git branches in the server-owned clone for a project. Returns branches sorted alphabetically with the currently checked-out branch first."

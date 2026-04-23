@@ -11,8 +11,10 @@ use djinn_workspace::MirrorManager;
 use djinn_control_plane::{
     McpState, bridge,
     bridge::{
-        CycleGroup, EdgeEntry, ImpactResult, NeighborsResult, OrphanEntry, PathResult, RankedNode,
-        RepoGraphOps, SearchHit, SymbolDescription,
+        ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup,
+        DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeEntry, HotPathHit, HotspotEntry,
+        ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, RankedNode,
+        RepoGraphOps, SearchHit, SymbolAtHit, SymbolDescription,
     },
     tools::task_tools::ErrorResponse,
 };
@@ -301,6 +303,77 @@ impl RepoGraphOps for StubRepoGraphOps {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn status(&self, _: &str) -> Result<bridge::GraphStatus, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn symbols_at(
+        &self,
+        _: &str,
+        _: &str,
+        _: u32,
+        _: Option<u32>,
+    ) -> Result<Vec<SymbolAtHit>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn diff_touches(
+        &self,
+        _: &str,
+        _: &[ChangedRange],
+    ) -> Result<DiffTouchesResult, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn api_surface(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<ApiSurfaceEntry>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn boundary_check(
+        &self,
+        _: &str,
+        _: &[BoundaryRule],
+    ) -> Result<Vec<BoundaryViolation>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn hotspots(
+        &self,
+        _: &str,
+        _: u32,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<HotspotEntry>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn metrics_at(
+        &self,
+        _: &str,
+    ) -> Result<MetricsAtResult, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn dead_symbols(
+        &self,
+        _: &str,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<DeadSymbolEntry>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn deprecated_callers(
+        &self,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<DeprecatedHit>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
+    async fn touches_hot_path(
+        &self,
+        _: &str,
+        _: &[String],
+        _: &[String],
+        _: &[String],
+    ) -> Result<Vec<HotPathHit>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
 }

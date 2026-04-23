@@ -11,10 +11,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_control_plane::bridge::{
-    CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, EdgeEntry, GitOps, GraphNeighbor,
-    GraphStatus, ImpactEntry, ImpactResult, LspOps, LspWarning, ModelPoolStatus, NeighborsResult,
+    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangedRange, CoordinatorOps,
+    CoordinatorStatus, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit, DiffTouchesResult,
+    EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry,
+    ImpactResult, LspOps, LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult,
     OrphanEntry, PathHop, PathResult, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo,
-    RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolDescription,
+    RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolAtHit, SymbolDescription,
+    TouchedSymbol,
 };
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
@@ -722,6 +725,982 @@ impl RepoGraphOps for RepoGraphBridge {
             commits_since_pin,
         })
     }
+
+    async fn symbols_at(
+        &self,
+        project_path: &str,
+        file: &str,
+        start_line: u32,
+        end_line: Option<u32>,
+    ) -> Result<Vec<SymbolAtHit>, String> {
+        use petgraph::Direction;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            project_path,
+        )
+        .await?;
+        let end = end_line.unwrap_or(start_line);
+        let (start, end) = if start_line <= end {
+            (start_line, end)
+        } else {
+            (end, start_line)
+        };
+
+        let file_path = std::path::Path::new(file);
+        let hits = graph.symbols_enclosing(file_path, start, end);
+
+        // Also surface the file node itself when present — this gives
+        // callers a stable anchor even when symbol_ranges is empty (e.g.
+        // the artifact-restored cache path before the next rebuild).
+        let mut out: Vec<SymbolAtHit> = Vec::new();
+        if let Some(file_idx) = graph.file_node(file_path) {
+            let node = graph.node(file_idx);
+            out.push(SymbolAtHit {
+                key: format_node_key(&node.id),
+                kind: format!("{:?}", node.kind).to_lowercase(),
+                display_name: node.display_name.clone(),
+                file: node.file_path.as_ref().map(|p| p.display().to_string()),
+                start_line: None,
+                end_line: None,
+                visibility: node.visibility.map(|v| v.as_str().to_string()),
+                symbol_kind: None,
+            });
+        }
+
+        for idx in hits {
+            let node = graph.node(idx);
+            // `symbols_enclosing` is populated by definitions only; we do
+            // not have the exact range stored on the node itself, so the
+            // per-hit start/end are omitted. Callers that need the range
+            // can re-query via `symbols_at` with a tighter window.
+            let _ = (
+                graph.graph().edges_directed(idx, Direction::Incoming),
+                graph.graph().edges_directed(idx, Direction::Outgoing),
+            );
+            out.push(SymbolAtHit {
+                key: format_node_key(&node.id),
+                kind: format!("{:?}", node.kind).to_lowercase(),
+                display_name: node.display_name.clone(),
+                file: node.file_path.as_ref().map(|p| p.display().to_string()),
+                start_line: Some(start),
+                end_line: Some(end),
+                visibility: node.visibility.map(|v| v.as_str().to_string()),
+                symbol_kind: node.symbol_kind.as_ref().map(|k| format!("{k:?}")),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn diff_touches(
+        &self,
+        project_path: &str,
+        changed_ranges: &[ChangedRange],
+    ) -> Result<DiffTouchesResult, String> {
+        use petgraph::Direction;
+        use std::collections::BTreeSet;
+
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            project_path,
+        )
+        .await?;
+
+        let mut touched_indices: BTreeSet<petgraph::graph::NodeIndex> = BTreeSet::new();
+        let mut affected_files: Vec<String> = Vec::new();
+        let mut unknown_files: Vec<String> = Vec::new();
+        let mut seen_affected: BTreeSet<String> = BTreeSet::new();
+        let mut seen_unknown: BTreeSet<String> = BTreeSet::new();
+
+        for range in changed_ranges {
+            let end = range.end_line.unwrap_or(range.start_line);
+            let (start, end) = if range.start_line <= end {
+                (range.start_line, end)
+            } else {
+                (end, range.start_line)
+            };
+            let file_path = std::path::Path::new(&range.file);
+            let file_present = graph.file_node(file_path).is_some();
+            if file_present {
+                if seen_affected.insert(range.file.clone()) {
+                    affected_files.push(range.file.clone());
+                }
+            } else if seen_unknown.insert(range.file.clone()) {
+                unknown_files.push(range.file.clone());
+            }
+            for idx in graph.symbols_enclosing(file_path, start, end) {
+                touched_indices.insert(idx);
+            }
+        }
+
+        let mut touched_symbols: Vec<TouchedSymbol> = touched_indices
+            .into_iter()
+            .map(|idx| {
+                let node = graph.node(idx);
+                let fan_in = graph
+                    .graph()
+                    .edges_directed(idx, Direction::Incoming)
+                    .count();
+                let fan_out = graph
+                    .graph()
+                    .edges_directed(idx, Direction::Outgoing)
+                    .count();
+                TouchedSymbol {
+                    key: format_node_key(&node.id),
+                    display_name: node.display_name.clone(),
+                    kind: format!("{:?}", node.kind).to_lowercase(),
+                    symbol_kind: node.symbol_kind.as_ref().map(|k| format!("{k:?}")),
+                    visibility: node.visibility.map(|v| v.as_str().to_string()),
+                    file: node.file_path.as_ref().map(|p| p.display().to_string()),
+                    start_line: None,
+                    end_line: None,
+                    fan_in,
+                    fan_out,
+                }
+            })
+            .collect();
+
+        // Stable output: highest fan-in first so PR reviewers see the
+        // most structurally central symbols at the top.
+        touched_symbols.sort_by(|a, b| {
+            b.fan_in
+                .cmp(&a.fan_in)
+                .then_with(|| b.fan_out.cmp(&a.fan_out))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+
+        Ok(DiffTouchesResult {
+            touched_symbols,
+            affected_files,
+            unknown_files,
+        })
+    }
+
+    async fn api_surface(
+        &self,
+        project_path: &str,
+        module_glob: Option<&str>,
+        visibility: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ApiSurfaceEntry>, String> {
+        use djinn_graph::repo_graph::RepoGraphNodeKind;
+        use djinn_graph::scip_parser::ScipVisibility;
+        use petgraph::Direction;
+
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            project_path,
+        )
+        .await?;
+
+        let vis_filter = match visibility {
+            None | Some("public") => Some(ScipVisibility::Public),
+            Some("private") => Some(ScipVisibility::Private),
+            Some("any") => None,
+            Some(other) => {
+                return Err(format!(
+                    "invalid visibility '{other}': expected 'public', 'private', or 'any'"
+                ));
+            }
+        };
+        let module_matcher = match module_glob {
+            Some(pattern) => Some(
+                globset::Glob::new(pattern)
+                    .map_err(|e| format!("invalid module_glob '{pattern}': {e}"))?
+                    .compile_matcher(),
+            ),
+            None => None,
+        };
+
+        let mut out: Vec<ApiSurfaceEntry> = Vec::new();
+        for node_index in graph.graph().node_indices() {
+            let node = graph.node(node_index);
+            if node.kind != RepoGraphNodeKind::Symbol || node.is_external {
+                continue;
+            }
+            if let Some(filter) = vis_filter
+                && node.visibility != Some(filter)
+            {
+                continue;
+            }
+            let file_str = node
+                .file_path
+                .as_ref()
+                .map(|p| p.display().to_string());
+            if let Some(matcher) = &module_matcher {
+                let Some(f) = &file_str else { continue };
+                if !matcher.is_match(f) {
+                    continue;
+                }
+            }
+            let key = format_node_key(&node.id);
+            // Self-crate = the SCIP `<tool> <scheme> <crate-name> ...` token.
+            let own_crate = node
+                .symbol
+                .as_deref()
+                .and_then(scip_crate_name);
+            let mut used_outside_crate = false;
+            let mut fan_in = 0usize;
+            for edge in graph.graph().edges_directed(node_index, Direction::Incoming) {
+                fan_in += 1;
+                if !used_outside_crate && own_crate.is_some() {
+                    let src = graph.node(edge.source());
+                    if let Some(src_sym) = src.symbol.as_deref()
+                        && let Some(src_crate) = scip_crate_name(src_sym)
+                        && Some(src_crate) != own_crate.as_deref()
+                    {
+                        used_outside_crate = true;
+                    }
+                }
+            }
+            let fan_out = graph
+                .graph()
+                .edges_directed(node_index, Direction::Outgoing)
+                .count();
+            let doc_present = !node.documentation.is_empty()
+                && node.documentation.iter().any(|l| !l.trim().is_empty());
+            out.push(ApiSurfaceEntry {
+                key,
+                display_name: node.display_name.clone(),
+                symbol_kind: node.symbol_kind.as_ref().map(|k| format!("{k:?}")),
+                file: file_str,
+                visibility: node.visibility.map(|v| v.as_str().to_string()),
+                doc_present,
+                fan_in,
+                fan_out,
+                used_outside_crate,
+            });
+        }
+        // Stable order: highest fan-in first, then alpha by key.
+        out.sort_by(|a, b| b.fan_in.cmp(&a.fan_in).then_with(|| a.key.cmp(&b.key)));
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn boundary_check(
+        &self,
+        project_path: &str,
+        rules: &[BoundaryRule],
+    ) -> Result<Vec<BoundaryViolation>, String> {
+        use globset::Glob;
+
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            project_path,
+        )
+        .await?;
+
+        // Every submitted rule is treated as a forbidden edge.
+        let compiled: Vec<(usize, globset::GlobMatcher, globset::GlobMatcher)> = rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let from = Glob::new(&r.from_glob)
+                    .map_err(|e| format!("rule[{i}].from_glob '{}': {e}", r.from_glob))?
+                    .compile_matcher();
+                let to = Glob::new(&r.to_glob)
+                    .map_err(|e| format!("rule[{i}].to_glob '{}': {e}", r.to_glob))?
+                    .compile_matcher();
+                Ok::<_, String>((i, from, to))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if compiled.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let exclusions = self
+            .state
+            .mcp_state_graph_exclusions(project_path)
+            .await;
+
+        let mut violations: Vec<BoundaryViolation> = Vec::new();
+        for edge_ref in graph.graph().edge_references() {
+            let src_node = graph.node(edge_ref.source());
+            let dst_node = graph.node(edge_ref.target());
+            let src_key = format_node_key(&src_node.id);
+            let dst_key = format_node_key(&dst_node.id);
+            // Skip the edge if either endpoint is filtered by exclusions.
+            if exclusions.excludes(&src_key, src_node.file_path.as_ref().map(|p| p.display().to_string()).as_deref(), &src_node.display_name)
+                || exclusions.excludes(&dst_key, dst_node.file_path.as_ref().map(|p| p.display().to_string()).as_deref(), &dst_node.display_name)
+            {
+                continue;
+            }
+            let src_match_target = src_node
+                .file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| src_node.display_name.clone());
+            let dst_match_target = dst_node
+                .file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| dst_node.display_name.clone());
+
+            for (rule_index, from_m, to_m) in &compiled {
+                if from_m.is_match(&src_match_target) && to_m.is_match(&dst_match_target) {
+                    violations.push(BoundaryViolation {
+                        rule_index: *rule_index,
+                        from_key: src_key.clone(),
+                        to_key: dst_key.clone(),
+                        edge_kind: format!("{:?}", edge_ref.weight().kind),
+                        from_file: src_node.file_path.as_ref().map(|p| p.display().to_string()),
+                        to_file: dst_node.file_path.as_ref().map(|p| p.display().to_string()),
+                        witness_path: Some(vec![src_key.clone(), dst_key.clone()]),
+                    });
+                }
+            }
+        }
+        Ok(violations)
+    }
+
+    async fn hotspots(
+        &self,
+        project_path: &str,
+        window_days: u32,
+        file_glob: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<HotspotEntry>, String> {
+        use djinn_graph::repo_graph::RepoGraphNodeKind;
+        use std::collections::BTreeMap;
+
+        let (graph, ranking, _sccs) =
+            djinn_graph::canonical_graph::load_canonical_graph(&self.state, project_path)
+                .await?;
+
+        // Churn via git log, single invocation. Use git's relative-date
+        // syntax ("N days ago") — that side-steps dragging in chrono just
+        // for a date subtraction while still giving git a stable bound.
+        let days = window_days.clamp(1, 365);
+        let (project_root, _idx) =
+            djinn_graph::canonical_graph::normalize_graph_query_paths(project_path);
+        let mut churn: BTreeMap<String, usize> = BTreeMap::new();
+        match std::process::Command::new("git")
+            .current_dir(&project_root)
+            .args([
+                "log",
+                "--name-only",
+                "--pretty=format:",
+                &format!("--since={days} days ago"),
+            ])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    *churn.entry(trimmed.to_string()).or_insert(0) += 1;
+                }
+            }
+            Ok(out) => {
+                tracing::warn!(
+                    project = %project_path,
+                    status = %out.status,
+                    "hotspots: git log returned non-zero; returning empty result",
+                );
+                return Ok(Vec::new());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    project = %project_path,
+                    error = %e,
+                    "hotspots: git log failed; returning empty result",
+                );
+                return Ok(Vec::new());
+            }
+        }
+
+        // Build per-file centrality (Σ PR of owned symbols) and top-symbol list.
+        // `RepoGraphRanking` is pagerank-sorted, so we can walk it directly
+        // to pick up the highest-PR symbols per file.
+        let mut per_file_centrality: BTreeMap<String, f64> = BTreeMap::new();
+        let mut per_file_top: BTreeMap<String, Vec<(f64, String)>> = BTreeMap::new();
+        for ranked in &ranking.nodes {
+            if ranked.kind != RepoGraphNodeKind::Symbol {
+                continue;
+            }
+            let node = graph.node(ranked.node_index);
+            let Some(file) = node.file_path.as_ref().map(|p| p.display().to_string())
+            else {
+                continue;
+            };
+            *per_file_centrality.entry(file.clone()).or_insert(0.0) += ranked.page_rank;
+            let top = per_file_top.entry(file).or_default();
+            if top.len() < 3 {
+                top.push((ranked.page_rank, node.display_name.clone()));
+            }
+        }
+
+        let file_matcher = match file_glob {
+            Some(pattern) => Some(
+                globset::Glob::new(pattern)
+                    .map_err(|e| format!("invalid file_glob '{pattern}': {e}"))?
+                    .compile_matcher(),
+            ),
+            None => None,
+        };
+        let exclusions = self
+            .state
+            .mcp_state_graph_exclusions(project_path)
+            .await;
+
+        let mut out: Vec<HotspotEntry> = Vec::new();
+        for (file, count) in churn {
+            if let Some(matcher) = &file_matcher
+                && !matcher.is_match(&file)
+            {
+                continue;
+            }
+            // Apply GraphExclusions — we key on file path for discovery,
+            // and use the same path as display_name for the key check.
+            if exclusions.excludes(&file, Some(&file), &file) {
+                continue;
+            }
+            let centrality = per_file_centrality.get(&file).copied().unwrap_or(0.0);
+            let top_symbols = per_file_top
+                .get(&file)
+                .map(|v| v.iter().map(|(_, n)| n.clone()).collect())
+                .unwrap_or_default();
+            out.push(HotspotEntry {
+                file,
+                churn: count,
+                centrality,
+                composite_score: count as f64 * centrality,
+                top_symbols,
+            });
+        }
+        out.sort_by(|a, b| {
+            b.composite_score
+                .partial_cmp(&a.composite_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.file.cmp(&b.file))
+        });
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn metrics_at(
+        &self,
+        project_path: &str,
+    ) -> Result<MetricsAtResult, String> {
+        use djinn_graph::repo_graph::RepoGraphNodeKind;
+        use djinn_graph::scip_parser::ScipVisibility;
+        use petgraph::Direction;
+        use std::collections::BTreeMap;
+
+        let (graph, _ranking, sccs) =
+            djinn_graph::canonical_graph::load_canonical_graph(&self.state, project_path)
+                .await?;
+
+        let exclusions = self
+            .state
+            .mcp_state_graph_exclusions(project_path)
+            .await;
+
+        // Filter the node-set once; every downstream count uses it.
+        let mut kept: Vec<petgraph::graph::NodeIndex> = Vec::new();
+        let mut total_degree: Vec<usize> = Vec::new();
+        let mut public_kept: Vec<petgraph::graph::NodeIndex> = Vec::new();
+        for node_index in graph.graph().node_indices() {
+            let node = graph.node(node_index);
+            let file = node.file_path.as_ref().map(|p| p.display().to_string());
+            let key = format_node_key(&node.id);
+            if exclusions.excludes(&key, file.as_deref(), &node.display_name) {
+                continue;
+            }
+            kept.push(node_index);
+            let td = graph.graph().edges_directed(node_index, Direction::Incoming).count()
+                + graph.graph().edges_directed(node_index, Direction::Outgoing).count();
+            total_degree.push(td);
+            if node.kind == RepoGraphNodeKind::Symbol
+                && node.visibility == Some(ScipVisibility::Public)
+            {
+                public_kept.push(node_index);
+            }
+        }
+
+        // p95 of total_degree across kept nodes → god-object floor.
+        let mut td_sorted = total_degree.clone();
+        td_sorted.sort_unstable();
+        let p95_floor = if td_sorted.is_empty() {
+            0
+        } else {
+            let idx = ((td_sorted.len() as f64) * 0.95).ceil() as usize;
+            td_sorted[idx.saturating_sub(1).min(td_sorted.len() - 1)]
+        };
+        let god_object_count = if p95_floor == 0 {
+            0
+        } else {
+            total_degree.iter().filter(|d| **d >= p95_floor).count()
+        };
+
+        // Edge count over kept nodes only — both endpoints must survive.
+        let kept_set: std::collections::HashSet<petgraph::graph::NodeIndex> =
+            kept.iter().copied().collect();
+        let edge_count = graph
+            .graph()
+            .edge_references()
+            .filter(|e| kept_set.contains(&e.source()) && kept_set.contains(&e.target()))
+            .count();
+
+        // Cycles — exclude SCCs whose kept members drop below size 2.
+        let mut cycles_by_size_histogram: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut cycle_count = 0usize;
+        for component in sccs.full.iter() {
+            let surviving = component
+                .iter()
+                .filter(|idx| kept_set.contains(idx))
+                .count();
+            if surviving >= 2 {
+                cycle_count += 1;
+                *cycles_by_size_histogram.entry(surviving).or_insert(0) += 1;
+            }
+        }
+
+        // Orphan count — defer to graph.orphans(), then strip via exclusions.
+        let orphans = graph.orphans(None, None, usize::MAX);
+        let orphan_count = orphans
+            .into_iter()
+            .filter(|idx| kept_set.contains(idx))
+            .count();
+
+        let public_api_count = public_kept.len();
+        let docs_present = public_kept
+            .iter()
+            .filter(|idx| {
+                let n = graph.node(**idx);
+                !n.documentation.is_empty() && n.documentation.iter().any(|l| !l.trim().is_empty())
+            })
+            .count();
+        let doc_coverage_pct = if public_api_count == 0 {
+            0.0
+        } else {
+            100.0 * (docs_present as f64) / (public_api_count as f64)
+        };
+
+        // Resolve the pinned commit via repo_graph_cache. Best-effort;
+        // fall back to an empty string if the lookup fails.
+        let mut pinned = String::new();
+        use djinn_db::{ProjectRepository, RepoGraphCacheRepository};
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        if let Ok(Some(project)) = repo.get_by_path(project_path).await {
+            let cache_repo = RepoGraphCacheRepository::new(self.state.db().clone());
+            if let Ok(Some(row)) = cache_repo.latest_for_project(&project.id).await {
+                pinned = row.commit_sha;
+            }
+        }
+
+        Ok(MetricsAtResult {
+            commit: pinned,
+            node_count: kept.len(),
+            edge_count,
+            cycle_count,
+            cycles_by_size_histogram,
+            god_object_count,
+            orphan_count,
+            public_api_count,
+            doc_coverage_pct,
+        })
+    }
+
+    /// Symbols with zero incoming edges from the entry-point set
+    /// (`main` functions, test/bench heuristics, public symbols in
+    /// crate-root files).
+    ///
+    /// **V1 approximations** (documented for future parser work):
+    /// * Test entry points are inferred heuristically from file paths
+    ///   (`**/tests/**`, `**/*_test.rs`, `**/*_test.go`) and display
+    ///   names (`test_*`, `*_test`) because the SCIP parser does not
+    ///   yet surface `#[test]` / `#[tokio::test]` / `#[bench]`
+    ///   annotations.
+    /// * "Crate root re-export surface" is inferred from the file
+    ///   path (`**/src/lib.rs` or `**/src/main.rs`).
+    async fn dead_symbols(
+        &self,
+        project_path: &str,
+        confidence: &str,
+        limit: usize,
+    ) -> Result<Vec<DeadSymbolEntry>, String> {
+        use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
+        use djinn_graph::scip_parser::{ScipSymbolKind, ScipVisibility};
+        use petgraph::Direction;
+        use std::collections::HashSet;
+
+        if !matches!(confidence, "high" | "med" | "low") {
+            return Err(format!(
+                "invalid confidence '{confidence}': expected 'high', 'med', or 'low'"
+            ));
+        }
+
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            project_path,
+        )
+        .await?;
+
+        // Compile entry-path heuristics once.
+        let test_dir = globset::Glob::new("**/tests/**")
+            .map_err(|e| e.to_string())?
+            .compile_matcher();
+        let rs_test_file = globset::Glob::new("**/*_test.rs")
+            .map_err(|e| e.to_string())?
+            .compile_matcher();
+        let go_test_file = globset::Glob::new("**/*_test.go")
+            .map_err(|e| e.to_string())?
+            .compile_matcher();
+        let crate_root_lib = globset::Glob::new("**/src/lib.rs")
+            .map_err(|e| e.to_string())?
+            .compile_matcher();
+        let crate_root_main = globset::Glob::new("**/src/main.rs")
+            .map_err(|e| e.to_string())?
+            .compile_matcher();
+
+        let mut entry_set: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
+        for idx in graph.graph().node_indices() {
+            let node = graph.node(idx);
+            if node.kind != RepoGraphNodeKind::Symbol || node.is_external {
+                continue;
+            }
+            let file_str = node
+                .file_path
+                .as_ref()
+                .map(|p| p.display().to_string());
+            let is_main = node.display_name == "main"
+                && node.symbol_kind.as_ref() == Some(&ScipSymbolKind::Function);
+            let name_hints_test = node.display_name.starts_with("test_")
+                || node.display_name.ends_with("_test");
+            let path_hints_test = file_str
+                .as_deref()
+                .map(|f| {
+                    test_dir.is_match(f) || rs_test_file.is_match(f) || go_test_file.is_match(f)
+                })
+                .unwrap_or(false);
+            let crate_root_public = node.visibility == Some(ScipVisibility::Public)
+                && file_str
+                    .as_deref()
+                    .map(|f| crate_root_lib.is_match(f) || crate_root_main.is_match(f))
+                    .unwrap_or(false);
+            if is_main || name_hints_test || path_hints_test || crate_root_public {
+                entry_set.insert(idx);
+            }
+        }
+
+        let exclusions = self
+            .state
+            .mcp_state_graph_exclusions(project_path)
+            .await;
+
+        let mut out: Vec<DeadSymbolEntry> = Vec::new();
+        for idx in graph.graph().node_indices() {
+            let node = graph.node(idx);
+            if node.kind != RepoGraphNodeKind::Symbol || node.is_external {
+                continue;
+            }
+            if entry_set.contains(&idx) {
+                continue;
+            }
+
+            let mut has_any_incoming = false;
+            let mut has_relationship_ref_or_impl = false;
+            let mut has_relationship_impl = false;
+            for edge in graph.graph().edges_directed(idx, Direction::Incoming) {
+                match edge.weight().kind {
+                    RepoGraphEdgeKind::ContainsDefinition
+                    | RepoGraphEdgeKind::DeclaredInFile => {}
+                    RepoGraphEdgeKind::SymbolRelationshipImplementation => {
+                        has_any_incoming = true;
+                        has_relationship_ref_or_impl = true;
+                        has_relationship_impl = true;
+                    }
+                    RepoGraphEdgeKind::SymbolRelationshipReference => {
+                        has_any_incoming = true;
+                        has_relationship_ref_or_impl = true;
+                    }
+                    _ => {
+                        has_any_incoming = true;
+                    }
+                }
+            }
+            // Tiers (strictest → loosest):
+            // * `high` — exclude anything with an incoming impl *or*
+            //   relationship-ref edge (they're likely dyn-dispatch callers).
+            // * `med`  — exclude anything with an incoming impl edge.
+            // * `low`  — keep any symbol with zero incoming "real" edges,
+            //   regardless of relationship hints.
+            let keep = match confidence {
+                "low" => !has_any_incoming,
+                "med" => !has_any_incoming && !has_relationship_impl,
+                "high" => !has_any_incoming && !has_relationship_ref_or_impl,
+                _ => unreachable!(),
+            };
+            if !keep {
+                continue;
+            }
+
+            let key = format_node_key(&node.id);
+            let file = node.file_path.as_ref().map(|p| p.display().to_string());
+            if exclusions.excludes(&key, file.as_deref(), &node.display_name) {
+                continue;
+            }
+            out.push(DeadSymbolEntry {
+                key,
+                display_name: node.display_name.clone(),
+                symbol_kind: node.symbol_kind.as_ref().map(|k| format!("{k:?}")),
+                file,
+                visibility: node.visibility.map(|v| v.as_str().to_string()),
+                confidence: confidence.to_string(),
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    async fn deprecated_callers(
+        &self,
+        project_path: &str,
+        limit: usize,
+    ) -> Result<Vec<DeprecatedHit>, String> {
+        use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
+        use petgraph::Direction;
+
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            project_path,
+        )
+        .await?;
+        let exclusions = self
+            .state
+            .mcp_state_graph_exclusions(project_path)
+            .await;
+
+        let mut out: Vec<DeprecatedHit> = Vec::new();
+        for idx in graph.graph().node_indices() {
+            let node = graph.node(idx);
+            if node.kind != RepoGraphNodeKind::Symbol || node.is_external {
+                continue;
+            }
+            // v1: text-scan signature + documentation for deprecation markers.
+            // The SCIP parser does not yet set an explicit `deprecated` flag —
+            // extending `ScipSymbol` to carry one is left for a later pass.
+            if !is_deprecated_text(node.signature.as_deref(), &node.documentation) {
+                continue;
+            }
+            let dep_key = format_node_key(&node.id);
+            let dep_file = node.file_path.as_ref().map(|p| p.display().to_string());
+            if exclusions.excludes(&dep_key, dep_file.as_deref(), &node.display_name) {
+                continue;
+            }
+            let mut callers: Vec<CallerRef> = Vec::new();
+            for edge in graph.graph().edges_directed(idx, Direction::Incoming) {
+                match edge.weight().kind {
+                    RepoGraphEdgeKind::SymbolReference
+                    | RepoGraphEdgeKind::SymbolRelationshipReference
+                    | RepoGraphEdgeKind::FileReference => {
+                        let src = graph.node(edge.source());
+                        let src_key = format_node_key(&src.id);
+                        let src_file = src.file_path.as_ref().map(|p| p.display().to_string());
+                        if exclusions.excludes(&src_key, src_file.as_deref(), &src.display_name) {
+                            continue;
+                        }
+                        callers.push(CallerRef {
+                            key: src_key,
+                            display_name: src.display_name.clone(),
+                            file: src_file,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            out.push(DeprecatedHit {
+                deprecated_symbol: dep_key,
+                deprecated_display_name: node.display_name.clone(),
+                deprecated_file: dep_file,
+                callers,
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    async fn touches_hot_path(
+        &self,
+        project_path: &str,
+        seed_entries: &[String],
+        seed_sinks: &[String],
+        symbols: &[String],
+    ) -> Result<Vec<HotPathHit>, String> {
+        use std::collections::{HashMap, HashSet};
+
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            project_path,
+        )
+        .await?;
+
+        if seed_entries.is_empty() || seed_sinks.is_empty() || symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Resolve all keys once.
+        let resolve = |key: &str| -> Option<petgraph::graph::NodeIndex> {
+            match resolve_node(&graph, key) {
+                Ok(idx) => Some(idx),
+                Err(_) => None,
+            }
+        };
+        let entry_ix: Vec<petgraph::graph::NodeIndex> =
+            seed_entries.iter().filter_map(|k| resolve(k)).collect();
+        let sink_ix: Vec<petgraph::graph::NodeIndex> =
+            seed_sinks.iter().filter_map(|k| resolve(k)).collect();
+
+        let pair_cap = 400usize;
+        let total_pairs = entry_ix.len() * sink_ix.len();
+        let truncated = total_pairs > pair_cap;
+        if truncated {
+            tracing::warn!(
+                project = %project_path,
+                total_pairs,
+                cap = pair_cap,
+                "touches_hot_path: pair count exceeds cap; truncating",
+            );
+        }
+
+        // Precompute shortest paths, capping at pair_cap. Paths collected
+        // as Vec<NodeIndex> for membership tests, and cached as formatted
+        // keys for the first `example_path` hit per symbol.
+        let mut paths: Vec<Vec<petgraph::graph::NodeIndex>> = Vec::new();
+        let mut count = 0usize;
+        'outer: for &e in &entry_ix {
+            for &s in &sink_ix {
+                if count >= pair_cap {
+                    break 'outer;
+                }
+                count += 1;
+                if let Some(p) = graph.shortest_path(e, s, None) {
+                    paths.push(p);
+                }
+            }
+        }
+
+        // Build a lookup symbol-key → NodeIndex, then walk the path
+        // list once per queried symbol (O(Q × P × |path|), P ≤ 400).
+        let mut queried: HashMap<String, petgraph::graph::NodeIndex> = HashMap::new();
+        for k in symbols {
+            if let Some(idx) = resolve(k) {
+                queried.insert(k.clone(), idx);
+            }
+        }
+
+        let mut out: Vec<HotPathHit> = Vec::new();
+        for k in symbols {
+            let Some(idx) = queried.get(k).copied() else {
+                out.push(HotPathHit {
+                    symbol: k.clone(),
+                    on_path_count: 0,
+                    example_path: None,
+                });
+                continue;
+            };
+            let mut hits = 0usize;
+            let mut example: Option<Vec<String>> = None;
+            for path in &paths {
+                let set: HashSet<petgraph::graph::NodeIndex> = path.iter().copied().collect();
+                if set.contains(&idx) {
+                    hits += 1;
+                    if example.is_none() {
+                        example = Some(
+                            path.iter()
+                                .map(|i| format_node_key(&graph.node(*i).id))
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            out.push(HotPathHit {
+                symbol: k.clone(),
+                on_path_count: hits,
+                example_path: example,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Extract the SCIP crate-name token from a symbol identifier.
+///
+/// SCIP symbols have the shape:
+/// `<scheme> <manager> <package-name> <version> <descriptors>`
+///
+/// Example: `scip-rust cargo my-crate 0.1.0 foo/Bar#`
+///
+/// This helper returns the `<package-name>` slot (`my-crate`). Locals
+/// (symbols of shape `local <id>`) and any symbol with fewer than four
+/// leading tokens return `None`, signaling "no crate identity" to the
+/// caller (who then conservatively skips the cross-crate check).
+fn scip_crate_name(symbol: &str) -> Option<&str> {
+    if symbol.starts_with("local ") || symbol.is_empty() {
+        return None;
+    }
+    let mut parts = symbol.split_whitespace();
+    let _scheme = parts.next()?;
+    let _manager = parts.next()?;
+    let package = parts.next()?;
+    // Ensure there's at least one more token — the version — so we're
+    // not mis-reading a malformed short header as a package name.
+    let _version = parts.next()?;
+    if package.is_empty() || package == "." {
+        return None;
+    }
+    Some(package)
+}
+
+/// Scan a symbol's signature + documentation text for a `#[deprecated]`
+/// or `@deprecated` marker.
+///
+/// `@deprecated` matching is case-insensitive so the common JSDoc and
+/// Python-docstring conventions both engage. `#[deprecated` does not
+/// require a closing bracket — Rust allows both the bare
+/// `#[deprecated]` and `#[deprecated(...)]` forms.
+fn is_deprecated_text(signature: Option<&str>, documentation: &[String]) -> bool {
+    if let Some(sig) = signature
+        && (sig.contains("#[deprecated") || sig.to_lowercase().contains("@deprecated"))
+    {
+        return true;
+    }
+    for line in documentation {
+        if line.contains("#[deprecated") || line.to_lowercase().contains("@deprecated") {
+            return true;
+        }
+    }
+    false
+}
+
+impl AppState {
+    /// Helper for graph handlers in this module: compiles a
+    /// [`GraphExclusions`] predicate for the given project path,
+    /// falling back to the empty (Tier 1 only) filter on any DB /
+    /// lookup failure.
+    async fn mcp_state_graph_exclusions(
+        &self,
+        project_path: &str,
+    ) -> djinn_control_plane::tools::graph_exclusions::GraphExclusions {
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        let repo =
+            djinn_db::ProjectRepository::new(self.db().clone(), self.event_bus());
+        let project = match repo.get_by_path(project_path).await {
+            Ok(Some(p)) => p,
+            _ => return GraphExclusions::empty(),
+        };
+        match repo.get_config(&project.id).await {
+            Ok(Some(c)) => GraphExclusions::from_config(&c),
+            _ => GraphExclusions::empty(),
+        }
+    }
 }
 
 impl AppState {
@@ -752,6 +1731,63 @@ impl AppState {
             Arc::new(self.clone()),
             Arc::new(RepoGraphBridge::new(self.clone())),
         )
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::{is_deprecated_text, scip_crate_name};
+
+    #[test]
+    fn scip_crate_name_extracts_cargo_package() {
+        let sym = "scip-rust cargo my-crate 0.1.0 foo/Bar#";
+        assert_eq!(scip_crate_name(sym), Some("my-crate"));
+    }
+
+    #[test]
+    fn scip_crate_name_extracts_go_module() {
+        let sym = "scip-go gomod github.com/acme/foo v1 pkg/Thing#";
+        assert_eq!(scip_crate_name(sym), Some("github.com/acme/foo"));
+    }
+
+    #[test]
+    fn scip_crate_name_returns_none_for_short_input() {
+        assert_eq!(scip_crate_name(""), None);
+        assert_eq!(scip_crate_name("scip-rust"), None);
+        assert_eq!(scip_crate_name("scip-rust cargo"), None);
+        assert_eq!(scip_crate_name("scip-rust cargo pkg"), None);
+    }
+
+    #[test]
+    fn scip_crate_name_skips_locals_and_dot_placeholder() {
+        // Local symbols have no crate identity.
+        assert_eq!(scip_crate_name("local 42"), None);
+        // Some SCIP scheme/manager slots use "." when missing — and
+        // the package slot does the same. In that case we have no
+        // identity to compare against.
+        let sym = "scip-rust cargo . 0.1.0 foo/Bar#";
+        assert_eq!(scip_crate_name(sym), None);
+    }
+
+    #[test]
+    fn is_deprecated_text_matches_rust_attribute() {
+        assert!(is_deprecated_text(Some("#[deprecated] fn foo()"), &[]));
+        assert!(is_deprecated_text(
+            Some(r#"#[deprecated(since = "0.1", note = "use bar")] fn foo()"#),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn is_deprecated_text_matches_jsdoc_marker_case_insensitive() {
+        let doc = vec!["/**".into(), " * @Deprecated use `bar` instead".into()];
+        assert!(is_deprecated_text(None, &doc));
+    }
+
+    #[test]
+    fn is_deprecated_text_ignores_unrelated_text() {
+        let doc = vec!["A documented symbol.".into()];
+        assert!(!is_deprecated_text(Some("fn foo()"), &doc));
     }
 }
 

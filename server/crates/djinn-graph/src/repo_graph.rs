@@ -35,6 +35,22 @@ pub struct RepoDependencyGraph {
     /// Index from lowercased `display_name` to the nodes that use it.
     /// Populated at build time so `search` is O(log N + k).
     name_index: BTreeMap<String, Vec<NodeIndex>>,
+    /// Per-file list of symbol-definition enclosing ranges, sorted by
+    /// `start_line`. Populated only when the graph is freshly built from
+    /// parsed SCIP input (see [`RepoDependencyGraph::symbols_enclosing`] for
+    /// the limitation on graphs restored from artifacts).
+    symbol_ranges: BTreeMap<PathBuf, Vec<SymbolRange>>,
+}
+
+/// A single SCIP definition range pinned to a graph node.
+///
+/// Line numbers are 1-indexed and inclusive on both ends, matching the
+/// convention used by callers (diff hunks, editor selections).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolRange {
+    pub start_line: u32,
+    pub end_line: u32,
+    pub node: NodeIndex,
 }
 
 /// Standard sparse PageRank, O((V + E) × iterations) per full pass.
@@ -352,6 +368,38 @@ impl RepoDependencyGraph {
         out
     }
 
+    /// Returns the [`NodeIndex`]es of symbols whose definition enclosing
+    /// range overlaps `[start_line, end_line]` in `file`.
+    ///
+    /// Lines are 1-indexed inclusive.
+    ///
+    /// **Limitation**: the sidecar `symbol_ranges` map is populated only when
+    /// the graph is freshly built from parsed SCIP input via
+    /// [`RepoDependencyGraph::build`]. Graphs restored via
+    /// [`RepoDependencyGraph::from_artifact`] — the DB cache-hit path —
+    /// have an empty map because per-occurrence ranges are not persisted in
+    /// the artifact. On a cache hit this method therefore returns an empty
+    /// `Vec` until the next rebuild repopulates the sidecar.
+    pub fn symbols_enclosing(
+        &self,
+        file: &Path,
+        start_line: u32,
+        end_line: u32,
+    ) -> Vec<NodeIndex> {
+        let Some(ranges) = self.symbol_ranges.get(file) else {
+            return Vec::new();
+        };
+        // Ranges can nest (method inside impl inside mod), so a binary search
+        // on `start_line` would miss enclosing parents whose start precedes
+        // the query window. Linear scan is fine — per-file range counts are
+        // small (hundreds at most) and this path is off the hot query loop.
+        ranges
+            .iter()
+            .filter(|range| range.start_line <= end_line && range.end_line >= start_line)
+            .map(|range| range.node)
+            .collect()
+    }
+
     /// Shortest dependency path between two nodes using A* over edge weights.
     pub fn shortest_path(
         &self,
@@ -495,6 +543,9 @@ struct RepoDependencyGraphBuilder {
     symbol_file: BTreeMap<String, PathBuf>,
     symbol_language: BTreeMap<String, String>,
     declared_symbols: BTreeSet<String>,
+    /// Accumulator for the per-file `SymbolRange` sidecar. Unsorted; the
+    /// builder sorts each entry by `start_line` in `finish()`.
+    symbol_ranges: BTreeMap<PathBuf, Vec<SymbolRange>>,
 }
 
 impl RepoDependencyGraphBuilder {
@@ -555,6 +606,7 @@ impl RepoDependencyGraphBuilder {
                     RepoGraphEdgeKind::DeclaredInFile,
                     1,
                 );
+                self.record_symbol_range(symbol_index, file, definition);
             }
         }
 
@@ -760,6 +812,35 @@ impl RepoDependencyGraphBuilder {
             .or_default() += count;
     }
 
+    /// Record the definition's enclosing range (if any) into the sidecar
+    /// `symbol_ranges` map. SCIP lines are 0-indexed on the wire; we
+    /// normalize to the 1-indexed inclusive convention used by callers.
+    fn record_symbol_range(
+        &mut self,
+        symbol_index: NodeIndex,
+        file: &ScipFile,
+        occurrence: &ScipOccurrence,
+    ) {
+        let Some(enclosing) = occurrence.enclosing_range.as_ref() else {
+            return;
+        };
+        let start_line = (enclosing.start_line.max(0) as u32).saturating_add(1);
+        let end_line = (enclosing.end_line.max(0) as u32).saturating_add(1);
+        let (start_line, end_line) = if start_line <= end_line {
+            (start_line, end_line)
+        } else {
+            (end_line, start_line)
+        };
+        self.symbol_ranges
+            .entry(file.relative_path.clone())
+            .or_default()
+            .push(SymbolRange {
+                start_line,
+                end_line,
+                node: symbol_index,
+            });
+    }
+
     fn finish(mut self) -> RepoDependencyGraph {
         for ((source, target, kind), evidence_count) in self.edge_accumulator {
             self.graph.add_edge(
@@ -773,11 +854,19 @@ impl RepoDependencyGraphBuilder {
             );
         }
 
+        // Sort each per-file range vec by `start_line` so callers can reason
+        // about ordering even though nesting still demands a linear overlap
+        // scan.
+        for ranges in self.symbol_ranges.values_mut() {
+            ranges.sort_by_key(|r| (r.start_line, r.end_line));
+        }
+
         let name_index = build_name_index(&self.graph);
         RepoDependencyGraph {
             graph: self.graph,
             node_lookup: self.node_lookup,
             name_index,
+            symbol_ranges: self.symbol_ranges,
         }
     }
 }
@@ -874,6 +963,10 @@ impl RepoDependencyGraph {
             graph,
             node_lookup,
             name_index,
+            // Artifacts do not carry per-occurrence ranges, so the
+            // `symbols_enclosing` sidecar is empty on cache-restore paths;
+            // see that method's doc comment.
+            symbol_ranges: BTreeMap::new(),
         }
     }
 
@@ -1689,5 +1782,210 @@ mod tests {
         assert!(path.len() >= 2);
         assert_eq!(path[0], from);
         assert_eq!(*path.last().unwrap(), to);
+    }
+
+    // ── symbols_enclosing tests ─────────────────────────────────────────────
+
+    /// Build a SCIP occurrence for a definition with an explicit enclosing
+    /// range (0-indexed, half-open-like on the wire; `symbols_enclosing`
+    /// normalizes to 1-indexed inclusive).
+    fn definition_with_enclosing(
+        symbol: &str,
+        enclosing_start: i32,
+        enclosing_end: i32,
+    ) -> ScipOccurrence {
+        ScipOccurrence {
+            symbol: symbol.to_string(),
+            range: ScipRange {
+                start_line: enclosing_start,
+                start_character: 0,
+                end_line: enclosing_start,
+                end_character: 6,
+            },
+            enclosing_range: Some(ScipRange {
+                start_line: enclosing_start,
+                start_character: 0,
+                end_line: enclosing_end,
+                end_character: 0,
+            }),
+            roles: BTreeSet::from([ScipSymbolRole::Definition]),
+            syntax_kind: None,
+            override_documentation: vec![],
+        }
+    }
+
+    /// Fixture with nested symbols in one file and a separate sibling file:
+    ///
+    /// `src/lib.rs`:
+    /// - `outer` module, lines 1..20 (0-indexed: 0..=19)
+    /// - `Inner` struct, lines 5..12 (nested in outer)
+    /// - `inner_method` method, lines 7..10 (nested in Inner)
+    /// - `sibling_fn` function, lines 25..30 (sibling of outer)
+    ///
+    /// `src/other.rs`:
+    /// - `other_fn` function, lines 1..5
+    fn nested_ranges_fixture() -> ParsedScipIndex {
+        let outer_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/lib.rs `outer`/".to_string(),
+            kind: Some(ScipSymbolKind::Namespace),
+            display_name: Some("outer".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let inner_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/lib.rs `outer`/`Inner`#".to_string(),
+            kind: Some(ScipSymbolKind::Struct),
+            display_name: Some("Inner".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let method_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/lib.rs `outer`/`Inner`#`inner_method`().".to_string(),
+            kind: Some(ScipSymbolKind::Method),
+            display_name: Some("inner_method".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let sibling_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/lib.rs `sibling_fn`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("sibling_fn".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let other_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/other.rs `other_fn`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("other_fn".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+
+        ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/lib.rs"),
+                    // 0-indexed on the wire; the normalization adds 1 so the
+                    // resulting 1-indexed inclusive ranges are:
+                    //   outer:        1..=20
+                    //   Inner:        6..=12
+                    //   inner_method: 8..=10
+                    //   sibling_fn:  26..=30
+                    definitions: vec![
+                        definition_with_enclosing(&outer_sym.symbol, 0, 19),
+                        definition_with_enclosing(&inner_sym.symbol, 5, 11),
+                        definition_with_enclosing(&method_sym.symbol, 7, 9),
+                        definition_with_enclosing(&sibling_sym.symbol, 25, 29),
+                    ],
+                    references: vec![],
+                    occurrences: vec![],
+                    symbols: vec![
+                        outer_sym.clone(),
+                        inner_sym.clone(),
+                        method_sym.clone(),
+                        sibling_sym.clone(),
+                    ],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/other.rs"),
+                    // 1..=5 after normalization.
+                    definitions: vec![definition_with_enclosing(&other_sym.symbol, 0, 4)],
+                    references: vec![],
+                    occurrences: vec![],
+                    symbols: vec![other_sym.clone()],
+                },
+            ],
+            external_symbols: vec![],
+        }
+    }
+
+    #[test]
+    fn symbols_enclosing_range_inside_single_symbol_returns_only_that_symbol() {
+        let graph = RepoDependencyGraph::build(&[nested_ranges_fixture()]);
+        // Lines 27..=28 fall wholly inside `sibling_fn` (26..=30).
+        let hits = graph.symbols_enclosing(Path::new("src/lib.rs"), 27, 28);
+        let names: Vec<_> = hits
+            .iter()
+            .map(|idx| graph.node(*idx).display_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["sibling_fn"]);
+    }
+
+    #[test]
+    fn symbols_enclosing_range_crossing_sibling_symbols_returns_both() {
+        let graph = RepoDependencyGraph::build(&[nested_ranges_fixture()]);
+        // Lines 20..=26 span the gap between `outer` (1..=20) and
+        // `sibling_fn` (26..=30); both overlap at their boundary lines.
+        let hits = graph.symbols_enclosing(Path::new("src/lib.rs"), 20, 26);
+        let mut names: Vec<_> = hits
+            .iter()
+            .map(|idx| graph.node(*idx).display_name.clone())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["outer".to_string(), "sibling_fn".to_string()]);
+    }
+
+    #[test]
+    fn symbols_enclosing_nested_symbols_all_enclose_query() {
+        let graph = RepoDependencyGraph::build(&[nested_ranges_fixture()]);
+        // Line 9 sits inside `inner_method` (8..=10), which is inside
+        // `Inner` (6..=12), which is inside `outer` (1..=20).
+        let hits = graph.symbols_enclosing(Path::new("src/lib.rs"), 9, 9);
+        let mut names: Vec<_> = hits
+            .iter()
+            .map(|idx| graph.node(*idx).display_name.clone())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "Inner".to_string(),
+                "inner_method".to_string(),
+                "outer".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn symbols_enclosing_file_without_ranges_returns_empty() {
+        // The base fixture uses definition_occurrence() which has
+        // enclosing_range=None, so symbol_ranges is empty for that file.
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let hits = graph.symbols_enclosing(Path::new("src/app.rs"), 1, 100);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn symbols_enclosing_unknown_file_returns_empty() {
+        let graph = RepoDependencyGraph::build(&[nested_ranges_fixture()]);
+        let hits = graph.symbols_enclosing(Path::new("src/does_not_exist.rs"), 1, 10);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn symbols_enclosing_restored_from_artifact_is_empty() {
+        // Ranges are not serialized in the artifact; a cache-restore path
+        // therefore yields an empty map. Documented limitation.
+        let graph = RepoDependencyGraph::build(&[nested_ranges_fixture()]);
+        let artifact = graph.to_artifact();
+        let restored = RepoDependencyGraph::from_artifact(&artifact);
+        let hits = restored.symbols_enclosing(Path::new("src/lib.rs"), 9, 9);
+        assert!(
+            hits.is_empty(),
+            "artifact-restored graph must yield no range hits"
+        );
     }
 }

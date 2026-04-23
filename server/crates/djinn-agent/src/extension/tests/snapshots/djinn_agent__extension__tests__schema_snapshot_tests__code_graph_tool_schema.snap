@@ -3,9 +3,45 @@ source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
 expression: "serde_json::to_value(tool_code_graph()).unwrap()"
 ---
 {
-  "description": "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node; group_by=file for per-file rollup), ranked (top nodes by PageRank or degree; sort_by pagerank|in_degree|out_degree|total_degree), impact (transitive dependents; group_by=file for per-file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup via query substring), cycles (strongly-connected components of size >= min_size), orphans (zero-incoming-reference nodes filtered by visibility public|private|any), path (shortest dependency path from→to), edges (enumerate edges matching from_glob→to_glob), diff (what changed since the previous canonical graph — only since=previous supported), describe (symbol signature/documentation without an LSP round trip).",
+  "description": "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node; group_by=file for per-file rollup), ranked (top nodes by PageRank or degree; sort_by pagerank|in_degree|out_degree|total_degree), impact (transitive dependents; group_by=file for per-file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup via query substring), cycles (strongly-connected components of size >= min_size), orphans (zero-incoming-reference nodes filtered by visibility public|private|any), path (shortest dependency path from→to), edges (enumerate edges matching from_glob→to_glob), symbols_at (given (file, start_line, end_line?), return SCIP symbols whose definition range encloses those lines — lookup for diff-hunk → symbols mapping), diff_touches (given a list of changed line ranges (parsed from `git diff --unified=0 base..head`), return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current `main` — this op does NOT build a head graph), describe (symbol signature/documentation without an LSP round trip), api_surface (every public symbol with fan-in/out and used-outside-crate flag; filter via module_glob/visibility), boundary_check (detect forbidden from_glob→to_glob edges via `rules` list), hotspots (file churn × PageRank centrality ranking; window_days controls look-back, file_glob narrows the file set), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-objects at p95 total-degree, orphan count, public API size + doc coverage), dead_symbols (symbols with zero incoming edges from entry-points; confidence=high|med|low tunes dyn-dispatch tolerance), deprecated_callers (symbols whose signature/documentation contains `#[deprecated]` or `@deprecated`, with caller list), touches_hot_path (given entry-point and sink SCIP keys plus queried symbols, return which sit on any entry→sink shortest path).",
   "inputSchema": {
     "properties": {
+      "changed_ranges": {
+        "description": "List of changed line ranges for diff_touches (parsed from `git diff --unified=0 base..head`)",
+        "items": {
+          "properties": {
+            "end_line": {
+              "description": "1-indexed inclusive last line of the hunk (defaults to start_line)",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "file": {
+              "description": "Repository-relative path of the changed file",
+              "type": "string"
+            },
+            "start_line": {
+              "description": "1-indexed inclusive first line of the hunk",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "file",
+            "start_line"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "confidence": {
+        "description": "Confidence tier for dead_symbols (default high)",
+        "enum": [
+          "high",
+          "med",
+          "low"
+        ],
+        "type": "string"
+      },
       "direction": {
         "description": "Edge direction filter for neighbors (omit for both)",
         "enum": [
@@ -16,6 +52,19 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
       },
       "edge_kind": {
         "description": "Edge-kind filter for edges",
+        "type": "string"
+      },
+      "end_line": {
+        "description": "1-indexed inclusive end line for symbols_at (defaults to start_line)",
+        "minimum": 1,
+        "type": "integer"
+      },
+      "file": {
+        "description": "Repository-relative file path (required for symbols_at)",
+        "type": "string"
+      },
+      "file_glob": {
+        "description": "File-path glob restricting hotspots to a subset of files",
         "type": "string"
       },
       "from": {
@@ -60,6 +109,10 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
         "minimum": 2,
         "type": "integer"
       },
+      "module_glob": {
+        "description": "File-path glob restricting api_surface to a subset of symbols",
+        "type": "string"
+      },
       "operation": {
         "description": "Graph query to perform",
         "enum": [
@@ -72,8 +125,16 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
           "orphans",
           "path",
           "edges",
-          "diff",
-          "describe"
+          "symbols_at",
+          "diff_touches",
+          "describe",
+          "api_surface",
+          "boundary_check",
+          "hotspots",
+          "metrics_at",
+          "dead_symbols",
+          "deprecated_callers",
+          "touches_hot_path"
         ],
         "type": "string"
       },
@@ -85,9 +146,40 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
         "description": "Substring query for search",
         "type": "string"
       },
-      "since": {
-        "description": "Diff base selector for diff (currently only 'previous')",
-        "type": "string"
+      "rules": {
+        "description": "Boundary rules for boundary_check. Every submitted rule is treated as a forbidden edge; matching edges are reported as violations.",
+        "items": {
+          "properties": {
+            "from_glob": {
+              "description": "Source path glob",
+              "type": "string"
+            },
+            "to_glob": {
+              "description": "Destination path glob",
+              "type": "string"
+            }
+          },
+          "required": [
+            "from_glob",
+            "to_glob"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "seed_entries": {
+        "description": "Entry-point SCIP symbol keys for touches_hot_path",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "seed_sinks": {
+        "description": "Sink SCIP symbol keys for touches_hot_path",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "sort_by": {
         "description": "Sort key for ranked (default pagerank)",
@@ -98,6 +190,18 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
           "total_degree"
         ],
         "type": "string"
+      },
+      "start_line": {
+        "description": "1-indexed inclusive start line (required for symbols_at)",
+        "minimum": 1,
+        "type": "integer"
+      },
+      "symbols": {
+        "description": "Queried symbol keys for touches_hot_path",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "to": {
         "description": "Destination node for path",
@@ -115,6 +219,11 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
           "any"
         ],
         "type": "string"
+      },
+      "window_days": {
+        "description": "Churn look-back window in days for hotspots (default 90, clamped to 365)",
+        "minimum": 1,
+        "type": "integer"
       }
     },
     "required": [

@@ -8,9 +8,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
-    CycleGroup, EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, ImpactEntry,
-    ImpactResult, NeighborsResult, OrphanEntry, PathResult, RankedNode, SearchHit,
-    SymbolDescription,
+    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup, DeadSymbolEntry,
+    DeprecatedHit, EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry,
+    ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult,
+    RankedNode, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -23,8 +24,8 @@ use djinn_db::ProjectRepository;
 pub struct CodeGraphParams {
     /// The operation to perform.
     /// One of: `neighbors`, `ranked`, `impact`, `implementations`,
-    /// `search`, `cycles`, `orphans`, `path`, `edges`, `diff`, `describe`,
-    /// `status`.
+    /// `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
+    /// `diff_touches`, `describe`, `status`.
     pub operation: String,
     /// Path to the project root (used to locate the graph).
     pub project_path: String,
@@ -76,6 +77,49 @@ pub struct CodeGraphParams {
     /// Optional edge-kind filter for `edges`.
     #[serde(default)]
     pub edge_kind: Option<String>,
+    /// Repository-relative file path for `symbols_at`.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// 1-indexed inclusive start line for `symbols_at`.
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    /// 1-indexed inclusive end line for `symbols_at`. Defaults to
+    /// `start_line` when omitted.
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// List of `(file, start_line, end_line?)` hunks for `diff_touches`.
+    #[serde(default)]
+    pub changed_ranges: Option<Vec<ChangedRange>>,
+    /// Optional module-path glob for `api_surface` (filter symbols by
+    /// `file_path`).
+    #[serde(default)]
+    pub module_glob: Option<String>,
+    /// Confidence tier for `dead_symbols`: `high`, `med`, or `low`.
+    /// Default `high`.
+    #[serde(default)]
+    pub confidence: Option<String>,
+    /// Churn look-back window in days for `hotspots` (default 90, clamped
+    /// to 365).
+    #[serde(default)]
+    pub window_days: Option<u32>,
+    /// Optional file glob restricting `hotspots` to a subset of paths.
+    #[serde(default)]
+    pub file_glob: Option<String>,
+    /// Boundary rules for `boundary_check`.
+    #[serde(default)]
+    pub rules: Option<Vec<BoundaryRule>>,
+    /// Entry-point symbol keys (route handlers, `main`, etc.) for
+    /// `touches_hot_path`.
+    #[serde(default)]
+    pub seed_entries: Option<Vec<String>>,
+    /// Sink symbol keys (DB queries, external APIs, etc.) for
+    /// `touches_hot_path`.
+    #[serde(default)]
+    pub seed_sinks: Option<Vec<String>>,
+    /// Queried symbol keys for `touches_hot_path` — which sit on any
+    /// entry→sink shortest path?
+    #[serde(default)]
+    pub symbols: Option<Vec<String>>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -154,6 +198,66 @@ pub struct StatusResponse {
     pub status: GraphStatus,
 }
 
+/// Response for the `symbols_at` op — the queried file and every symbol
+/// hit whose definition range encloses the requested line window.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SymbolsAtResponse {
+    pub file: String,
+    pub hits: Vec<SymbolAtHit>,
+}
+
+/// Response for the `diff_touches` op — touched-symbol rollup plus the
+/// affected/unknown-file partition.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DiffTouchesResponse {
+    pub touched_symbols: Vec<TouchedSymbol>,
+    pub affected_files: Vec<String>,
+    pub unknown_files: Vec<String>,
+}
+
+/// Response for the `api_surface` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ApiSurfaceResponse {
+    pub symbols: Vec<ApiSurfaceEntry>,
+}
+
+/// Response for the `boundary_check` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BoundaryCheckResponse {
+    pub violations: Vec<BoundaryViolation>,
+}
+
+/// Response for the `hotspots` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HotspotsResponse {
+    pub hotspots: Vec<HotspotEntry>,
+}
+
+/// Response for the `metrics_at` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MetricsAtResponse {
+    #[serde(flatten)]
+    pub metrics: MetricsAtResult,
+}
+
+/// Response for the `dead_symbols` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DeadSymbolsResponse {
+    pub symbols: Vec<DeadSymbolEntry>,
+}
+
+/// Response for the `deprecated_callers` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DeprecatedCallersResponse {
+    pub hits: Vec<DeprecatedHit>,
+}
+
+/// Response for the `touches_hot_path` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TouchesHotPathResponse {
+    pub hits: Vec<HotPathHit>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
@@ -168,6 +272,15 @@ pub enum CodeGraphResponse {
     Edges(EdgesResponse),
     Describe(DescribeResponse),
     Status(StatusResponse),
+    SymbolsAt(SymbolsAtResponse),
+    DiffTouches(DiffTouchesResponse),
+    ApiSurface(ApiSurfaceResponse),
+    BoundaryCheck(BoundaryCheckResponse),
+    Hotspots(HotspotsResponse),
+    MetricsAt(MetricsAtResponse),
+    DeadSymbols(DeadSymbolsResponse),
+    DeprecatedCallers(DeprecatedCallersResponse),
+    TouchesHotPath(TouchesHotPathResponse),
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────────
@@ -290,7 +403,7 @@ fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms)."
+        description = "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path)."
     )]
     pub async fn code_graph(
         &self,
@@ -308,10 +421,22 @@ impl DjinnMcpServer {
             "edges" => self.code_graph_edges(&params).await,
             "describe" => self.code_graph_describe(&params).await,
             "status" => self.code_graph_status(&params).await,
+            "symbols_at" => self.code_graph_symbols_at(&params).await,
+            "diff_touches" => self.code_graph_diff_touches(&params).await,
+            "api_surface" => self.code_graph_api_surface(&params).await,
+            "boundary_check" => self.code_graph_boundary_check(&params).await,
+            "hotspots" => self.code_graph_hotspots(&params).await,
+            "metrics_at" => self.code_graph_metrics_at(&params).await,
+            "dead_symbols" => self.code_graph_dead_symbols(&params).await,
+            "deprecated_callers" => self.code_graph_deprecated_callers(&params).await,
+            "touches_hot_path" => self.code_graph_touches_hot_path(&params).await,
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', 'describe', 'status'"
+                 'search', 'cycles', 'orphans', 'path', 'edges', \
+                 'symbols_at', 'diff_touches', 'describe', 'status', \
+                 'api_surface', 'boundary_check', 'hotspots', 'metrics_at', \
+                 'dead_symbols', 'deprecated_callers', 'touches_hot_path'"
             )),
         };
 
@@ -613,6 +738,10 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let (from_glob, to_glob) = require_globs(params)?;
         let limit = params.limit.unwrap_or(100) as usize;
+        // Over-fetch so the exclusion post-filter doesn't starve the
+        // requested limit. Edges are cheap to drop but we want the
+        // returned set to honour `limit` after Tier 1+2 pruning.
+        let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 400);
         let edges = self
             .state
             .repo_graph()
@@ -621,9 +750,22 @@ impl DjinnMcpServer {
                 from_glob,
                 to_glob,
                 params.edge_kind.as_deref(),
-                limit,
+                fetch_limit,
             )
             .await?;
+        // Drop edges whose `from` OR `to` endpoint is filtered — a
+        // boundary-check style query over the graph should not surface
+        // edges that touch SCIP-artifact nodes or user-excluded paths,
+        // even if the glob pair technically matches.
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let edges: Vec<EdgeEntry> = edges
+            .into_iter()
+            .filter(|e| {
+                !exclusions.excludes(&e.from, Some(&e.from), &e.from)
+                    && !exclusions.excludes(&e.to, Some(&e.to), &e.to)
+            })
+            .take(limit)
+            .collect();
         Ok(CodeGraphResponse::Edges(EdgesResponse { edges }))
     }
 
@@ -648,6 +790,246 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let status = self.state.repo_graph().status(&params.project_path).await?;
         Ok(CodeGraphResponse::Status(StatusResponse { status }))
+    }
+
+    /// Handler for `operation = "symbols_at"`.
+    ///
+    /// Requires `file` + `start_line`; `end_line` defaults to `start_line`
+    /// when omitted. No exclusion filter is applied here — the caller
+    /// already named the file, so this is a lookup, not a discovery.
+    async fn code_graph_symbols_at(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let file = params
+            .file
+            .as_deref()
+            .filter(|f| !f.is_empty())
+            .ok_or_else(|| format!("'file' is required for operation '{}'", params.operation))?;
+        let start_line = params.start_line.ok_or_else(|| {
+            format!(
+                "'start_line' is required for operation '{}'",
+                params.operation
+            )
+        })?;
+        let end_line = params.end_line;
+        let hits = self
+            .state
+            .repo_graph()
+            .symbols_at(&params.project_path, file, start_line, end_line)
+            .await?;
+        Ok(CodeGraphResponse::SymbolsAt(SymbolsAtResponse {
+            file: file.to_string(),
+            hits,
+        }))
+    }
+
+    /// Handler for `operation = "diff_touches"`.
+    ///
+    /// Requires a non-empty `changed_ranges` list. The Phase 0 graph
+    /// exclusions filter is applied post-query: touched symbols whose
+    /// key, file, or display_name matches an exclusion are dropped
+    /// because they are noise even in PR-review context (generated
+    /// `mod.rs`, third-party shims, etc.).
+    async fn code_graph_diff_touches(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let changed_ranges = params.changed_ranges.as_deref().ok_or_else(|| {
+            format!(
+                "'changed_ranges' is required for operation '{}'",
+                params.operation
+            )
+        })?;
+        if changed_ranges.is_empty() {
+            return Err(format!(
+                "'changed_ranges' must not be empty for operation '{}'",
+                params.operation
+            ));
+        }
+        let result = self
+            .state
+            .repo_graph()
+            .diff_touches(&params.project_path, changed_ranges)
+            .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let touched_symbols: Vec<TouchedSymbol> = result
+            .touched_symbols
+            .into_iter()
+            .filter(|s| !exclusions.excludes(&s.key, s.file.as_deref(), &s.display_name))
+            .collect();
+        Ok(CodeGraphResponse::DiffTouches(DiffTouchesResponse {
+            touched_symbols,
+            affected_files: result.affected_files,
+            unknown_files: result.unknown_files,
+        }))
+    }
+
+    /// Handler for `operation = "api_surface"`.
+    async fn code_graph_api_surface(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        validate_visibility(params.visibility.as_deref())?;
+        let limit = params.limit.unwrap_or(100).max(0) as usize;
+        let symbols = self
+            .state
+            .repo_graph()
+            .api_surface(
+                &params.project_path,
+                params.module_glob.as_deref(),
+                params.visibility.as_deref(),
+                limit.saturating_mul(4).clamp(limit, 500),
+            )
+            .await?;
+        // The bridge already applies the exclusions; also defend against
+        // noise that might slip in if the bridge is evolved later.
+        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let symbols: Vec<ApiSurfaceEntry> = symbols
+            .into_iter()
+            .filter(|e| {
+                !exclusions.excludes(&e.key, e.file.as_deref(), &e.display_name)
+            })
+            .take(limit)
+            .collect();
+        Ok(CodeGraphResponse::ApiSurface(ApiSurfaceResponse {
+            symbols,
+        }))
+    }
+
+    /// Handler for `operation = "boundary_check"`.
+    async fn code_graph_boundary_check(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let rules = params.rules.as_deref().ok_or_else(|| {
+            format!(
+                "'rules' is required for operation '{}'",
+                params.operation
+            )
+        })?;
+        if rules.is_empty() {
+            return Err(format!(
+                "'rules' must not be empty for operation '{}'",
+                params.operation
+            ));
+        }
+        let violations = self
+            .state
+            .repo_graph()
+            .boundary_check(&params.project_path, rules)
+            .await?;
+        Ok(CodeGraphResponse::BoundaryCheck(BoundaryCheckResponse {
+            violations,
+        }))
+    }
+
+    /// Handler for `operation = "hotspots"`.
+    async fn code_graph_hotspots(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let window = params.window_days.unwrap_or(90).clamp(1, 365);
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 100);
+        let hotspots = self
+            .state
+            .repo_graph()
+            .hotspots(
+                &params.project_path,
+                window,
+                params.file_glob.as_deref(),
+                limit,
+            )
+            .await?;
+        Ok(CodeGraphResponse::Hotspots(HotspotsResponse { hotspots }))
+    }
+
+    /// Handler for `operation = "metrics_at"`.
+    async fn code_graph_metrics_at(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let metrics = self
+            .state
+            .repo_graph()
+            .metrics_at(&params.project_path)
+            .await?;
+        Ok(CodeGraphResponse::MetricsAt(MetricsAtResponse { metrics }))
+    }
+
+    /// Handler for `operation = "dead_symbols"`.
+    async fn code_graph_dead_symbols(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let confidence = params.confidence.as_deref().unwrap_or("high");
+        if !matches!(confidence, "high" | "med" | "low") {
+            return Err(format!(
+                "invalid confidence '{confidence}': expected 'high', 'med', or 'low'"
+            ));
+        }
+        let limit = params.limit.unwrap_or(100).max(0) as usize;
+        let symbols = self
+            .state
+            .repo_graph()
+            .dead_symbols(&params.project_path, confidence, limit)
+            .await?;
+        Ok(CodeGraphResponse::DeadSymbols(DeadSymbolsResponse {
+            symbols,
+        }))
+    }
+
+    /// Handler for `operation = "deprecated_callers"`.
+    async fn code_graph_deprecated_callers(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let limit = params.limit.unwrap_or(50).max(0) as usize;
+        let hits = self
+            .state
+            .repo_graph()
+            .deprecated_callers(&params.project_path, limit)
+            .await?;
+        Ok(CodeGraphResponse::DeprecatedCallers(
+            DeprecatedCallersResponse { hits },
+        ))
+    }
+
+    /// Handler for `operation = "touches_hot_path"`.
+    async fn code_graph_touches_hot_path(
+        &self,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let seed_entries = params
+            .seed_entries
+            .as_deref()
+            .ok_or_else(|| {
+                format!(
+                    "'seed_entries' is required for operation '{}'",
+                    params.operation
+                )
+            })?;
+        let seed_sinks = params.seed_sinks.as_deref().ok_or_else(|| {
+            format!(
+                "'seed_sinks' is required for operation '{}'",
+                params.operation
+            )
+        })?;
+        let symbols = params.symbols.as_deref().ok_or_else(|| {
+            format!(
+                "'symbols' is required for operation '{}'",
+                params.operation
+            )
+        })?;
+        let hits = self
+            .state
+            .repo_graph()
+            .touches_hot_path(&params.project_path, seed_entries, seed_sinks, symbols)
+            .await?;
+        Ok(CodeGraphResponse::TouchesHotPath(TouchesHotPathResponse {
+            hits,
+        }))
     }
 }
 
@@ -697,6 +1079,18 @@ mod tests {
             group_by: None,
             max_depth: None,
             edge_kind: None,
+            file: None,
+            start_line: None,
+            end_line: None,
+            changed_ranges: None,
+            module_glob: None,
+            confidence: None,
+            window_days: None,
+            file_glob: None,
+            rules: None,
+            seed_entries: None,
+            seed_sinks: None,
+            symbols: None,
         }
     }
 
@@ -908,5 +1302,157 @@ mod tests {
         let params: CodeGraphParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.operation, "describe");
         assert_eq!(params.key.as_deref(), Some("scip-rust . . . AgentSession#"));
+    }
+
+    #[test]
+    fn parses_symbols_at_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "symbols_at",
+            "project_path": "/workspace/repo",
+            "file": "src/lib.rs",
+            "start_line": 42,
+            "end_line": 48,
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "symbols_at");
+        assert_eq!(params.file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(params.start_line, Some(42));
+        assert_eq!(params.end_line, Some(48));
+    }
+
+    #[test]
+    fn parses_symbols_at_params_without_end_line() {
+        let json = serde_json::json!({
+            "operation": "symbols_at",
+            "project_path": "/workspace/repo",
+            "file": "src/lib.rs",
+            "start_line": 17,
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.start_line, Some(17));
+        assert!(params.end_line.is_none());
+    }
+
+    #[test]
+    fn parses_api_surface_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "api_surface",
+            "project_path": "/workspace/repo",
+            "module_glob": "server/src/**",
+            "visibility": "public",
+            "limit": 50,
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "api_surface");
+        assert_eq!(params.module_glob.as_deref(), Some("server/src/**"));
+        assert_eq!(params.visibility.as_deref(), Some("public"));
+        assert_eq!(params.limit, Some(50));
+    }
+
+    #[test]
+    fn parses_boundary_check_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "boundary_check",
+            "project_path": "/workspace/repo",
+            "rules": [
+                {"from_glob": "server/src/**", "to_glob": "ui/**"},
+                {"from_glob": "ui/**", "to_glob": "server/src/**"},
+            ],
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        let rules = params.rules.as_ref().expect("rules set");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].from_glob, "server/src/**");
+        assert_eq!(rules[1].to_glob, "server/src/**");
+    }
+
+    #[test]
+    fn parses_hotspots_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "hotspots",
+            "project_path": "/workspace/repo",
+            "window_days": 30,
+            "file_glob": "server/src/**",
+            "limit": 10,
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "hotspots");
+        assert_eq!(params.window_days, Some(30));
+        assert_eq!(params.file_glob.as_deref(), Some("server/src/**"));
+        assert_eq!(params.limit, Some(10));
+    }
+
+    #[test]
+    fn parses_metrics_at_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "metrics_at",
+            "project_path": "/workspace/repo",
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "metrics_at");
+        assert_eq!(params.project_path, "/workspace/repo");
+    }
+
+    #[test]
+    fn parses_dead_symbols_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "dead_symbols",
+            "project_path": "/workspace/repo",
+            "confidence": "med",
+            "limit": 75,
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "dead_symbols");
+        assert_eq!(params.confidence.as_deref(), Some("med"));
+        assert_eq!(params.limit, Some(75));
+    }
+
+    #[test]
+    fn parses_deprecated_callers_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "deprecated_callers",
+            "project_path": "/workspace/repo",
+            "limit": 25,
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "deprecated_callers");
+        assert_eq!(params.limit, Some(25));
+    }
+
+    #[test]
+    fn parses_touches_hot_path_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "touches_hot_path",
+            "project_path": "/workspace/repo",
+            "seed_entries": ["scip-rust . . . entry#"],
+            "seed_sinks": ["scip-rust . . . sink#"],
+            "symbols": ["scip-rust . . . foo#", "scip-rust . . . bar#"],
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "touches_hot_path");
+        assert_eq!(params.seed_entries.as_ref().unwrap().len(), 1);
+        assert_eq!(params.seed_sinks.as_ref().unwrap().len(), 1);
+        assert_eq!(params.symbols.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parses_diff_touches_params_from_json() {
+        let json = serde_json::json!({
+            "operation": "diff_touches",
+            "project_path": "/workspace/repo",
+            "changed_ranges": [
+                {"file": "src/a.rs", "start_line": 10, "end_line": 20},
+                {"file": "src/b.rs", "start_line": 5},
+            ],
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        let ranges = params.changed_ranges.as_ref().expect("changed_ranges set");
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].file, "src/a.rs");
+        assert_eq!(ranges[0].start_line, 10);
+        assert_eq!(ranges[0].end_line, Some(20));
+        assert_eq!(ranges[1].file, "src/b.rs");
+        assert_eq!(ranges[1].start_line, 5);
+        assert!(ranges[1].end_line.is_none());
     }
 }

@@ -1023,8 +1023,10 @@ mod tests {
     use djinn_core::models::Project;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use djinn_control_plane::bridge::{
-        CycleGroup, EdgeEntry, GraphStatus, ImpactResult, NeighborsResult, OrphanEntry, PathResult,
-        RankedNode, RepoGraphOps, SearchHit, SymbolDescription,
+        ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup,
+        DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeEntry, GraphStatus, HotPathHit,
+        HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult,
+        RankedNode, RepoGraphOps, SearchHit, SymbolAtHit, SymbolDescription,
     };
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -1125,6 +1127,86 @@ mod tests {
         }
 
         async fn status(&self, _: &str) -> Result<GraphStatus, String> {
+            Err("unused in test".into())
+        }
+
+        async fn symbols_at(
+            &self,
+            _: &str,
+            _: &str,
+            _: u32,
+            _: Option<u32>,
+        ) -> Result<Vec<SymbolAtHit>, String> {
+            Err("unused in test".into())
+        }
+
+        async fn diff_touches(
+            &self,
+            _: &str,
+            _: &[ChangedRange],
+        ) -> Result<DiffTouchesResult, String> {
+            Err("unused in test".into())
+        }
+
+        async fn api_surface(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<ApiSurfaceEntry>, String> {
+            Err("unused in test".into())
+        }
+
+        async fn boundary_check(
+            &self,
+            _: &str,
+            _: &[BoundaryRule],
+        ) -> Result<Vec<BoundaryViolation>, String> {
+            Err("unused in test".into())
+        }
+
+        async fn hotspots(
+            &self,
+            _: &str,
+            _: u32,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<HotspotEntry>, String> {
+            Err("unused in test".into())
+        }
+
+        async fn metrics_at(
+            &self,
+            _: &str,
+        ) -> Result<MetricsAtResult, String> {
+            Err("unused in test".into())
+        }
+
+        async fn dead_symbols(
+            &self,
+            _: &str,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<DeadSymbolEntry>, String> {
+            Err("unused in test".into())
+        }
+
+        async fn deprecated_callers(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<DeprecatedHit>, String> {
+            Err("unused in test".into())
+        }
+
+        async fn touches_hot_path(
+            &self,
+            _: &str,
+            _: &[String],
+            _: &[String],
+            _: &[String],
+        ) -> Result<Vec<HotPathHit>, String> {
             Err("unused in test".into())
         }
     }
