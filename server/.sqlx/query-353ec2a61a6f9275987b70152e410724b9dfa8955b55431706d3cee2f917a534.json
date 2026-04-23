@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO note_associations (note_a_id, note_b_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "353ec2a61a6f9275987b70152e410724b9dfa8955b55431706d3cee2f917a534"
+}
