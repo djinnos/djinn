@@ -37,7 +37,7 @@ use djinn_image_builder::{
 use djinn_stack::environment::EnvironmentConfig;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, info, warn};
 
@@ -244,7 +244,44 @@ impl ImageController {
             .clone()
             .unwrap_or_else(|| format!("djinn-build-{project_id}-{hash_prefix}"));
 
-        let created_job = match jobs.get_opt(&job_name).await? {
+        let existing = jobs.get_opt(&job_name).await?;
+        let existing = match existing {
+            Some(ref job) if is_job_failed(job) => {
+                // Prior Job reached a terminal Failed state — typically
+                // an early crash that exhausted `backoffLimit` (we've
+                // seen this on cold-start races against buildkitd).
+                // Leaving a Failed Job in place wedges the controller
+                // permanently because every subsequent reconcile hits
+                // the "Job already exists" branch and never retries.
+                // Delete it with Background propagation so the Job
+                // object goes away immediately; the next reconcile
+                // tick will find no Job and create a fresh one with
+                // buildkitd now warm.
+                info!(
+                    project_id,
+                    hash = %hash_prefix,
+                    job = %job_name,
+                    namespace = %self.config.namespace,
+                    "image_controller: build Job in Failed state — deleting so the next reconcile recreates it"
+                );
+                if let Err(e) = jobs
+                    .delete(&job_name, &DeleteParams::background())
+                    .await
+                {
+                    warn!(
+                        project_id,
+                        hash = %hash_prefix,
+                        job = %job_name,
+                        error = %e,
+                        "image_controller: failed to delete Failed build Job — will retry on next reconcile"
+                    );
+                }
+                return Ok(());
+            }
+            other => other,
+        };
+
+        let created_job = match existing {
             Some(existing) => {
                 info!(
                     project_id,
@@ -417,6 +454,30 @@ fn short_hash(hash: &str) -> &str {
     &hash[..HASH_TAG_PREFIX_LEN.min(hash.len())]
 }
 
+/// Returns true when the Job has reached a terminal Failed state —
+/// either `.status.failed >= 1` (a pod exhausted the Job's backoff
+/// limit) or a `{type: "Failed", status: "True"}` condition is set.
+///
+/// A Failed Job never recovers on its own; the controller must tear
+/// it down before a fresh reconcile can create a replacement.
+fn is_job_failed(job: &Job) -> bool {
+    let Some(status) = job.status.as_ref() else {
+        return false;
+    };
+    if status.failed.unwrap_or(0) >= 1 {
+        return true;
+    }
+    status
+        .conditions
+        .as_ref()
+        .map(|conds| {
+            conds
+                .iter()
+                .any(|c| c.type_ == "Failed" && c.status == "True")
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +524,58 @@ mod tests {
             split_image_ref("djinn/agent-runtime"),
             ("djinn/agent-runtime".into(), "latest".into())
         );
+    }
+
+    #[test]
+    fn is_job_failed_false_when_no_status() {
+        let job = Job::default();
+        assert!(!is_job_failed(&job));
+    }
+
+    #[test]
+    fn is_job_failed_true_when_failed_count_nonzero() {
+        use k8s_openapi::api::batch::v1::JobStatus;
+        let mut job = Job::default();
+        job.status = Some(JobStatus {
+            failed: Some(1),
+            ..Default::default()
+        });
+        assert!(is_job_failed(&job));
+    }
+
+    #[test]
+    fn is_job_failed_true_when_failed_condition_is_true() {
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+        let mut job = Job::default();
+        job.status = Some(JobStatus {
+            conditions: Some(vec![JobCondition {
+                type_: "Failed".into(),
+                status: "True".into(),
+                last_probe_time: None,
+                last_transition_time: None,
+                message: Some("BackoffLimitExceeded".into()),
+                reason: Some("BackoffLimitExceeded".into()),
+            }]),
+            ..Default::default()
+        });
+        assert!(is_job_failed(&job));
+    }
+
+    #[test]
+    fn is_job_failed_false_when_complete_condition_present() {
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+        let mut job = Job::default();
+        job.status = Some(JobStatus {
+            conditions: Some(vec![JobCondition {
+                type_: "Complete".into(),
+                status: "True".into(),
+                last_probe_time: None,
+                last_transition_time: None,
+                message: None,
+                reason: None,
+            }]),
+            ..Default::default()
+        });
+        assert!(!is_job_failed(&job));
     }
 }

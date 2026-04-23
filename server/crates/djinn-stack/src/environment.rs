@@ -77,17 +77,14 @@ pub type EnvResult<T> = std::result::Result<T, EnvironmentConfigError>;
 ///   Re-writing from detection is OK (config may still be overwritten on the
 ///   next detector pass until the user edits it).
 /// * `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConfigSource {
+    #[default]
     AutoDetected,
     UserEdited,
-}
-
-impl Default for ConfigSource {
-    fn default() -> Self {
-        Self::AutoDetected
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -242,59 +242,6 @@ impl LlmProvider for FakeProvider {
     }
 }
 
-pub struct CapturingProvider {
-    inner: FakeProvider,
-    captured_tools: Arc<StdMutex<Vec<Vec<Value>>>>,
-    captured_conversations: Arc<StdMutex<Vec<Conversation>>>,
-}
-
-impl CapturingProvider {
-    pub fn tool_call(id: impl Into<String>, name: impl Into<String>, input: Value) -> Self {
-        Self {
-            inner: FakeProvider::tool_call(id, name, input),
-            captured_tools: Arc::new(StdMutex::new(Vec::new())),
-            captured_conversations: Arc::new(StdMutex::new(Vec::new())),
-        }
-    }
-
-    pub fn captured_tools(&self) -> Vec<Vec<Value>> {
-        self.captured_tools.lock().unwrap().clone()
-    }
-
-    pub fn captured_conversations(&self) -> Vec<Conversation> {
-        self.captured_conversations.lock().unwrap().clone()
-    }
-}
-
-impl LlmProvider for CapturingProvider {
-    fn name(&self) -> &str {
-        "capturing"
-    }
-
-    fn stream<'a>(
-        &'a self,
-        conversation: &'a Conversation,
-        tools: &'a [Value],
-        tool_choice: Option<ToolChoice>,
-    ) -> Pin<
-        Box<
-            dyn futures::Future<
-                    Output = anyhow::Result<
-                        Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        self.captured_tools.lock().unwrap().push(tools.to_vec());
-        self.captured_conversations
-            .lock()
-            .unwrap()
-            .push(conversation.clone());
-        self.inner.stream(conversation, tools, tool_choice)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct FailingProvider {
     message: Arc<String>,

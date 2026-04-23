@@ -597,7 +597,7 @@ fn dedup_shallowest_per_language(
     for c in candidates {
         let dir = parent_dir(&c.path);
         let suppressed = selected.iter().any(|s| {
-            s.language == c.language && is_ancestor_dir(&parent_dir(&s.path), dir)
+            s.language == c.language && is_ancestor_dir(parent_dir(&s.path), dir)
         });
         if !suppressed {
             selected.push(c);
