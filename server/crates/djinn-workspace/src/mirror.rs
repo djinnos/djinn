@@ -154,11 +154,17 @@ impl MirrorManager {
     /// `origin_url` is passed on every call (rather than remembered from
     /// `ensure_mirror`) because installation tokens rotate. Callers mint a
     /// fresh token per fetch and embed it in the URL.
+    ///
+    /// Returns `true` when the fetch advanced at least one local ref
+    /// (new commits, new/deleted branch, new/deleted tag). `false` means
+    /// the mirror's ref set is byte-identical to what it was before —
+    /// callers use this to skip the per-tick stack detect + graph warmer
+    /// when nothing changed upstream.
     pub async fn fetch_mirror(
         &self,
         project_id: &str,
         origin_url: &str,
-    ) -> Result<(), MirrorError> {
+    ) -> Result<bool, MirrorError> {
         let mirror = self.mirror_path(project_id);
         if !mirror.exists() {
             return Err(MirrorError::Missing(project_id.to_string()));
@@ -178,6 +184,8 @@ impl MirrorManager {
         )
         .await
         .map_err(|e| git_err_to_mirror("git remote set-url", e))?;
+
+        let before = snapshot_refs(&mirror).await?;
 
         // `git clone --bare --filter=blob:none` does NOT write a
         // `fetch` refspec into `remote.origin`, so a plain
@@ -201,7 +209,9 @@ impl MirrorManager {
         )
         .await
         .map_err(|e| git_err_to_mirror("git fetch", e))?;
-        Ok(())
+
+        let after = snapshot_refs(&mirror).await?;
+        Ok(before != after)
     }
 
     /// Hardlinked local clone of the mirror, returned as a [`Workspace`].
@@ -240,5 +250,23 @@ impl MirrorManager {
         .map_err(|e| git_err_to_mirror("git clone --local", e))?;
 
         Ok(Workspace::new(dir, branch.to_string()))
+    }
+}
+
+async fn snapshot_refs(mirror: &Path) -> Result<String, MirrorError> {
+    let out = run_git_command(
+        mirror.to_path_buf(),
+        vec!["show-ref".into(), "--heads".into(), "--tags".into()],
+    )
+    .await;
+    match out {
+        Ok(o) => Ok(o.stdout),
+        // `git show-ref` exits 1 with empty output when the repo has no
+        // matching refs (e.g. a freshly cloned empty mirror). Treat that
+        // as an empty snapshot rather than an error.
+        Err(djinn_git::GitError::CommandFailed { code: 1, stdout, .. }) if stdout.is_empty() => {
+            Ok(String::new())
+        }
+        Err(e) => Err(git_err_to_mirror("git show-ref", e)),
     }
 }

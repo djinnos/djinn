@@ -9,10 +9,11 @@
 #   - bootstraps the kind cluster + localhost:5001 registry (idempotent),
 #   - builds djinn-server on server/** changes and rewrites the Deployment
 #     PodSpec to the freshly built tag (so the rollout is automatic),
-#   - builds + pushes djinn-agent-runtime under its stable :dev tag (the
-#     ConfigMap key DJINN_TASKRUN_IMAGE points at that literal ref; it's
-#     consumed by Jobs the controller spawns at runtime, not by a PodSpec
-#     Tilt can rewrite),
+#   - builds + pushes djinn-agent-runtime under a content-hashed tag (the
+#     ref flows into DJINN_TASKRUN_IMAGE and DJINN_IMAGE_AGENT_WORKER_IMAGE
+#     via `--set` on helm template below; per-content tag forces BuildKit
+#     to invalidate the `COPY --from=…agent-runtime:…` layer when the
+#     worker binary changes),
 #   - installs the djinn Helm chart with values.local.yaml,
 #   - deploys a self-hosted Langfuse stack (postgres + clickhouse + redis +
 #     minio + langfuse-web/worker) that self-seeds a project + API keys via
@@ -28,8 +29,50 @@
 CLUSTER  = 'kind-djinn'
 NS       = 'djinn'
 REGISTRY = 'localhost:5001'
-AGENT_RUNTIME_REF = '{}/djinn-agent-runtime:dev'.format(REGISTRY)
-IMAGE_BUILDER_REF = '{}/djinn-image-builder:dev'.format(REGISTRY)
+# The chart renders `kind-registry:5000` refs so in-cluster pulls resolve via
+# the kind node's /etc/hosts alias. Host-side pushes go through localhost:5001,
+# which is the same registry from the host's vantage point.
+IN_CLUSTER_REGISTRY = 'kind-registry:5000'
+
+# Content-hashed tags for the agent-runtime + image-builder images.
+#
+# These images aren't referenced by any PodSpec image field Tilt can rewrite
+# — they land as env vars the server Pod reads and the image-controller
+# threads into `compute_environment_hash` as `agent_worker_ref` / as the
+# build-Pod's image. With a stable `:dev` tag BuildKit's remote layer cache
+# reuses the prior `COPY --from=…-runtime:dev` layer even when the underlying
+# worker binary changed (cache key = source image digest, but Tilt never
+# invalidated the tag → BuildKit pulled the prior digest from the cache
+# manifest). Moving to a per-content tag forces a fresh digest on every worker
+# rebuild, which cascades through: wrap script pushes the new tag → helm
+# renders the new value → server pod rolls → next project-image hash differs
+# → project images rebuild with the fresh worker.
+#
+# `watch_file` re-parses the Tiltfile when the artifact changes so the tag
+# here re-computes on every rebuild without a manual Tilt restart.
+watch_file('.tilt/artifacts/djinn-agent-worker')
+watch_file('server/docker/djinn-image-builder.Dockerfile')
+
+def _content_tag(path):
+    if not os.path.exists(path):
+        return 'bootstrap'
+    md5 = str(local(
+        'md5sum "{}" | cut -d" " -f1'.format(path),
+        quiet=True,
+        echo_off=True,
+    )).strip()
+    return 'c-{}'.format(md5[:12])
+
+AGENT_RUNTIME_TAG = _content_tag('.tilt/artifacts/djinn-agent-worker')
+IMAGE_BUILDER_TAG = _content_tag('server/docker/djinn-image-builder.Dockerfile')
+
+# Host-side refs (what wrap scripts push to).
+AGENT_RUNTIME_REF = '{}/djinn-agent-runtime:{}'.format(REGISTRY, AGENT_RUNTIME_TAG)
+IMAGE_BUILDER_REF = '{}/djinn-image-builder:{}'.format(REGISTRY, IMAGE_BUILDER_TAG)
+# In-cluster refs (what the chart values reference — same image, different
+# network vantage point).
+AGENT_RUNTIME_REF_CLUSTER = '{}/djinn-agent-runtime:{}'.format(IN_CLUSTER_REGISTRY, AGENT_RUNTIME_TAG)
+IMAGE_BUILDER_REF_CLUSTER = '{}/djinn-image-builder:{}'.format(IN_CLUSTER_REGISTRY, IMAGE_BUILDER_TAG)
 
 # --- kind cluster + registry ---------------------------------------------
 # Bootstrap runs at Tiltfile parse (blocking, idempotent) so the cluster
@@ -110,17 +153,17 @@ custom_build(
 
 # --- djinn-agent-runtime image -------------------------------------------
 # Thin wrap on top of djinn-agent-runtime-base: copies in the djinn-agent-
-# worker binary and pushes under the stable :dev tag that values.local.yaml
-# (and thus DJINN_TASKRUN_IMAGE on the controller) points at. Not
-# referenced by any PodSpec at render time — the controller plugs the ref
-# into Jobs it creates at dispatch time, so Tilt can't rewrite anything,
-# hence the stable-tag pattern. `deps` must include the binary artifact so
-# the wrap re-runs when djinn-binaries produces a fresh worker; resource_deps
-# alone is ordering-only, not a file trigger, so without this line every
-# source edit landed in a freshly compiled binary that the next Job never saw.
+# worker binary and pushes under a content-hashed tag (AGENT_RUNTIME_REF,
+# computed above from the artifact md5). The chart plugs this ref into env
+# vars the server and controller read at runtime — not into a PodSpec Tilt
+# can auto-rewrite — so we route the ref ourselves via `--set` on helm
+# template below. `deps` must include the binary artifact so the wrap
+# re-runs when djinn-binaries produces a fresh worker; resource_deps alone
+# is ordering-only, not a file trigger, so without this line every source
+# edit landed in a freshly compiled binary that the next Job never saw.
 local_resource(
     'djinn-agent-runtime-image',
-    cmd='bash scripts/tilt/wrap-agent-runtime-image.sh',
+    cmd='IMAGE_TAG={ref} bash scripts/tilt/wrap-agent-runtime-image.sh'.format(ref=AGENT_RUNTIME_REF),
     deps=[
         '.tilt/artifacts/djinn-agent-worker',
         'scripts/tilt/wrap-agent-runtime-image.sh',
@@ -132,9 +175,9 @@ local_resource(
 
 # --- djinn-image-builder image ------------------------------------------
 # Same reasoning as djinn-agent-runtime: referenced by the controller in
-# Job PodSpecs it creates at runtime, not by any chart template. Build +
-# push under a stable :dev tag; values.local.yaml points the server's
-# DJINN_IMAGE_BUILDER_IMAGE env at localhost:5001/djinn-image-builder:dev.
+# Job PodSpecs it creates at runtime, not by any chart template. Tag is
+# content-hashed from the Dockerfile (IMAGE_BUILDER_REF above) so changes
+# to the builder image flow through to a pod roll.
 local_resource(
     'djinn-image-builder-image',
     cmd=' && '.join([
@@ -144,6 +187,14 @@ local_resource(
     deps=['server/docker/djinn-image-builder.Dockerfile'],
     labels=['build'],
 )
+
+# --- helm override values -------------------------------------------------
+# Feed the content-hashed refs into the chart so the server Deployment's
+# DJINN_IMAGE_AGENT_WORKER_IMAGE / DJINN_IMAGE_BUILDER_IMAGE env vars pick
+# them up. Override AT the helm template call below (not baked into
+# values.local.yaml) because the tags change on every worker rebuild.
+IMAGE_RUNTIME_SET = 'image.runtime=' + AGENT_RUNTIME_REF_CLUSTER
+IMAGE_BUILDER_SET = 'imagePipeline.builderImage=' + IMAGE_BUILDER_REF_CLUSTER
 
 # --- Vault key pinning ---------------------------------------------------
 # The chart's secret-vault-key template uses Helm `lookup` to preserve the
@@ -195,6 +246,8 @@ helm_cmd = [
     '--namespace', NS,
     '--values', 'deploy/helm/djinn/values.local.yaml',
     '--set', 'secrets.vaultKey.key=' + VAULT_KEY,
+    '--set', IMAGE_RUNTIME_SET,
+    '--set', IMAGE_BUILDER_SET,
 ]
 for key, path in gh_present:
     helm_cmd += ['--set-file', '{}={}'.format(key, path)]

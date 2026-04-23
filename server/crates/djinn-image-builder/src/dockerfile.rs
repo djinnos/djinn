@@ -166,11 +166,12 @@ fn emit_base(df: &mut String, _config: &EnvironmentConfig) {
 // Listing everything unconditionally keeps the emitter simple and the
 // generated hash stable across language toggles.
 const IMAGE_PATH: &str =
-    "/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    "/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 fn emit_path(df: &mut String) {
     writeln!(df, "ENV PATH={IMAGE_PATH}").unwrap();
     writeln!(df, "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo").unwrap();
+    writeln!(df, "ENV GOPATH=/go GOROOT=/usr/local/go").unwrap();
 }
 
 fn emit_system_packages(df: &mut String, config: &EnvironmentConfig) {

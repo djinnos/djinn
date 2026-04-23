@@ -641,7 +641,11 @@ mod tests {
         );
         assert_eq!(
             plans[3].args,
-            vec!["index", "/workspace/repo/.djinn/scip/repo-go-root.scip"]
+            vec![
+                "index",
+                "-o",
+                "/workspace/repo/.djinn/scip/repo-go-root.scip"
+            ]
         );
         assert_eq!(
             plans[4].args,

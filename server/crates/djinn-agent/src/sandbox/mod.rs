@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 use anyhow::Result;
 
 pub mod linux;
+#[cfg(target_os = "macos")]
 pub mod macos;
 
 // ─── Trait ────────────────────────────────────────────────────────────────────

@@ -220,11 +220,14 @@ fn normalize_document(document: Document) -> Result<ScipFile> {
         return Err(anyhow!("SCIP document missing relative_path"));
     }
 
-    let occurrences = document
+    // scip-go emits some occurrences with an empty range field — e.g.
+    // synthetic references to generated code. Skip those rather than failing
+    // the entire index parse, matching the tolerance scip-go itself shows.
+    let occurrences: Vec<_> = document
         .occurrences
         .into_iter()
-        .map(normalize_occurrence)
-        .collect::<Result<Vec<_>>>()?;
+        .filter_map(normalize_occurrence)
+        .collect();
 
     let definitions = occurrences
         .iter()
@@ -255,25 +258,21 @@ fn normalize_document(document: Document) -> Result<ScipFile> {
     })
 }
 
-fn normalize_occurrence(occurrence: Occurrence) -> Result<ScipOccurrence> {
-    Ok(ScipOccurrence {
+fn normalize_occurrence(occurrence: Occurrence) -> Option<ScipOccurrence> {
+    // A valid SCIP range is 3 (same-line) or 4 ints. scip-go has been seen
+    // emitting 0-length ranges on synthetic occurrences; we drop those rather
+    // than abort the whole parse. A malformed enclosing_range is also fatal
+    // only for that one occurrence.
+    let range = decode_range(&occurrence.range)?;
+    let enclosing_range = if occurrence.enclosing_range.is_empty() {
+        None
+    } else {
+        Some(decode_range(&occurrence.enclosing_range)?)
+    };
+    Some(ScipOccurrence {
         symbol: occurrence.symbol,
-        range: decode_range(&occurrence.range).ok_or_else(|| {
-            anyhow!(
-                "SCIP occurrence has malformed range: {:?}",
-                occurrence.range
-            )
-        })?,
-        enclosing_range: if occurrence.enclosing_range.is_empty() {
-            None
-        } else {
-            Some(decode_range(&occurrence.enclosing_range).ok_or_else(|| {
-                anyhow!(
-                    "SCIP occurrence has malformed enclosing_range: {:?}",
-                    occurrence.enclosing_range
-                )
-            })?)
-        },
+        range,
+        enclosing_range,
         roles: decode_roles(occurrence.symbol_roles),
         syntax_kind: occurrence
             .syntax_kind
@@ -557,7 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn partial_document_data_fails_gracefully() {
+    fn partial_document_data_skips_malformed_occurrences() {
+        // scip-go is known to emit occurrences with empty / single-element
+        // ranges on synthetic references. Skip those occurrences rather than
+        // abort the whole parse — otherwise one bad occurrence kills indexing
+        // for the entire project. The document itself still parses, just
+        // without the malformed occurrence.
         let mut index = Index::new();
         index.documents.push(Document {
             language: "rust".to_string(),
@@ -571,8 +575,13 @@ mod tests {
         });
 
         let bytes = index.write_to_bytes().expect("encode index");
-        let error = parse_scip_bytes(&bytes).expect_err("expected range error");
-        assert!(error.to_string().contains("malformed range"));
+        let parsed = parse_scip_bytes(&bytes).expect("parse should succeed");
+        assert_eq!(parsed.files.len(), 1);
+        assert!(
+            parsed.files[0].occurrences.is_empty(),
+            "malformed occurrence should be dropped, got {:?}",
+            parsed.files[0].occurrences
+        );
     }
 
     #[test]

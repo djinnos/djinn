@@ -47,8 +47,18 @@ async fn mirror_clone_commit_cycle() {
     // Idempotent
     mgr.ensure_mirror(project_id, &source_url).await.unwrap();
 
-    // Fetch is a no-op against an up-to-date mirror but must succeed.
-    mgr.fetch_mirror(project_id, &source_url).await.unwrap();
+    // Fetch is a no-op against an up-to-date mirror; reports no changes.
+    let changed = mgr.fetch_mirror(project_id, &source_url).await.unwrap();
+    assert!(!changed, "no-op fetch must report no ref advance");
+
+    // New upstream commit → fetch reports changes.
+    tokio::fs::write(source_dir.path().join("new.txt"), "added")
+        .await
+        .unwrap();
+    run(&["git", "add", "."], source_dir.path()).await;
+    run(&["git", "commit", "-m", "add new"], source_dir.path()).await;
+    let changed = mgr.fetch_mirror(project_id, &source_url).await.unwrap();
+    assert!(changed, "fetch after upstream commit must report a ref advance");
 
     let ws = mgr.clone_ephemeral(project_id, "main").await.unwrap();
     assert!(ws.path().join("README.md").exists());

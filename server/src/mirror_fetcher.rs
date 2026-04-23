@@ -94,45 +94,51 @@ pub(crate) async fn fetch_one(
     );
     let mirror = state.mirror();
     mirror.ensure_mirror(project_id, &origin_url).await?;
-    mirror.fetch_mirror(project_id, &origin_url).await?;
+    let changed = mirror.fetch_mirror(project_id, &origin_url).await?;
 
-    // Stack detection — best-effort, must never break the mirror fetch.
-    // Graph-warmer trigger lands in PR 8.
-    let mirror_path = mirror.mirror_path(project_id);
-    let detected_stack =
+    let repo_db = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let stack_missing = match repo_db.get_stack(project_id).await {
+        Ok(Some(s)) => s.trim().is_empty() || s.trim() == "{}",
+        Ok(None) => true,
+        Err(err) => {
+            tracing::warn!(project_id, error = %err, "read stack failed; forcing detection");
+            true
+        }
+    };
+
+    // Stack detection is the only thing gated on changed || stack_missing —
+    // it's CPU-heavy and its output is idempotent for a given HEAD. Enqueue
+    // and warmer always run so that retrigger (which nulls image_hash on an
+    // unchanged mirror) and a stale graph both get reacted to on the next
+    // tick instead of waiting for a git push.
+    if changed || stack_missing {
+        let mirror_path = mirror.mirror_path(project_id);
         match tokio::task::spawn_blocking(move || djinn_stack::detect_blocking(&mirror_path)).await
         {
-            Ok(Ok(stack)) => {
-                match serde_json::to_string(&stack) {
-                    Ok(json) => {
-                        let repo_db =
-                            ProjectRepository::new(state.db().clone(), state.event_bus());
-                        if let Err(err) = repo_db.set_stack(project_id, &json).await {
-                            tracing::warn!(project_id, error = %err, "persist detected stack failed");
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(project_id, error = %err, "serialize detected stack failed")
+            Ok(Ok(stack)) => match serde_json::to_string(&stack) {
+                Ok(json) => {
+                    if let Err(err) = repo_db.set_stack(project_id, &json).await {
+                        tracing::warn!(project_id, error = %err, "persist detected stack failed");
                     }
                 }
-                Some(stack)
-            }
+                Err(err) => {
+                    tracing::warn!(project_id, error = %err, "serialize detected stack failed")
+                }
+            },
             Ok(Err(err)) => {
                 tracing::warn!(project_id, error = %err, "stack detection failed");
-                None
             }
             Err(err) => {
                 tracing::warn!(project_id, error = %err, "stack detection panicked");
-                None
             }
-        };
+        }
+    }
 
     // P5: image-controller enqueue — reads environment_config from
     // Dolt, generates a Dockerfile via djinn-image-builder, and
     // dispatches a `buildctl build` Job if the hash changed. The
     // stack is no longer passed; config is authoritative.
     // Absent controller (local dev without a kube::Client) is expected.
-    let _ = detected_stack;
     if let Some(controller) = state.image_controller().await
         && let Err(err) = controller.enqueue(project_id).await
     {

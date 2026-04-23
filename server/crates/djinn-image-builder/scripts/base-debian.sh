@@ -14,6 +14,7 @@ apt-get install -y --no-install-recommends \
     git \
     gnupg \
     tini \
+    unzip \
     xz-utils
 apt-get clean
 rm -rf /var/lib/apt/lists/*

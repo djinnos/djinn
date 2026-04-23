@@ -8,7 +8,6 @@ pub(crate) mod process;
 // ─── Agent module (was src/agent/) ───────────────────────────────────────────
 
 pub(crate) mod compaction;
-pub(crate) mod config;
 pub mod context;
 // Extension tools: `pub(crate)` internals, `chat_tools` re-exports the chat-safe subset.
 pub mod chat_tools;
@@ -40,10 +39,6 @@ pub mod verification;
 // ─── Resource monitoring ─────────────────────────────────────────────────────
 
 pub mod resource_monitor;
-
-// ─── Per-session cgroup memory limits ───────────────────────────────────────
-
-pub(crate) mod cgroup;
 
 // ─── Actors (was src/actors/) ────────────────────────────────────────────────
 

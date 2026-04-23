@@ -139,7 +139,12 @@ impl SupportedIndexer {
             ],
             Self::TypeScript => vec!["index".to_string(), output],
             Self::Python => vec!["index".to_string(), output],
-            Self::Go => vec!["index".to_string(), output],
+            // scip-go: positional non-flag args are package patterns (default
+            // `./...`). Giving the output path positionally silently narrows
+            // indexing to ~nothing and dumps ./index.scip in cwd, which the
+            // artifact collector never looks at. `-o` routes the SCIP output
+            // to the planner-chosen path.
+            Self::Go => vec!["index".to_string(), "-o".to_string(), output],
             Self::Java => vec!["index".to_string(), output],
             Self::Clang => vec![
                 "--compdb-path".to_string(),

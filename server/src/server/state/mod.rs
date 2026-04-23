@@ -316,6 +316,14 @@ impl AppState {
         );
 
         let config = ImageControllerConfig::from_env();
+        tracing::info!(
+            buildkitd_host = %config.buildkitd_host,
+            registry_host = %config.registry_host,
+            builder_image = %config.builder_image,
+            agent_worker_image = %config.agent_worker_image,
+            namespace = %config.namespace,
+            "image_controller: config loaded"
+        );
         let controller = Arc::new(ImageController::new(
             client.clone(),
             config.clone(),

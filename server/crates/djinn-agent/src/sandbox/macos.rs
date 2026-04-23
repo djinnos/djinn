@@ -6,9 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::Sandbox;
-#[cfg(target_os = "macos")]
-use super::{djinn_cache_dir, git_metadata_dir};
+use super::{Sandbox, djinn_cache_dir, git_metadata_dir};
 
 /// Seatbelt (sandbox-exec) based filesystem sandbox for macOS.
 ///
@@ -20,10 +18,8 @@ use super::{djinn_cache_dir, git_metadata_dir};
 /// `/dev/{null,zero,urandom}` nodes. `/tmp` is intentionally excluded for
 /// parity with the Linux backend, where it is tmpfs-backed and prone to
 /// RAM leaks from runaway build artifacts.
-#[cfg(target_os = "macos")]
 pub struct SeatbeltSandbox;
 
-#[cfg(target_os = "macos")]
 impl Sandbox for SeatbeltSandbox {
     fn apply(&self, worktree_path: &Path, cmd: &mut std::process::Command) -> Result<()> {
         let worktree = worktree_path
@@ -116,18 +112,6 @@ impl Sandbox for SeatbeltSandbox {
             }
         }
 
-        Ok(())
-    }
-}
-
-// Compilation stub for non-macOS targets — allows `pub mod macos` in mod.rs
-// without a platform gate at the module level.
-#[cfg(not(target_os = "macos"))]
-pub struct SeatbeltSandbox;
-
-#[cfg(not(target_os = "macos"))]
-impl Sandbox for SeatbeltSandbox {
-    fn apply(&self, _worktree_path: &Path, _cmd: &mut std::process::Command) -> Result<()> {
         Ok(())
     }
 }

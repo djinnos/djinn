@@ -33,6 +33,15 @@ for version in ${NODE_VERSIONS}; do
 done
 fnm default "${DEFAULT_NODE_VALUE}"
 
+# The generated Dockerfile's canonical PATH has /opt/node/bin (matches the
+# agent-runtime base image's layout, which untars node directly there). fnm
+# installs to FNM_DIR/node-versions/vX.Y.Z/installation and points its
+# `default` alias at the active one — symlink /opt/node through that alias
+# so `/opt/node/bin/node` resolves without per-shell fnm activation.
+if [ -L "${FNM_DIR}/aliases/default" ]; then
+    ln -sfn "${FNM_DIR}/aliases/default" /opt/node
+fi
+
 # Expose fnm + the default Node version on every shell.
 cat > /etc/profile.d/20-node.sh <<'EOF'
 export FNM_DIR=/usr/local/share/fnm

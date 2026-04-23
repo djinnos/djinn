@@ -65,15 +65,6 @@ pub fn isolate_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub fn isolate_process_group(_cmd: &mut Command) {}
 
-/// Run a pre-configured `std::process::Command` on a blocking thread and return
-/// its output.  This is a drop-in async replacement for
-/// `tokio::process::Command::output()`.
-pub async fn output(mut cmd: Command) -> io::Result<Output> {
-    tokio::task::spawn_blocking(move || cmd.output())
-        .await
-        .map_err(io::Error::other)?
-}
-
 /// Join a drain thread with a wall-clock deadline.
 ///
 /// If the thread doesn't finish in time (e.g. a surviving subprocess still
@@ -171,15 +162,8 @@ pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result
 }
 
 #[cfg(not(unix))]
-pub async fn output_with_kill(cmd: Command, _timeout: Duration) -> io::Result<Output> {
-    output(cmd).await
-}
-
-/// Run a pre-configured `std::process::Command` on a blocking thread and return
-/// its exit status.  This is a drop-in async replacement for
-/// `tokio::process::Command::status()`.
-pub async fn status(mut cmd: Command) -> io::Result<std::process::ExitStatus> {
-    tokio::task::spawn_blocking(move || cmd.status())
+pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Result<Output> {
+    tokio::task::spawn_blocking(move || cmd.output())
         .await
         .map_err(io::Error::other)?
 }
@@ -196,7 +180,9 @@ mod tests {
         cmd.arg("-c").arg("printf '%d' \"$(ps -o pgid= -p $$)\"");
         isolate_process_group(&mut cmd);
 
-        let output = output(cmd).await.expect("spawn succeeds");
+        let output = output_with_kill(cmd, Duration::from_secs(10))
+            .await
+            .expect("spawn succeeds");
         assert!(output.status.success());
 
         let child_pgid: i32 = String::from_utf8_lossy(&output.stdout)
