@@ -13,8 +13,8 @@ use djinn_control_plane::{
     bridge::{
         ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup,
         DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeEntry, HotPathHit, HotspotEntry,
-        ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, RankedNode,
-        RepoGraphOps, SearchHit, SymbolAtHit, SymbolDescription,
+        ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx,
+        RankedNode, RepoGraphOps, SearchHit, SymbolAtHit, SymbolDescription,
     },
     tools::task_tools::ErrorResponse,
 };
@@ -231,7 +231,7 @@ struct StubRepoGraphOps;
 impl RepoGraphOps for StubRepoGraphOps {
     async fn neighbors(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
@@ -240,19 +240,19 @@ impl RepoGraphOps for StubRepoGraphOps {
     }
     async fn ranked(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: Option<&str>,
         _: Option<&str>,
         _: usize,
     ) -> Result<Vec<RankedNode>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
+    async fn implementations(&self, _: &ProjectCtx, _: &str) -> Result<Vec<String>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn impact(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &str,
         _: usize,
         _: Option<&str>,
@@ -261,19 +261,24 @@ impl RepoGraphOps for StubRepoGraphOps {
     }
     async fn search(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &str,
         _: Option<&str>,
         _: usize,
     ) -> Result<Vec<SearchHit>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn cycles(&self, _: &str, _: Option<&str>, _: usize) -> Result<Vec<CycleGroup>, String> {
+    async fn cycles(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<CycleGroup>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn orphans(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: Option<&str>,
         _: Option<&str>,
         _: usize,
@@ -282,7 +287,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     }
     async fn path(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &str,
         _: &str,
         _: Option<usize>,
@@ -291,7 +296,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     }
     async fn edges(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &str,
         _: &str,
         _: Option<&str>,
@@ -299,15 +304,19 @@ impl RepoGraphOps for StubRepoGraphOps {
     ) -> Result<Vec<EdgeEntry>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn describe(&self, _: &str, _: &str) -> Result<Option<SymbolDescription>, String> {
+    async fn describe(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+    ) -> Result<Option<SymbolDescription>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn status(&self, _: &str) -> Result<bridge::GraphStatus, String> {
+    async fn status(&self, _: &ProjectCtx) -> Result<bridge::GraphStatus, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn symbols_at(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &str,
         _: u32,
         _: Option<u32>,
@@ -316,14 +325,14 @@ impl RepoGraphOps for StubRepoGraphOps {
     }
     async fn diff_touches(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &[ChangedRange],
     ) -> Result<DiffTouchesResult, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn api_surface(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: Option<&str>,
         _: Option<&str>,
         _: usize,
@@ -332,29 +341,26 @@ impl RepoGraphOps for StubRepoGraphOps {
     }
     async fn boundary_check(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &[BoundaryRule],
     ) -> Result<Vec<BoundaryViolation>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn hotspots(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: u32,
         _: Option<&str>,
         _: usize,
     ) -> Result<Vec<HotspotEntry>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn metrics_at(
-        &self,
-        _: &str,
-    ) -> Result<MetricsAtResult, String> {
+    async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn dead_symbols(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &str,
         _: usize,
     ) -> Result<Vec<DeadSymbolEntry>, String> {
@@ -362,14 +368,14 @@ impl RepoGraphOps for StubRepoGraphOps {
     }
     async fn deprecated_callers(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: usize,
     ) -> Result<Vec<DeprecatedHit>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn touches_hot_path(
         &self,
-        _: &str,
+        _: &ProjectCtx,
         _: &[String],
         _: &[String],
         _: &[String],

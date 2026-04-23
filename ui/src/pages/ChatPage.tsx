@@ -12,8 +12,11 @@ export function ChatPage() {
   const isAllProjects = useIsAllProjects();
 
   const hasSessionsInScope = useMemo(() => {
-    const projectPath = isAllProjects ? null : (selectedProject?.path ?? null);
-    return sessions.some((session) => session.projectPath === projectPath);
+    const projectSlug =
+      isAllProjects || !selectedProject
+        ? null
+        : `${selectedProject.github_owner}/${selectedProject.github_repo}`;
+    return sessions.some((session) => session.projectSlug === projectSlug);
   }, [sessions, selectedProject, isAllProjects]);
 
   return (
@@ -22,7 +25,11 @@ export function ChatPage() {
         <ChatSessionList
           onSelectSession={(id) => setActiveSession(id)}
           onNewChat={() => {
-            const sessionId = createSession(isAllProjects ? null : (selectedProject?.path ?? null));
+            const projectSlug =
+              isAllProjects || !selectedProject
+                ? null
+                : `${selectedProject.github_owner}/${selectedProject.github_repo}`;
+            const sessionId = createSession(projectSlug);
             setActiveSession(sessionId);
           }}
         />

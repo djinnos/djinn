@@ -162,6 +162,7 @@ pub(super) async fn completions_handler_impl(
         None
     };
     let project_path = project_resolution.as_ref().map(|(path, _)| path.clone());
+    let project_id_for_chat = project_resolution.as_ref().map(|(_, id)| id.clone());
 
     let provider = create_provider(provider_config);
 
@@ -413,8 +414,11 @@ pub(super) async fn completions_handler_impl(
                 let started_at = Instant::now();
 
                 let dispatch_result = if djinn_agent::chat_tools::is_chat_extension_tool(&name) {
-                    if let (Some(ctx), Some(root)) = (&agent_ctx, &project_path) {
-                        djinn_agent::chat_tools::dispatch_chat_tool(ctx, &name, args, root).await
+                    if let (Some(ctx), Some(root), Some(pid)) =
+                        (&agent_ctx, &project_path, project_id_for_chat.as_deref())
+                    {
+                        djinn_agent::chat_tools::dispatch_chat_tool(ctx, &name, args, root, pid)
+                            .await
                     } else {
                         Err(format!("tool '{name}' requires a project context"))
                     }

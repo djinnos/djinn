@@ -276,8 +276,6 @@ pub(super) struct LspParams {
 pub(super) struct CodeGraphParams {
     pub operation: String,
     #[serde(default)]
-    pub project_path: String,
-    #[serde(default)]
     pub key: Option<String>,
     #[serde(default)]
     pub direction: Option<String>,

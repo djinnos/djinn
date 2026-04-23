@@ -15,9 +15,9 @@ use djinn_control_plane::bridge::{
     CoordinatorStatus, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit, DiffTouchesResult,
     EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry,
     ImpactResult, LspOps, LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult,
-    OrphanEntry, PathHop, PathResult, PoolStatus, RankedNode, RepoGraphOps, RunningTaskInfo,
-    RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolAtHit, SymbolDescription,
-    TouchedSymbol,
+    OrphanEntry, PathHop, PathResult, PoolStatus, ProjectCtx, RankedNode, RepoGraphOps,
+    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolAtHit,
+    SymbolDescription, TouchedSymbol,
 };
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
@@ -231,14 +231,18 @@ impl RepoGraphBridge {
 impl RepoGraphOps for RepoGraphBridge {
     async fn neighbors(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         key: &str,
         direction: Option<&str>,
         group_by: Option<&str>,
     ) -> Result<NeighborsResult, String> {
         use petgraph::Direction;
-        let graph =
-            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let node_index = resolve_node(&graph, key)?;
         let directions: Vec<Direction> = match direction {
             Some("incoming") => vec![Direction::Incoming],
@@ -288,7 +292,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn ranked(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         kind_filter: Option<&str>,
         sort_by: Option<&str>,
         limit: usize,
@@ -298,9 +302,12 @@ impl RepoGraphOps for RepoGraphBridge {
         // during warm.  Without this cache, every `ranked` call re-ran a full
         // PageRank pass and hung for 30+ s on real-world graphs even when
         // `code_graph status` reported `warmed: true`.
-        let (graph, ranking, _sccs) =
-            djinn_graph::canonical_graph::load_canonical_graph(&self.state, project_path)
-                .await?;
+        let (graph, ranking, _sccs) = djinn_graph::canonical_graph::load_canonical_graph(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -356,12 +363,16 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn implementations(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         symbol: &str,
     ) -> Result<Vec<String>, String> {
         use djinn_graph::repo_graph::RepoGraphEdgeKind;
-        let graph =
-            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let node_index = graph
             .symbol_node(symbol)
             .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
@@ -382,13 +393,17 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn impact(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         key: &str,
         max_depth: usize,
         group_by: Option<&str>,
     ) -> Result<ImpactResult, String> {
-        let graph =
-            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let start = resolve_node(&graph, key)?;
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
@@ -436,14 +451,18 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn search(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         query: &str,
         kind_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>, String> {
         use djinn_graph::repo_graph::RepoGraphNodeKind;
-        let graph =
-            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -467,7 +486,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn cycles(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         kind_filter: Option<&str>,
         min_size: usize,
     ) -> Result<Vec<CycleGroup>, String> {
@@ -480,9 +499,12 @@ impl RepoGraphOps for RepoGraphBridge {
         // search, so a single unfiltered representation cannot reproduce the
         // kind-specific results.  `min_size` is applied at read time against
         // the cached set (which is materialised at `min_size = 2`).
-        let (graph, _ranking, sccs) =
-            djinn_graph::canonical_graph::load_canonical_graph(&self.state, project_path)
-                .await?;
+        let (graph, _ranking, sccs) = djinn_graph::canonical_graph::load_canonical_graph(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let cached: &Vec<Vec<petgraph::graph::NodeIndex>> = match kind_filter {
             Some("file") => &sccs.file,
             Some("symbol") => &sccs.symbol,
@@ -514,15 +536,19 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn orphans(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         kind_filter: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
     ) -> Result<Vec<OrphanEntry>, String> {
         use djinn_graph::repo_graph::RepoGraphNodeKind;
         use djinn_graph::scip_parser::ScipVisibility;
-        let graph =
-            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -559,13 +585,17 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn path(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         from: &str,
         to: &str,
         max_depth: Option<usize>,
     ) -> Result<Option<PathResult>, String> {
-        let graph =
-            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let from_idx = resolve_node(&graph, from)?;
         let to_idx = resolve_node(&graph, to)?;
         let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
@@ -597,15 +627,19 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn edges(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         from_glob: &str,
         to_glob: &str,
         edge_kind: Option<&str>,
         limit: usize,
     ) -> Result<Vec<EdgeEntry>, String> {
         use globset::Glob;
-        let graph =
-            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let from_matcher = Glob::new(from_glob)
             .map_err(|e| format!("invalid from_glob '{from_glob}': {e}"))?
             .compile_matcher();
@@ -655,11 +689,15 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn describe(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         key: &str,
     ) -> Result<Option<SymbolDescription>, String> {
-        let graph =
-            djinn_graph::canonical_graph::load_canonical_graph_only(&self.state, project_path).await?;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
         let node_index = match resolve_node(&graph, key) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
@@ -680,47 +718,24 @@ impl RepoGraphOps for RepoGraphBridge {
         }))
     }
 
-    async fn status(&self, project_path: &str) -> Result<GraphStatus, String> {
-        use djinn_db::{ProjectRepository, RepoGraphCacheRepository};
+    async fn status(&self, ctx: &ProjectCtx) -> Result<GraphStatus, String> {
+        use djinn_db::RepoGraphCacheRepository;
 
         let (project_root, _index_tree_path) =
-            djinn_graph::canonical_graph::normalize_graph_query_paths(project_path);
-        // Reverse-parse `{projects_root}/{owner}/{repo}` from the
-        // normalized path and look the project up by GitHub coords —
-        // every caller that reaches this bridge method passes the
-        // synthesized clone path produced by the graph dispatch.
-        let owner_repo: Vec<String> = project_root
-            .components()
-            .rev()
-            .take(2)
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        if owner_repo.len() < 2 {
-            return Err(format!(
-                "cannot derive owner/repo from path '{project_path}'"
-            ));
-        }
-        let (repo_name, owner_name) = (&owner_repo[0], &owner_repo[1]);
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project_id = repo
-            .get_by_github(owner_name, repo_name)
-            .await
-            .map_err(|e| format!("resolve project: {e}"))?
-            .ok_or_else(|| format!("no project registered for path '{project_path}'"))?
-            .id;
+            djinn_graph::canonical_graph::normalize_graph_query_paths(&ctx.clone_path);
 
         // Source of truth: the `repo_graph_cache` row written by the K8s
         // graph warmer Job. The server process itself never rebuilds —
         // status reports whatever the warmer has persisted.
         let cache_repo = RepoGraphCacheRepository::new(self.state.db().clone());
         let row = cache_repo
-            .latest_for_project(&project_id)
+            .latest_for_project(&ctx.id)
             .await
             .map_err(|e| format!("read repo_graph_cache: {e}"))?;
 
         let Some(row) = row else {
             return Ok(GraphStatus {
-                project_id,
+                project_id: ctx.id.clone(),
                 warmed: false,
                 last_warm_at: None,
                 pinned_commit: None,
@@ -735,7 +750,7 @@ impl RepoGraphOps for RepoGraphBridge {
         .await;
 
         Ok(GraphStatus {
-            project_id,
+            project_id: ctx.id.clone(),
             warmed: true,
             last_warm_at: Some(row.built_at),
             pinned_commit: Some(row.commit_sha),
@@ -745,7 +760,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn symbols_at(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         file: &str,
         start_line: u32,
         end_line: Option<u32>,
@@ -753,7 +768,8 @@ impl RepoGraphOps for RepoGraphBridge {
         use petgraph::Direction;
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
-            project_path,
+            &ctx.id,
+            &ctx.clone_path,
         )
         .await?;
         let end = end_line.unwrap_or(start_line);
@@ -810,7 +826,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn diff_touches(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         changed_ranges: &[ChangedRange],
     ) -> Result<DiffTouchesResult, String> {
         use petgraph::Direction;
@@ -818,7 +834,8 @@ impl RepoGraphOps for RepoGraphBridge {
 
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
-            project_path,
+            &ctx.id,
+            &ctx.clone_path,
         )
         .await?;
 
@@ -894,7 +911,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn api_surface(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         module_glob: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -905,7 +922,8 @@ impl RepoGraphOps for RepoGraphBridge {
 
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
-            project_path,
+            &ctx.id,
+            &ctx.clone_path,
         )
         .await?;
 
@@ -995,14 +1013,15 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn boundary_check(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         rules: &[BoundaryRule],
     ) -> Result<Vec<BoundaryViolation>, String> {
         use globset::Glob;
 
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
-            project_path,
+            &ctx.id,
+            &ctx.clone_path,
         )
         .await?;
 
@@ -1024,10 +1043,7 @@ impl RepoGraphOps for RepoGraphBridge {
             return Ok(Vec::new());
         }
 
-        let exclusions = self
-            .state
-            .mcp_state_graph_exclusions(project_path)
-            .await;
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
 
         let mut violations: Vec<BoundaryViolation> = Vec::new();
         for edge_ref in graph.graph().edge_references() {
@@ -1071,7 +1087,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn hotspots(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         window_days: u32,
         file_glob: Option<&str>,
         limit: usize,
@@ -1079,16 +1095,19 @@ impl RepoGraphOps for RepoGraphBridge {
         use djinn_graph::repo_graph::RepoGraphNodeKind;
         use std::collections::BTreeMap;
 
-        let (graph, ranking, _sccs) =
-            djinn_graph::canonical_graph::load_canonical_graph(&self.state, project_path)
-                .await?;
+        let (graph, ranking, _sccs) = djinn_graph::canonical_graph::load_canonical_graph(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
 
         // Churn via git log, single invocation. Use git's relative-date
         // syntax ("N days ago") — that side-steps dragging in chrono just
         // for a date subtraction while still giving git a stable bound.
         let days = window_days.clamp(1, 365);
         let (project_root, _idx) =
-            djinn_graph::canonical_graph::normalize_graph_query_paths(project_path);
+            djinn_graph::canonical_graph::normalize_graph_query_paths(&ctx.clone_path);
         let mut churn: BTreeMap<String, usize> = BTreeMap::new();
         match std::process::Command::new("git")
             .current_dir(&project_root)
@@ -1112,7 +1131,7 @@ impl RepoGraphOps for RepoGraphBridge {
             }
             Ok(out) => {
                 tracing::warn!(
-                    project = %project_path,
+                    project_id = %ctx.id,
                     status = %out.status,
                     "hotspots: git log returned non-zero; returning empty result",
                 );
@@ -1120,7 +1139,7 @@ impl RepoGraphOps for RepoGraphBridge {
             }
             Err(e) => {
                 tracing::warn!(
-                    project = %project_path,
+                    project_id = %ctx.id,
                     error = %e,
                     "hotspots: git log failed; returning empty result",
                 );
@@ -1157,10 +1176,7 @@ impl RepoGraphOps for RepoGraphBridge {
             ),
             None => None,
         };
-        let exclusions = self
-            .state
-            .mcp_state_graph_exclusions(project_path)
-            .await;
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
 
         let mut out: Vec<HotspotEntry> = Vec::new();
         for (file, count) in churn {
@@ -1199,21 +1215,21 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn metrics_at(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
     ) -> Result<MetricsAtResult, String> {
         use djinn_graph::repo_graph::RepoGraphNodeKind;
         use djinn_graph::scip_parser::ScipVisibility;
         use petgraph::Direction;
         use std::collections::BTreeMap;
 
-        let (graph, _ranking, sccs) =
-            djinn_graph::canonical_graph::load_canonical_graph(&self.state, project_path)
-                .await?;
+        let (graph, _ranking, sccs) = djinn_graph::canonical_graph::load_canonical_graph(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
 
-        let exclusions = self
-            .state
-            .mcp_state_graph_exclusions(project_path)
-            .await;
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
 
         // Filter the node-set once; every downstream count uses it.
         let mut kept: Vec<petgraph::graph::NodeIndex> = Vec::new();
@@ -1297,29 +1313,12 @@ impl RepoGraphOps for RepoGraphBridge {
         };
 
         // Resolve the pinned commit via repo_graph_cache. Best-effort;
-        // fall back to an empty string if the lookup fails. The server-
-        // managed clone path has the shape `{projects_root}/{owner}/{repo}`;
-        // reverse-parse the owner/repo segment and look the project up by
-        // GitHub coords.
+        // fall back to an empty string if the lookup fails.
         let mut pinned = String::new();
-        use djinn_db::{ProjectRepository, RepoGraphCacheRepository};
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let owner_repo = std::path::Path::new(project_path)
-            .components()
-            .rev()
-            .take(2)
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        if owner_repo.len() >= 2 {
-            // rev().take(2) yields [repo, owner]; flip them.
-            let repo_name = &owner_repo[0];
-            let owner_name = &owner_repo[1];
-            if let Ok(Some(project)) = repo.get_by_github(owner_name, repo_name).await {
-                let cache_repo = RepoGraphCacheRepository::new(self.state.db().clone());
-                if let Ok(Some(row)) = cache_repo.latest_for_project(&project.id).await {
-                    pinned = row.commit_sha;
-                }
-            }
+        use djinn_db::RepoGraphCacheRepository;
+        let cache_repo = RepoGraphCacheRepository::new(self.state.db().clone());
+        if let Ok(Some(row)) = cache_repo.latest_for_project(&ctx.id).await {
+            pinned = row.commit_sha;
         }
 
         Ok(MetricsAtResult {
@@ -1349,7 +1348,7 @@ impl RepoGraphOps for RepoGraphBridge {
     ///   path (`**/src/lib.rs` or `**/src/main.rs`).
     async fn dead_symbols(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         confidence: &str,
         limit: usize,
     ) -> Result<Vec<DeadSymbolEntry>, String> {
@@ -1366,7 +1365,8 @@ impl RepoGraphOps for RepoGraphBridge {
 
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
-            project_path,
+            &ctx.id,
+            &ctx.clone_path,
         )
         .await?;
 
@@ -1417,10 +1417,7 @@ impl RepoGraphOps for RepoGraphBridge {
             }
         }
 
-        let exclusions = self
-            .state
-            .mcp_state_graph_exclusions(project_path)
-            .await;
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
 
         let mut out: Vec<DeadSymbolEntry> = Vec::new();
         for idx in graph.graph().node_indices() {
@@ -1491,7 +1488,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn deprecated_callers(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         limit: usize,
     ) -> Result<Vec<DeprecatedHit>, String> {
         use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
@@ -1499,13 +1496,11 @@ impl RepoGraphOps for RepoGraphBridge {
 
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
-            project_path,
+            &ctx.id,
+            &ctx.clone_path,
         )
         .await?;
-        let exclusions = self
-            .state
-            .mcp_state_graph_exclusions(project_path)
-            .await;
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
 
         let mut out: Vec<DeprecatedHit> = Vec::new();
         for idx in graph.graph().node_indices() {
@@ -1560,7 +1555,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
     async fn touches_hot_path(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         seed_entries: &[String],
         seed_sinks: &[String],
         symbols: &[String],
@@ -1569,7 +1564,8 @@ impl RepoGraphOps for RepoGraphBridge {
 
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
-            project_path,
+            &ctx.id,
+            &ctx.clone_path,
         )
         .await?;
 
@@ -1591,7 +1587,7 @@ impl RepoGraphOps for RepoGraphBridge {
         let truncated = total_pairs > pair_cap;
         if truncated {
             tracing::warn!(
-                project = %project_path,
+                project_id = %ctx.id,
                 total_pairs,
                 cap = pair_cap,
                 "touches_hot_path: pair count exceeds cap; truncating",
@@ -1710,35 +1706,17 @@ fn is_deprecated_text(signature: Option<&str>, documentation: &[String]) -> bool
 
 impl AppState {
     /// Helper for graph handlers in this module: compiles a
-    /// [`GraphExclusions`] predicate for the given project path,
+    /// [`GraphExclusions`] predicate for the given project id,
     /// falling back to the empty (Tier 1 only) filter on any DB /
     /// lookup failure.
     async fn mcp_state_graph_exclusions(
         &self,
-        project_path: &str,
+        project_id: &str,
     ) -> djinn_control_plane::tools::graph_exclusions::GraphExclusions {
         use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
         let repo =
             djinn_db::ProjectRepository::new(self.db().clone(), self.event_bus());
-        // The server-managed clone path has the shape
-        // `{projects_root}/{owner}/{repo}`; reverse-parse the owner/repo
-        // segment and look the project up by GitHub coords.
-        let owner_repo = std::path::Path::new(project_path)
-            .components()
-            .rev()
-            .take(2)
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        if owner_repo.len() < 2 {
-            return GraphExclusions::empty();
-        }
-        let repo_name = &owner_repo[0];
-        let owner_name = &owner_repo[1];
-        let project = match repo.get_by_github(owner_name, repo_name).await {
-            Ok(Some(p)) => p,
-            _ => return GraphExclusions::empty(),
-        };
-        match repo.get_config(&project.id).await {
+        match repo.get_config(project_id).await {
             Ok(Some(c)) => GraphExclusions::from_config(&c),
             _ => GraphExclusions::empty(),
         }

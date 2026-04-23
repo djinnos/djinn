@@ -49,7 +49,7 @@ use crate::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CoordinatorOps,
     CoordinatorStatus, CycleGroup, DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeEntry,
     GitOps, GraphStatus, HotPathHit, HotspotEntry, ImpactResult, LspOps, LspWarning,
-    MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, PoolStatus, RankedNode,
+    MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, PoolStatus, ProjectCtx, RankedNode,
     RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps,
     SymbolAtHit, SymbolDescription,
 };
@@ -169,7 +169,7 @@ pub struct StubRepoGraph;
 impl RepoGraphOps for StubRepoGraph {
     async fn neighbors(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _key: &str,
         _direction: Option<&str>,
         _group_by: Option<&str>,
@@ -178,7 +178,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn ranked(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _kind_filter: Option<&str>,
         _sort_by: Option<&str>,
         _limit: usize,
@@ -187,14 +187,14 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn implementations(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _symbol: &str,
     ) -> std::result::Result<Vec<String>, String> {
         Ok(Vec::new())
     }
     async fn impact(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _key: &str,
         _depth: usize,
         _group_by: Option<&str>,
@@ -203,7 +203,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn search(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _query: &str,
         _kind_filter: Option<&str>,
         _limit: usize,
@@ -212,7 +212,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn cycles(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _kind_filter: Option<&str>,
         _min_size: usize,
     ) -> std::result::Result<Vec<CycleGroup>, String> {
@@ -220,7 +220,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn orphans(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _kind_filter: Option<&str>,
         _visibility: Option<&str>,
         _limit: usize,
@@ -229,7 +229,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn path(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _from: &str,
         _to: &str,
         _max_depth: Option<usize>,
@@ -238,7 +238,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn edges(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _from_glob: &str,
         _to_glob: &str,
         _edge_kind: Option<&str>,
@@ -248,17 +248,17 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn describe(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _key: &str,
     ) -> std::result::Result<Option<SymbolDescription>, String> {
         Ok(None)
     }
     async fn status(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
     ) -> std::result::Result<GraphStatus, String> {
         Ok(GraphStatus {
-            project_id: project_path.to_string(),
+            project_id: ctx.id.clone(),
             warmed: false,
             last_warm_at: None,
             pinned_commit: None,
@@ -267,7 +267,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn symbols_at(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _file: &str,
         _start_line: u32,
         _end_line: Option<u32>,
@@ -276,7 +276,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn diff_touches(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _changed_ranges: &[ChangedRange],
     ) -> std::result::Result<DiffTouchesResult, String> {
         Ok(DiffTouchesResult {
@@ -287,7 +287,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn api_surface(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _module_glob: Option<&str>,
         _visibility: Option<&str>,
         _limit: usize,
@@ -296,14 +296,14 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn boundary_check(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _rules: &[BoundaryRule],
     ) -> std::result::Result<Vec<BoundaryViolation>, String> {
         Ok(Vec::new())
     }
     async fn hotspots(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _window_days: u32,
         _file_glob: Option<&str>,
         _limit: usize,
@@ -312,7 +312,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn metrics_at(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
     ) -> std::result::Result<MetricsAtResult, String> {
         Ok(MetricsAtResult {
             commit: String::new(),
@@ -328,7 +328,7 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn dead_symbols(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _confidence: &str,
         _limit: usize,
     ) -> std::result::Result<Vec<DeadSymbolEntry>, String> {
@@ -336,14 +336,14 @@ impl RepoGraphOps for StubRepoGraph {
     }
     async fn deprecated_callers(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _limit: usize,
     ) -> std::result::Result<Vec<DeprecatedHit>, String> {
         Ok(Vec::new())
     }
     async fn touches_hot_path(
         &self,
-        _project_path: &str,
+        _ctx: &ProjectCtx,
         _seed_entries: &[String],
         _seed_sinks: &[String],
         _symbols: &[String],

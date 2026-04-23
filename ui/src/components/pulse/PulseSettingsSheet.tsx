@@ -15,7 +15,7 @@ import { usePulseSettings } from "@/hooks/usePulseSettings";
 import { cn } from "@/lib/utils";
 
 interface PulseSettingsSheetProps {
-  projectPath: string;
+  projectSlug: string;
 }
 
 function ListEditor({
@@ -95,14 +95,14 @@ function ListEditor({
   );
 }
 
-export function PulseSettingsSheet({ projectPath }: PulseSettingsSheetProps) {
+export function PulseSettingsSheet({ projectSlug }: PulseSettingsSheetProps) {
   const {
     settings,
     addExcludedPath,
     removeExcludedPath,
     addOrphanIgnore,
     removeOrphanIgnore,
-  } = usePulseSettings(projectPath);
+  } = usePulseSettings(projectSlug);
 
   const [savedFlash, setSavedFlash] = useState(false);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);

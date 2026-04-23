@@ -120,7 +120,8 @@ function ProvidersReplica({
 interface ProjectEntry {
   id: string;
   name: string;
-  path: string;
+  github_owner: string;
+  github_repo: string;
   branch: string;
   auto_merge: boolean;
 }
@@ -163,7 +164,7 @@ function ProjectsReplica({
                       <p className="font-medium">{project.name}</p>
                     </div>
                     <p className="truncate text-xs text-muted-foreground">
-                      {project.path}
+                      {project.github_owner}/{project.github_repo}
                     </p>
                   </button>
                   <Button variant="destructive" size="sm">
@@ -371,14 +372,16 @@ const sampleProjects: ProjectEntry[] = [
   {
     id: "proj-1",
     name: "desktop",
-    path: "/home/fernando/git/djinnos/desktop",
+    github_owner: "djinnos",
+    github_repo: "desktop",
     branch: "main",
     auto_merge: false,
   },
   {
     id: "proj-2",
     name: "api-server",
-    path: "/home/fernando/git/djinnos/api",
+    github_owner: "djinnos",
+    github_repo: "api",
     branch: "develop",
     auto_merge: true,
   },

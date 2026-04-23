@@ -8,7 +8,7 @@ import { callMcpTool } from "@/api/mcpClient";
 import { showToast } from "@/lib/toast";
 
 interface GitHubAppBannerProps {
-  projectPaths: string[];
+  projectSlugs: string[];
 }
 
 type WarningKind = "not_connected" | "org_pending";
@@ -18,21 +18,21 @@ interface GitHubWarning {
   orgs: string[];
 }
 
-export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
+export function GitHubAppBanner({ projectSlugs }: GitHubAppBannerProps) {
   const [warning, setWarning] = useState<GitHubWarning | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [checking, setChecking] = useState(false);
 
-  // Stabilize the paths array so deps don't fire on every render
-  const pathsKey = projectPaths.slice().sort().join("\0");
-  const stablePaths = useMemo(() => projectPaths, [pathsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Stabilize the slugs array so deps don't fire on every render
+  const slugsKey = projectSlugs.slice().sort().join("\0");
+  const stableSlugs = useMemo(() => projectSlugs, [slugsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const checkHealth = useCallback(async (): Promise<GitHubWarning | null> => {
-    if (stablePaths.length === 0) return null;
+    if (stableSlugs.length === 0) return null;
 
     const results = await Promise.all(
-      stablePaths.map((path) =>
-        callMcpTool("board_health", { project: path }).catch(
+      stableSlugs.map((slug) =>
+        callMcpTool("board_health", { project: slug }).catch(
           () => null as Record<string, unknown> | null
         )
       )
@@ -56,7 +56,7 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
       return { kind: "org_pending", orgs: Array.from(pendingOrgs) };
     }
     return null;
-  }, [stablePaths]);
+  }, [stableSlugs]);
 
   const showWarning = warning !== null;
 
@@ -72,7 +72,7 @@ export function GitHubAppBanner({ projectPaths }: GitHubAppBannerProps) {
   }, [checkHealth]);
 
   // Reset dismissed when project selection changes
-  useEffect(() => setDismissed(false), [pathsKey]);
+  useEffect(() => setDismissed(false), [slugsKey]);
 
   const handleCheckAgain = async () => {
     setChecking(true);

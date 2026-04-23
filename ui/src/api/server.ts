@@ -136,7 +136,9 @@ export async function fetchProjects(): Promise<Project[]> {
   const projects: Project[] = await Promise.all(
     data.projects.map(async (p) => {
       try {
-        const config = await callMcpTool("project_config_get", { project: p.path });
+        const config = await callMcpTool("project_config_get", {
+          project: `${p.github_owner}/${p.github_repo}`,
+        });
         return { ...p, branch: config.target_branch, auto_merge: config.auto_merge };
       } catch {
         return p;
@@ -340,18 +342,19 @@ export async function updateProject(projectId: string, updates: { branch?: strin
   if (!project) {
     throw new Error("Project not found");
   }
+  const slug = `${project.github_owner}/${project.github_repo}`;
 
   const configCalls: Promise<unknown>[] = [];
   if (updates.branch !== undefined) {
     configCalls.push(callMcpTool("project_config_set", {
-      project: project.path,
+      project: slug,
       key: "target_branch",
       value: updates.branch,
     }));
   }
   if (updates.auto_merge !== undefined) {
     configCalls.push(callMcpTool("project_config_set", {
-      project: project.path,
+      project: slug,
       key: "auto_merge",
       value: String(updates.auto_merge),
     }));
@@ -360,57 +363,50 @@ export async function updateProject(projectId: string, updates: { branch?: strin
 }
 
 export async function removeProject(projectId: string): Promise<void> {
-  const projects = await callMcpTool("project_list");
-  const project = projects.projects.find((entry) => entry.id === projectId);
-  if (!project) {
-    throw new Error("Project not found");
-  }
-
   await callMcpTool("project_remove", {
-    name: project.name,
-    path: project.path,
+    project: projectId,
   });
 }
 
 export interface KanbanSnapshot {
-  projectPath: string | null;
+  projectSlug: string | null;
   tasks: Task[];
   epics: Epic[];
 }
 
 /** Fetch tasks + epics for a single project, or aggregate across all projects. */
 export async function fetchKanbanSnapshot(
-  projectPath?: string | null,
-  allProjectPaths?: string[],
+  projectSlug?: string | null,
+  allProjectSlugs?: string[],
 ): Promise<KanbanSnapshot> {
   // All-projects mode: fetch from every project and merge
-  if (allProjectPaths && allProjectPaths.length > 0) {
+  if (allProjectSlugs && allProjectSlugs.length > 0) {
     const snapshots = await Promise.all(
-      allProjectPaths.map((path) => fetchKanbanSnapshot(path))
+      allProjectSlugs.map((slug) => fetchKanbanSnapshot(slug))
     );
     return {
-      projectPath: null,
+      projectSlug: null,
       tasks: snapshots.flatMap((s) => s.tasks),
       epics: snapshots.flatMap((s) => s.epics),
     };
   }
 
-  const resolvedProjectPath = projectPath ?? null;
+  const resolvedProjectSlug = projectSlug ?? null;
 
-  if (!resolvedProjectPath) {
-    return { projectPath: null, tasks: [], epics: [] };
+  if (!resolvedProjectSlug) {
+    return { projectSlug: null, tasks: [], epics: [] };
   }
 
   // Fetch first page of tasks + all epics in parallel
   const PAGE_SIZE = 200;
   const [firstTaskPage, epicList] = await Promise.all([
     callMcpTool("task_list", {
-      project: resolvedProjectPath,
+      project: resolvedProjectSlug,
       limit: PAGE_SIZE,
       offset: 0,
     }),
     callMcpTool("epic_list", {
-      project: resolvedProjectPath,
+      project: resolvedProjectSlug,
       limit: 500,
       offset: 0,
     }),
@@ -420,10 +416,10 @@ export async function fetchKanbanSnapshot(
   const allTasks: Task[] = [...(firstTaskPage.tasks as unknown as Task[])];
   if (firstTaskPage.has_more) {
     let offset = allTasks.length;
-     
+
     while (true) {
       const page = await callMcpTool("task_list", {
-        project: resolvedProjectPath,
+        project: resolvedProjectSlug,
         limit: PAGE_SIZE,
         offset,
       });
@@ -434,11 +430,13 @@ export async function fetchKanbanSnapshot(
   }
 
   // Stamp each task with the project it belongs to (needed for all-projects view)
-  const projectId = projectStore.getState().projects.find((p) => p.path === resolvedProjectPath)?.id ?? null;
+  const projectId = projectStore
+    .getState()
+    .projects.find((p) => `${p.github_owner}/${p.github_repo}` === resolvedProjectSlug)?.id ?? null;
   const tasks = allTasks.map((t) => ({ ...t, project_id: projectId }));
 
   return {
-    projectPath: resolvedProjectPath,
+    projectSlug: resolvedProjectSlug,
     tasks,
     epics: (epicList.epics ?? []) as unknown as Epic[],
   };

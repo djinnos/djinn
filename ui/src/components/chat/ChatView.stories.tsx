@@ -21,12 +21,12 @@ function ChatViewSeeded({
 }) {
   useEffect(() => {
     projectStore.setState({
-      projects: [{ id: "proj-1", name: "DjinnOS Desktop", path: "/workspace/djinnos" }],
+      projects: [{ id: "proj-1", name: "DjinnOS Desktop", github_owner: "djinnos", github_repo: "desktop" }],
       selectedProjectId: "proj-1",
     });
 
     if (withMessages) {
-      const sessionId = useChatStore.getState().createSession("/workspace/djinnos", "anthropic/claude-sonnet-4-6");
+      const sessionId = useChatStore.getState().createSession("djinnos/desktop", "anthropic/claude-sonnet-4-6");
       useChatStore.getState().setActiveSession(sessionId);
       useChatStore.getState().addMessage(sessionId, {
         id: "m1",

@@ -13,7 +13,7 @@ import {
 } from "./pulseTypes";
 
 interface BlastRadiusPanelProps {
-  projectPath: string;
+  projectSlug: string;
 }
 
 // The slider controls max traversal depth passed to `code_graph impact`.
@@ -31,7 +31,7 @@ function useDebounced<T>(value: T, ms: number): T {
   return debounced;
 }
 
-export function BlastRadiusPanel({ projectPath }: BlastRadiusPanelProps) {
+export function BlastRadiusPanel({ projectSlug }: BlastRadiusPanelProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<SearchHit | null>(null);
   const [depth, setDepth] = useState(3);
@@ -41,10 +41,10 @@ export function BlastRadiusPanel({ projectPath }: BlastRadiusPanelProps) {
   const debouncedQuery = useDebounced(query, 200);
 
   const { data: searchData, isLoading: searchLoading } = useQuery({
-    queryKey: ["pulse", "search", projectPath, debouncedQuery],
+    queryKey: ["pulse", "search", projectSlug, debouncedQuery],
     queryFn: async () => {
       const raw = await callMcpTool("code_graph", {
-        project_path: projectPath,
+        project: projectSlug,
         operation: "search",
         query: debouncedQuery,
         limit: 10,
@@ -56,11 +56,11 @@ export function BlastRadiusPanel({ projectPath }: BlastRadiusPanelProps) {
   });
 
   const { data: impactData, isLoading: impactLoading, error: impactError } = useQuery({
-    queryKey: ["pulse", "impact", projectPath, selected?.key, depth],
+    queryKey: ["pulse", "impact", projectSlug, selected?.key, depth],
     queryFn: async () => {
       if (!selected) return [];
       const raw = await callMcpTool("code_graph", {
-        project_path: projectPath,
+        project: projectSlug,
         operation: "impact",
         key: selected.key,
         group_by: "file",

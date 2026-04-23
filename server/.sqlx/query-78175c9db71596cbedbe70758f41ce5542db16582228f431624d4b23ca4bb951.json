@@ -8,7 +8,7 @@
         "name": "github_owner!: String",
         "type_info": {
           "type": "VarString",
-          "flags": "",
+          "flags": "NOT_NULL",
           "max_size": 1020
         }
       },
@@ -17,7 +17,7 @@
         "name": "github_repo!: String",
         "type_info": {
           "type": "VarString",
-          "flags": "",
+          "flags": "NOT_NULL",
           "max_size": 1020
         }
       }
@@ -26,8 +26,8 @@
       "Right": 1
     },
     "nullable": [
-      true,
-      true
+      false,
+      false
     ]
   },
   "hash": "78175c9db71596cbedbe70758f41ce5542db16582228f431624d4b23ca4bb951"

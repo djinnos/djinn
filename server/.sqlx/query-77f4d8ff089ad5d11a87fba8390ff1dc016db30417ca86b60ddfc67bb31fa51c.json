@@ -26,7 +26,7 @@
         "name": "github_owner!: String",
         "type_info": {
           "type": "VarString",
-          "flags": "",
+          "flags": "NOT_NULL",
           "max_size": 1020
         }
       },
@@ -35,7 +35,7 @@
         "name": "github_repo!: String",
         "type_info": {
           "type": "VarString",
-          "flags": "",
+          "flags": "NOT_NULL",
           "max_size": 1020
         }
       },
@@ -91,8 +91,8 @@
     "nullable": [
       false,
       false,
-      true,
-      true,
+      false,
+      false,
       true,
       false,
       false,

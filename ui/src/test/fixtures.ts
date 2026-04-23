@@ -3,14 +3,16 @@ import type { Epic, Project, Task } from "@/api/types";
 export const mockProjectA: Project = {
   id: "project-1",
   name: "Project One",
-  path: "/tmp/project-one",
+  github_owner: "djinn",
+  github_repo: "project-one",
   description: "First test project",
 };
 
 export const mockProjectB: Project = {
   id: "project-2",
   name: "Project Two",
-  path: "/tmp/project-two",
+  github_owner: "djinn",
+  github_repo: "project-two",
   description: "Second test project",
 };
 

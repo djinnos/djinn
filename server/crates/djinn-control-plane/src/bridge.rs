@@ -452,13 +452,32 @@ pub enum ImpactResult {
     Grouped(Vec<FileGroupEntry>),
 }
 
+/// Resolved project handle passed to every `RepoGraphOps` call.
+///
+/// Built once in the `code_graph` / `pr_review_context` dispatch from
+/// the incoming project ref (UUID or `"owner/repo"` slug). Carries:
+/// - `id`: UUIDv7 project identifier — the key for `repo_graph_cache`
+///   and other per-project tables.
+/// - `clone_path`: `$DJINN_HOME/projects/{owner}/{repo}` — the
+///   filesystem root the SCIP indexer / git CLI operates against.
+///
+/// Every bridge method takes this by reference so implementations can
+/// decide whether an operation is DB-only (`status`, `metrics_at`) or
+/// filesystem-touching (`hotspots` / `diff_touches` → git log / diff)
+/// without re-resolving anything.
+#[derive(Clone, Debug)]
+pub struct ProjectCtx {
+    pub id: String,
+    pub clone_path: String,
+}
+
 #[async_trait]
 pub trait RepoGraphOps: Send + Sync {
     /// Neighbors of a file or symbol node (edges in/out). When `group_by` is
     /// `Some("file")`, results are collapsed into per-file rollups.
     async fn neighbors(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         key: &str,
         direction: Option<&str>,
         group_by: Option<&str>,
@@ -468,7 +487,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// of `pagerank` (default), `in_degree`, `out_degree`, or `total_degree`.
     async fn ranked(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         kind_filter: Option<&str>,
         sort_by: Option<&str>,
         limit: usize,
@@ -477,7 +496,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// Symbols that implement a given trait/interface symbol.
     async fn implementations(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         symbol: &str,
     ) -> Result<Vec<String>, String>;
 
@@ -486,7 +505,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// rollups.
     async fn impact(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         key: &str,
         depth: usize,
         group_by: Option<&str>,
@@ -495,7 +514,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// Name-based symbol search.
     async fn search(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         query: &str,
         kind_filter: Option<&str>,
         limit: usize,
@@ -504,7 +523,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// Strongly-connected components of size >= `min_size`.
     async fn cycles(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         kind_filter: Option<&str>,
         min_size: usize,
     ) -> Result<Vec<CycleGroup>, String>;
@@ -512,7 +531,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// Bulk dead-symbol enumeration (nodes with zero incoming references).
     async fn orphans(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         kind_filter: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -521,7 +540,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// Shortest dependency path between two nodes.
     async fn path(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         from: &str,
         to: &str,
         max_depth: Option<usize>,
@@ -530,7 +549,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// Enumerate edges matching path globs.
     async fn edges(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         from_glob: &str,
         to_glob: &str,
         edge_kind: Option<&str>,
@@ -540,7 +559,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// Detailed description of a single symbol.
     async fn describe(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         key: &str,
     ) -> Result<Option<SymbolDescription>, String>;
 
@@ -548,14 +567,14 @@ pub trait RepoGraphOps: Send + Sync {
     /// MUST NOT trigger any warming or SCIP indexing.  When the cache is
     /// empty for this project, returns `warmed: false` with the timestamp/
     /// commit fields set to `None`.
-    async fn status(&self, project_path: &str) -> Result<GraphStatus, String>;
+    async fn status(&self, ctx: &ProjectCtx) -> Result<GraphStatus, String>;
 
     /// Resolve a `(file, start_line, end_line?)` tuple into the set of
     /// base-graph symbols whose definition range encloses the queried
     /// lines. Used for diff-hunk → symbol mapping during PR review.
     async fn symbols_at(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         file: &str,
         start_line: u32,
         end_line: Option<u32>,
@@ -569,7 +588,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// project's base branch — it does NOT build a head graph.
     async fn diff_touches(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         changed_ranges: &[ChangedRange],
     ) -> Result<DiffTouchesResult, String>;
 
@@ -578,7 +597,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// "used outside crate" signal.
     async fn api_surface(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         module_glob: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -588,14 +607,14 @@ pub trait RepoGraphOps: Send + Sync {
     /// `to_glob`, returning the forbidden ones.
     async fn boundary_check(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         rules: &[BoundaryRule],
     ) -> Result<Vec<BoundaryViolation>, String>;
 
     /// Churn × centrality ranking over files in the project.
     async fn hotspots(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         window_days: u32,
         file_glob: Option<&str>,
         limit: usize,
@@ -604,7 +623,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// Scalar graph snapshot of the currently-pinned canonical graph.
     async fn metrics_at(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
     ) -> Result<MetricsAtResult, String>;
 
     /// Symbols with zero incoming edges from the entry-point set
@@ -612,7 +631,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// confidence.
     async fn dead_symbols(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         confidence: &str,
         limit: usize,
     ) -> Result<Vec<DeadSymbolEntry>, String>;
@@ -621,7 +640,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// `#[deprecated]` / `@deprecated` marker, and return their callers.
     async fn deprecated_callers(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         limit: usize,
     ) -> Result<Vec<DeprecatedHit>, String>;
 
@@ -630,7 +649,7 @@ pub trait RepoGraphOps: Send + Sync {
     /// to any sink.
     async fn touches_hot_path(
         &self,
-        project_path: &str,
+        ctx: &ProjectCtx,
         seed_entries: &[String],
         seed_sinks: &[String],
         symbols: &[String],

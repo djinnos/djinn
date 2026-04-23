@@ -5,11 +5,11 @@ export function useTaskActions() {
   const [busy, setBusy] = useState(false);
 
   const transition = useCallback(
-    async (taskId: string, projectPath: string, action: string, reason?: string) => {
+    async (taskId: string, projectSlug: string, action: string, reason?: string) => {
       setBusy(true);
       try {
         await callMcpTool("task_transition", {
-          project: projectPath,
+          project: projectSlug,
           id: taskId,
           action,
           ...(reason ? { reason } : {}),

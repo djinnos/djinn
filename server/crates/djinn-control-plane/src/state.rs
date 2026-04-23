@@ -234,7 +234,7 @@ pub mod stubs {
     impl RepoGraphOps for StubRepoGraphOps {
         async fn neighbors(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &str,
             _: Option<&str>,
             _: Option<&str>,
@@ -243,19 +243,23 @@ pub mod stubs {
         }
         async fn ranked(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
         ) -> Result<Vec<RankedNode>, String> {
             Ok(vec![])
         }
-        async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
+        async fn implementations(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            _: &str,
+        ) -> Result<Vec<String>, String> {
             Ok(vec![])
         }
         async fn impact(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &str,
             _: usize,
             _: Option<&str>,
@@ -264,7 +268,7 @@ pub mod stubs {
         }
         async fn search(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &str,
             _: Option<&str>,
             _: usize,
@@ -273,7 +277,7 @@ pub mod stubs {
         }
         async fn cycles(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: Option<&str>,
             _: usize,
         ) -> Result<Vec<crate::bridge::CycleGroup>, String> {
@@ -281,7 +285,7 @@ pub mod stubs {
         }
         async fn orphans(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -290,7 +294,7 @@ pub mod stubs {
         }
         async fn path(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &str,
             _: &str,
             _: Option<usize>,
@@ -299,7 +303,7 @@ pub mod stubs {
         }
         async fn edges(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &str,
             _: &str,
             _: Option<&str>,
@@ -309,12 +313,15 @@ pub mod stubs {
         }
         async fn describe(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &str,
         ) -> Result<Option<crate::bridge::SymbolDescription>, String> {
             Ok(None)
         }
-        async fn status(&self, _: &str) -> Result<crate::bridge::GraphStatus, String> {
+        async fn status(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+        ) -> Result<crate::bridge::GraphStatus, String> {
             Ok(crate::bridge::GraphStatus {
                 project_id: String::new(),
                 warmed: false,
@@ -325,7 +332,7 @@ pub mod stubs {
         }
         async fn symbols_at(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &str,
             _: u32,
             _: Option<u32>,
@@ -334,7 +341,7 @@ pub mod stubs {
         }
         async fn diff_touches(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &[crate::bridge::ChangedRange],
         ) -> Result<crate::bridge::DiffTouchesResult, String> {
             Ok(crate::bridge::DiffTouchesResult {
@@ -345,7 +352,7 @@ pub mod stubs {
         }
         async fn api_surface(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -354,14 +361,14 @@ pub mod stubs {
         }
         async fn boundary_check(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &[crate::bridge::BoundaryRule],
         ) -> Result<Vec<crate::bridge::BoundaryViolation>, String> {
             Ok(vec![])
         }
         async fn hotspots(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: u32,
             _: Option<&str>,
             _: usize,
@@ -370,7 +377,7 @@ pub mod stubs {
         }
         async fn metrics_at(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
         ) -> Result<crate::bridge::MetricsAtResult, String> {
             Ok(crate::bridge::MetricsAtResult {
                 commit: String::new(),
@@ -386,7 +393,7 @@ pub mod stubs {
         }
         async fn dead_symbols(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &str,
             _: usize,
         ) -> Result<Vec<crate::bridge::DeadSymbolEntry>, String> {
@@ -394,14 +401,14 @@ pub mod stubs {
         }
         async fn deprecated_callers(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: usize,
         ) -> Result<Vec<crate::bridge::DeprecatedHit>, String> {
             Ok(vec![])
         }
         async fn touches_hot_path(
             &self,
-            _: &str,
+            _: &crate::bridge::ProjectCtx,
             _: &[String],
             _: &[String],
             _: &[String],

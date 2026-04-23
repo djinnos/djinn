@@ -13,7 +13,7 @@ import DependencyGraph from "@/components/graph/DependencyGraph";
  */
 async function fetchAllBlockers(
   taskIds: string[],
-  projectPath: string,
+  projectSlug: string,
 ): Promise<Map<string, BlockerItem[]>> {
   const result = new Map<string, BlockerItem[]>();
   if (taskIds.length === 0) return result;
@@ -27,7 +27,7 @@ async function fetchAllBlockers(
         try {
           const response = await callMcpTool("task_blockers_list", {
             id,
-            project: projectPath,
+            project: projectSlug,
           });
           return { id, blockers: (response.blockers ?? []) as BlockerItem[] };
         } catch {
@@ -53,7 +53,9 @@ export function RoadmapPage() {
   const projects = useProjects();
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId);
-  const projectPath = selectedProject?.path ?? null;
+  const projectSlug = selectedProject
+    ? `${selectedProject.github_owner}/${selectedProject.github_repo}`
+    : null;
 
   // Collect IDs of non-epic tasks for blocker fetching
   const taskIds = useMemo(
@@ -63,9 +65,9 @@ export function RoadmapPage() {
 
   // Fetch blockers for all tasks — cached and refreshed with tasks
   const { data: blockersByTask, isLoading: blockersLoading } = useQuery({
-    queryKey: ["roadmap-blockers", projectPath, taskIds.join(",")],
-    queryFn: () => fetchAllBlockers(taskIds, projectPath!),
-    enabled: !!projectPath && taskIds.length > 0,
+    queryKey: ["roadmap-blockers", projectSlug, taskIds.join(",")],
+    queryFn: () => fetchAllBlockers(taskIds, projectSlug!),
+    enabled: !!projectSlug && taskIds.length > 0,
     staleTime: 30_000, // 30s — blockers change infrequently
     placeholderData: (prev) => prev,
   });

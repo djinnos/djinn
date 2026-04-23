@@ -110,14 +110,19 @@ const tasksFixture: Task[] = [
 // Chat fixtures
 // ---------------------------------------------------------------------------
 
-const MOCK_PROJECT_PATH = "/workspace/djinnos";
-const MOCK_PROJECT = { id: "proj-1", name: "Djinn OS", path: MOCK_PROJECT_PATH };
+const MOCK_PROJECT_SLUG = "djinnos/djinnos";
+const MOCK_PROJECT = {
+  id: "proj-1",
+  name: "Djinn OS",
+  github_owner: "djinnos",
+  github_repo: "djinnos",
+};
 
 const mockSessions = [
   {
     id: "s1",
     title: "Planning next milestone",
-    projectPath: MOCK_PROJECT_PATH,
+    projectSlug: MOCK_PROJECT_SLUG,
     model: "anthropic/claude-sonnet-4-6",
     createdAt: Date.now() - 3_600_000,
     updatedAt: Date.now() - 600_000,
@@ -125,7 +130,7 @@ const mockSessions = [
   {
     id: "s2",
     title: "Debug SSE reconnection",
-    projectPath: MOCK_PROJECT_PATH,
+    projectSlug: MOCK_PROJECT_SLUG,
     model: "openai/gpt-4o",
     createdAt: Date.now() - 86_400_000,
     updatedAt: Date.now() - 86_400_000,

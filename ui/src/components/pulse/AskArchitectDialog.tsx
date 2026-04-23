@@ -23,7 +23,7 @@ import { recordPulseOriginatedSpike } from "@/lib/pulseProposals";
 import { useAuthUser } from "@/components/AuthGate";
 
 interface AskArchitectDialogProps {
-  projectPath: string;
+  projectSlug: string;
 }
 
 function buildTaskTitle(question: string): string {
@@ -56,7 +56,7 @@ function normalizeCreatedTask(task: TaskCreateOutput): Task | null {
   } as Task;
 }
 
-export function AskArchitectDialog({ projectPath }: AskArchitectDialogProps) {
+export function AskArchitectDialog({ projectSlug }: AskArchitectDialogProps) {
   const navigate = useNavigate();
   const user = useAuthUser();
   const questionId = useId();
@@ -101,7 +101,7 @@ export function AskArchitectDialog({ projectPath }: AskArchitectDialogProps) {
 
     try {
       const created = await callMcpTool("task_create", {
-        project: projectPath,
+        project: projectSlug,
         issue_type: "spike",
         title: buildTaskTitle(normalizedQuestion),
         description: buildTaskDescription(normalizedQuestion, normalizedContext),

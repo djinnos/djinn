@@ -46,16 +46,6 @@ import {
 import { showToast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
-function parseOwnerRepo(path: string | undefined | null): { owner: string; repo: string } | null {
-  if (!path) return null;
-  const segments = path.split('/').filter(Boolean);
-  if (segments.length < 2) return null;
-  const repo = segments[segments.length - 1];
-  const owner = segments[segments.length - 2];
-  if (!owner || !repo) return null;
-  return { owner, repo };
-}
-
 function RemoveButton({
   project,
   onRemoved,
@@ -207,8 +197,10 @@ function RepositoryRow({
   onSelect: () => void;
   onRemoved: () => Promise<void> | void;
 }) {
-  const coords = parseOwnerRepo(project.path);
-  const githubUrl = coords ? `https://github.com/${coords.owner}/${coords.repo}` : null;
+  const githubUrl =
+    project.github_owner && project.github_repo
+      ? `https://github.com/${project.github_owner}/${project.github_repo}`
+      : null;
   const navigate = useNavigate();
 
   return (
@@ -224,9 +216,9 @@ function RepositoryRow({
           <HugeiconsIcon icon={Folder02Icon} className="h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0">
             <div className="truncate text-sm font-medium text-foreground">{project.name}</div>
-            {coords && (
+            {project.github_owner && project.github_repo && (
               <div className="truncate text-xs text-muted-foreground">
-                {coords.owner}/{coords.repo}
+                {project.github_owner}/{project.github_repo}
               </div>
             )}
           </div>

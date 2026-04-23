@@ -99,7 +99,7 @@ export interface SessionInfo {
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
-export function useSessionMessages(taskId: string | null, projectPath: string | null) {
+export function useSessionMessages(taskId: string | null, projectSlug: string | null) {
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -108,7 +108,7 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
   const [streamingThinking, setStreamingThinking] = useState<Map<string, string>>(new Map());
 
   const fetchData = useCallback(async () => {
-    if (!taskId || !projectPath) return;
+    if (!taskId || !projectSlug) return;
 
     setLoading(true);
     setError(null);
@@ -117,7 +117,7 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
       // Single MCP call fetches sessions + messages + activity
       const result = await callMcpTool("task_timeline", {
         task_id: taskId,
-        project: projectPath,
+        project: projectSlug,
       });
 
       if (result.error) {
@@ -322,7 +322,7 @@ export function useSessionMessages(taskId: string | null, projectPath: string | 
     } finally {
       setLoading(false);
     }
-  }, [taskId, projectPath]);
+  }, [taskId, projectSlug]);
 
   // Subscribe to live SSE session_message events for this task via sseStore
   useEffect(() => {

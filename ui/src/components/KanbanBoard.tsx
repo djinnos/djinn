@@ -341,16 +341,15 @@ export function KanbanBoard({
     if (refreshing) return;
     setRefreshing(true);
     try {
-      const allPaths = !selectedProject
-        ? (projectStore
+      const allSlugs = !selectedProject
+        ? projectStore
             .getState()
-            .projects.map((p) => p.path)
-            .filter(Boolean) as string[])
+            .projects.map((p) => `${p.github_owner}/${p.github_repo}`)
         : undefined;
-      const snapshot = await fetchKanbanSnapshot(
-        selectedProject?.path ?? null,
-        allPaths,
-      );
+      const selectedSlug = selectedProject
+        ? `${selectedProject.github_owner}/${selectedProject.github_repo}`
+        : null;
+      const snapshot = await fetchKanbanSnapshot(selectedSlug, allSlugs);
       taskStore.getState().setTasks(snapshot.tasks);
       epicStore.getState().setEpics(snapshot.epics);
     } catch (error) {
@@ -585,18 +584,18 @@ export function KanbanBoard({
       </div>
 
       <BoardHealthBanner
-        projectPaths={
-          selectedProject?.path
-            ? [selectedProject.path]
-            : projects.map((p) => p.path)
+        projectSlugs={
+          selectedProject
+            ? [`${selectedProject.github_owner}/${selectedProject.github_repo}`]
+            : projects.map((p) => `${p.github_owner}/${p.github_repo}`)
         }
       />
 
       <GitHubAppBanner
-        projectPaths={
-          selectedProject?.path
-            ? [selectedProject.path]
-            : projects.map((p) => p.path)
+        projectSlugs={
+          selectedProject
+            ? [`${selectedProject.github_owner}/${selectedProject.github_repo}`]
+            : projects.map((p) => `${p.github_owner}/${p.github_repo}`)
         }
       />
 

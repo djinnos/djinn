@@ -313,6 +313,15 @@ export type BoardReconcileOutput = BoardReconcileOutputSchema.BoardReconcileOutp
 export namespace CodeGraphInputSchema {
   export interface CodeGraphInput {
   /**
+   * List of `(file, start_line, end_line?)` hunks for `diff_touches`.
+   */
+  changed_ranges?: ChangedRange[]
+  /**
+   * Confidence tier for `dead_symbols`: `high`, `med`, or `low`.
+   * Default `high`.
+   */
+  confidence?: string
+  /**
    * Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.
    */
   direction?: string
@@ -320,6 +329,19 @@ export namespace CodeGraphInputSchema {
    * Optional edge-kind filter for `edges`.
    */
   edge_kind?: string
+  /**
+   * 1-indexed inclusive end line for `symbols_at`. Defaults to
+   * `start_line` when omitted.
+   */
+  end_line?: number
+  /**
+   * Repository-relative file path for `symbols_at`.
+   */
+  file?: string
+  /**
+   * Optional file glob restricting `hotspots` to a subset of paths.
+   */
+  file_glob?: string
   /**
    * Source node for `path`.
    */
@@ -355,25 +377,56 @@ export namespace CodeGraphInputSchema {
    */
   min_size?: number
   /**
+   * Optional module-path glob for `api_surface` (filter symbols by
+   * `file_path`).
+   */
+  module_glob?: string
+  /**
    * The operation to perform.
    * One of: `neighbors`, `ranked`, `impact`, `implementations`,
-   * `search`, `cycles`, `orphans`, `path`, `edges`, `diff`, `describe`,
-   * `status`.
+   * `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
+   * `diff_touches`, `describe`, `status`.
    */
   operation: string
   /**
-   * Path to the project root (used to locate the graph).
+   * Project identifier — either the UUID (`project_id`) or the
+   * canonical `"owner/repo"` slug. The handler resolves it to the
+   * server-managed clone path via `djinn_core::paths::project_dir`
+   * before dispatching to the graph backend.
    */
-  project_path: string
+  project: string
   /**
    * Substring query for `search`.
    */
   query?: string
   /**
+   * Boundary rules for `boundary_check`.
+   */
+  rules?: BoundaryRule[]
+  /**
+   * Entry-point symbol keys (route handlers, `main`, etc.) for
+   * `touches_hot_path`.
+   */
+  seed_entries?: string[]
+  /**
+   * Sink symbol keys (DB queries, external APIs, etc.) for
+   * `touches_hot_path`.
+   */
+  seed_sinks?: string[]
+  /**
    * Sort key for `ranked`: `pagerank` (default), `in_degree`, `out_degree`,
    * or `total_degree`.
    */
   sort_by?: string
+  /**
+   * 1-indexed inclusive start line for `symbols_at`.
+   */
+  start_line?: number
+  /**
+   * Queried symbol keys for `touches_hot_path` — which sit on any
+   * entry→sink shortest path?
+   */
+  symbols?: string[]
   /**
    * Destination node for `path`.
    */
@@ -386,6 +439,42 @@ export namespace CodeGraphInputSchema {
    * Visibility filter for `orphans`: `public`, `private`, or `any` (default).
    */
   visibility?: string
+  /**
+   * Churn look-back window in days for `hotspots` (default 90, clamped
+   * to 365).
+   */
+  window_days?: number
+  [k: string]: any
+  }
+  /**
+   * A single `(file, start_line, end_line)` hunk from a parsed diff. The
+   * caller supplies one of these per `git diff --unified=0` hunk when
+   * invoking the `diff_touches` op on the `code_graph` tool.
+   */
+  export interface ChangedRange {
+  /**
+   * Inclusive 1-indexed last line of the hunk. Defaults to `start_line`
+   * when the caller passed a single-line hunk.
+   */
+  end_line?: number
+  /**
+   * Repository-relative path of the file the hunk lives in.
+   */
+  file: string
+  /**
+   * Inclusive 1-indexed first line of the hunk.
+   */
+  start_line: number
+  [k: string]: any
+  }
+  /**
+   * A single boundary-check rule — a pair of globs. Every rule is
+   * treated as a forbidden edge; callers submit only the rules they want
+   * flagged as violations.
+   */
+  export interface BoundaryRule {
+  from_glob: string
+  to_glob: string
   [k: string]: any
   }
 
@@ -2113,6 +2202,105 @@ export namespace ModelHealthOutputSchema {
 
 }
 export type ModelHealthOutput = ModelHealthOutputSchema.ModelHealthOutput;
+export namespace PrReviewContextInputSchema {
+  /**
+   * Input parameters for the `pr_review_context` meta-tool.
+   */
+  export interface PrReviewContextInput {
+  /**
+   * Architecture boundary rules. When empty, boundary analysis is
+   * skipped and [`PrReviewContextResponse::touched_boundary_violations`]
+   * is empty.
+   */
+  boundary_rules?: BoundaryRule[]
+  /**
+   * Per-list result caps. Missing fields fall back to the defaults
+   * encoded in `ResolvedCaps::default_caps`.
+   */
+  caps?: (PrReviewCaps | null)
+  /**
+   * Hunks parsed from `git diff --unified=0 base..head`. Must be
+   * non-empty for the tool to return useful signal.
+   */
+  changed_ranges: ChangedRange[]
+  /**
+   * Churn look-back window for the hotspot overlap. Defaults to 90.
+   */
+  hotspots_window_days?: number
+  /**
+   * Project identifier — either the UUID (`project_id`) or the
+   * canonical `"owner/repo"` slug. The handler resolves it to the
+   * server-managed clone path via `djinn_core::paths::project_dir`
+   * before dispatching to the graph backend.
+   */
+  project: string
+  /**
+   * Entry-point SCIP keys (route handlers, `main`, etc.) used when
+   * computing [`PrReviewContextResponse::hot_path_overlap`].
+   */
+  seed_entries?: string[]
+  /**
+   * Sink SCIP keys (DB queries, external APIs, etc.) used when
+   * computing [`PrReviewContextResponse::hot_path_overlap`].
+   */
+  seed_sinks?: string[]
+  [k: string]: any
+  }
+  /**
+   * A single boundary-check rule — a pair of globs. Every rule is
+   * treated as a forbidden edge; callers submit only the rules they want
+   * flagged as violations.
+   */
+  export interface BoundaryRule {
+  from_glob: string
+  to_glob: string
+  [k: string]: any
+  }
+  /**
+   * Per-list caps overriding the built-in defaults. Any field left
+   * `None` uses the default from `default_caps`.
+   */
+  export interface PrReviewCaps {
+  blast_radius?: number
+  hot_path_overlap?: number
+  hotspot_overlap?: number
+  touched_boundary_violations?: number
+  touched_cycles?: number
+  touched_deprecated?: number
+  touched_symbols?: number
+  [k: string]: any
+  }
+  /**
+   * A single `(file, start_line, end_line)` hunk from a parsed diff. The
+   * caller supplies one of these per `git diff --unified=0` hunk when
+   * invoking the `diff_touches` op on the `code_graph` tool.
+   */
+  export interface ChangedRange {
+  /**
+   * Inclusive 1-indexed last line of the hunk. Defaults to `start_line`
+   * when the caller passed a single-line hunk.
+   */
+  end_line?: number
+  /**
+   * Repository-relative path of the file the hunk lives in.
+   */
+  file: string
+  /**
+   * Inclusive 1-indexed first line of the hunk.
+   */
+  start_line: number
+  [k: string]: any
+  }
+
+}
+export type PrReviewContextInput = PrReviewContextInputSchema.PrReviewContextInput;
+export namespace PrReviewContextOutputSchema {
+  export interface PrReviewContextOutput {
+  [k: string]: any
+  }
+
+}
+export type PrReviewContextOutput = PrReviewContextOutputSchema.PrReviewContextOutput;
 export namespace ProjectAddFromGithubInputSchema {
   export interface ProjectAddFromGithubInput {
   /**
@@ -2150,9 +2338,10 @@ export namespace ProjectAddFromGithubOutputSchema {
   [k: string]: any
   }
   export interface ProjectInfo {
+  github_owner: string
+  github_repo: string
   id: string
   name: string
-  path: string
   [k: string]: any
   }
 
@@ -2333,6 +2522,77 @@ export namespace ProjectEnvironmentConfigSetOutputSchema {
 
 }
 export type ProjectEnvironmentConfigSetOutput = ProjectEnvironmentConfigSetOutputSchema.ProjectEnvironmentConfigSetOutput;
+export namespace ProjectGraphExclusionsGetInputSchema {
+  export interface ProjectGraphExclusionsGetInput {
+  /**
+   * Project path (same shape accepted by `project_config_get`).
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProjectGraphExclusionsGetInput = ProjectGraphExclusionsGetInputSchema.ProjectGraphExclusionsGetInput;
+export namespace ProjectGraphExclusionsGetOutputSchema {
+  export interface ProjectGraphExclusionsGetOutput {
+  /**
+   * Glob patterns stripped from cycles/orphans/ranked/impact/edges
+   * output. Empty array means no per-project globs; Tier 1 (universal
+   * SCIP-artifact filter) still applies.
+   */
+  graph_excluded_paths?: string[]
+  /**
+   * Exact file paths the `code_graph orphans` op silently drops.
+   */
+  graph_orphan_ignore?: string[]
+  project: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ProjectGraphExclusionsGetOutput = ProjectGraphExclusionsGetOutputSchema.ProjectGraphExclusionsGetOutput;
+export namespace ProjectGraphExclusionsSetInputSchema {
+  /**
+   * Partial-update payload. Either field may be `None` — the repository
+   * leaves the corresponding column untouched when the caller only wants
+   * to rewrite one of the two lists.
+   */
+  export interface ProjectGraphExclusionsSetInput {
+  /**
+   * When present, replaces `graph_excluded_paths` wholesale. Empty
+   * vec resets to zero globs (Tier 1 still applies).
+   */
+  graph_excluded_paths?: string[]
+  /**
+   * When present, replaces `graph_orphan_ignore` wholesale.
+   */
+  graph_orphan_ignore?: string[]
+  project: string
+  [k: string]: any
+  }
+
+}
+export type ProjectGraphExclusionsSetInput = ProjectGraphExclusionsSetInputSchema.ProjectGraphExclusionsSetInput;
+export namespace ProjectGraphExclusionsSetOutputSchema {
+  export interface ProjectGraphExclusionsSetOutput {
+  /**
+   * Glob patterns stripped from cycles/orphans/ranked/impact/edges
+   * output. Empty array means no per-project globs; Tier 1 (universal
+   * SCIP-artifact filter) still applies.
+   */
+  graph_excluded_paths?: string[]
+  /**
+   * Exact file paths the `code_graph orphans` op silently drops.
+   */
+  graph_orphan_ignore?: string[]
+  project: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ProjectGraphExclusionsSetOutput = ProjectGraphExclusionsSetOutputSchema.ProjectGraphExclusionsSetOutput;
 export namespace ProjectListInputSchema {
   export interface ProjectListInput {
   [k: string]: any
@@ -2346,9 +2606,10 @@ export namespace ProjectListOutputSchema {
   [k: string]: any
   }
   export interface ProjectInfo {
+  github_owner: string
+  github_repo: string
   id: string
   name: string
-  path: string
   [k: string]: any
   }
 
@@ -2357,13 +2618,11 @@ export type ProjectListOutput = ProjectListOutputSchema.ProjectListOutput;
 export namespace ProjectRemoveInputSchema {
   export interface ProjectRemoveInput {
   /**
-   * Project name to remove.
+   * Project identifier — either the UUID (`project_id`) or the
+   * canonical `"owner/repo"` slug. Resolved via
+   * `ProjectRepository::resolve`.
    */
-  name: string
-  /**
-   * Absolute path of the project to remove. Must match the registered path exactly.
-   */
-  path: string
+  project: string
   [k: string]: any
   }
 
@@ -2376,9 +2635,10 @@ export namespace ProjectRemoveOutputSchema {
   [k: string]: any
   }
   export interface ProjectInfo {
+  github_owner: string
+  github_repo: string
   id: string
   name: string
-  path: string
   [k: string]: any
   }
 
@@ -3862,7 +4122,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -3915,6 +4175,7 @@ export interface McpToolMap {
   "memory_task_refs": { input: MemoryTaskRefsInput; output: MemoryTaskRefsOutput };
   "memory_write": { input: MemoryWriteInput; output: MemoryWriteOutput };
   "model_health": { input: ModelHealthInput; output: ModelHealthOutput };
+  "pr_review_context": { input: PrReviewContextInput; output: PrReviewContextOutput };
   "project_add_from_github": { input: ProjectAddFromGithubInput; output: ProjectAddFromGithubOutput };
   "project_branches": { input: ProjectBranchesInput; output: ProjectBranchesOutput };
   "project_config_get": { input: ProjectConfigGetInput; output: ProjectConfigGetOutput };
@@ -3922,6 +4183,8 @@ export interface McpToolMap {
   "project_environment_config_get": { input: ProjectEnvironmentConfigGetInput; output: ProjectEnvironmentConfigGetOutput };
   "project_environment_config_reset": { input: ProjectEnvironmentConfigResetInput; output: ProjectEnvironmentConfigResetOutput };
   "project_environment_config_set": { input: ProjectEnvironmentConfigSetInput; output: ProjectEnvironmentConfigSetOutput };
+  "project_graph_exclusions_get": { input: ProjectGraphExclusionsGetInput; output: ProjectGraphExclusionsGetOutput };
+  "project_graph_exclusions_set": { input: ProjectGraphExclusionsSetInput; output: ProjectGraphExclusionsSetOutput };
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
   "propose_adr_accept": { input: ProposeAdrAcceptInput; output: ProposeAdrAcceptOutput };

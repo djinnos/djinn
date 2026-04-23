@@ -35,9 +35,9 @@ const ProjectSelectorState = ({ selectedId }: { selectedId: string | null }) => 
 
   useEffect(() => {
     const projects = [
-      { id: 'proj-1', name: 'DjinnOS Desktop', path: '/workspace/djinnos-desktop' },
-      { id: 'proj-2', name: 'API Platform', path: '/workspace/api-platform' },
-      { id: 'proj-3', name: 'Onboarding Improvements', path: '/workspace/onboarding-improvements' },
+      { id: 'proj-1', name: 'DjinnOS Desktop', github_owner: 'djinnos', github_repo: 'desktop' },
+      { id: 'proj-2', name: 'API Platform', github_owner: 'djinnos', github_repo: 'api' },
+      { id: 'proj-3', name: 'Onboarding Improvements', github_owner: 'djinnos', github_repo: 'onboarding' },
     ] satisfies Project[];
 
     setProjects(projects);

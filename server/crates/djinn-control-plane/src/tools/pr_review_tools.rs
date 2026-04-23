@@ -14,19 +14,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
     BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup, DeprecatedHit, HotPathHit,
-    HotspotEntry, ImpactEntry, ImpactResult, TouchedSymbol,
+    HotspotEntry, ImpactEntry, ImpactResult, ProjectCtx, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::{ErrorOr, ErrorResponse};
+use djinn_db::ProjectRepository;
 
 // ── Request types ──────────────────────────────────────────────────────────────
 
 /// Input parameters for the `pr_review_context` meta-tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PrReviewContextParams {
-    /// Absolute path to the project root. Used both for `git rev-parse`
-    /// and as the lookup key into the warmed canonical graph.
-    pub project_path: String,
+    /// Project identifier — either the UUID (`project_id`) or the
+    /// canonical `"owner/repo"` slug. The handler resolves it to the
+    /// server-managed clone path via `djinn_core::paths::project_dir`
+    /// before dispatching to the graph backend.
+    pub project: String,
     /// Hunks parsed from `git diff --unified=0 base..head`. Must be
     /// non-empty for the tool to return useful signal.
     pub changed_ranges: Vec<ChangedRange>,
@@ -261,13 +264,37 @@ impl DjinnMcpServer {
     ) -> Result<PrReviewContextResponse, String> {
         let caps = default_caps(&params.caps);
         let changed_ranges_count = params.changed_ranges.len();
-        let base_commit = resolve_base_commit(&params.project_path);
+
+        // Resolve `project` (UUID or slug) to (project_id, clone_path) once;
+        // every bridge call below reuses the same `ProjectCtx`.
+        let project_repo =
+            ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_id = project_repo
+            .resolve(&params.project)
+            .await
+            .map_err(|e| format!("project lookup failed: {e}"))?
+            .ok_or_else(|| format!("project not found: {}", params.project))?;
+        let project = project_repo
+            .get(&project_id)
+            .await
+            .map_err(|e| format!("project lookup failed: {e}"))?
+            .ok_or_else(|| format!("project not found: {}", params.project))?;
+        let clone_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+                .to_string_lossy()
+                .into_owned();
+        let ctx = ProjectCtx {
+            id: project.id.clone(),
+            clone_path: clone_path.clone(),
+        };
+
+        let base_commit = resolve_base_commit(&clone_path);
 
         // Step 2: diff_touches on base graph.
         let diff = self
             .state
             .repo_graph()
-            .diff_touches(&params.project_path, &params.changed_ranges)
+            .diff_touches(&ctx, &params.changed_ranges)
             .await?;
         let mut touched_symbols = diff.touched_symbols;
         touched_symbols.truncate(caps.touched_symbols);
@@ -283,7 +310,7 @@ impl DjinnMcpServer {
             let impact = self
                 .state
                 .repo_graph()
-                .impact(&params.project_path, &ts.key, 3, None)
+                .impact(&ctx, &ts.key, 3, None)
                 .await?;
             if let ImpactResult::Detailed(mut entries) = impact {
                 let total = entries.len();
@@ -307,7 +334,7 @@ impl DjinnMcpServer {
         let hotspots = self
             .state
             .repo_graph()
-            .hotspots(&params.project_path, window_days, None, 200)
+            .hotspots(&ctx, window_days, None, 200)
             .await?;
         let affected_set: std::collections::HashSet<&str> =
             affected_files.iter().map(|s| s.as_str()).collect();
@@ -322,7 +349,7 @@ impl DjinnMcpServer {
         let cycles = self
             .state
             .repo_graph()
-            .cycles(&params.project_path, Some("symbol"), 2)
+            .cycles(&ctx, Some("symbol"), 2)
             .await?;
         let touched_set: std::collections::HashSet<&str> =
             touched_symbol_keys.iter().map(|s| s.as_str()).collect();
@@ -337,7 +364,7 @@ impl DjinnMcpServer {
         let deprecated = self
             .state
             .repo_graph()
-            .deprecated_callers(&params.project_path, 500)
+            .deprecated_callers(&ctx, 500)
             .await?;
         let mut touched_deprecated: Vec<DeprecatedHit> = deprecated
             .into_iter()
@@ -359,7 +386,7 @@ impl DjinnMcpServer {
                 self.state
                     .repo_graph()
                     .touches_hot_path(
-                        &params.project_path,
+                        &ctx,
                         &params.seed_entries,
                         &params.seed_sinks,
                         &touched_symbol_keys,
@@ -377,7 +404,7 @@ impl DjinnMcpServer {
                 let all = self
                     .state
                     .repo_graph()
-                    .boundary_check(&params.project_path, &params.boundary_rules)
+                    .boundary_check(&ctx, &params.boundary_rules)
                     .await?;
                 all.into_iter()
                     .filter(|v| {
@@ -585,13 +612,13 @@ mod tests {
     #[test]
     fn parses_params_from_json() {
         let json = serde_json::json!({
-            "project_path": "/tmp/repo",
+            "project": "owner/repo",
             "changed_ranges": [
                 {"file": "a.rs", "start_line": 1, "end_line": 10}
             ],
         });
         let p: PrReviewContextParams = serde_json::from_value(json).unwrap();
-        assert_eq!(p.project_path, "/tmp/repo");
+        assert_eq!(p.project, "owner/repo");
         assert_eq!(p.changed_ranges.len(), 1);
         assert!(p.seed_entries.is_empty());
         assert!(p.caps.is_none());

@@ -143,16 +143,18 @@ pub(crate) async fn call_lsp(
 pub(crate) async fn call_code_graph(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    project_id: &str,
     project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let p: CodeGraphParams = parse_args(arguments)?;
     let mcp_state = state.to_mcp_state();
     let graph_ops = mcp_state.repo_graph();
-    // Use worktree project path if user did not supply an explicit project_path
-    let effective_path = if p.project_path.is_empty() {
-        project_path
-    } else {
-        &p.project_path
+    // Build the resolved ProjectCtx once; pass by reference to each op.
+    // We ignore any caller-supplied `project_path` in `p` — the task's
+    // resolved project_id + its canonical clone path are authoritative.
+    let ctx = djinn_control_plane::bridge::ProjectCtx {
+        id: project_id.to_string(),
+        clone_path: project_path.to_string(),
     };
 
     let result: serde_json::Value = match p.operation.as_str() {
@@ -164,7 +166,7 @@ pub(crate) async fn call_code_graph(
                 .ok_or("'key' is required for 'neighbors'")?;
             let neighbors = graph_ops
                 .neighbors(
-                    effective_path,
+                    &ctx,
                     key,
                     p.direction.as_deref(),
                     p.group_by.as_deref(),
@@ -176,7 +178,7 @@ pub(crate) async fn call_code_graph(
             let limit = p.limit.unwrap_or(20);
             let ranked = graph_ops
                 .ranked(
-                    effective_path,
+                    &ctx,
                     p.kind_filter.as_deref(),
                     p.sort_by.as_deref(),
                     limit,
@@ -190,7 +192,7 @@ pub(crate) async fn call_code_graph(
                 .as_deref()
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'implementations'")?;
-            let impls = graph_ops.implementations(effective_path, key).await?;
+            let impls = graph_ops.implementations(&ctx, key).await?;
             serde_json::to_value(&impls).map_err(|e| format!("serialize error: {e}"))?
         }
         "impact" => {
@@ -201,7 +203,7 @@ pub(crate) async fn call_code_graph(
                 .ok_or("'key' is required for 'impact'")?;
             let depth = p.limit.unwrap_or(3);
             let impact = graph_ops
-                .impact(effective_path, key, depth, p.group_by.as_deref())
+                .impact(&ctx, key, depth, p.group_by.as_deref())
                 .await?;
             serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -213,14 +215,14 @@ pub(crate) async fn call_code_graph(
                 .ok_or("'query' is required for 'search'")?;
             let limit = p.limit.unwrap_or(20);
             let hits = graph_ops
-                .search(effective_path, query, p.kind_filter.as_deref(), limit)
+                .search(&ctx, query, p.kind_filter.as_deref(), limit)
                 .await?;
             serde_json::to_value(&hits).map_err(|e| format!("serialize error: {e}"))?
         }
         "cycles" => {
             let min_size = p.min_size.unwrap_or(2);
             let cycles = graph_ops
-                .cycles(effective_path, p.kind_filter.as_deref(), min_size)
+                .cycles(&ctx, p.kind_filter.as_deref(), min_size)
                 .await?;
             serde_json::to_value(&cycles).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -228,7 +230,7 @@ pub(crate) async fn call_code_graph(
             let limit = p.limit.unwrap_or(50);
             let orphans = graph_ops
                 .orphans(
-                    effective_path,
+                    &ctx,
                     p.kind_filter.as_deref(),
                     p.visibility.as_deref(),
                     limit,
@@ -247,7 +249,7 @@ pub(crate) async fn call_code_graph(
                     .filter(|s| !s.is_empty())
                     .ok_or("'to' is required for 'path'")?;
             let path = graph_ops
-                .path(effective_path, from, to, p.max_depth)
+                .path(&ctx, from, to, p.max_depth)
                 .await?;
             serde_json::to_value(&path).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -265,7 +267,7 @@ pub(crate) async fn call_code_graph(
             let limit = p.limit.unwrap_or(100);
             let edges = graph_ops
                 .edges(
-                    effective_path,
+                    &ctx,
                     from_glob,
                     to_glob,
                     p.edge_kind.as_deref(),
@@ -280,7 +282,7 @@ pub(crate) async fn call_code_graph(
                 .as_deref()
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'describe'")?;
-            let description = graph_ops.describe(effective_path, key).await?;
+            let description = graph_ops.describe(&ctx, key).await?;
             serde_json::to_value(&description).map_err(|e| format!("serialize error: {e}"))?
         }
         other => {

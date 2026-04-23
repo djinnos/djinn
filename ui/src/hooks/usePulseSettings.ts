@@ -24,13 +24,13 @@ export interface PulseSettings {
 
 const EMPTY: PulseSettings = { excluded_paths: [], orphan_ignore: [] };
 
-function queryKey(projectPath: string | null) {
-  return ["pulse", "settings", projectPath] as const;
+function queryKey(projectSlug: string | null) {
+  return ["pulse", "settings", projectSlug] as const;
 }
 
-async function fetchSettings(projectPath: string): Promise<PulseSettings> {
+async function fetchSettings(projectSlug: string): Promise<PulseSettings> {
   const response = await callMcpTool("project_config_get", {
-    project: projectPath,
+    project: projectSlug,
   });
   // The server returns `status: "ok"` on success and `"error: ..."`
   // on failure. On error we fall through to empty rather than
@@ -43,12 +43,12 @@ async function fetchSettings(projectPath: string): Promise<PulseSettings> {
 }
 
 async function writeList(
-  projectPath: string,
+  projectSlug: string,
   key: "graph_excluded_paths" | "graph_orphan_ignore",
   items: string[],
 ): Promise<PulseSettings> {
   const response = await callMcpTool("project_config_set", {
-    project: projectPath,
+    project: projectSlug,
     key,
     value: JSON.stringify(items),
   });
@@ -61,13 +61,13 @@ async function writeList(
   };
 }
 
-export function usePulseSettings(projectPath: string | null) {
+export function usePulseSettings(projectSlug: string | null) {
   const queryClient = useQueryClient();
 
   const query = useQuery({
-    queryKey: queryKey(projectPath),
-    queryFn: () => fetchSettings(projectPath!),
-    enabled: !!projectPath,
+    queryKey: queryKey(projectSlug),
+    queryFn: () => fetchSettings(projectSlug!),
+    enabled: !!projectSlug,
     staleTime: 60_000,
   });
 
@@ -78,10 +78,10 @@ export function usePulseSettings(projectPath: string | null) {
       key: "graph_excluded_paths" | "graph_orphan_ignore";
       items: string[];
     }) => {
-      if (!projectPath) {
-        throw new Error("no project path");
+      if (!projectSlug) {
+        throw new Error("no project slug");
       }
-      return writeList(projectPath, args.key, args.items);
+      return writeList(projectSlug, args.key, args.items);
     },
     onMutate: async (args) => {
       // Optimistic update: write the new list into the cache before
@@ -89,10 +89,10 @@ export function usePulseSettings(projectPath: string | null) {
       // on the next paint. The server's canonicalization (trim /
       // dedup) overwrites this in onSuccess — good enough for the
       // typical path where the user's input is already clean.
-      if (!projectPath) return;
-      await queryClient.cancelQueries({ queryKey: queryKey(projectPath) });
-      const prev = queryClient.getQueryData<PulseSettings>(queryKey(projectPath));
-      queryClient.setQueryData<PulseSettings>(queryKey(projectPath), {
+      if (!projectSlug) return;
+      await queryClient.cancelQueries({ queryKey: queryKey(projectSlug) });
+      const prev = queryClient.getQueryData<PulseSettings>(queryKey(projectSlug));
+      queryClient.setQueryData<PulseSettings>(queryKey(projectSlug), {
         excluded_paths:
           args.key === "graph_excluded_paths"
             ? args.items
@@ -106,14 +106,14 @@ export function usePulseSettings(projectPath: string | null) {
     },
     onError: (_err, _args, ctx) => {
       // Roll back to whatever the cache held before onMutate wrote.
-      if (!projectPath) return;
+      if (!projectSlug) return;
       if (ctx?.prev) {
-        queryClient.setQueryData(queryKey(projectPath), ctx.prev);
+        queryClient.setQueryData(queryKey(projectSlug), ctx.prev);
       }
     },
     onSuccess: (data) => {
-      if (!projectPath) return;
-      queryClient.setQueryData(queryKey(projectPath), data);
+      if (!projectSlug) return;
+      queryClient.setQueryData(queryKey(projectSlug), data);
     },
   });
 

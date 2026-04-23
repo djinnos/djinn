@@ -4,13 +4,13 @@ import { callMcpTool } from "@/api/mcpClient";
 /**
  * True when an architect-role session is currently dispatched or running
  * for the given project. Polls session_active every 10s when the tab is
- * visible. Returns false on error or when no project path is available.
+ * visible. Returns false on error or when no project slug is available.
  */
-export function useArchitectActive(projectPath: string | null | undefined): boolean {
+export function useArchitectActive(projectSlug: string | null | undefined): boolean {
   const { data } = useQuery({
-    queryKey: ["pulse", "architect-active", projectPath],
+    queryKey: ["pulse", "architect-active", projectSlug],
     queryFn: async () => {
-      const result = await callMcpTool("session_active", { project: projectPath! });
+      const result = await callMcpTool("session_active", { project: projectSlug! });
       const sessions = result.sessions ?? [];
       return sessions.some((s) => {
         const role = (s.agent_type ?? "").toLowerCase();
@@ -19,7 +19,7 @@ export function useArchitectActive(projectPath: string | null | undefined): bool
         return role === "architect" && live;
       });
     },
-    enabled: !!projectPath,
+    enabled: !!projectSlug,
     staleTime: 10_000,
     refetchInterval: 10_000,
     refetchOnWindowFocus: true,

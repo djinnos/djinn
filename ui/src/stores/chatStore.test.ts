@@ -18,7 +18,7 @@ describe('chatStore', () => {
     const state = useChatStore.getState();
     expect(state.activeSessionId).toBe(id);
     expect(state.sessions[0].id).toBe(id);
-    expect(state.sessions[0].projectPath).toBe('/p');
+    expect(state.sessions[0].projectSlug).toBe('/p');
     expect(state.messagesBySession[id]).toEqual([]);
   });
 

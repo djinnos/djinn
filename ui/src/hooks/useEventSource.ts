@@ -29,7 +29,10 @@ const RECONNECT_MULTIPLIER = 2;
 export function useEventSource(projectId?: string | null) {
   const selectedProject = useSelectedProject();
   const isAll = projectId === ALL_PROJECTS;
-  const selectedProjectPath = isAll ? null : (selectedProject?.path ?? null);
+  const selectedProjectSlug =
+    isAll || !selectedProject
+      ? null
+      : `${selectedProject.github_owner}/${selectedProject.github_repo}`;
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
@@ -75,12 +78,12 @@ export function useEventSource(projectId?: string | null) {
     taskStore.getState().clearTasks();
     epicStore.getState().clearEpics();
 
-    const hydrateSnapshot = async (projectPath: string | null) => {
+    const hydrateSnapshot = async (projectSlug: string | null) => {
       try {
-        const allPaths = isAll
-          ? projectStore.getState().projects.map((p) => p.path).filter(Boolean) as string[]
+        const allSlugs = isAll
+          ? projectStore.getState().projects.map((p) => `${p.github_owner}/${p.github_repo}`)
           : undefined;
-        const snapshot = await fetchKanbanSnapshot(projectPath, allPaths);
+        const snapshot = await fetchKanbanSnapshot(projectSlug, allSlugs);
         if (!isActive) return;
         taskStore.getState().setTasks(snapshot.tasks);
         epicStore.getState().setEpics(snapshot.epics);
@@ -92,28 +95,28 @@ export function useEventSource(projectId?: string | null) {
     // Initialize SSE event handlers (wire stores to SSE events)
     cleanupHandlersRef.current = initSSEEventHandlers();
 
-    // When the project path isn't available yet (projects still loading),
+    // When the project slug isn't available yet (projects still loading),
     // subscribe directly to the project store so we hydrate as soon as
-    // the path resolves — without relying on a React re-render to re-run
+    // the slug resolves — without relying on a React re-render to re-run
     // this effect.
-    let unsubProjectPath: (() => void) | undefined;
-    if (!selectedProjectPath && projectId) {
-      unsubProjectPath = projectStore.subscribe((state) => {
+    let unsubProjectSlug: (() => void) | undefined;
+    if (!selectedProjectSlug && projectId) {
+      unsubProjectSlug = projectStore.subscribe((state) => {
         if (!isActive) return;
         if (isAll) {
           // ALL_PROJECTS mode: wait for projects to load, then hydrate all
-          const paths = state.projects.map((p) => p.path).filter(Boolean) as string[];
-          if (paths.length > 0) {
-            unsubProjectPath?.();
-            unsubProjectPath = undefined;
+          const slugs = state.projects.map((p) => `${p.github_owner}/${p.github_repo}`);
+          if (slugs.length > 0) {
+            unsubProjectSlug?.();
+            unsubProjectSlug = undefined;
             void hydrateSnapshot(null);
           }
         } else {
           const project = state.getSelectedProject();
-          if (project?.path) {
-            unsubProjectPath?.();
-            unsubProjectPath = undefined;
-            void hydrateSnapshot(project.path);
+          if (project?.github_owner && project?.github_repo) {
+            unsubProjectSlug?.();
+            unsubProjectSlug = undefined;
+            void hydrateSnapshot(`${project.github_owner}/${project.github_repo}`);
           }
         }
       });
@@ -121,7 +124,7 @@ export function useEventSource(projectId?: string | null) {
 
     const connect = async () => {
       try {
-        await hydrateSnapshot(selectedProjectPath);
+        await hydrateSnapshot(selectedProjectSlug);
 
         // Build URL with Last-Event-ID if available
         let url = `${getServerBaseUrl()}/events`;
@@ -141,8 +144,11 @@ export function useEventSource(projectId?: string | null) {
         es.onopen = () => {
           if (!isActive) return;
           if (sseStore.getState().reconnectAttempt > 0) {
-            const currentPath = projectStore.getState().getSelectedProject()?.path ?? selectedProjectPath;
-            void hydrateSnapshot(currentPath);
+            const current = projectStore.getState().getSelectedProject();
+            const currentSlug = current
+              ? `${current.github_owner}/${current.github_repo}`
+              : selectedProjectSlug;
+            void hydrateSnapshot(currentSlug);
           }
           sseStore.getState().resetReconnectAttempt();
           sseStore.getState().setConnected(true);
@@ -227,8 +233,11 @@ export function useEventSource(projectId?: string | null) {
             if (!isActive) return;
             try {
               if (eventType === "lagged") {
-                const currentPath = projectStore.getState().getSelectedProject()?.path ?? selectedProjectPath;
-                void hydrateSnapshot(currentPath);
+                const current = projectStore.getState().getSelectedProject();
+                const currentSlug = current
+                  ? `${current.github_owner}/${current.github_repo}`
+                  : selectedProjectSlug;
+                void hydrateSnapshot(currentSlug);
                 return;
               }
 
@@ -297,7 +306,7 @@ export function useEventSource(projectId?: string | null) {
 
     return () => {
       isActive = false;
-      unsubProjectPath?.();
+      unsubProjectSlug?.();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
@@ -313,7 +322,7 @@ export function useEventSource(projectId?: string | null) {
         cleanupHandlersRef.current = null;
       }
     };
-  }, [projectId, selectedProjectPath]);
+  }, [projectId, selectedProjectSlug]);
 
   return {
     eventSource: eventSourceRef.current,

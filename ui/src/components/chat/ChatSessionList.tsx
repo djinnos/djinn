@@ -43,9 +43,12 @@ export function ChatSessionList({ onSelectSession, onNewChat }: ChatSessionListP
   }, [search]);
 
   const filteredSessions = useMemo(() => {
-    const projectPath = isAllProjects ? null : (selectedProject?.path ?? null);
+    const projectSlug =
+      isAllProjects || !selectedProject
+        ? null
+        : `${selectedProject.github_owner}/${selectedProject.github_repo}`;
     return sessions
-      .filter((session) => session.projectPath === projectPath)
+      .filter((session) => session.projectSlug === projectSlug)
       .filter((session) => session.title.toLowerCase().includes(debouncedSearch))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [sessions, selectedProject, isAllProjects, debouncedSearch]);

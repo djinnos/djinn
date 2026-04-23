@@ -84,8 +84,8 @@ function TaskActions({ task }: { task: Task }) {
   const { busy: killing, killTask } = useExecutionControl();
   const busy = transitioning || killing;
 
-  if (!project?.path) return null;
-  const projectPath = project.path;
+  if (!project?.github_owner || !project?.github_repo) return null;
+  const projectSlug = `${project.github_owner}/${project.github_repo}`;
 
   const isOpen = task.status === "open";
   const isInProgress = task.status === "in_progress";
@@ -99,7 +99,7 @@ function TaskActions({ task }: { task: Task }) {
           size="sm"
           variant="default"
           disabled={busy}
-          onClick={() => transition(task.id, projectPath, "start")}
+          onClick={() => transition(task.id, projectSlug, "start")}
           className="gap-1.5 bg-emerald-600 hover:bg-emerald-700"
         >
           <HugeiconsIcon icon={PlayIcon} size={14} />
@@ -123,7 +123,7 @@ function TaskActions({ task }: { task: Task }) {
           size="sm"
           variant="outline"
           disabled={busy}
-          onClick={() => transition(task.id, projectPath, "reopen", "Reopened from desktop")}
+          onClick={() => transition(task.id, projectSlug, "reopen", "Reopened from desktop")}
           className="gap-1.5"
         >
           <HugeiconsIcon icon={Refresh01Icon} size={14} />
@@ -135,7 +135,7 @@ function TaskActions({ task }: { task: Task }) {
           size="sm"
           variant="ghost"
           disabled={busy}
-          onClick={() => transition(task.id, projectPath, "force_close", "Closed from desktop")}
+          onClick={() => transition(task.id, projectSlug, "force_close", "Closed from desktop")}
           className="gap-1.5 text-muted-foreground hover:text-destructive"
         >
           <HugeiconsIcon icon={Cancel01Icon} size={14} />

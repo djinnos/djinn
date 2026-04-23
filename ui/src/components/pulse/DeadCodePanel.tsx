@@ -15,7 +15,7 @@ import {
 } from "./pulseTypes";
 
 interface DeadCodePanelProps {
-  projectPath: string;
+  projectSlug: string;
   onIgnoreFile: (filePath: string) => void;
 }
 
@@ -210,16 +210,16 @@ function ConfidenceSection({
 }
 
 export function DeadCodePanel({
-  projectPath,
+  projectSlug,
   onIgnoreFile,
 }: DeadCodePanelProps) {
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ["pulse", "orphans", projectPath],
+    queryKey: ["pulse", "orphans", projectSlug],
     queryFn: async () => {
       const raw = await callMcpTool("code_graph", {
-        project_path: projectPath,
+        project: projectSlug,
         operation: "orphans",
         kind_filter: "symbol",
         limit: 500,

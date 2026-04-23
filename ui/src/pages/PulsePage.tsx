@@ -63,20 +63,21 @@ function CenteredMessage({
 
 export function PulsePage() {
   const project = useSelectedProject();
-  const projectPath = project?.path ?? null;
+  const projectSlug =
+    project ? `${project.github_owner}/${project.github_repo}` : null;
   const projectId = project?.id ?? null;
-  const architectActive = useArchitectActive(projectPath);
+  const architectActive = useArchitectActive(projectSlug);
 
   const { data, isLoading } = useQuery({
-    queryKey: ["pulse", "status", projectPath],
+    queryKey: ["pulse", "status", projectSlug],
     queryFn: async () => {
       const result = await callMcpTool("code_graph", {
-        project_path: projectPath!,
+        project: projectSlug!,
         operation: "status",
       });
       return isPulseStatus(result) ? result : null;
     },
-    enabled: !!projectPath,
+    enabled: !!projectSlug,
     staleTime: 30_000,
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
@@ -108,7 +109,7 @@ export function PulsePage() {
           />
         ) : (
           <ReadyState
-            projectPath={projectPath!}
+            projectSlug={projectSlug!}
             lastWarmAt={data?.last_warm_at ?? null}
             pinnedCommit={data?.pinned_commit ?? null}
             commitsSincePin={data?.commits_since_pin ?? null}
@@ -175,13 +176,13 @@ function NotWarmedView({
 }
 
 function ReadyState({
-  projectPath,
+  projectSlug,
   lastWarmAt,
   pinnedCommit,
   commitsSincePin,
   architectActive,
 }: {
-  projectPath: string;
+  projectSlug: string;
   lastWarmAt: string | null;
   pinnedCommit: string | null;
   commitsSincePin: number | null;
@@ -190,7 +191,7 @@ function ReadyState({
   // Exclusions are applied server-side now; we only need the hook
   // here for the Dead-code panel's "mark not actually dead" callback,
   // which still writes through to project_config via `addOrphanIgnore`.
-  const { addOrphanIgnore } = usePulseSettings(projectPath);
+  const { addOrphanIgnore } = usePulseSettings(projectSlug);
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 [&>*]:shrink-0">
       <div className="flex items-start gap-2">
@@ -200,15 +201,15 @@ function ReadyState({
             pinnedCommit={pinnedCommit}
             commitsSincePin={commitsSincePin}
             architectActive={architectActive}
-            actions={<AskArchitectDialog projectPath={projectPath} />}
+            actions={<AskArchitectDialog projectSlug={projectSlug} />}
           />
         </div>
-        <PulseSettingsSheet projectPath={projectPath} />
+        <PulseSettingsSheet projectSlug={projectSlug} />
       </div>
-      <HotspotsPanel projectPath={projectPath} />
-      <DeadCodePanel projectPath={projectPath} onIgnoreFile={addOrphanIgnore} />
-      <CyclesPanel projectPath={projectPath} />
-      <BlastRadiusPanel projectPath={projectPath} />
+      <HotspotsPanel projectSlug={projectSlug} />
+      <DeadCodePanel projectSlug={projectSlug} onIgnoreFile={addOrphanIgnore} />
+      <CyclesPanel projectSlug={projectSlug} />
+      <BlastRadiusPanel projectSlug={projectSlug} />
     </div>
   );
 }

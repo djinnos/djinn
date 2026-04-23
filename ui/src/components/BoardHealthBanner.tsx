@@ -22,25 +22,25 @@ interface BoardHealthData {
   failedRun: VerificationRun | null;
 }
 
-function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
+function useBoardHealth(projectSlugs: string[]): BoardHealthData | null {
   const [projectIssues, setProjectIssues] = useState<Record<string, string>>(
     {}
   );
   const [prErrors, setPrErrors] = useState<PrError[]>([]);
 
-  // Stabilize the paths array so deps don't fire on every render
-  const pathsKey = projectPaths.slice().sort().join("\0");
-  const stablePaths = useMemo(() => projectPaths, [pathsKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  const pathSet = useMemo(() => new Set(stablePaths), [stablePaths]);
+  // Stabilize the slugs array so deps don't fire on every render
+  const slugsKey = projectSlugs.slice().sort().join("\0");
+  const stableSlugs = useMemo(() => projectSlugs, [slugsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const slugSet = useMemo(() => new Set(stableSlugs), [stableSlugs]);
 
   const failedRun = useStore(
     verificationStore,
     useCallback(
       (state) => {
-        if (pathSet.size === 0) return null;
+        if (slugSet.size === 0) return null;
         let latest: VerificationRun | null = null;
         for (const run of state.runs.values()) {
-          if (!pathSet.has(run.projectId)) continue;
+          if (!slugSet.has(run.projectId)) continue;
           if (
             !latest ||
             new Date(run.startedAt).getTime() >
@@ -51,20 +51,20 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
         }
         return latest?.status === "failed" ? latest : null;
       },
-      [pathSet]
+      [slugSet]
     )
   );
 
   const failedSteps = failedRun?.steps.filter((s) => s.status === "failed") ?? [];
 
   useEffect(() => {
-    if (stablePaths.length === 0) return;
+    if (stableSlugs.length === 0) return;
 
     let active = true;
     const fetch = () => {
       Promise.all(
-        stablePaths.map((path) =>
-          callMcpTool("board_health", { project: path }).catch(
+        stableSlugs.map((slug) =>
+          callMcpTool("board_health", { project: slug }).catch(
             () => null as Record<string, unknown> | null
           )
         )
@@ -94,7 +94,7 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
       active = false;
       clearInterval(interval);
     };
-  }, [stablePaths]);
+  }, [stableSlugs]);
 
   const hasIssues =
     Object.keys(projectIssues).length > 0 ||
@@ -107,16 +107,16 @@ function useBoardHealth(projectPaths: string[]): BoardHealthData | null {
 }
 
 interface BoardHealthBannerProps {
-  projectPaths: string[];
+  projectSlugs: string[];
 }
 
-export function BoardHealthBanner({ projectPaths }: BoardHealthBannerProps) {
-  const health = useBoardHealth(projectPaths);
+export function BoardHealthBanner({ projectSlugs }: BoardHealthBannerProps) {
+  const health = useBoardHealth(projectSlugs);
   const [dismissed, setDismissed] = useState(false);
 
   // Reset dismissed when project selection changes
-  const pathsKey = projectPaths.slice().sort().join("\0");
-  useEffect(() => setDismissed(false), [pathsKey]);
+  const slugsKey = projectSlugs.slice().sort().join("\0");
+  useEffect(() => setDismissed(false), [slugsKey]);
 
   if (!health || dismissed) return null;
 

@@ -31,11 +31,13 @@ export function MemoryPage() {
   const noteCache = useRef(new Map<string, MemoryReadOutput>());
   const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  const projectPath = project?.path;
+  const projectSlug = project
+    ? `${project.github_owner}/${project.github_repo}`
+    : undefined;
 
   // Fetch notes list + health on project change
   const refresh = useCallback(() => {
-    if (!projectPath) return;
+    if (!projectSlug) return;
     setLoading(true);
     setSelectedNote(null);
     setSelectedNoteId(null);
@@ -44,8 +46,8 @@ export function MemoryPage() {
     noteCache.current.clear();
 
     Promise.all([
-      callMcpTool('memory_list', { project: projectPath, depth: 0 }),
-      callMcpTool('memory_health', { project: projectPath }),
+      callMcpTool('memory_list', { project: projectSlug, depth: 0 }),
+      callMcpTool('memory_health', { project: projectSlug }),
     ])
       .then(([listResult, healthResult]) => {
         setNotes(listResult.notes ?? []);
@@ -56,7 +58,7 @@ export function MemoryPage() {
         setHealth(null);
       })
       .finally(() => setLoading(false));
-  }, [projectPath]);
+  }, [projectSlug]);
 
   useEffect(() => {
     refresh();
@@ -65,7 +67,7 @@ export function MemoryPage() {
   // Select a note and fetch full content
   const handleSelectNote = useCallback(
     (note: NoteCompact | SearchResult) => {
-      if (!projectPath) return;
+      if (!projectSlug) return;
       setSelectedNoteId(note.id);
 
       const cached = noteCache.current.get(note.permalink);
@@ -75,7 +77,7 @@ export function MemoryPage() {
       }
 
       setDetailLoading(true);
-      callMcpTool('memory_read', { project: projectPath, identifier: note.permalink })
+      callMcpTool('memory_read', { project: projectSlug, identifier: note.permalink })
         .then((result) => {
           noteCache.current.set(note.permalink, result);
           setSelectedNote(result);
@@ -83,13 +85,13 @@ export function MemoryPage() {
         .catch(() => setSelectedNote(null))
         .finally(() => setDetailLoading(false));
     },
-    [projectPath],
+    [projectSlug],
   );
 
   // Navigate to a note by title (from wikilinks)
   const handleNavigateToNote = useCallback(
     (title: string) => {
-      if (!projectPath) return;
+      if (!projectSlug) return;
 
       // Try to find in the already-loaded list by title match
       const match = notes.find(
@@ -102,7 +104,7 @@ export function MemoryPage() {
 
       // Fall back to memory_read by title (the server resolves title → permalink)
       setDetailLoading(true);
-      callMcpTool('memory_read', { project: projectPath, identifier: title })
+      callMcpTool('memory_read', { project: projectSlug, identifier: title })
         .then((result) => {
           if (result.id) {
             setSelectedNoteId(result.id);
@@ -115,7 +117,7 @@ export function MemoryPage() {
         .catch(() => setSelectedNote(null))
         .finally(() => setDetailLoading(false));
     },
-    [projectPath, notes, handleSelectNote],
+    [projectSlug, notes, handleSelectNote],
   );
 
   // Debounced search
@@ -130,16 +132,16 @@ export function MemoryPage() {
         return;
       }
 
-      if (!projectPath) return;
+      if (!projectSlug) return;
 
       setSearchResults(null); // show loading state
       searchTimer.current = setTimeout(() => {
-        callMcpTool('memory_search', { project: projectPath, query: query.trim() })
+        callMcpTool('memory_search', { project: projectSlug, query: query.trim() })
           .then((result) => setSearchResults(result.results ?? []))
           .catch(() => setSearchResults([]));
       }, 200);
     },
-    [projectPath],
+    [projectSlug],
   );
 
   if (isAll || !project) {

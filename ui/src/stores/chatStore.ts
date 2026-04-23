@@ -7,7 +7,7 @@ const AUTO_TITLE_MAX_LENGTH = 50;
 export interface ChatSession {
   id: string;
   title: string;
-  projectPath: string | null;
+  projectSlug: string | null;
   model: string | null;
   createdAt: number;
   updatedAt: number;
@@ -42,7 +42,7 @@ export interface ChatState {
   globalDraft: string;
   activeSessionId: string | null;
 
-  createSession: (projectPath?: string | null, model?: string | null) => string;
+  createSession: (projectSlug?: string | null, model?: string | null) => string;
   deleteSession: (sessionId: string) => void;
   setActiveSession: (sessionId: string | null) => void;
   setSessionModel: (sessionId: string, model: string) => void;
@@ -53,7 +53,7 @@ export interface ChatState {
   clearStreaming: (sessionId: string) => void;
   setThinkingStartTime: (sessionId: string, startTime: number | null) => void;
   setDraft: (sessionId: string | null, text: string) => void;
-  getSessionsForProject: (projectPath: string | null) => ChatSession[];
+  getSessionsForProject: (projectSlug: string | null) => ChatSession[];
 }
 
 function generateId(): string {
@@ -83,13 +83,13 @@ export const useChatStore = create<ChatState>()(
       globalDraft: '',
       activeSessionId: null,
 
-      createSession: (projectPath = null, model = null) => {
+      createSession: (projectSlug = null, model = null) => {
         const now = Date.now();
         const id = generateId();
         const newSession: ChatSession = {
           id,
           title: 'New Chat',
-          projectPath,
+          projectSlug,
           model,
           createdAt: now,
           updatedAt: now,
@@ -292,8 +292,8 @@ export const useChatStore = create<ChatState>()(
         }
       },
 
-      getSessionsForProject: (projectPath) => {
-        return get().sessions.filter((session) => session.projectPath === projectPath);
+      getSessionsForProject: (projectSlug) => {
+        return get().sessions.filter((session) => session.projectSlug === projectSlug);
       },
     }),
     {

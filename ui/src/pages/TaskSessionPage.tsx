@@ -153,7 +153,9 @@ export function TaskSessionPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
   const selectedProject = useSelectedProject();
-  const projectPath = selectedProject?.path ?? null;
+  const projectSlug = selectedProject
+    ? `${selectedProject.github_owner}/${selectedProject.github_repo}`
+    : null;
   const tasks = useTaskStore((s) => s.tasks);
   const [task, setTask] = useState<Task | null>(null);
 
@@ -176,7 +178,7 @@ export function TaskSessionPage() {
 
   const { timeline, sessions, loading, error, streamingText, streamingThinking } = useSessionMessages(
     taskId ?? null,
-    projectPath
+    projectSlug
   );
 
   // Build setup verification view for the session thread

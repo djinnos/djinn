@@ -24,7 +24,7 @@ function ChatSessionListSeeded({
   activeSessionId?: string;
 }) {
   useEffect(() => {
-    // Set project store to "all projects" so sessions with null projectPath are visible
+    // Set project store to "all projects" so sessions with null projectSlug are visible
     projectStore.setState({ selectedProjectId: '__all__' });
 
     // Seed chat store
@@ -32,7 +32,7 @@ function ChatSessionListSeeded({
       sessions: sessions.map((s) => ({
         id: s.id,
         title: s.title,
-        projectPath: null,
+        projectSlug: null,
         model: 'claude-sonnet-4-6',
         createdAt: s.updatedAt - 300_000,
         updatedAt: s.updatedAt,

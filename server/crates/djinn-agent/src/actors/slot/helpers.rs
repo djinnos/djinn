@@ -835,33 +835,19 @@ pub(crate) async fn build_planner_patrol_context(
     }
 
     let graph_ops = app_state.repo_graph_ops.clone()?;
+    // `task.project_id` is the canonical project identifier; the
+    // bridge requires `(id, clone_path)` so pack both into ctx.
+    let ctx = djinn_control_plane::bridge::ProjectCtx {
+        id: task.project_id.clone(),
+        clone_path: project_path.to_string(),
+    };
     let ranked = graph_ops
-        .ranked(project_path, Some("file"), Some("pagerank"), 20)
+        .ranked(&ctx, Some("file"), Some("pagerank"), 20)
         .await
         .ok()
         .unwrap_or_default();
 
-    let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    // Reverse-parse the canonical `{projects_root}/{owner}/{repo}` clone-path
-    // shape to look up the project by GitHub coords.
-    let owner_repo = std::path::Path::new(project_path)
-        .components()
-        .rev()
-        .take(2)
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    if owner_repo.len() < 2 {
-        return None;
-    }
-    // rev().take(2) yields [repo, owner]; flip them.
-    let repo_name = &owner_repo[0];
-    let owner_name = &owner_repo[1];
-    let project_id = project_repo
-        .get_by_github(owner_name, repo_name)
-        .await
-        .ok()
-        .flatten()
-        .map(|p| p.id)?;
+    let project_id = task.project_id.clone();
     let note_repo =
         djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -1041,7 +1027,7 @@ mod tests {
         ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup,
         DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeEntry, GraphStatus, HotPathHit,
         HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult,
-        RankedNode, RepoGraphOps, SearchHit, SymbolAtHit, SymbolDescription,
+        ProjectCtx, RankedNode, RepoGraphOps, SearchHit, SymbolAtHit, SymbolDescription,
     };
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -1055,7 +1041,7 @@ mod tests {
     impl RepoGraphOps for FakeRepoGraphOps {
         async fn neighbors(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &str,
             _: Option<&str>,
             _: Option<&str>,
@@ -1065,7 +1051,7 @@ mod tests {
 
         async fn ranked(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -1073,13 +1059,13 @@ mod tests {
             Ok(self.ranked.clone())
         }
 
-        async fn implementations(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
+        async fn implementations(&self, _: &ProjectCtx, _: &str) -> Result<Vec<String>, String> {
             Err("unused in test".into())
         }
 
         async fn impact(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &str,
             _: usize,
             _: Option<&str>,
@@ -1089,7 +1075,7 @@ mod tests {
 
         async fn search(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &str,
             _: Option<&str>,
             _: usize,
@@ -1099,7 +1085,7 @@ mod tests {
 
         async fn cycles(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: Option<&str>,
             _: usize,
         ) -> Result<Vec<CycleGroup>, String> {
@@ -1108,7 +1094,7 @@ mod tests {
 
         async fn orphans(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -1118,7 +1104,7 @@ mod tests {
 
         async fn path(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &str,
             _: &str,
             _: Option<usize>,
@@ -1128,7 +1114,7 @@ mod tests {
 
         async fn edges(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &str,
             _: &str,
             _: Option<&str>,
@@ -1137,17 +1123,21 @@ mod tests {
             Err("unused in test".into())
         }
 
-        async fn describe(&self, _: &str, _: &str) -> Result<Option<SymbolDescription>, String> {
+        async fn describe(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+        ) -> Result<Option<SymbolDescription>, String> {
             Err("unused in test".into())
         }
 
-        async fn status(&self, _: &str) -> Result<GraphStatus, String> {
+        async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
             Err("unused in test".into())
         }
 
         async fn symbols_at(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &str,
             _: u32,
             _: Option<u32>,
@@ -1157,7 +1147,7 @@ mod tests {
 
         async fn diff_touches(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &[ChangedRange],
         ) -> Result<DiffTouchesResult, String> {
             Err("unused in test".into())
@@ -1165,7 +1155,7 @@ mod tests {
 
         async fn api_surface(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -1175,7 +1165,7 @@ mod tests {
 
         async fn boundary_check(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &[BoundaryRule],
         ) -> Result<Vec<BoundaryViolation>, String> {
             Err("unused in test".into())
@@ -1183,7 +1173,7 @@ mod tests {
 
         async fn hotspots(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: u32,
             _: Option<&str>,
             _: usize,
@@ -1191,16 +1181,13 @@ mod tests {
             Err("unused in test".into())
         }
 
-        async fn metrics_at(
-            &self,
-            _: &str,
-        ) -> Result<MetricsAtResult, String> {
+        async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
             Err("unused in test".into())
         }
 
         async fn dead_symbols(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &str,
             _: usize,
         ) -> Result<Vec<DeadSymbolEntry>, String> {
@@ -1209,7 +1196,7 @@ mod tests {
 
         async fn deprecated_callers(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: usize,
         ) -> Result<Vec<DeprecatedHit>, String> {
             Err("unused in test".into())
@@ -1217,7 +1204,7 @@ mod tests {
 
         async fn touches_hot_path(
             &self,
-            _: &str,
+            _: &ProjectCtx,
             _: &[String],
             _: &[String],
             _: &[String],

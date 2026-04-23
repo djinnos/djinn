@@ -15,7 +15,7 @@ import {
 } from "./pulseTypes";
 
 interface HotspotsPanelProps {
-  projectPath: string;
+  projectSlug: string;
 }
 
 function formatScore(n: number, max: number): string {
@@ -24,11 +24,11 @@ function formatScore(n: number, max: number): string {
 }
 
 function NeighborsDrilldown({
-  projectPath,
+  projectSlug,
   nodeKey,
   selfFile,
 }: {
-  projectPath: string;
+  projectSlug: string;
   nodeKey: string;
   selfFile: string;
 }) {
@@ -37,10 +37,10 @@ function NeighborsDrilldown({
   // isn't useful for "what depends on this file". `group_by: "file"` answers
   // the question we actually care about.
   const { data, isLoading, error } = useQuery({
-    queryKey: ["pulse", "neighbors", projectPath, nodeKey, "incoming", "by-file"],
+    queryKey: ["pulse", "neighbors", projectSlug, nodeKey, "incoming", "by-file"],
     queryFn: async () => {
       const raw = await callMcpTool("code_graph", {
-        project_path: projectPath,
+        project: projectSlug,
         operation: "neighbors",
         key: nodeKey,
         direction: "incoming",
@@ -123,14 +123,14 @@ function HotspotRow({
   maxRank,
   expanded,
   onToggle,
-  projectPath,
+  projectSlug,
 }: {
   index: number;
   node: RankedNode;
   maxRank: number;
   expanded: boolean;
   onToggle: () => void;
-  projectPath: string;
+  projectSlug: string;
 }) {
   const pct = maxRank > 0 ? (node.page_rank / maxRank) * 100 : 0;
   const label = node.display_name || node.key;
@@ -174,7 +174,7 @@ function HotspotRow({
       </button>
       {expanded && (
         <NeighborsDrilldown
-          projectPath={projectPath}
+          projectSlug={projectSlug}
           nodeKey={node.key}
           selfFile={node.display_name || node.key}
         />
@@ -183,14 +183,14 @@ function HotspotRow({
   );
 }
 
-export function HotspotsPanel({ projectPath }: HotspotsPanelProps) {
+export function HotspotsPanel({ projectSlug }: HotspotsPanelProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ["pulse", "ranked", projectPath, "file"],
+    queryKey: ["pulse", "ranked", projectSlug, "file"],
     queryFn: async () => {
       const raw = await callMcpTool("code_graph", {
-        project_path: projectPath,
+        project: projectSlug,
         operation: "ranked",
         kind_filter: "file",
         limit: 20,
@@ -243,7 +243,7 @@ export function HotspotsPanel({ projectPath }: HotspotsPanelProps) {
                 onToggle={() =>
                   setExpanded((prev) => (prev === node.key ? null : node.key))
                 }
-                projectPath={projectPath}
+                projectSlug={projectSlug}
               />
             ))}
           </div>

@@ -11,7 +11,7 @@ use crate::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup, DeadSymbolEntry,
     DeprecatedHit, EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry,
     ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult,
-    RankedNode, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
+    ProjectCtx, RankedNode, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -450,27 +450,35 @@ impl DjinnMcpServer {
             .to_string_lossy()
             .into_owned();
 
+        // Build the resolved `ProjectCtx` once. Inner handlers pass it
+        // straight to the `RepoGraphOps` bridge so no downstream code
+        // needs to reverse-parse `{projects_root}/{owner}/{repo}`.
+        let ctx = ProjectCtx {
+            id: params.project_id.clone(),
+            clone_path: params.project_path.clone(),
+        };
+
         let result = match params.operation.as_str() {
-            "neighbors" => self.code_graph_neighbors(&params).await,
-            "ranked" => self.code_graph_ranked(&params).await,
-            "implementations" => self.code_graph_implementations(&params).await,
-            "impact" => self.code_graph_impact(&params).await,
-            "search" => self.code_graph_search(&params).await,
-            "cycles" => self.code_graph_cycles(&params).await,
-            "orphans" => self.code_graph_orphans(&params).await,
-            "path" => self.code_graph_path(&params).await,
-            "edges" => self.code_graph_edges(&params).await,
-            "describe" => self.code_graph_describe(&params).await,
-            "status" => self.code_graph_status(&params).await,
-            "symbols_at" => self.code_graph_symbols_at(&params).await,
-            "diff_touches" => self.code_graph_diff_touches(&params).await,
-            "api_surface" => self.code_graph_api_surface(&params).await,
-            "boundary_check" => self.code_graph_boundary_check(&params).await,
-            "hotspots" => self.code_graph_hotspots(&params).await,
-            "metrics_at" => self.code_graph_metrics_at(&params).await,
-            "dead_symbols" => self.code_graph_dead_symbols(&params).await,
-            "deprecated_callers" => self.code_graph_deprecated_callers(&params).await,
-            "touches_hot_path" => self.code_graph_touches_hot_path(&params).await,
+            "neighbors" => self.code_graph_neighbors(&ctx, &params).await,
+            "ranked" => self.code_graph_ranked(&ctx, &params).await,
+            "implementations" => self.code_graph_implementations(&ctx, &params).await,
+            "impact" => self.code_graph_impact(&ctx, &params).await,
+            "search" => self.code_graph_search(&ctx, &params).await,
+            "cycles" => self.code_graph_cycles(&ctx, &params).await,
+            "orphans" => self.code_graph_orphans(&ctx, &params).await,
+            "path" => self.code_graph_path(&ctx, &params).await,
+            "edges" => self.code_graph_edges(&ctx, &params).await,
+            "describe" => self.code_graph_describe(&ctx, &params).await,
+            "status" => self.code_graph_status(&ctx, &params).await,
+            "symbols_at" => self.code_graph_symbols_at(&ctx, &params).await,
+            "diff_touches" => self.code_graph_diff_touches(&ctx, &params).await,
+            "api_surface" => self.code_graph_api_surface(&ctx, &params).await,
+            "boundary_check" => self.code_graph_boundary_check(&ctx, &params).await,
+            "hotspots" => self.code_graph_hotspots(&ctx, &params).await,
+            "metrics_at" => self.code_graph_metrics_at(&ctx, &params).await,
+            "dead_symbols" => self.code_graph_dead_symbols(&ctx, &params).await,
+            "deprecated_callers" => self.code_graph_deprecated_callers(&ctx, &params).await,
+            "touches_hot_path" => self.code_graph_touches_hot_path(&ctx, &params).await,
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
@@ -511,6 +519,7 @@ impl DjinnMcpServer {
 
     async fn code_graph_neighbors(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let key = require_key(params)?;
@@ -520,7 +529,7 @@ impl DjinnMcpServer {
             .state
             .repo_graph()
             .neighbors(
-                &params.project_path,
+                ctx,
                 key,
                 params.direction.as_deref(),
                 params.group_by.as_deref(),
@@ -559,6 +568,7 @@ impl DjinnMcpServer {
 
     async fn code_graph_ranked(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         validate_kind_filter(params.kind_filter.as_deref())?;
@@ -575,7 +585,7 @@ impl DjinnMcpServer {
             .state
             .repo_graph()
             .ranked(
-                &params.project_path,
+                ctx,
                 params.kind_filter.as_deref(),
                 params.sort_by.as_deref(),
                 fetch_limit,
@@ -594,13 +604,14 @@ impl DjinnMcpServer {
 
     async fn code_graph_implementations(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let key = require_key(params)?;
         let implementations = self
             .state
             .repo_graph()
-            .implementations(&params.project_path, key)
+            .implementations(ctx, key)
             .await?;
         Ok(CodeGraphResponse::Implementations(
             ImplementationsResponse {
@@ -612,6 +623,7 @@ impl DjinnMcpServer {
 
     async fn code_graph_impact(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let key = require_key(params)?;
@@ -620,7 +632,7 @@ impl DjinnMcpServer {
         let result = self
             .state
             .repo_graph()
-            .impact(&params.project_path, key, depth, params.group_by.as_deref())
+            .impact(ctx, key, depth, params.group_by.as_deref())
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let (impact, file_groups) = match result {
@@ -646,6 +658,7 @@ impl DjinnMcpServer {
 
     async fn code_graph_search(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let query = require_query(params)?;
@@ -656,7 +669,7 @@ impl DjinnMcpServer {
             .state
             .repo_graph()
             .search(
-                &params.project_path,
+                ctx,
                 query,
                 params.kind_filter.as_deref(),
                 fetch_limit,
@@ -678,6 +691,7 @@ impl DjinnMcpServer {
 
     async fn code_graph_cycles(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         validate_kind_filter(params.kind_filter.as_deref())?;
@@ -691,7 +705,7 @@ impl DjinnMcpServer {
             .state
             .repo_graph()
             .cycles(
-                &params.project_path,
+                ctx,
                 params.kind_filter.as_deref(),
                 fetch_floor,
             )
@@ -720,6 +734,7 @@ impl DjinnMcpServer {
 
     async fn code_graph_orphans(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         validate_kind_filter(params.kind_filter.as_deref())?;
@@ -730,7 +745,7 @@ impl DjinnMcpServer {
             .state
             .repo_graph()
             .orphans(
-                &params.project_path,
+                ctx,
                 params.kind_filter.as_deref(),
                 params.visibility.as_deref(),
                 fetch_limit,
@@ -747,19 +762,24 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Orphans(OrphansResponse { orphans }))
     }
 
-    async fn code_graph_path(&self, params: &CodeGraphParams) -> Result<CodeGraphResponse, String> {
+    async fn code_graph_path(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
         let (from, to) = require_from_to(params)?;
         let max_depth = params.max_depth.map(|v| v.max(0) as usize);
         let path = self
             .state
             .repo_graph()
-            .path(&params.project_path, from, to, max_depth)
+            .path(ctx, from, to, max_depth)
             .await?;
         Ok(CodeGraphResponse::Path(PathResponse { path }))
     }
 
     async fn code_graph_edges(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let (from_glob, to_glob) = require_globs(params)?;
@@ -772,7 +792,7 @@ impl DjinnMcpServer {
             .state
             .repo_graph()
             .edges(
-                &params.project_path,
+                ctx,
                 from_glob,
                 to_glob,
                 params.edge_kind.as_deref(),
@@ -797,13 +817,14 @@ impl DjinnMcpServer {
 
     async fn code_graph_describe(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let key = require_key(params)?;
         let description = self
             .state
             .repo_graph()
-            .describe(&params.project_path, key)
+            .describe(ctx, key)
             .await?;
         Ok(CodeGraphResponse::Describe(DescribeResponse {
             description,
@@ -812,9 +833,10 @@ impl DjinnMcpServer {
 
     async fn code_graph_status(
         &self,
-        params: &CodeGraphParams,
+        ctx: &ProjectCtx,
+        _params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let status = self.state.repo_graph().status(&params.project_path).await?;
+        let status = self.state.repo_graph().status(ctx).await?;
         Ok(CodeGraphResponse::Status(StatusResponse { status }))
     }
 
@@ -825,6 +847,7 @@ impl DjinnMcpServer {
     /// already named the file, so this is a lookup, not a discovery.
     async fn code_graph_symbols_at(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let file = params
@@ -842,7 +865,7 @@ impl DjinnMcpServer {
         let hits = self
             .state
             .repo_graph()
-            .symbols_at(&params.project_path, file, start_line, end_line)
+            .symbols_at(ctx, file, start_line, end_line)
             .await?;
         Ok(CodeGraphResponse::SymbolsAt(SymbolsAtResponse {
             file: file.to_string(),
@@ -859,6 +882,7 @@ impl DjinnMcpServer {
     /// `mod.rs`, third-party shims, etc.).
     async fn code_graph_diff_touches(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let changed_ranges = params.changed_ranges.as_deref().ok_or_else(|| {
@@ -876,7 +900,7 @@ impl DjinnMcpServer {
         let result = self
             .state
             .repo_graph()
-            .diff_touches(&params.project_path, changed_ranges)
+            .diff_touches(ctx, changed_ranges)
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let touched_symbols: Vec<TouchedSymbol> = result
@@ -894,6 +918,7 @@ impl DjinnMcpServer {
     /// Handler for `operation = "api_surface"`.
     async fn code_graph_api_surface(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         validate_visibility(params.visibility.as_deref())?;
@@ -902,7 +927,7 @@ impl DjinnMcpServer {
             .state
             .repo_graph()
             .api_surface(
-                &params.project_path,
+                ctx,
                 params.module_glob.as_deref(),
                 params.visibility.as_deref(),
                 limit.saturating_mul(4).clamp(limit, 500),
@@ -926,6 +951,7 @@ impl DjinnMcpServer {
     /// Handler for `operation = "boundary_check"`.
     async fn code_graph_boundary_check(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let rules = params.rules.as_deref().ok_or_else(|| {
@@ -943,7 +969,7 @@ impl DjinnMcpServer {
         let violations = self
             .state
             .repo_graph()
-            .boundary_check(&params.project_path, rules)
+            .boundary_check(ctx, rules)
             .await?;
         Ok(CodeGraphResponse::BoundaryCheck(BoundaryCheckResponse {
             violations,
@@ -953,6 +979,7 @@ impl DjinnMcpServer {
     /// Handler for `operation = "hotspots"`.
     async fn code_graph_hotspots(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let window = params.window_days.unwrap_or(90).clamp(1, 365);
@@ -962,7 +989,7 @@ impl DjinnMcpServer {
             .state
             .repo_graph()
             .hotspots(
-                &params.project_path,
+                ctx,
                 window,
                 params.file_glob.as_deref(),
                 limit,
@@ -974,12 +1001,13 @@ impl DjinnMcpServer {
     /// Handler for `operation = "metrics_at"`.
     async fn code_graph_metrics_at(
         &self,
-        params: &CodeGraphParams,
+        ctx: &ProjectCtx,
+        _params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let metrics = self
             .state
             .repo_graph()
-            .metrics_at(&params.project_path)
+            .metrics_at(ctx)
             .await?;
         Ok(CodeGraphResponse::MetricsAt(MetricsAtResponse { metrics }))
     }
@@ -987,6 +1015,7 @@ impl DjinnMcpServer {
     /// Handler for `operation = "dead_symbols"`.
     async fn code_graph_dead_symbols(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let confidence = params.confidence.as_deref().unwrap_or("high");
@@ -999,7 +1028,7 @@ impl DjinnMcpServer {
         let symbols = self
             .state
             .repo_graph()
-            .dead_symbols(&params.project_path, confidence, limit)
+            .dead_symbols(ctx, confidence, limit)
             .await?;
         Ok(CodeGraphResponse::DeadSymbols(DeadSymbolsResponse {
             symbols,
@@ -1009,13 +1038,14 @@ impl DjinnMcpServer {
     /// Handler for `operation = "deprecated_callers"`.
     async fn code_graph_deprecated_callers(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let limit = params.limit.unwrap_or(50).max(0) as usize;
         let hits = self
             .state
             .repo_graph()
-            .deprecated_callers(&params.project_path, limit)
+            .deprecated_callers(ctx, limit)
             .await?;
         Ok(CodeGraphResponse::DeprecatedCallers(
             DeprecatedCallersResponse { hits },
@@ -1025,6 +1055,7 @@ impl DjinnMcpServer {
     /// Handler for `operation = "touches_hot_path"`.
     async fn code_graph_touches_hot_path(
         &self,
+        ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let seed_entries = params
@@ -1051,7 +1082,7 @@ impl DjinnMcpServer {
         let hits = self
             .state
             .repo_graph()
-            .touches_hot_path(&params.project_path, seed_entries, seed_sinks, symbols)
+            .touches_hot_path(ctx, seed_entries, seed_sinks, symbols)
             .await?;
         Ok(CodeGraphResponse::TouchesHotPath(TouchesHotPathResponse {
             hits,

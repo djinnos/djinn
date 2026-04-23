@@ -115,15 +115,17 @@ export function ProposalsPage() {
 
   const isAllScope = scope === ALL_SCOPE;
   const scopedProject = isAllScope ? undefined : projects.find((p) => p.id === scope);
-  const scopedProjectPath = scopedProject?.path ?? "";
+  const scopedProjectSlug = scopedProject
+    ? `${scopedProject.github_owner}/${scopedProject.github_repo}`
+    : "";
 
   const allQuery = useQuery({
     ...allProjectsProposalListQueryOptions(),
     enabled: isAllScope,
   });
   const singleQuery = useQuery({
-    ...pulseProposalListQueryOptions(scopedProjectPath),
-    enabled: !isAllScope && !!scopedProjectPath,
+    ...pulseProposalListQueryOptions(scopedProjectSlug),
+    enabled: !isAllScope && !!scopedProjectSlug,
   });
   const activeQuery = isAllScope ? allQuery : singleQuery;
 
@@ -149,21 +151,22 @@ export function ProposalsPage() {
 
   const selectedSummary = filteredProposals.find((item) => item.id === selectedId) ?? null;
 
-  // Each summary carries its own project_path from the backend aggregation,
+  // Each summary carries its own project_id from the backend aggregation,
   // so detail / accept / reject calls thread through the correct project
-  // even in cross-project mode.
-  const detailProjectPath = selectedSummary?.project_path ?? scopedProjectPath ?? "";
+  // even in cross-project mode. The server's `project` input accepts
+  // UUID or `"owner/repo"` slug, so we prefer the UUID when present.
+  const detailProjectRef = selectedSummary?.project_id ?? scopedProjectSlug ?? "";
 
   const detailQuery = useQuery({
-    queryKey: ["proposals", "architect-proposal", detailProjectPath, selectedSummary?.id],
+    queryKey: ["proposals", "architect-proposal", detailProjectRef, selectedSummary?.id],
     queryFn: async () => {
       const response = await callMcpTool("propose_adr_show", {
-        project: detailProjectPath,
+        project: detailProjectRef,
         id: selectedSummary!.id,
       });
       return response.adr ?? null;
     },
-    enabled: !!selectedSummary && !!detailProjectPath,
+    enabled: !!selectedSummary && !!detailProjectRef,
     staleTime: 30_000,
     refetchOnWindowFocus: true,
   });
@@ -278,7 +281,7 @@ export function ProposalsPage() {
                 </ScrollArea>
               </div>
               <ProposalDetailPanel
-                projectPath={detailProjectPath}
+                projectRef={detailProjectRef}
                 proposal={selectedSummary}
                 detail={detailQuery.data ?? null}
                 loading={detailQuery.isLoading}
@@ -339,7 +342,7 @@ function ProposalListItem({
 }
 
 function ProposalDetailPanel({
-  projectPath,
+  projectRef,
   proposal,
   detail,
   loading,
@@ -348,7 +351,7 @@ function ProposalDetailPanel({
   retrying,
   onReviewed,
 }: {
-  projectPath: string;
+  projectRef: string;
   proposal: ProposalSummary | null;
   detail: ProposalDetail | null;
   loading: boolean;
@@ -429,7 +432,7 @@ function ProposalDetailPanel({
 
     try {
       const response = await callMcpTool("propose_adr_accept", {
-        project: projectPath,
+        project: projectRef,
         id: activeProposal.id,
         title,
         create_epic: isArchitectural ? false : createEpic,
@@ -471,7 +474,7 @@ function ProposalDetailPanel({
 
     try {
       const response = await callMcpTool("propose_adr_reject", {
-        project: projectPath,
+        project: projectRef,
         id: activeProposal.id,
         reason,
       });

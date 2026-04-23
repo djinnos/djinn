@@ -19,11 +19,11 @@ export function parseProposalItems(output: ProposeAdrListOutput): PulseProposalS
   }));
 }
 
-export function pulseProposalListQueryOptions(projectPath: string) {
+export function pulseProposalListQueryOptions(projectSlug: string) {
   return queryOptions({
-    queryKey: ["pulse", "architect-proposals", projectPath],
-    queryFn: async () => parseProposalItems(await callMcpTool("propose_adr_list", { project: projectPath })),
-    enabled: !!projectPath,
+    queryKey: ["pulse", "architect-proposals", projectSlug],
+    queryFn: async () => parseProposalItems(await callMcpTool("propose_adr_list", { project: projectSlug })),
+    enabled: !!projectSlug,
     staleTime: 30_000,
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,

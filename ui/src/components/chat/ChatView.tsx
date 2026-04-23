@@ -17,7 +17,10 @@ const MODEL_STORAGE_KEY = 'djinnos-chat-model';
 export function ChatView() {
   const isAllProjects = useIsAllProjects();
   const selectedProject = useSelectedProject();
-  const projectPath = isAllProjects ? null : (selectedProject?.path ?? null);
+  const projectSlug =
+    isAllProjects || !selectedProject
+      ? null
+      : `${selectedProject.github_owner}/${selectedProject.github_repo}`;
 
   const createSession = useChatStore((state) => state.createSession);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
@@ -114,7 +117,7 @@ export function ChatView() {
   }, [messages, streamingText, activeSessionId]);
 
   const send = async (text: string, attachments: ChatAttachment[] = []) => {
-    const sessionId = activeSessionId ?? createSession(projectPath, selectedModel !== 'unknown/model' ? selectedModel : null);
+    const sessionId = activeSessionId ?? createSession(projectSlug, selectedModel !== 'unknown/model' ? selectedModel : null);
     if (!activeSessionId) setActiveSession(sessionId);
     if (selectedModel !== 'unknown/model') setSessionModel(sessionId, selectedModel);
 
@@ -138,7 +141,7 @@ export function ChatView() {
     await sendChatMessage(
       currentMessages,
       selectedModel,
-      projectPath,
+      projectSlug,
       (delta) => appendStreamingText(sessionId, delta),
       (toolName) => {
         toolCallsRef.current = [...toolCallsRef.current, toolName];
@@ -169,7 +172,7 @@ export function ChatView() {
               { ...firstAssistantMessage, content: firstAssistantMessage.content },
             ],
             selectedModel,
-            projectPath,
+            projectSlug,
             () => {},
             () => {},
             () => {},

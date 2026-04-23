@@ -8,7 +8,7 @@ import { showToast } from "@/lib/toast";
 import { parseCycles, truncatePathLeft } from "./pulseTypes";
 
 interface CyclesPanelProps {
-  projectPath: string;
+  projectSlug: string;
 }
 
 type CyclesKind = "file" | "symbol";
@@ -31,7 +31,7 @@ function openMember(displayName: string) {
   });
 }
 
-export function CyclesPanel({ projectPath }: CyclesPanelProps) {
+export function CyclesPanel({ projectSlug }: CyclesPanelProps) {
   // File-level cycles catch circular imports between modules — the
   // actionable case.  Symbol-level cycles catch mutual recursion and
   // trait-impl loops.  We default to `file` because circular imports
@@ -47,10 +47,10 @@ export function CyclesPanel({ projectPath }: CyclesPanelProps) {
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set());
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ["pulse", "cycles", projectPath, kind],
+    queryKey: ["pulse", "cycles", projectSlug, kind],
     queryFn: async () => {
       const raw = await callMcpTool("code_graph", {
-        project_path: projectPath,
+        project: projectSlug,
         operation: "cycles",
         kind_filter: kind,
         min_size: 2,

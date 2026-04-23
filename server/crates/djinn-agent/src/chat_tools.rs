@@ -55,6 +55,7 @@ pub async fn dispatch_chat_tool(
     name: &str,
     args: serde_json::Value,
     project_root: &Path,
+    project_id: &str,
 ) -> Result<serde_json::Value, String> {
     use crate::extension::handlers;
 
@@ -68,7 +69,9 @@ pub async fn dispatch_chat_tool(
         "shell" => handlers::call_shell(&arguments, &effective_root).await,
         "read" => handlers::call_read(state, &arguments, &effective_root).await,
         "lsp" => handlers::call_lsp(state, &arguments, &effective_root).await,
-        "code_graph" => handlers::call_code_graph(state, &arguments, &effective_root_str).await,
+        "code_graph" => {
+            handlers::call_code_graph(state, &arguments, project_id, &effective_root_str).await
+        }
         "pr_review_context" => {
             // Route through the MCP server so chat and architect share one
             // implementation — the meta-tool lives in djinn-control-plane.
@@ -80,12 +83,7 @@ pub async fn dispatch_chat_tool(
             server.dispatch_tool("pr_review_context", args_value).await
         }
         "github_search" => {
-            let project_id = {
-                let repo =
-                    djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
-                repo.resolve(&effective_root_str).await.ok().flatten()
-            };
-            handlers::call_github_search(state, &arguments, project_id.as_deref()).await
+            handlers::call_github_search(state, &arguments, Some(project_id)).await
         }
         _ => Err(format!("unknown chat extension tool: {name}")),
     }

@@ -44,7 +44,7 @@ export interface SendChatMessageOptions {
 export async function sendChatMessage(
   messages: ChatMessage[],
   model: string,
-  projectPath: string | null,
+  projectSlug: string | null,
   onDelta: (text: string) => void,
   onToolCall: (name: string) => void,
   onDone: () => void,
@@ -67,7 +67,7 @@ export async function sendChatMessage(
           content: messageToContent(message),
         })),
         model,
-        project: projectPath,
+        project: projectSlug,
       }),
       signal: options?.signal,
     });

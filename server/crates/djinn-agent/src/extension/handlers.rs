@@ -214,7 +214,10 @@ where
         "code_graph" => {
             let root = state.working_root_for(worktree_path);
             let root_str = root.to_string_lossy().into_owned();
-            call_code_graph(state, &call.arguments, &root_str).await
+            let pid = project_id.as_deref().ok_or(
+                "code_graph requires an active project context; dispatcher could not resolve project_id",
+            )?;
+            call_code_graph(state, &call.arguments, pid, &root_str).await
         }
         "github_search" => call_github_search(state, &call.arguments, project_id.as_deref()).await,
         "github_fetch_file" => {

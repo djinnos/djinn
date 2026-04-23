@@ -705,8 +705,68 @@ expression: signatures
   },
   {
     "input_schema": {
+      "$defs": {
+        "BoundaryRule": {
+          "description": "A single boundary-check rule — a pair of globs. Every rule is\ntreated as a forbidden edge; callers submit only the rules they want\nflagged as violations.",
+          "properties": {
+            "from_glob": {
+              "type": "string"
+            },
+            "to_glob": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from_glob",
+            "to_glob"
+          ],
+          "type": "object"
+        },
+        "ChangedRange": {
+          "description": "A single `(file, start_line, end_line)` hunk from a parsed diff. The\ncaller supplies one of these per `git diff --unified=0` hunk when\ninvoking the `diff_touches` op on the `code_graph` tool.",
+          "properties": {
+            "end_line": {
+              "description": "Inclusive 1-indexed last line of the hunk. Defaults to `start_line`\nwhen the caller passed a single-line hunk.",
+              "format": "uint32",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            },
+            "file": {
+              "description": "Repository-relative path of the file the hunk lives in.",
+              "type": "string"
+            },
+            "start_line": {
+              "description": "Inclusive 1-indexed first line of the hunk.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "file",
+            "start_line"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "changed_ranges": {
+          "default": null,
+          "description": "List of `(file, start_line, end_line?)` hunks for `diff_touches`.",
+          "items": {
+            "$ref": "#/$defs/ChangedRange"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "confidence": {
+          "default": null,
+          "description": "Confidence tier for `dead_symbols`: `high`, `med`, or `low`.\nDefault `high`.",
+          "nullable": true,
+          "type": "string"
+        },
         "direction": {
           "default": null,
           "description": "Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.",
@@ -716,6 +776,26 @@ expression: signatures
         "edge_kind": {
           "default": null,
           "description": "Optional edge-kind filter for `edges`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "end_line": {
+          "default": null,
+          "description": "1-indexed inclusive end line for `symbols_at`. Defaults to\n`start_line` when omitted.",
+          "format": "uint32",
+          "minimum": 0,
+          "nullable": true,
+          "type": "integer"
+        },
+        "file": {
+          "default": null,
+          "description": "Repository-relative file path for `symbols_at`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "file_glob": {
+          "default": null,
+          "description": "Optional file glob restricting `hotspots` to a subset of paths.",
           "nullable": true,
           "type": "string"
         },
@@ -770,12 +850,18 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
-        "operation": {
-          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `diff`, `describe`,\n`status`.",
+        "module_glob": {
+          "default": null,
+          "description": "Optional module-path glob for `api_surface` (filter symbols by\n`file_path`).",
+          "nullable": true,
           "type": "string"
         },
-        "project_path": {
-          "description": "Path to the project root (used to locate the graph).",
+        "operation": {
+          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,\n`diff_touches`, `describe`, `status`.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Project identifier — either the UUID (`project_id`) or the\ncanonical `\"owner/repo\"` slug. The handler resolves it to the\nserver-managed clone path via `djinn_core::paths::project_dir`\nbefore dispatching to the graph backend.",
           "type": "string"
         },
         "query": {
@@ -784,11 +870,55 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "rules": {
+          "default": null,
+          "description": "Boundary rules for `boundary_check`.",
+          "items": {
+            "$ref": "#/$defs/BoundaryRule"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "seed_entries": {
+          "default": null,
+          "description": "Entry-point symbol keys (route handlers, `main`, etc.) for\n`touches_hot_path`.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "seed_sinks": {
+          "default": null,
+          "description": "Sink symbol keys (DB queries, external APIs, etc.) for\n`touches_hot_path`.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "sort_by": {
           "default": null,
           "description": "Sort key for `ranked`: `pagerank` (default), `in_degree`, `out_degree`,\nor `total_degree`.",
           "nullable": true,
           "type": "string"
+        },
+        "start_line": {
+          "default": null,
+          "description": "1-indexed inclusive start line for `symbols_at`.",
+          "format": "uint32",
+          "minimum": 0,
+          "nullable": true,
+          "type": "integer"
+        },
+        "symbols": {
+          "default": null,
+          "description": "Queried symbol keys for `touches_hot_path` — which sit on any\nentry→sink shortest path?",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
         },
         "to": {
           "default": null,
@@ -807,11 +937,19 @@ expression: signatures
           "description": "Visibility filter for `orphans`: `public`, `private`, or `any` (default).",
           "nullable": true,
           "type": "string"
+        },
+        "window_days": {
+          "default": null,
+          "description": "Churn look-back window in days for `hotspots` (default 90, clamped\nto 365).",
+          "format": "uint32",
+          "minimum": 0,
+          "nullable": true,
+          "type": "integer"
         }
       },
       "required": [
         "operation",
-        "project_path"
+        "project"
       ],
       "title": "CodeGraphParams",
       "type": "object"
@@ -4401,6 +4539,175 @@ expression: signatures
   },
   {
     "input_schema": {
+      "$defs": {
+        "BoundaryRule": {
+          "description": "A single boundary-check rule — a pair of globs. Every rule is\ntreated as a forbidden edge; callers submit only the rules they want\nflagged as violations.",
+          "properties": {
+            "from_glob": {
+              "type": "string"
+            },
+            "to_glob": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from_glob",
+            "to_glob"
+          ],
+          "type": "object"
+        },
+        "ChangedRange": {
+          "description": "A single `(file, start_line, end_line)` hunk from a parsed diff. The\ncaller supplies one of these per `git diff --unified=0` hunk when\ninvoking the `diff_touches` op on the `code_graph` tool.",
+          "properties": {
+            "end_line": {
+              "description": "Inclusive 1-indexed last line of the hunk. Defaults to `start_line`\nwhen the caller passed a single-line hunk.",
+              "format": "uint32",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            },
+            "file": {
+              "description": "Repository-relative path of the file the hunk lives in.",
+              "type": "string"
+            },
+            "start_line": {
+              "description": "Inclusive 1-indexed first line of the hunk.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "file",
+            "start_line"
+          ],
+          "type": "object"
+        },
+        "PrReviewCaps": {
+          "description": "Per-list caps overriding the built-in defaults. Any field left\n`None` uses the default from `default_caps`.",
+          "properties": {
+            "blast_radius": {
+              "format": "uint",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            },
+            "hot_path_overlap": {
+              "format": "uint",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            },
+            "hotspot_overlap": {
+              "format": "uint",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            },
+            "touched_boundary_violations": {
+              "format": "uint",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            },
+            "touched_cycles": {
+              "format": "uint",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            },
+            "touched_deprecated": {
+              "format": "uint",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            },
+            "touched_symbols": {
+              "format": "uint",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Input parameters for the `pr_review_context` meta-tool.",
+      "properties": {
+        "boundary_rules": {
+          "default": [],
+          "description": "Architecture boundary rules. When empty, boundary analysis is\nskipped and [`PrReviewContextResponse::touched_boundary_violations`]\nis empty.",
+          "items": {
+            "$ref": "#/$defs/BoundaryRule"
+          },
+          "type": "array"
+        },
+        "caps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrReviewCaps"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Per-list result caps. Missing fields fall back to the defaults\nencoded in `ResolvedCaps::default_caps`."
+        },
+        "changed_ranges": {
+          "description": "Hunks parsed from `git diff --unified=0 base..head`. Must be\nnon-empty for the tool to return useful signal.",
+          "items": {
+            "$ref": "#/$defs/ChangedRange"
+          },
+          "type": "array"
+        },
+        "hotspots_window_days": {
+          "default": null,
+          "description": "Churn look-back window for the hotspot overlap. Defaults to 90.",
+          "format": "uint32",
+          "minimum": 0,
+          "nullable": true,
+          "type": "integer"
+        },
+        "project": {
+          "description": "Project identifier — either the UUID (`project_id`) or the\ncanonical `\"owner/repo\"` slug. The handler resolves it to the\nserver-managed clone path via `djinn_core::paths::project_dir`\nbefore dispatching to the graph backend.",
+          "type": "string"
+        },
+        "seed_entries": {
+          "default": [],
+          "description": "Entry-point SCIP keys (route handlers, `main`, etc.) used when\ncomputing [`PrReviewContextResponse::hot_path_overlap`].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "seed_sinks": {
+          "default": [],
+          "description": "Sink SCIP keys (DB queries, external APIs, etc.) used when\ncomputing [`PrReviewContextResponse::hot_path_overlap`].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "project",
+        "changed_ranges"
+      ],
+      "title": "PrReviewContextParams",
+      "type": "object"
+    },
+    "name": "pr_review_context",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "ErrorOrPrReviewContextResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "installation_id": {
@@ -4443,20 +4750,24 @@ expression: signatures
       "$defs": {
         "ProjectInfo": {
           "properties": {
+            "github_owner": {
+              "type": "string"
+            },
+            "github_repo": {
+              "type": "string"
+            },
             "id": {
               "type": "string"
             },
             "name": {
-              "type": "string"
-            },
-            "path": {
               "type": "string"
             }
           },
           "required": [
             "id",
             "name",
-            "path"
+            "github_owner",
+            "github_repo"
           ],
           "type": "object"
         }
@@ -4808,6 +5119,124 @@ expression: signatures
   },
   {
     "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "project": {
+          "description": "Project path (same shape accepted by `project_config_get`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ProjectGraphExclusionsGetParams",
+      "type": "object"
+    },
+    "name": "project_graph_exclusions_get",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "graph_excluded_paths": {
+          "default": [],
+          "description": "Glob patterns stripped from cycles/orphans/ranked/impact/edges\noutput. Empty array means no per-project globs; Tier 1 (universal\nSCIP-artifact filter) still applies.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "graph_orphan_ignore": {
+          "default": [],
+          "description": "Exact file paths the `code_graph orphans` op silently drops.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "project"
+      ],
+      "title": "ProjectGraphExclusionsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Partial-update payload. Either field may be `None` — the repository\nleaves the corresponding column untouched when the caller only wants\nto rewrite one of the two lists.",
+      "properties": {
+        "graph_excluded_paths": {
+          "default": null,
+          "description": "When present, replaces `graph_excluded_paths` wholesale. Empty\nvec resets to zero globs (Tier 1 still applies).",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "graph_orphan_ignore": {
+          "default": null,
+          "description": "When present, replaces `graph_orphan_ignore` wholesale.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ProjectGraphExclusionsSetParams",
+      "type": "object"
+    },
+    "name": "project_graph_exclusions_set",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "graph_excluded_paths": {
+          "default": [],
+          "description": "Glob patterns stripped from cycles/orphans/ranked/impact/edges\noutput. Empty array means no per-project globs; Tier 1 (universal\nSCIP-artifact filter) still applies.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "graph_orphan_ignore": {
+          "default": [],
+          "description": "Exact file paths the `code_graph orphans` op silently drops.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "project": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "project"
+      ],
+      "title": "ProjectGraphExclusionsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
       "properties": {},
       "type": "object"
     },
@@ -4816,20 +5245,24 @@ expression: signatures
       "$defs": {
         "ProjectInfo": {
           "properties": {
+            "github_owner": {
+              "type": "string"
+            },
+            "github_repo": {
+              "type": "string"
+            },
             "id": {
               "type": "string"
             },
             "name": {
-              "type": "string"
-            },
-            "path": {
               "type": "string"
             }
           },
           "required": [
             "id",
             "name",
-            "path"
+            "github_owner",
+            "github_repo"
           ],
           "type": "object"
         }
@@ -4854,18 +5287,13 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "name": {
-          "description": "Project name to remove.",
-          "type": "string"
-        },
-        "path": {
-          "description": "Absolute path of the project to remove. Must match the registered path exactly.",
+        "project": {
+          "description": "Project identifier — either the UUID (`project_id`) or the\ncanonical `\"owner/repo\"` slug. Resolved via\n`ProjectRepository::resolve`.",
           "type": "string"
         }
       },
       "required": [
-        "name",
-        "path"
+        "project"
       ],
       "title": "ProjectRemoveParams",
       "type": "object"
@@ -4875,20 +5303,24 @@ expression: signatures
       "$defs": {
         "ProjectInfo": {
           "properties": {
+            "github_owner": {
+              "type": "string"
+            },
+            "github_repo": {
+              "type": "string"
+            },
             "id": {
               "type": "string"
             },
             "name": {
-              "type": "string"
-            },
-            "path": {
               "type": "string"
             }
           },
           "required": [
             "id",
             "name",
-            "path"
+            "github_owner",
+            "github_repo"
           ],
           "type": "object"
         }

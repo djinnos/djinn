@@ -469,7 +469,8 @@ async fn load_cached_artifact(
 const GRAPH_NOT_WARMED_ERR: &str =
     "canonical graph not warmed yet — K8s graph warmer will populate it once the project's devcontainer image is ready";
 
-/// Server-side read-only load: return the canonical graph for `project_path`.
+/// Server-side read-only load: return the canonical graph for the given
+/// `project_id` + `project_path`.
 ///
 /// Tries the in-process RAM cache first; on miss, deserializes the most
 /// recent entry from `repo_graph_cache` and installs it in RAM. Never
@@ -478,6 +479,7 @@ const GRAPH_NOT_WARMED_ERR: &str =
 /// [`ensure_canonical_graph`]).
 pub async fn load_canonical_graph<C: WarmContext>(
     ctx: &C,
+    project_id: &str,
     project_path: &str,
 ) -> Result<
     (
@@ -487,7 +489,7 @@ pub async fn load_canonical_graph<C: WarmContext>(
     ),
     String,
 > {
-    use djinn_db::{ProjectRepository, RepoGraphCacheRepository};
+    use djinn_db::RepoGraphCacheRepository;
 
     let (_project_root, index_tree_path) = normalize_graph_query_paths(project_path);
 
@@ -505,36 +507,9 @@ pub async fn load_canonical_graph<C: WarmContext>(
         }
     }
 
-    // The server-managed clone path has the shape
-    // `{projects_root}/{owner}/{repo}`; reverse-parse the owner/repo
-    // segment and look the project up by GitHub coords. Callers that
-    // pass a subdirectory still hit here because `normalize_graph_query_paths`
-    // strips back to the project root.
-    let project_repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
-    let project_id = {
-        let owner_repo = std::path::Path::new(project_path)
-            .components()
-            .rev()
-            .take(2)
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        if owner_repo.len() < 2 {
-            return Err(GRAPH_NOT_WARMED_ERR.to_string());
-        }
-        // rev().take(2) yields [repo, owner]; flip them.
-        let repo_name = &owner_repo[0];
-        let owner_name = &owner_repo[1];
-        project_repo
-            .get_by_github(owner_name, repo_name)
-            .await
-            .map_err(|e| format!("resolve project id for '{project_path}': {e}"))?
-            .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?
-            .id
-    };
-
     let cache_repo = RepoGraphCacheRepository::new(ctx.db().clone());
     let row = cache_repo
-        .latest_for_project(&project_id)
+        .latest_for_project(project_id)
         .await
         .map_err(|e| format!("read repo_graph_cache for '{project_id}': {e}"))?
         .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?;
@@ -542,7 +517,7 @@ pub async fn load_canonical_graph<C: WarmContext>(
     let (graph, pagerank, sccs) = load_cached_artifact(row.graph_blob).await?;
     install_as_canonical(
         ctx,
-        &project_id,
+        project_id,
         index_tree_path,
         row.commit_sha,
         graph.clone(),
@@ -556,9 +531,10 @@ pub async fn load_canonical_graph<C: WarmContext>(
 /// Thin wrapper for callers that only need the graph.
 pub async fn load_canonical_graph_only<C: WarmContext>(
     ctx: &C,
+    project_id: &str,
     project_path: &str,
 ) -> Result<crate::repo_graph::RepoDependencyGraph, String> {
-    let (graph, _pagerank, _sccs) = load_canonical_graph(ctx, project_path).await?;
+    let (graph, _pagerank, _sccs) = load_canonical_graph(ctx, project_id, project_path).await?;
     Ok(graph)
 }
 
@@ -932,12 +908,19 @@ mod tests {
         };
 
         let project_root_str = project_root.to_string_lossy().into_owned();
-        let graph_only = load_canonical_graph_only(&ctx, &project_root_str)
+        // Find the project we just created so we can pass its id.
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .get_by_github("test", "test-cache-only-readers")
+            .await
+            .expect("lookup project")
+            .expect("project exists");
+        let graph_only = load_canonical_graph_only(&ctx, &project.id, &project_root_str)
             .await
             .expect("cache-only reader must succeed without warming");
-        let (graph_with_caches, pagerank, _sccs) = load_canonical_graph(&ctx, &project_root_str)
-            .await
-            .expect("cache-only reader (with caches) must succeed without warming");
+        let (graph_with_caches, pagerank, _sccs) =
+            load_canonical_graph(&ctx, &project.id, &project_root_str)
+                .await
+                .expect("cache-only reader (with caches) must succeed without warming");
 
         clear_test_caches().await;
 
