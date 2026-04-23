@@ -981,7 +981,11 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        repo.get_path(project_id).await.ok().flatten()
+        repo.get(project_id).await.ok().flatten().map(|p| {
+            djinn_core::paths::project_dir(&p.github_owner, &p.github_repo)
+                .to_string_lossy()
+                .into_owned()
+        })
     }
 
     // ─── Idle-time memory consolidation (ADR-048 §3A) ───────────────────────

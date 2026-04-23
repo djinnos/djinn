@@ -465,11 +465,28 @@ impl AgentContext {
                     .await
             }
             Err(error) => {
+                // Fall back to reverse-parsing the `{projects_root}/{owner}/{repo}`
+                // clone path shape. The `Project` identity is now `(github_owner,
+                // github_repo)`; any raw filesystem path we get here is expected
+                // to end in that two-segment tail.
                 let repo =
                     djinn_db::ProjectRepository::new(self.db.clone(), self.event_bus.clone());
-                repo.resolve_id_by_path_fuzzy(project)
+                let owner_repo = std::path::Path::new(project)
+                    .components()
+                    .rev()
+                    .take(2)
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                if owner_repo.len() < 2 {
+                    return Err(error);
+                }
+                // rev().take(2) yields [repo, owner]; flip them.
+                let repo_name = &owner_repo[0];
+                let owner_name = &owner_repo[1];
+                repo.get_by_github(owner_name, repo_name)
                     .await
                     .map_err(|repo_error| ErrorResponse::new(repo_error.to_string()))?
+                    .map(|p| p.id)
                     .ok_or(error)
             }
         }

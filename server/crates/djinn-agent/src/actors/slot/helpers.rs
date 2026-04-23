@@ -842,11 +842,26 @@ pub(crate) async fn build_planner_patrol_context(
         .unwrap_or_default();
 
     let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    // Reverse-parse the canonical `{projects_root}/{owner}/{repo}` clone-path
+    // shape to look up the project by GitHub coords.
+    let owner_repo = std::path::Path::new(project_path)
+        .components()
+        .rev()
+        .take(2)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if owner_repo.len() < 2 {
+        return None;
+    }
+    // rev().take(2) yields [repo, owner]; flip them.
+    let repo_name = &owner_repo[0];
+    let owner_name = &owner_repo[1];
     let project_id = project_repo
-        .resolve_id_by_path_fuzzy(project_path)
+        .get_by_github(owner_name, repo_name)
         .await
         .ok()
-        .flatten()?;
+        .flatten()
+        .map(|p| p.id)?;
     let note_repo =
         djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -1217,7 +1232,7 @@ mod tests {
         let tmp = crate::test_helpers::test_tempdir("planner-patrol-context-");
         let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = project_repo
-            .create("test-project", tmp.path().to_str().expect("tmp path"))
+            .create("test-project", "test", "test-project")
             .await
             .expect("create project");
         let ctx = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
@@ -1319,7 +1334,11 @@ mod tests {
             ],
         }));
 
-        let summary = build_planner_patrol_context(&patrol_task(&project.id), &ctx, &project.path)
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+                .to_string_lossy()
+                .into_owned();
+        let summary = build_planner_patrol_context(&patrol_task(&project.id), &ctx, &project_path)
             .await
             .expect("planner patrol context");
 
@@ -1376,7 +1395,11 @@ mod tests {
             .await
             .expect("create exploration task");
 
-        let summary = build_planner_patrol_context(&patrol_task(&project.id), &ctx, &project.path)
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+                .to_string_lossy()
+                .into_owned();
+        let summary = build_planner_patrol_context(&patrol_task(&project.id), &ctx, &project_path)
             .await
             .expect("planner patrol context");
 

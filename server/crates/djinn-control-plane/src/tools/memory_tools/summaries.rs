@@ -363,10 +363,10 @@ mod tests {
         })
     }
 
-    async fn make_project(db: &Database, path: &std::path::Path) -> djinn_core::models::Project {
+    async fn make_project(db: &Database, _path: &std::path::Path) -> djinn_core::models::Project {
         db.ensure_initialized().await.unwrap();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        repo.create("test-project", path.to_str().unwrap())
+        repo.create("test-project", "test", "test-project")
             .await
             .unwrap()
     }

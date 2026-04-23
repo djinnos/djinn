@@ -23,7 +23,7 @@ async fn task_create_success_shape() {
     let payload = harness
         .call_tool(
             "task_create",
-            json!({"project": project.path, "epic_id": epic.id, "title": "Create task contract test", "acceptance_criteria": ["task is created successfully"]}),
+            json!({"project": project.slug(), "epic_id": epic.id, "title": "Create task contract test", "acceptance_criteria": ["task is created successfully"]}),
         )
         .await
         .expect("task_create should dispatch");
@@ -75,7 +75,7 @@ async fn task_create_with_blocked_by_sets_blockers() {
     let blocker = harness
         .call_tool(
             "task_create",
-            json!({"project": project.path, "epic_id": epic.id, "title": "Blocker task", "acceptance_criteria": ["blocker is resolved"]}),
+            json!({"project": project.slug(), "epic_id": epic.id, "title": "Blocker task", "acceptance_criteria": ["blocker is resolved"]}),
         )
         .await
         .expect("blocker task_create should dispatch");
@@ -86,7 +86,7 @@ async fn task_create_with_blocked_by_sets_blockers() {
         .call_tool(
             "task_create",
             json!({
-                "project": project.path,
+                "project": project.slug(),
                 "epic_id": epic.id,
                 "title": "Blocked task",
                 "acceptance_criteria": ["blocked task completes after blocker"],
@@ -102,7 +102,7 @@ async fn task_create_with_blocked_by_sets_blockers() {
     let blockers = harness
         .call_tool(
             "task_blockers_list",
-            json!({"project": project.path, "id": blocked["id"].as_str().unwrap()}),
+            json!({"project": project.slug(), "id": blocked["id"].as_str().unwrap()}),
         )
         .await
         .expect("task_blockers_list should dispatch");
@@ -125,7 +125,7 @@ async fn task_create_with_invalid_blocked_by_rejects_without_creating_task() {
         .call_tool(
             "task_create",
             json!({
-                "project": project.path,
+                "project": project.slug(),
                 "epic_id": epic.id,
                 "title": "Should not exist",
                 "acceptance_criteria": ["task completes"],
@@ -144,7 +144,7 @@ async fn task_create_with_invalid_blocked_by_rejects_without_creating_task() {
     let list = harness
         .call_tool(
             "task_list",
-            json!({"project": project.path, "text": "Should not exist"}),
+            json!({"project": project.slug(), "text": "Should not exist"}),
         )
         .await
         .expect("task_list should dispatch");
@@ -166,7 +166,7 @@ async fn task_create_requires_acceptance_criteria_for_task_type() {
     let err = harness
         .call_tool(
             "task_create",
-            json!({"project": project.path, "epic_id": epic.id, "title": "No AC task", "issue_type": "task"}),
+            json!({"project": project.slug(), "epic_id": epic.id, "title": "No AC task", "issue_type": "task"}),
         )
         .await
         .expect_err("task type without AC should error");
@@ -180,7 +180,7 @@ async fn task_create_requires_acceptance_criteria_for_task_type() {
         let err = harness
             .call_tool(
                 "task_create",
-                json!({"project": project.path, "epic_id": epic.id, "title": "No AC", "issue_type": issue_type}),
+                json!({"project": project.slug(), "epic_id": epic.id, "title": "No AC", "issue_type": issue_type}),
             )
             .await
             .expect_err("{issue_type} should error without AC");
@@ -203,7 +203,7 @@ async fn task_create_simple_lifecycle_types_do_not_require_acceptance_criteria()
         let result = harness
             .call_tool(
                 "task_create",
-                json!({"project": project.path, "epic_id": epic.id, "title": format!("No AC {issue_type}"), "issue_type": issue_type}),
+                json!({"project": project.slug(), "epic_id": epic.id, "title": format!("No AC {issue_type}"), "issue_type": issue_type}),
             )
             .await
             .expect("{issue_type} task_create should dispatch");
@@ -229,7 +229,7 @@ async fn task_show_found_and_not_found_shapes() {
     let ok = harness
         .call_tool(
             "task_show",
-            json!({"project": project.path, "id": task.id}),
+            json!({"project": project.slug(), "id": task.id}),
         )
         .await
         .expect("task_show should dispatch");
@@ -247,7 +247,7 @@ async fn task_show_found_and_not_found_shapes() {
     let err = harness
         .call_tool(
             "task_show",
-            json!({"project": project.path, "id": "missing-task-id"}),
+            json!({"project": project.slug(), "id": "missing-task-id"}),
         )
         .await
         .expect_err("task_show with missing id should error");
@@ -337,7 +337,7 @@ async fn task_list_filters_and_pagination() {
     let by_status = harness
         .call_tool(
             "task_list",
-            json!({"project": project.path, "status": "in_progress"}),
+            json!({"project": project.slug(), "status": "in_progress"}),
         )
         .await
         .expect("task_list by_status should dispatch");
@@ -346,7 +346,7 @@ async fn task_list_filters_and_pagination() {
     let by_text = harness
         .call_tool(
             "task_list",
-            json!({"project": project.path, "text": "gamma"}),
+            json!({"project": project.slug(), "text": "gamma"}),
         )
         .await
         .expect("task_list by_text should dispatch");
@@ -355,7 +355,7 @@ async fn task_list_filters_and_pagination() {
     let paged = harness
         .call_tool(
             "task_list",
-            json!({"project": project.path, "limit": 1, "offset": 0}),
+            json!({"project": project.slug(), "limit": 1, "offset": 0}),
         )
         .await
         .expect("task_list paged should dispatch");
@@ -382,7 +382,7 @@ async fn task_update_partial_and_error_shape() {
     let ok = harness
         .call_tool(
             "task_update",
-            json!({"project": project.path, "id": task.id, "title": "updated"}),
+            json!({"project": project.slug(), "id": task.id, "title": "updated"}),
         )
         .await
         .expect("task_update should dispatch");
@@ -394,7 +394,7 @@ async fn task_update_partial_and_error_shape() {
     let err = harness
         .call_tool(
             "task_update",
-            json!({"project": project.path, "id": "missing-id", "title": "x"}),
+            json!({"project": project.slug(), "id": "missing-id", "title": "x"}),
         )
         .await
         .expect_err("task_update with missing id should error");
@@ -415,7 +415,7 @@ async fn task_transition_valid_and_invalid() {
     let ok = harness
         .call_tool(
             "task_transition",
-            json!({"project": project.path, "id": task.id, "action": "start", "actor_id": "u1", "actor_role": "user"}),
+            json!({"project": project.slug(), "id": task.id, "action": "start", "actor_id": "u1", "actor_role": "user"}),
         )
         .await
         .expect("task_transition start should dispatch");
@@ -430,7 +430,7 @@ async fn task_transition_valid_and_invalid() {
     let err = harness
         .call_tool(
             "task_transition",
-            json!({"project": project.path, "id": task.id, "action": "not_real", "actor_id": "u1", "actor_role": "user"}),
+            json!({"project": project.slug(), "id": task.id, "action": "not_real", "actor_id": "u1", "actor_role": "user"}),
         )
         .await
         .expect_err("invalid transition action should error");
@@ -461,7 +461,7 @@ async fn task_count_plain_and_grouped() {
     let _t2 = common::create_test_task(db, &project.id, &epic.id).await;
 
     let plain = harness
-        .call_tool("task_count", json!({"project": project.path}))
+        .call_tool("task_count", json!({"project": project.slug()}))
         .await
         .expect("task_count plain should dispatch");
     assert!(plain["total_count"].as_i64().unwrap() >= 2);
@@ -470,7 +470,7 @@ async fn task_count_plain_and_grouped() {
     let grouped = harness
         .call_tool(
             "task_count",
-            json!({"project": project.path, "group_by": "status"}),
+            json!({"project": project.slug(), "group_by": "status"}),
         )
         .await
         .expect("task_count grouped should dispatch");
@@ -480,7 +480,7 @@ async fn task_count_plain_and_grouped() {
     let priority_grouped = harness
         .call_tool(
             "task_count",
-            json!({"project": project.path, "group_by": "priority"}),
+            json!({"project": project.slug(), "group_by": "priority"}),
         )
         .await
         .expect("task_count priority grouped should dispatch");
@@ -497,7 +497,7 @@ async fn task_claim_ready_and_empty() {
     let _task = common::create_test_task(db, &project.id, &epic.id).await;
 
     let claimed = harness
-        .call_tool("task_claim", json!({"project": project.path}))
+        .call_tool("task_claim", json!({"project": project.slug()}))
         .await
         .expect("task_claim should dispatch");
     assert!(claimed["id"].as_str().is_some() || claimed["task"].is_null());
@@ -505,7 +505,7 @@ async fn task_claim_ready_and_empty() {
     let harness2 = McpTestHarness::new().await;
     let project2 = common::create_test_project(harness2.db()).await;
     let empty = harness2
-        .call_tool("task_claim", json!({"project": project2.path}))
+        .call_tool("task_claim", json!({"project": project2.slug()}))
         .await
         .expect("task_claim on empty project should dispatch");
     assert!(empty["task"].is_null());
@@ -520,7 +520,7 @@ async fn task_ready_lists_open_unblocked() {
     let _ = common::create_test_task(db, &project.id, &epic.id).await;
 
     let payload = harness
-        .call_tool("task_ready", json!({"project": project.path}))
+        .call_tool("task_ready", json!({"project": project.slug()}))
         .await
         .expect("task_ready should dispatch");
     assert!(payload["tasks"].as_array().is_some());
@@ -538,7 +538,7 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
     let updated = harness
         .call_tool(
             "task_update",
-            json!({"project": project.path, "id": blocked.id, "blocked_by_add": [blocker.id], "memory_refs_add": ["notes/a"]}),
+            json!({"project": project.slug(), "id": blocked.id, "blocked_by_add": [blocker.id], "memory_refs_add": ["notes/a"]}),
         )
         .await
         .expect("task_update should dispatch");
@@ -547,7 +547,7 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
     let c = harness
         .call_tool(
             "task_comment_add",
-            json!({"project": project.path, "id": blocked.id, "actor_id": "u1", "actor_role": "user", "body": "hello"}),
+            json!({"project": project.slug(), "id": blocked.id, "actor_id": "u1", "actor_role": "user", "body": "hello"}),
         )
         .await
         .expect("task_comment_add should dispatch");
@@ -556,7 +556,7 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
     let c_err = harness
         .call_tool(
             "task_comment_add",
-            json!({"project": project.path, "id": "missing", "actor_id": "u1", "actor_role": "user", "body": "hello"}),
+            json!({"project": project.slug(), "id": "missing", "actor_id": "u1", "actor_role": "user", "body": "hello"}),
         )
         .await
         .expect_err("task_comment_add with missing task should error");
@@ -568,7 +568,7 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
     let activity = harness
         .call_tool(
             "task_activity_list",
-            json!({"project": project.path, "id": blocked.id}),
+            json!({"project": project.slug(), "id": blocked.id}),
         )
         .await
         .expect("task_activity_list should dispatch");
@@ -584,7 +584,7 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
     let blockers = harness
         .call_tool(
             "task_blockers_list",
-            json!({"project": project.path, "id": blocked.id}),
+            json!({"project": project.slug(), "id": blocked.id}),
         )
         .await
         .expect("task_blockers_list should dispatch");
@@ -597,7 +597,7 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
     let blocked_list = harness
         .call_tool(
             "task_blocked_list",
-            json!({"project": project.path, "id": blocker.id}),
+            json!({"project": project.slug(), "id": blocker.id}),
         )
         .await
         .expect("task_blocked_list should dispatch");
@@ -606,7 +606,7 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
     let refs = harness
         .call_tool(
             "task_memory_refs",
-            json!({"project": project.path, "id": blocked.id}),
+            json!({"project": project.slug(), "id": blocked.id}),
         )
         .await
         .expect("task_memory_refs should dispatch");

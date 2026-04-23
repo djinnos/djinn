@@ -684,19 +684,23 @@ mod tests {
         let project2 = {
             db.ensure_initialized().await.unwrap();
             let id = uuid::Uuid::now_v7().to_string();
-            let project2_path_str = project2_path.to_str().unwrap();
+            let _ = project2_path; // path is now derived at runtime
             sqlx::query!(
-                "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+                "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
                 id,
                 "test-project-2",
-                project2_path_str,
+                "test",
+                "test-project-2",
             )
             .execute(db.pool())
             .await
             .unwrap();
             sqlx::query_as!(
                 Project,
-                r#"SELECT id, name, path, created_at, target_branch,
+                r#"SELECT id, name,
+                          github_owner AS "github_owner!: String",
+                          github_repo AS "github_repo!: String",
+                          created_at, target_branch,
                           auto_merge AS "auto_merge!: bool",
                           sync_enabled AS "sync_enabled!: bool",
                           sync_remote

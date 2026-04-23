@@ -27,7 +27,7 @@ async fn session_active_returns_error_without_pool() {
         &app,
         &session_id,
         "session_active",
-        json!({ "project": project.path }),
+        json!({ "project": project.slug() }),
     )
     .await;
     assert!(payload.get("error").and_then(|v| v.as_str()).is_some());
@@ -47,7 +47,7 @@ async fn session_for_task_returns_error_without_pool() {
         &app,
         &mcp_session,
         "session_for_task",
-        json!({ "task_id": task.id, "project": project.path }),
+        json!({ "task_id": task.id, "project": project.slug() }),
     )
     .await;
     assert!(result.get("error").and_then(|v| v.as_str()).is_some());

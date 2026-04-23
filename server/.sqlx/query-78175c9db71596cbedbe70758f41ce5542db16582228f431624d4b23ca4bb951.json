@@ -1,11 +1,11 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT github_owner, github_repo FROM projects WHERE id = ?",
+  "query": "SELECT github_owner AS \"github_owner!: String\",\n                          github_repo  AS \"github_repo!: String\"\n                   FROM projects WHERE id = ?",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "github_owner",
+        "name": "github_owner!: String",
         "type_info": {
           "type": "VarString",
           "flags": "",
@@ -14,7 +14,7 @@
       },
       {
         "ordinal": 1,
-        "name": "github_repo",
+        "name": "github_repo!: String",
         "type_info": {
           "type": "VarString",
           "flags": "",
@@ -30,5 +30,5 @@
       true
     ]
   },
-  "hash": "f208368edd38a16603d9e16db604983a67eabe8cb8f62ca021ee7cb4892feb38"
+  "hash": "78175c9db71596cbedbe70758f41ce5542db16582228f431624d4b23ca4bb951"
 }

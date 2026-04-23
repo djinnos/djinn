@@ -416,11 +416,14 @@ mod tests {
         let db = djinn_db::Database::open_in_memory().expect("db");
         let project_repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         let project = project_repo
-            .create("agent-tools", tempdir.path().to_str().expect("path"))
+            .create("agent-tools", "test", "agent-tools")
             .await
             .expect("create project");
         let state = test_mcp_state(db);
-        (DjinnMcpServer::new(state), tempdir, project.path)
+        // Pass the `owner/repo` slug — tool dispatch accepts either a UUID or
+        // slug reference and this keeps the fixture independent of the new
+        // runtime-synthesized `project_dir` layout.
+        (DjinnMcpServer::new(state), tempdir, project.slug())
     }
 
     #[tokio::test]

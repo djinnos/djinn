@@ -296,7 +296,7 @@ mod tests {
         tmp: &tempfile::TempDir,
     ) -> (String, String) {
         let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let repo = NoteRepository::new(db.clone(), EventBus::noop());

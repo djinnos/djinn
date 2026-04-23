@@ -426,10 +426,12 @@ async fn run_llm_extraction_inner(
 
     // ── Build prompt ───────────────────────────────────────────────────────
     let taxonomy_json = serde_json::to_string(&taxonomy).unwrap_or_else(|_| "{}".to_string());
-    let project_path = &project.path;
+    let project_path_buf =
+        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+    let project_path = project_path_buf.to_string_lossy();
     let session_scope_paths = crate::actors::slot::session_extraction::derive_scope_paths(
         &taxonomy.changed_file_paths,
-        project_path,
+        &project_path,
     );
     let scope_json =
         serde_json::to_string(&session_scope_paths).unwrap_or_else(|_| "[]".to_string());
@@ -533,7 +535,7 @@ async fn run_llm_extraction_inner(
         None => None,
     };
     let knowledge_branch_target = app_state
-        .knowledge_branch_target_for(Path::new(project_path), workspace_path.as_deref());
+        .knowledge_branch_target_for(Path::new(project_path.as_ref()), workspace_path.as_deref());
     tracing::debug!(
         session_id = %session_id,
         knowledge_branch_target = %knowledge_branch_target.intent_label(),
@@ -561,7 +563,7 @@ async fn run_llm_extraction_inner(
         note_repo: &note_repo,
         provider: provider.as_ref(),
         project_id: &project.id,
-        project_path: &project.path,
+        project_path: &project_path,
         knowledge_branch_target: &knowledge_branch_target,
         session_id: &session_id,
         task_short_id: &task.short_id,
@@ -1334,12 +1336,10 @@ mod tests {
 
         // Need a project first
         let id = uuid::Uuid::now_v7().to_string();
-        let project_path = test_path(&format!("djinn-llm-extraction-no-task-{id}-"));
+        let _ = test_path(&format!("djinn-llm-extraction-no-task-{id}-"));
+        let name = format!("proj-{id}");
         let project = project_repo
-            .create(
-                &format!("proj-{id}"),
-                project_path.to_string_lossy().as_ref(),
-            )
+            .create(&name, "test", &name)
             .await
             .expect("create project");
 
@@ -1374,12 +1374,10 @@ mod tests {
         let epic_repo = djinn_db::EpicRepository::new(db.clone(), events.clone());
 
         let id = uuid::Uuid::now_v7().to_string();
-        let project_path = test_path(&format!("djinn-llm-extraction-provider-{id}-"));
+        let _ = test_path(&format!("djinn-llm-extraction-provider-{id}-"));
+        let name = format!("proj-{id}");
         let project = project_repo
-            .create(
-                &format!("proj-{id}"),
-                project_path.to_string_lossy().as_ref(),
-            )
+            .create(&name, "test", &name)
             .await
             .expect("create project");
 

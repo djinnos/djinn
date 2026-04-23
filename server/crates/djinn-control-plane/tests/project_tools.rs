@@ -71,7 +71,8 @@ async fn project_add_and_list_success_shape() {
         .expect("project_list should dispatch");
     let projects = listed["projects"].as_array().expect("projects array");
     assert!(
-        projects.iter().any(|p| p["path"] == json!(project.path)),
+        projects.iter().any(|p| p["github_owner"] == json!(project.github_owner)
+            && p["github_repo"] == json!(project.github_repo)),
         "project_list must include the registered project"
     );
     assert!(
@@ -121,14 +122,17 @@ async fn project_add_duplicate_path_errors() {
 }
 
 #[tokio::test]
-async fn project_remove_wrong_path_is_rejected() {
+async fn project_remove_unknown_slug_is_rejected() {
+    // `project_remove` now takes a single `project` handle (UUID or
+    // `owner/repo` slug). A non-existent slug must be refused without
+    // disturbing already-registered projects.
     let harness = McpTestHarness::new().await;
     let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;
 
     let rejected = harness
         .call_tool(
             "project_remove",
-            json!({"name": project.name.clone(), "path": "/wrong/path"}),
+            json!({"project": "nonexistent/project"}),
         )
         .await
         .expect("project_remove should dispatch");
@@ -160,14 +164,14 @@ async fn project_config_get_set_round_trip() {
     let set = harness
         .call_tool(
             "project_config_set",
-            json!({"project": project.path.clone(), "key": "target_branch", "value": "develop"}),
+            json!({"project": project.slug(), "key": "target_branch", "value": "develop"}),
         )
         .await
         .expect("project_config_set should dispatch");
     assert_eq!(set["status"], "ok");
 
     let got = harness
-        .call_tool("project_config_get", json!({"project": project.path}))
+        .call_tool("project_config_get", json!({"project": project.slug()}))
         .await
         .expect("project_config_get should dispatch");
     assert_eq!(got["status"], "ok");
@@ -183,7 +187,7 @@ async fn project_graph_exclusions_set_and_get_round_trip() {
         .call_tool(
             "project_graph_exclusions_set",
             json!({
-                "project": project.path.clone(),
+                "project": project.slug(),
                 "graph_excluded_paths": ["**/workspace-hack/**", "**/target/**"],
                 "graph_orphan_ignore": ["crates/test-support/src/fixtures.rs"],
             }),
@@ -198,7 +202,7 @@ async fn project_graph_exclusions_set_and_get_round_trip() {
     let got = harness
         .call_tool(
             "project_graph_exclusions_get",
-            json!({"project": project.path.clone()}),
+            json!({"project": project.slug()}),
         )
         .await
         .expect("project_graph_exclusions_get should dispatch");
@@ -220,7 +224,7 @@ async fn project_graph_exclusions_partial_update_leaves_other_field_untouched() 
         .call_tool(
             "project_graph_exclusions_set",
             json!({
-                "project": project.path.clone(),
+                "project": project.slug(),
                 "graph_excluded_paths": ["**/vendor/**"],
                 "graph_orphan_ignore": ["a.rs"],
             }),
@@ -233,7 +237,7 @@ async fn project_graph_exclusions_partial_update_leaves_other_field_untouched() 
         .call_tool(
             "project_graph_exclusions_set",
             json!({
-                "project": project.path.clone(),
+                "project": project.slug(),
                 "graph_orphan_ignore": ["a.rs", "b.rs"],
             }),
         )

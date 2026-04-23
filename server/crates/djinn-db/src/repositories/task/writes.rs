@@ -693,11 +693,14 @@ mod created_by_tests {
     async fn seed_project_and_epic(db: &Database) -> (String, String) {
         db.ensure_initialized().await.unwrap();
         let project_id = uuid::Uuid::now_v7().to_string();
+        let owner = "test";
+        let repo_slug = format!("task-writes-{project_id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
             project_id,
             "p",
-            "/tmp/p",
+            owner,
+            repo_slug,
         )
         .execute(db.pool())
         .await

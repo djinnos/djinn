@@ -256,8 +256,7 @@ mod tests {
         db.ensure_initialized().await.unwrap();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let name = format!("test-proj-{}", uuid::Uuid::now_v7());
-        let path = format!("/tmp/{name}");
-        let proj = repo.create(&name, &path).await.unwrap();
+        let proj = repo.create(&name, "test", &name).await.unwrap();
         proj.id
     }
 

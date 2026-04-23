@@ -150,7 +150,10 @@ pub(super) async fn completions_handler_impl(
         let project_repo = ProjectRepository::new(state.db().clone(), state.event_bus());
         match project_repo.resolve(project_ref).await {
             Ok(Some(id)) => match project_repo.get(&id).await {
-                Ok(Some(project)) => Some((std::path::PathBuf::from(&project.path), project.id)),
+                Ok(Some(project)) => Some((
+                    djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
+                    project.id,
+                )),
                 _ => None,
             },
             _ => None,

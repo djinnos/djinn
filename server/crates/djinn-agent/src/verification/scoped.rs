@@ -234,8 +234,9 @@ mod tests {
         verification: Verification,
     ) {
         db.ensure_initialized().await.unwrap();
+        let _ = path; // path is derived at runtime; retained for fixture compat
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        repo.create_with_id(id, &format!("p-{id}"), path.to_str().unwrap())
+        repo.create_with_id(id, &format!("p-{id}"), "test", id)
             .await
             .unwrap();
         let mut cfg = EnvironmentConfig::empty();

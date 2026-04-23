@@ -1135,6 +1135,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dirs 6.0.0",
+ "djinn-control-plane",
  "djinn-core",
  "djinn-db",
  "djinn-git",

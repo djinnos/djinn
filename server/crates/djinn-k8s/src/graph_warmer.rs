@@ -495,8 +495,10 @@ mod tests {
     async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
         use djinn_db::ProjectImage;
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        let path = format!("/tmp/djinn-k8s-tests/{name}");
-        let project = repo.create(name, &path).await.expect("create project");
+        let project = repo
+            .create(name, "test", name)
+            .await
+            .expect("create project");
         let image = ProjectImage {
             tag: Some(format!(
                 "reg.example:5000/djinn-project-{}:abc123def456",
@@ -720,7 +722,7 @@ mod tests {
         let db = Database::open_in_memory().expect("in-memory db");
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = repo
-            .create("proj-noimg", "/tmp/djinn-k8s-tests/proj-noimg")
+            .create("proj-noimg", "test", "proj-noimg")
             .await
             .expect("create project");
         // No set_project_image → status stays `none`.

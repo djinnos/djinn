@@ -23,19 +23,27 @@ pub async fn make_project(db: &Database, path: &Path) -> Project {
         .filter(|name| !name.is_empty())
         .unwrap_or("root");
     let project_name = format!("test-project-{path_slug}-{id}");
-    let path_str = path.to_str().unwrap();
+    // Synthesize unique (owner, repo) coords; the actual filesystem
+    // `path` argument is used only for downstream note fixtures, not
+    // persisted.
+    let owner = "test";
+    let repo_slug = format!("{path_slug}-{id}");
     sqlx::query!(
-        "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
         id,
         project_name,
-        path_str,
+        owner,
+        repo_slug,
     )
     .execute(db.pool())
     .await
     .unwrap();
     sqlx::query_as!(
         Project,
-        r#"SELECT id, name, path, created_at, target_branch,
+        r#"SELECT id, name,
+                  github_owner AS "github_owner!: String",
+                  github_repo  AS "github_repo!: String",
+                  created_at, target_branch,
                   auto_merge AS "auto_merge!: bool",
                   sync_enabled AS "sync_enabled!: bool",
                   sync_remote

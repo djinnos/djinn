@@ -126,9 +126,8 @@ mod tests {
     async fn seed_project(db: &Database, project_id: &str) {
         db.ensure_initialized().await.expect("init schema");
         let name = format!("test-project-{project_id}");
-        let path = format!("/tmp/{project_id}");
         djinn_db::ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop())
-            .create_with_id(project_id, &name, &path)
+            .create_with_id(project_id, &name, "test", project_id)
             .await
             .expect("seed project row for FK");
     }

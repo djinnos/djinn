@@ -859,7 +859,11 @@ mod tests {
             })
             .await
             .expect("create session");
-        (ctx, project.path, task.id, session.id, cancel)
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+                .to_string_lossy()
+                .into_owned();
+        (ctx, project_path, task.id, session.id, cancel)
     }
 
     async fn count_persisted_messages(

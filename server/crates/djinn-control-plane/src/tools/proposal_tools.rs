@@ -323,19 +323,32 @@ impl DjinnMcpServer {
         // shape is identical regardless of scope — the UI always gets
         // project_name / project_id when they're knowable.
         let scan_targets: Vec<(Option<String>, Option<String>, PathBuf)> = match &p.project {
-            Some(project_path) => {
-                let trimmed = project_path.trim_end_matches('/').to_string();
-                let found = repo.get_by_path(&trimmed).await.ok().flatten();
-                let (pid, pname) = match &found {
-                    Some(proj) => (Some(proj.id.clone()), Some(proj.name.clone())),
-                    None => (None, None),
+            Some(project_ref) => {
+                let found = match repo.resolve(project_ref).await.ok().flatten() {
+                    Some(id) => repo.get(&id).await.ok().flatten(),
+                    None => None,
                 };
-                vec![(pid, pname, PathBuf::from(project_path))]
+                match found {
+                    Some(proj) => vec![(
+                        Some(proj.id.clone()),
+                        Some(proj.name.clone()),
+                        djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo),
+                    )],
+                    None => {
+                        return Json(ProposeAdrListResponse {
+                            items: None,
+                            error: Some(format!("project not found: {project_ref}")),
+                        });
+                    }
+                }
             }
             None => match repo.list().await {
                 Ok(list) => list
                     .into_iter()
-                    .map(|proj| (Some(proj.id), Some(proj.name), PathBuf::from(proj.path)))
+                    .map(|proj| {
+                        let path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo);
+                        (Some(proj.id), Some(proj.name), path)
+                    })
                     .collect(),
                 Err(e) => {
                     return Json(ProposeAdrListResponse {

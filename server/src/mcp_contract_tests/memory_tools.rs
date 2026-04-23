@@ -24,7 +24,10 @@ use djinn_db::NoteRepository;
 async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_and_lists() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
-    let project = &proj.path;
+    let project_path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo)
+        .to_string_lossy()
+        .into_owned();
+    let project = &project_path;
     let worktree = Path::new(project).join(".djinn/worktrees/proposal-pipeline-regression");
     std::fs::create_dir_all(worktree.join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
@@ -85,7 +88,7 @@ async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_
     .expect("overwrite recovered draft with proposal frontmatter");
 
     let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+    let project_id: String = project_repo.resolve(project).await.unwrap().expect("test project must resolve");
     let worktree_repo = NoteRepository::new(db.clone(), EventBus::noop())
         .with_worktree_root(Some(worktree.clone()));
     let synced = worktree_repo
@@ -123,7 +126,10 @@ async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_
 async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
-    let project = &proj.path;
+    let project_path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo)
+        .to_string_lossy()
+        .into_owned();
+    let project = &project_path;
     let worktree = workspace_tempdir("mcp-memory-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
@@ -144,7 +150,7 @@ async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
     .await;
 
     let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+    let project_id: String = project_repo.resolve(project).await.unwrap().expect("test project must resolve");
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
         .get_by_permalink(&project_id, created["permalink"].as_str().unwrap())
@@ -199,7 +205,10 @@ async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
 async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_worktree() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
-    let project = &proj.path;
+    let project_path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo)
+        .to_string_lossy()
+        .into_owned();
+    let project = &project_path;
     let worktree = workspace_tempdir("mcp-memory-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
@@ -231,7 +240,7 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
     assert!(edited["content"].as_str().unwrap().contains("beta"));
 
     let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+    let project_id: String = project_repo.resolve(project).await.unwrap().expect("test project must resolve");
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
         .get_by_permalink(&project_id, "brief")
@@ -281,7 +290,10 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
 async fn mcp_current_requirement_edits_use_canonical_project_root_and_mirror_worktree() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
-    let project = &proj.path;
+    let project_path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo)
+        .to_string_lossy()
+        .into_owned();
+    let project = &project_path;
     let worktree = workspace_tempdir("mcp-current-requirement-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
@@ -293,7 +305,7 @@ async fn mcp_current_requirement_edits_use_canonical_project_root_and_mirror_wor
     .await;
 
     let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+    let project_id: String = project_repo.resolve(project).await.unwrap().expect("test project must resolve");
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     note_repo
         .create(

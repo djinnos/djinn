@@ -80,10 +80,15 @@ async fn project_and_workspace_for_task(
 
     let task = task_repo.get(task_id).await.ok().flatten()?;
     let project_path = project_repo
-        .get_path(&task.project_id)
+        .get(&task.project_id)
         .await
         .ok()
-        .flatten()?;
+        .flatten()
+        .map(|p| {
+            djinn_core::paths::project_dir(&p.github_owner, &p.github_repo)
+                .to_string_lossy()
+                .into_owned()
+        })?;
     let fallback_project_path = project_path.clone();
     let workspace = task_run_repo
         .latest_workspace_path_for_task(task_id)

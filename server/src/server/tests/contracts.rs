@@ -393,7 +393,7 @@ async fn mcp_contract_board_health_detects_stale_in_progress_task() {
         &app,
         &session_id,
         "board_health",
-        serde_json::json!({ "project": project.path }),
+        serde_json::json!({ "project": project.slug() }),
     )
     .await;
 

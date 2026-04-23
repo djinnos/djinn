@@ -31,9 +31,10 @@ async fn write_rejects_symlink_escape_outside_worktree() {
 async fn call_tool_dispatches_task_create_with_public_response_shape() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
-    state.task_ops_project_path_override = Some(project.path.clone().into());
+    state.task_ops_project_path_override = Some(project_path.clone().into());
 
     let response = call_tool(
         &state,
@@ -54,7 +55,7 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
             .expect("task_create args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         None,
         Some("planner"),
         None,
@@ -109,10 +110,11 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
 async fn call_tool_dispatches_task_update_with_public_response_shape() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
-    state.task_ops_project_path_override = Some(project.path.clone().into());
+    state.task_ops_project_path_override = Some(project_path.clone().into());
 
     let response = call_tool(
         &state,
@@ -133,7 +135,7 @@ async fn call_tool_dispatches_task_update_with_public_response_shape() {
             .expect("task_update args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("planner"),
         None,
@@ -200,10 +202,11 @@ async fn call_tool_dispatches_task_update_with_public_response_shape() {
 async fn call_tool_dispatches_comment_and_transition_flows() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
-    state.task_ops_project_path_override = Some(project.path.clone().into());
+    state.task_ops_project_path_override = Some(project_path.clone().into());
 
     let comment = call_tool(
         &state,
@@ -217,7 +220,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
             .expect("task_comment_add args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("architect"),
         None,
@@ -261,7 +264,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
             .expect("task_transition args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("lead"),
         None,
@@ -291,6 +294,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
 async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
     let create_response = call_tool(
@@ -298,7 +302,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
         "agent_create",
         Some(
             serde_json::json!({
-                "project": project.path,
+                "project": project_path.clone(),
                 "name": "Rust specialist",
                 "base_role": "worker",
                 "description": "Handles Rust-heavy tasks",
@@ -309,7 +313,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
             .expect("agent_create args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         None,
         Some("architect"),
         None,
@@ -346,7 +350,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
         "agent_metrics",
         Some(
             serde_json::json!({
-                "project": project.path,
+                "project": project_path.clone(),
                 "agent_id": created_agent_id,
                 "window_days": 14
             })
@@ -354,7 +358,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
             .expect("agent_metrics args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         None,
         Some("architect"),
         None,

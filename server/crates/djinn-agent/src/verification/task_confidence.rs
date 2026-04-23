@@ -290,9 +290,11 @@ mod tests {
         slug: &str,
         path_name: &str,
     ) -> djinn_db::Result<djinn_core::models::Project> {
+        // `path_name` survives as the fake `github_repo` so the runtime-
+        // derived project_dir stays stable across the existing test asserts.
         let path = temp_project_path(path_name);
         std::fs::create_dir_all(&path).unwrap();
-        project_repo.create(slug, path.to_str().unwrap()).await
+        project_repo.create(slug, "test", path_name).await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -313,12 +315,14 @@ mod tests {
         .await
         .unwrap();
 
-        std::fs::create_dir_all(&project.path).unwrap();
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&project_path).unwrap();
 
         let note = note_repo
             .create(
                 &project.id,
-                std::path::Path::new(&project.path),
+                &project_path,
                 "Task Success Note",
                 "notes for task outcome confidence",
                 "research",
@@ -534,10 +538,13 @@ mod tests {
         .await
         .unwrap();
 
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&project_path).unwrap();
         let note = note_repo
             .create(
                 &project.id,
-                std::path::Path::new(&project.path),
+                &project_path,
                 "Dupe Note",
                 "notes for duplicate task outcome",
                 "research",

@@ -1026,10 +1026,19 @@ impl NoteRepository {
             && !is_singleton(&current.note_type);
 
         let project_path_opt: Option<String> = if heal_candidate {
-            sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?")
-                .bind(&current.project_id)
-                .fetch_optional(self.db.pool())
-                .await?
+            sqlx::query!(
+                r#"SELECT github_owner AS "github_owner!: String",
+                          github_repo  AS "github_repo!: String"
+                   FROM projects WHERE id = ?"#,
+                current.project_id
+            )
+            .fetch_optional(self.db.pool())
+            .await?
+            .map(|row| {
+                djinn_core::paths::project_dir(&row.github_owner, &row.github_repo)
+                    .to_string_lossy()
+                    .into_owned()
+            })
         } else {
             None
         };

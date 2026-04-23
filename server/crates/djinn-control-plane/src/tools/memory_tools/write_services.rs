@@ -82,12 +82,12 @@ pub(super) async fn create_note(
     // before creating the note; the repository still uses `worktree_root` to write
     // the editable worktree copy when present.
     let project_repo = ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
-    let canonical_project_path = project_repo
-        .get_path(project_id)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| params.project.clone());
+    let canonical_project_path = match project_repo.get(project_id).await {
+        Ok(Some(p)) => djinn_core::paths::project_dir(&p.github_owner, &p.github_repo)
+            .to_string_lossy()
+            .into_owned(),
+        _ => params.project.clone(),
+    };
 
     let scope_paths_json = params
         .scope_paths

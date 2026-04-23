@@ -1,0 +1,34 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT\n                 github_owner AS \"github_owner!: String\",\n                 github_repo  AS \"github_repo!: String\"\n               FROM projects WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "github_owner!: String",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "github_repo!: String",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "478104f30d3a90a6af19453f6e24ac79b402d9cedc449ad981801c8d5b29f3ae"
+}

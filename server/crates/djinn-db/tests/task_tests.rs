@@ -119,9 +119,8 @@ pub(crate) async fn create_test_project(db: &Database) -> djinn_core::models::Pr
     use djinn_db::ProjectRepository;
     let repo = ProjectRepository::new(db.clone(), noop_events());
     let id = uuid::Uuid::now_v7();
-    let path = format!("/tmp/djinn-test-project-{id}");
     let name = format!("test-project-{id}");
-    repo.create(&name, &path)
+    repo.create(&name, "test", &name)
         .await
         .expect("failed to create test project")
 }

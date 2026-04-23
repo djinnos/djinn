@@ -94,7 +94,7 @@ pub async fn run_warm_graph_command<C: WarmContext>(
             );
             PathBuf::from(v)
         }
-        _ => PathBuf::from(&project.path),
+        _ => djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
     };
     tracing::info!(
         project_id,
@@ -505,12 +505,32 @@ pub async fn load_canonical_graph<C: WarmContext>(
         }
     }
 
+    // The server-managed clone path has the shape
+    // `{projects_root}/{owner}/{repo}`; reverse-parse the owner/repo
+    // segment and look the project up by GitHub coords. Callers that
+    // pass a subdirectory still hit here because `normalize_graph_query_paths`
+    // strips back to the project root.
     let project_repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
-    let project_id = project_repo
-        .resolve_id_by_path_fuzzy(project_path)
-        .await
-        .map_err(|e| format!("resolve project id for '{project_path}': {e}"))?
-        .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?;
+    let project_id = {
+        let owner_repo = std::path::Path::new(project_path)
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        if owner_repo.len() < 2 {
+            return Err(GRAPH_NOT_WARMED_ERR.to_string());
+        }
+        // rev().take(2) yields [repo, owner]; flip them.
+        let repo_name = &owner_repo[0];
+        let owner_name = &owner_repo[1];
+        project_repo
+            .get_by_github(owner_name, repo_name)
+            .await
+            .map_err(|e| format!("resolve project id for '{project_path}': {e}"))?
+            .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?
+            .id
+    };
 
     let cache_repo = RepoGraphCacheRepository::new(ctx.db().clone());
     let row = cache_repo
@@ -800,7 +820,7 @@ mod tests {
         let ctx = TestWarmContext::new(db.clone());
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
-            .create("test-canonical", project_root.to_string_lossy().as_ref())
+            .create("test-canonical", "test", "test-canonical")
             .await
             .expect("create project");
 
@@ -845,10 +865,7 @@ mod tests {
         let ctx = TestWarmContext::new(db.clone());
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
-            .create(
-                "test-canonical-stale",
-                project_root.to_string_lossy().as_ref(),
-            )
+            .create("test-canonical-stale", "test", "test-canonical-stale")
             .await
             .expect("create project");
 
@@ -893,10 +910,7 @@ mod tests {
         let db = create_test_db();
         let ctx = TestWarmContext::new(db.clone());
         let _ = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create(
-                "test-cache-only-readers",
-                project_root.to_string_lossy().as_ref(),
-            )
+            .create("test-cache-only-readers", "test", "test-cache-only-readers")
             .await
             .expect("create project");
 
@@ -940,10 +954,7 @@ mod tests {
         let ctx = TestWarmContext::new(db.clone());
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
-            .create(
-                "test-canonical-persist",
-                project_root.to_string_lossy().as_ref(),
-            )
+            .create("test-canonical-persist", "test", "test-canonical-persist")
             .await
             .expect("create project");
 
@@ -1000,7 +1011,7 @@ mod tests {
         let ctx = TestWarmContext::new(db.clone());
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
-            .create("stack-filter", project_root.to_string_lossy().as_ref())
+            .create("stack-filter", "test", "stack-filter")
             .await
             .expect("create project");
 
@@ -1044,7 +1055,7 @@ mod tests {
         let other_root = tmp.path().join("repo-empty");
         tokio::fs::create_dir_all(&other_root).await.unwrap();
         let project2 = proj_repo
-            .create("stack-empty", other_root.to_string_lossy().as_ref())
+            .create("stack-empty", "test", "stack-empty")
             .await
             .expect("create second project");
         let filter_none = resolve_stack_indexer_filter(&ctx, &project2.id).await;

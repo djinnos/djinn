@@ -37,6 +37,10 @@ workspace-hack.workspace = true
 test-support = []
 
 [dev-dependencies]
+# Self-reference enables `feature = "test-support"` for integration tests
+# under `tests/` (which compile against the lib as an external crate, so
+# `#[cfg(test)]` gating on `test_support` doesn't apply).
+djinn-control-plane = { path = ".", features = ["test-support"] }
 tempfile = "3"
 sqlx = { version = "0.8", features = ["mysql", "runtime-tokio-rustls", "macros"] }
 anyhow = "1"

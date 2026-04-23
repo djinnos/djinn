@@ -24,9 +24,9 @@ mod tests {
         tempfile::tempdir_in(base).expect("create server crate tempdir")
     }
 
-    async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
+    async fn create_project(db: &Database, _root: &std::path::Path) -> djinn_core::models::Project {
         ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", root.to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap()
     }
@@ -171,7 +171,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let repo = NoteRepository::new(db.clone(), EventBus::noop());

@@ -24,7 +24,7 @@ async fn session_list_returns_empty_for_task_without_sessions() {
     let payload = harness
         .call_tool(
             "session_list",
-            json!({ "task_id": task.id, "project": project.path }),
+            json!({ "task_id": task.id, "project": project.slug() }),
         )
         .await
         .expect("session_list should dispatch");
@@ -61,7 +61,7 @@ async fn session_list_filters_by_project_and_task() {
     let payload = harness
         .call_tool(
             "session_list",
-            json!({ "task_id": task_a1.id, "project": project_a.path }),
+            json!({ "task_id": task_a1.id, "project": project_a.slug() }),
         )
         .await
         .expect("session_list should dispatch");
@@ -92,7 +92,7 @@ async fn session_show_returns_full_shape_with_tokens() {
     let payload = harness
         .call_tool(
             "session_show",
-            json!({ "id": session.id, "project": project.path }),
+            json!({ "id": session.id, "project": project.slug() }),
         )
         .await
         .expect("session_show should dispatch");
@@ -118,7 +118,7 @@ async fn session_show_not_found_returns_error_shape() {
     let payload = harness
         .call_tool(
             "session_show",
-            json!({ "id": "missing-session-id", "project": project.path }),
+            json!({ "id": "missing-session-id", "project": project.slug() }),
         )
         .await
         .expect("session_show should dispatch");
@@ -161,7 +161,7 @@ async fn task_timeline_returns_chronological_session_and_message_history() {
     let payload = harness
         .call_tool(
             "task_timeline",
-            json!({ "task_id": task.id, "project": project.path }),
+            json!({ "task_id": task.id, "project": project.slug() }),
         )
         .await
         .expect("task_timeline should dispatch");
@@ -189,7 +189,7 @@ async fn task_timeline_not_found_returns_error_shape() {
     let payload = harness
         .call_tool(
             "task_timeline",
-            json!({ "task_id": "missing-task", "project": project.path }),
+            json!({ "task_id": "missing-task", "project": project.slug() }),
         )
         .await
         .expect("task_timeline should dispatch");
@@ -222,7 +222,7 @@ async fn session_messages_returns_messages_for_valid_session_id() {
     let payload = harness
         .call_tool(
             "session_messages",
-            json!({ "id": sess.id, "project": project.path }),
+            json!({ "id": sess.id, "project": project.slug() }),
         )
         .await
         .expect("session_messages should dispatch");

@@ -578,7 +578,8 @@ mod tests {
         let project = Project {
             id: "proj-1".into(),
             name: "name".into(),
-            path: "/tmp/proj".into(),
+            github_owner: "test".into(),
+            github_repo: "proj".into(),
             created_at: "2025-01-01T00:00:00Z".into(),
             target_branch: "main".into(),
             auto_merge: false,
@@ -600,7 +601,8 @@ mod tests {
         let project = Project {
             id: "proj-1".into(),
             name: "name".into(),
-            path: "/tmp/proj".into(),
+            github_owner: "test".into(),
+            github_repo: "proj".into(),
             created_at: "2025-01-01T00:00:00Z".into(),
             target_branch: "main".into(),
             auto_merge: false,

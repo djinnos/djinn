@@ -92,7 +92,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", project_path.to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         (DjinnMcpServer::new(state), db, project.id, project_path)

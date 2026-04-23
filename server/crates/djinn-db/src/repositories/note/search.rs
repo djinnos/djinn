@@ -687,16 +687,18 @@ mod contradiction_tests {
     use djinn_core::events::EventBus;
     use djinn_memory::TypeRisk;
 
-    async fn make_repo_and_project(tmp: &tempfile::TempDir) -> (NoteRepository, String) {
+    async fn make_repo_and_project(_tmp: &tempfile::TempDir) -> (NoteRepository, String) {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
-        let path_str = tmp.path().to_str().unwrap();
+        let owner = "test";
+        let repo_slug = format!("contradiction-{id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
             id,
             "test",
-            path_str,
+            owner,
+            repo_slug,
         )
         .execute(db.pool())
         .await
@@ -867,12 +869,14 @@ mod scope_overlap_decay_tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
-        let path_str = tmp.path().to_str().unwrap();
+        let owner = "test";
+        let repo_slug = format!("scope-overlap-{id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
             id,
             "test",
-            path_str,
+            owner,
+            repo_slug,
         )
         .execute(db.pool())
         .await

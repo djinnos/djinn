@@ -1280,14 +1280,28 @@ impl RepoGraphOps for RepoGraphBridge {
         };
 
         // Resolve the pinned commit via repo_graph_cache. Best-effort;
-        // fall back to an empty string if the lookup fails.
+        // fall back to an empty string if the lookup fails. The server-
+        // managed clone path has the shape `{projects_root}/{owner}/{repo}`;
+        // reverse-parse the owner/repo segment and look the project up by
+        // GitHub coords.
         let mut pinned = String::new();
         use djinn_db::{ProjectRepository, RepoGraphCacheRepository};
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        if let Ok(Some(project)) = repo.get_by_path(project_path).await {
-            let cache_repo = RepoGraphCacheRepository::new(self.state.db().clone());
-            if let Ok(Some(row)) = cache_repo.latest_for_project(&project.id).await {
-                pinned = row.commit_sha;
+        let owner_repo = std::path::Path::new(project_path)
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        if owner_repo.len() >= 2 {
+            // rev().take(2) yields [repo, owner]; flip them.
+            let repo_name = &owner_repo[0];
+            let owner_name = &owner_repo[1];
+            if let Ok(Some(project)) = repo.get_by_github(owner_name, repo_name).await {
+                let cache_repo = RepoGraphCacheRepository::new(self.state.db().clone());
+                if let Ok(Some(row)) = cache_repo.latest_for_project(&project.id).await {
+                    pinned = row.commit_sha;
+                }
             }
         }
 
@@ -1692,7 +1706,21 @@ impl AppState {
         use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
         let repo =
             djinn_db::ProjectRepository::new(self.db().clone(), self.event_bus());
-        let project = match repo.get_by_path(project_path).await {
+        // The server-managed clone path has the shape
+        // `{projects_root}/{owner}/{repo}`; reverse-parse the owner/repo
+        // segment and look the project up by GitHub coords.
+        let owner_repo = std::path::Path::new(project_path)
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        if owner_repo.len() < 2 {
+            return GraphExclusions::empty();
+        }
+        let repo_name = &owner_repo[0];
+        let owner_name = &owner_repo[1];
+        let project = match repo.get_by_github(owner_name, repo_name).await {
             Ok(Some(p)) => p,
             _ => return GraphExclusions::empty(),
         };

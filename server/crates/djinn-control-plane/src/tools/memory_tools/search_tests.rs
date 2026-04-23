@@ -60,7 +60,7 @@ mod tests {
         let event_bus = event_bus_for(&tx);
         let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
         let project = project_repo
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), event_bus);
@@ -76,7 +76,7 @@ mod tests {
 
         let response = server
             .memory_diff(rmcp::handler::server::wrapper::Parameters(DiffParams {
-                project: project.path.clone(),
+                project: project.slug(),
                 permalink: db_note.permalink.clone(),
                 sha: None,
             }))
@@ -140,7 +140,7 @@ mod tests {
         let event_bus = event_bus_for(&tx);
         let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
         let project = project_repo
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
 
@@ -148,7 +148,7 @@ mod tests {
 
         let response = server
             .memory_diff(rmcp::handler::server::wrapper::Parameters(DiffParams {
-                project: project.path.clone(),
+                project: project.slug(),
                 permalink: "nonexistent/note".to_string(),
                 sha: None,
             }))
@@ -169,7 +169,7 @@ mod tests {
         let event_bus = event_bus_for(&tx);
         let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
         let project = project_repo
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), event_bus);
@@ -192,7 +192,7 @@ mod tests {
 
         let response = server
             .memory_diff(rmcp::handler::server::wrapper::Parameters(DiffParams {
-                project: project.path.clone(),
+                project: project.slug(),
                 permalink: file_note.permalink.clone(),
                 sha: None,
             }))
@@ -219,7 +219,7 @@ mod tests {
         let event_bus = event_bus_for(&tx);
         let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
         let project = project_repo
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), event_bus);
@@ -240,7 +240,7 @@ mod tests {
 
         let response = server
             .memory_history(rmcp::handler::server::wrapper::Parameters(HistoryParams {
-                project: project.path.clone(),
+                project: project.slug(),
                 permalink: db_note.permalink.clone(),
                 limit: None,
             }))
@@ -274,7 +274,7 @@ mod tests {
         let event_bus = event_bus_for(&tx);
         let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
         let project = project_repo
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), event_bus);
@@ -296,7 +296,7 @@ mod tests {
 
         let response = server
             .memory_history(rmcp::handler::server::wrapper::Parameters(HistoryParams {
-                project: project.path.clone(),
+                project: project.slug(),
                 permalink: file_note.permalink.clone(),
                 limit: None,
             }))

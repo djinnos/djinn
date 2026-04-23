@@ -133,7 +133,7 @@ mod tests {
         let event_bus = event_bus_for(&tx);
         let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
         let project = project_repo
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), event_bus);
@@ -175,7 +175,7 @@ mod tests {
         SetupResult {
             server,
             _tmp: tmp,
-            project: project.path,
+            project: project.slug(),
             permalink: primary.permalink,
             folder: folder_note.folder,
         }
@@ -540,7 +540,7 @@ mod tests {
         let event_bus = event_bus_for(&tx);
         let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
         let project = project_repo
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let repo = NoteRepository::new(db.clone(), event_bus.clone());
@@ -602,7 +602,7 @@ mod tests {
         let response = ops::memory_search(
             &server,
             SearchParams {
-                project: project.path.clone(),
+                project: project.slug(),
                 query: "architecture".to_string(),
                 folder: None,
                 note_type: None,

@@ -4,16 +4,17 @@ use super::*;
 async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
-    state.task_ops_project_path_override = Some(project.path.clone().into());
+    state.task_ops_project_path_override = Some(project_path.clone().into());
 
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let seed = note_repo
         .create(
             &project.id,
-            Path::new(&project.path),
+            Path::new(&project_path),
             "Shared Memory Seed",
             "Architecture guidance with [[Shared Memory Related]] references.",
             "adr",
@@ -24,7 +25,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
     note_repo
         .create(
             &project.id,
-            Path::new(&project.path),
+            Path::new(&project_path),
             "Shared Memory Related",
             "Related architecture context.",
             "reference",
@@ -38,7 +39,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         "memory_search",
         Some(
             serde_json::json!({
-                "project": project.path,
+                "project": project_path.clone(),
                 "query": "architecture",
                 "limit": 5
             })
@@ -46,7 +47,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
             .expect("memory_search args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("architect"),
         None,
@@ -71,14 +72,14 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         "memory_read",
         Some(
             serde_json::json!({
-                "project": project.path,
+                "project": project_path.clone(),
                 "identifier": seed.permalink
             })
             .as_object()
             .expect("memory_read args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("architect"),
         None,
@@ -103,7 +104,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         "memory_list",
         Some(
             serde_json::json!({
-                "project": project.path,
+                "project": project_path.clone(),
                 "folder": "decisions",
                 "depth": 1
             })
@@ -111,7 +112,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
             .expect("memory_list args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("architect"),
         None,
@@ -136,7 +137,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         "memory_build_context",
         Some(
             serde_json::json!({
-                "project": project.path,
+                "project": project_path.clone(),
                 "url": format!("memory://{}", seed.permalink),
                 "budget": 512,
                 "max_related": 5
@@ -145,7 +146,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
             .expect("memory_build_context args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("architect"),
         None,
@@ -171,16 +172,17 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
-    state.task_ops_project_path_override = Some(project.path.clone().into());
+    state.task_ops_project_path_override = Some(project_path.clone().into());
 
     let note_repo = NoteRepository::new(db, EventBus::noop());
     let note = note_repo
         .create(
             &project.id,
-            Path::new(&project.path),
+            Path::new(&project_path),
             "Draft To Recover",
             "# Draft To Recover",
             "adr",
@@ -201,7 +203,7 @@ async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() 
             .expect("memory_move args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("architect"),
         None,
@@ -216,16 +218,17 @@ async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() 
 async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wide() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
-    state.task_ops_project_path_override = Some(project.path.clone().into());
+    state.task_ops_project_path_override = Some(project_path.clone().into());
 
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     note_repo
         .create(
             &project.id,
-            Path::new(&project.path),
+            Path::new(&project_path),
             "Broken Source",
             "Broken reference to [[Missing Note]].",
             "research",
@@ -236,7 +239,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
     note_repo
         .create(
             &project.id,
-            Path::new(&project.path),
+            Path::new(&project_path),
             "Standalone Orphan",
             "No inbound links here.",
             "pattern",
@@ -256,7 +259,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
                 .expect("empty args object")
                 .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("planner"),
         None,
@@ -279,7 +282,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
                 .expect("broken_links args object")
                 .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("planner"),
         None,
@@ -302,7 +305,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
                 .expect("empty args object")
                 .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("planner"),
         None,
@@ -325,7 +328,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
                 .expect("orphans args object")
                 .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         Some(&task.id),
         Some("planner"),
         None,
@@ -344,8 +347,9 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
 async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    std::fs::create_dir_all(&project.path).expect("create project dir");
-    let worktree = Path::new(&project.path).join(".djinn/worktrees/test-singleton-worktree");
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    std::fs::create_dir_all(&project_path).expect("create project dir");
+    let worktree = Path::new(&project_path).join(".djinn/worktrees/test-singleton-worktree");
     std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -418,11 +422,11 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
     assert_eq!(note.permalink, "roadmap");
     assert_eq!(
         Path::new(&note.file_path),
-        Path::new(&project.path).join(".djinn/roadmap.md")
+        Path::new(&project_path).join(".djinn/roadmap.md")
     );
 
     let canonical_contents =
-        std::fs::read_to_string(Path::new(&project.path).join(".djinn/roadmap.md"))
+        std::fs::read_to_string(Path::new(&project_path).join(".djinn/roadmap.md"))
             .expect("read canonical roadmap");
     let worktree_contents =
         std::fs::read_to_string(worktree.join(".djinn/roadmap.md")).expect("read worktree roadmap");
@@ -441,7 +445,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
             .is_none()
     );
     assert!(
-        !Path::new(&project.path)
+        !Path::new(&project_path)
             .join(".djinn/reference/adr-043-roadmap-active-decomposition-status.md")
             .exists()
     );
@@ -451,8 +455,9 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_worktree() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    std::fs::create_dir_all(&project.path).expect("create project dir");
-    let worktree = Path::new(&project.path).join(".djinn/worktrees/test-brief-singleton-worktree");
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    std::fs::create_dir_all(&project_path).expect("create project dir");
+    let worktree = Path::new(&project_path).join(".djinn/worktrees/test-brief-singleton-worktree");
     std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
 
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -525,11 +530,11 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
     assert_eq!(note.permalink, "brief");
     assert_eq!(
         Path::new(&note.file_path),
-        Path::new(&project.path).join(".djinn/brief.md")
+        Path::new(&project_path).join(".djinn/brief.md")
     );
 
     let canonical_contents =
-        std::fs::read_to_string(Path::new(&project.path).join(".djinn/brief.md"))
+        std::fs::read_to_string(Path::new(&project_path).join(".djinn/brief.md"))
             .expect("read canonical brief");
     let worktree_contents =
         std::fs::read_to_string(worktree.join(".djinn/brief.md")).expect("read worktree brief");
@@ -545,7 +550,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
             .is_none()
     );
     assert!(
-        !Path::new(&project.path)
+        !Path::new(&project_path)
             .join(".djinn/reference/project-brief.md")
             .exists()
     );
@@ -555,6 +560,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 async fn call_tool_dispatches_registered_mcp_tool_success() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let state = agent_context_from_db(db, CancellationToken::new());
     let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
         [("web_search".to_string(), "search-server".to_string())],
@@ -582,7 +588,7 @@ async fn call_tool_dispatches_registered_mcp_tool_success() {
             .expect("mcp args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         None,
         Some("worker"),
         Some(&registry),
@@ -605,16 +611,17 @@ async fn call_tool_dispatches_registered_mcp_tool_success() {
 async fn call_tool_memory_current_requirement_targets_canonical_project_root_from_worktree() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    std::fs::create_dir_all(&project.path).expect("create project dir");
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    std::fs::create_dir_all(&project_path).expect("create project dir");
     let worktree =
-        Path::new(&project.path).join(".djinn/worktrees/test-current-requirement-worktree");
+        Path::new(&project_path).join(".djinn/worktrees/test-current-requirement-worktree");
     std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
 
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     note_repo
         .create(
             &project.id,
-            Path::new(&project.path),
+            Path::new(&project_path),
             "V1 Requirements",
             "tracks [[Cognitive Memory Scope]]",
             "requirement",
@@ -666,11 +673,11 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
     assert_eq!(note.permalink, "requirements/v1-requirements");
     assert_eq!(
         Path::new(&note.file_path),
-        Path::new(&project.path).join(".djinn/requirements/v1-requirements.md")
+        Path::new(&project_path).join(".djinn/requirements/v1-requirements.md")
     );
 
     let canonical_contents = std::fs::read_to_string(
-        Path::new(&project.path).join(".djinn/requirements/v1-requirements.md"),
+        Path::new(&project_path).join(".djinn/requirements/v1-requirements.md"),
     )
     .expect("read canonical requirements");
     let worktree_contents =
@@ -687,7 +694,7 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
             .is_none()
     );
     assert!(
-        !Path::new(&project.path)
+        !Path::new(&project_path)
             .join(".djinn/reference/v1-requirements.md")
             .exists()
     );
@@ -697,6 +704,7 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
 async fn call_tool_dispatches_registered_mcp_tool_error() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let state = agent_context_from_db(db, CancellationToken::new());
     let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
         [("web_fetch".to_string(), "fetch-server".to_string())],
@@ -722,7 +730,7 @@ async fn call_tool_dispatches_registered_mcp_tool_error() {
             .expect("mcp args object")
             .clone(),
         ),
-        Path::new(&project.path),
+        Path::new(&project_path),
         None,
         Some("worker"),
         Some(&registry),

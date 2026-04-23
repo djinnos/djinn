@@ -522,7 +522,7 @@ mod tests {
         db.ensure_initialized().await.unwrap();
         let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = proj_repo
-            .create("test-project", tmp.path().to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap();
         let repo = NoteRepository::new(db, bus);

@@ -89,12 +89,12 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
 pub async fn create_test_project(db: &Database) -> Project {
     let repo = ProjectRepository::new(db.clone(), test_events());
     let id = uuid::Uuid::now_v7();
-    let path = test_persistent_dir("djinn-test-project-")
-        .to_string_lossy()
-        .to_string();
+    // Keep the persistent tempdir creation for tests that still need a
+    // writable workspace, but the project row no longer stores a path.
+    let _ = test_persistent_dir("djinn-test-project-");
     let name = format!("test-project-{id}");
     let project = repo
-        .create(&name, &path)
+        .create(&name, "test", &name)
         .await
         .expect("failed to create test project");
     // Satisfy the coordinator's readiness gate so existing tests can dispatch

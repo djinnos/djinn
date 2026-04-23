@@ -55,9 +55,9 @@ mod tests {
         }
     }
 
-    async fn create_project(db: &Database, root: &std::path::Path) -> djinn_core::models::Project {
+    async fn create_project(db: &Database, _root: &std::path::Path) -> djinn_core::models::Project {
         ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", root.to_str().unwrap())
+            .create("test-project", "test", "test-project")
             .await
             .unwrap()
     }

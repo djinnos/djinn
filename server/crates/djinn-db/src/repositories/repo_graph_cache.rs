@@ -176,7 +176,7 @@ mod tests {
         let repo = RepoGraphCacheRepository::new(db.clone());
         let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = project_repo
-            .create("proj-warm-stamp", "/tmp/djinn-tests/warm-stamp")
+            .create("proj-warm-stamp", "test", "proj-warm-stamp")
             .await
             .expect("create project");
 

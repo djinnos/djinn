@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e84439699bdb8aeec9bce65d0d30023fa25c3ed86a12d98060d79e34e918e6ee"
+}

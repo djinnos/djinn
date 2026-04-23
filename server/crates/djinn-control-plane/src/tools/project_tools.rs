@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
@@ -9,6 +9,7 @@ use crate::server::DjinnMcpServer;
 use crate::tools::ObjectJson;
 use djinn_core::auth_context::current_user_token;
 use djinn_core::models::Project;
+use djinn_core::paths::project_dir;
 use djinn_db::{
     OrgConfigRepository, ProjectConfig, ProjectImage, ProjectImageStatus, ProjectRepository,
     RepoGraphCacheRepository,
@@ -16,13 +17,11 @@ use djinn_db::{
 use djinn_stack::Stack;
 
 /// Build a success-shape `ProjectConfigResponse` from a fully-populated
-/// [`ProjectConfig`]. Consolidates the six struct-field copies that
-/// used to live in every match arm of `project_config_get` and
-/// `project_config_set`.
-fn project_config_ok(project_path: &str, config: ProjectConfig) -> ProjectConfigResponse {
+/// [`ProjectConfig`].
+fn project_config_ok(project: &Project, config: ProjectConfig) -> ProjectConfigResponse {
     ProjectConfigResponse {
         status: "ok".into(),
-        project: project_path.to_owned(),
+        project: project.slug(),
         target_branch: config.target_branch,
         auto_merge: config.auto_merge,
         sync_enabled: config.sync_enabled,
@@ -33,14 +32,12 @@ fn project_config_ok(project_path: &str, config: ProjectConfig) -> ProjectConfig
 }
 
 /// Fallback shape used when `get_config` returns `None` (no row) or
-/// an error — we still want to echo back the denormalized fields from
-/// the `projects` table itself. Graph-exclusion lists aren't in the
-/// `Project` struct, so they default to empty (same as a freshly
-/// migrated row).
+/// an error — we still echo back the denormalized fields from the
+/// `Project` row itself.
 fn project_config_fallback(status: String, project: &Project) -> ProjectConfigResponse {
     ProjectConfigResponse {
         status,
-        project: project.path.clone(),
+        project: project.slug(),
         target_branch: project.target_branch.clone(),
         auto_merge: project.auto_merge,
         sync_enabled: project.sync_enabled,
@@ -51,8 +48,7 @@ fn project_config_fallback(status: String, project: &Project) -> ProjectConfigRe
 }
 
 /// Error shape used when the project lookup itself fails, so we don't
-/// even have a `Project` to echo. Fills the graph-exclusion lists with
-/// empty vecs because the caller's form binding expects arrays.
+/// even have a `Project` to echo.
 fn project_config_error(project_ref: &str, status: String) -> ProjectConfigResponse {
     ProjectConfigResponse {
         status,
@@ -68,21 +64,17 @@ fn project_config_error(project_ref: &str, status: String) -> ProjectConfigRespo
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
 
-/// Resolve the reference-clone root used by `project_add_from_github`.
-/// Mirrors `mirrors_root()` in `server/src/server/state/mod.rs`: prefer
-/// `$DJINN_HOME/projects` (set by the Helm chart to `/var/lib/djinn/projects`
-/// so the non-root `djinn` uid can write there) and fall back to
-/// `~/.djinn/projects` for local/docker-compose runs where HOME is `/root`.
-fn projects_root() -> PathBuf {
-    if let Ok(djinn_home) = std::env::var("DJINN_HOME")
-        && !djinn_home.is_empty()
-    {
-        return PathBuf::from(djinn_home).join("projects");
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".djinn")
-        .join("projects")
+/// Resolve a project handle (UUID or `owner/repo` slug) to a
+/// fully-loaded `Project`. Single source of truth for the many
+/// MCP tools that take a `project` parameter.
+async fn resolve_project(
+    repo: &ProjectRepository,
+    project_ref: &str,
+) -> djinn_db::Result<Option<Project>> {
+    let Some(id) = repo.resolve(project_ref).await? else {
+        return Ok(None);
+    };
+    repo.get(&id).await
 }
 
 /// Run `git fetch --all --prune` inside `path`. Best-effort refresh for an
@@ -106,10 +98,10 @@ async fn git_fetch_in(path: &str) -> Result<(), String> {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ProjectRemoveParams {
-    /// Project name to remove.
-    pub name: String,
-    /// Absolute path of the project to remove. Must match the registered path exactly.
-    pub path: String,
+    /// Project identifier — either the UUID (`project_id`) or the
+    /// canonical `"owner/repo"` slug. Resolved via
+    /// `ProjectRepository::resolve`.
+    pub project: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -383,7 +375,28 @@ pub struct ProjectListResponse {
 pub struct ProjectInfo {
     pub id: String,
     pub name: String,
-    pub path: String,
+    pub github_owner: String,
+    pub github_repo: String,
+}
+
+impl ProjectInfo {
+    fn from_project(p: &Project) -> Self {
+        Self {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            github_owner: p.github_owner.clone(),
+            github_repo: p.github_repo.clone(),
+        }
+    }
+
+    fn unknown(name: String) -> Self {
+        Self {
+            id: String::new(),
+            name,
+            github_owner: String::new(),
+            github_repo: String::new(),
+        }
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -449,7 +462,7 @@ fn error_response(
 impl DjinnMcpServer {
     /// Unregister a project from Djinn.
     #[tool(
-        description = "Remove a project from the Djinn registry by name and path. Both name and path must match exactly to prevent accidental deletion when duplicate names exist."
+        description = "Remove a project from the Djinn registry. Accepts the project UUID or the canonical \"owner/repo\" slug."
     )]
     pub async fn project_remove(
         &self,
@@ -457,44 +470,32 @@ impl DjinnMcpServer {
     ) -> Json<ProjectRemoveResponse> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        // Find the project by name AND path to prevent accidental deletion of duplicates
-        let projects = match repo.list().await {
-            Ok(p) => p,
+        let id = match repo.resolve(&input.project).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return Json(ProjectRemoveResponse {
+                    status: format!("error: project not found: {}", input.project),
+                    project: ProjectInfo::unknown(input.project),
+                });
+            }
             Err(e) => {
                 return Json(ProjectRemoveResponse {
                     status: format!("error: {e}"),
-                    project: ProjectInfo {
-                        id: String::new(),
-                        name: input.name,
-                        path: input.path,
-                    },
+                    project: ProjectInfo::unknown(input.project),
                 });
             }
         };
 
-        let path = input.path.trim_end_matches('/');
-        let Some(project) = projects
-            .into_iter()
-            .find(|p| p.name == input.name && p.path.trim_end_matches('/') == path)
-        else {
-            return Json(ProjectRemoveResponse {
-                status: format!(
-                    "error: no project named '{}' with path '{}' found",
-                    input.name, path
-                ),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: input.name,
-                    path: path.to_string(),
-                },
-            });
+        let project = match repo.get(&id).await {
+            Ok(Some(p)) => p,
+            _ => {
+                return Json(ProjectRemoveResponse {
+                    status: format!("error: project not found: {}", input.project),
+                    project: ProjectInfo::unknown(input.project),
+                });
+            }
         };
-
-        let info = ProjectInfo {
-            id: project.id.clone(),
-            name: project.name.clone(),
-            path: project.path.clone(),
-        };
+        let info = ProjectInfo::from_project(&project);
 
         match repo.delete(&project.id).await {
             Ok(()) => Json(ProjectRemoveResponse {
@@ -515,14 +516,7 @@ impl DjinnMcpServer {
 
         match repo.list().await {
             Ok(projects) => Json(ProjectListResponse {
-                projects: projects
-                    .into_iter()
-                    .map(|p| ProjectInfo {
-                        id: p.id,
-                        name: p.name,
-                        path: p.path,
-                    })
-                    .collect(),
+                projects: projects.iter().map(ProjectInfo::from_project).collect(),
             }),
             Err(_) => Json(ProjectListResponse { projects: vec![] }),
         }
@@ -545,11 +539,7 @@ impl DjinnMcpServer {
         if owner.is_empty() || repo.is_empty() {
             return Json(ProjectAddResponse {
                 status: "error: owner and repo must be non-empty".into(),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: input.name.unwrap_or_default(),
-                    path: String::new(),
-                },
+                project: ProjectInfo::unknown(input.name.unwrap_or_default()),
             });
         }
         let display_name = input.name.unwrap_or_else(|| repo.clone());
@@ -559,11 +549,7 @@ impl DjinnMcpServer {
         let Some(user_access_token) = current_user_token() else {
             return Json(ProjectAddResponse {
                 status: "error: sign in with GitHub required".into(),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: display_name,
-                    path: String::new(),
-                },
+                project: ProjectInfo::unknown(display_name),
             });
         };
 
@@ -578,11 +564,7 @@ impl DjinnMcpServer {
                 Err(e) => {
                     return Json(ProjectAddResponse {
                         status: format!("error: {e}"),
-                        project: ProjectInfo {
-                            id: String::new(),
-                            name: display_name,
-                            path: String::new(),
-                        },
+                        project: ProjectInfo::unknown(display_name),
                     });
                 }
             }
@@ -590,17 +572,16 @@ impl DjinnMcpServer {
 
         let default_branch = input.git_ref.clone().unwrap_or_else(|| "main".to_string());
 
-        // 3. Choose clone_path under the server-managed projects root.
-        let clone_path = projects_root()
-            .join(&owner)
-            .join(&repo)
-            .to_string_lossy()
-            .into_owned();
+        // 3. Synthesize the server-side clone path from the owner/repo
+        //    coords. The path is never persisted — every consumer calls
+        //    `djinn_core::paths::project_dir` with the project's coords.
+        let clone_path_buf = project_dir(&owner, &repo);
+        let clone_path = clone_path_buf.to_string_lossy().into_owned();
 
         // Idempotent: if already registered, fast-path to `git fetch`.
         if let Ok(Some(existing)) = repo_db.get_by_github(&owner, &repo).await {
-            let _ = fs::create_dir_all(&existing.path).await;
-            if let Err(e) = git_fetch_in(&existing.path).await {
+            let _ = fs::create_dir_all(&clone_path).await;
+            if let Err(e) = git_fetch_in(&clone_path).await {
                 tracing::warn!(
                     owner = %owner, repo = %repo, error = %e,
                     "project_add_from_github: fetch refresh failed",
@@ -608,11 +589,7 @@ impl DjinnMcpServer {
             }
             return Json(ProjectAddResponse {
                 status: "ok".into(),
-                project: ProjectInfo {
-                    id: existing.id,
-                    name: existing.name,
-                    path: existing.path,
-                },
+                project: ProjectInfo::from_project(&existing),
             });
         }
 
@@ -634,11 +611,7 @@ impl DjinnMcpServer {
                     status: format!(
                         "error: could not mint installation token for {owner}/{repo}: {e}"
                     ),
-                    project: ProjectInfo {
-                        id: String::new(),
-                        name: display_name,
-                        path: clone_path,
-                    },
+                    project: ProjectInfo::unknown(display_name),
                 });
             }
         };
@@ -655,11 +628,7 @@ impl DjinnMcpServer {
                 Err(e) => {
                     return Json(ProjectAddResponse {
                         status: format!("error: git clone failed: {e}"),
-                        project: ProjectInfo {
-                            id: String::new(),
-                            name: display_name,
-                            path: clone_path,
-                        },
+                        project: ProjectInfo::unknown(display_name),
                     });
                 }
             };
@@ -669,11 +638,7 @@ impl DjinnMcpServer {
                         "error: git clone failed: {}",
                         String::from_utf8_lossy(&output.stderr).trim()
                     ),
-                    project: ProjectInfo {
-                        id: String::new(),
-                        name: display_name,
-                        path: clone_path,
-                    },
+                    project: ProjectInfo::unknown(display_name),
                 });
             }
         } else {
@@ -726,26 +691,17 @@ impl DjinnMcpServer {
                 &owner,
                 &repo,
                 &default_branch,
-                &clone_path,
                 Some(installation_id),
             )
             .await
         {
             Ok(project) => Json(ProjectAddResponse {
                 status: "ok".into(),
-                project: ProjectInfo {
-                    id: project.id,
-                    name: project.name,
-                    path: project.path,
-                },
+                project: ProjectInfo::from_project(&project),
             }),
             Err(e) => Json(ProjectAddResponse {
                 status: format!("error: {e}"),
-                project: ProjectInfo {
-                    id: String::new(),
-                    name: display_name,
-                    path: clone_path,
-                },
+                project: ProjectInfo::unknown(display_name),
             }),
         }
     }
@@ -851,7 +807,7 @@ impl DjinnMcpServer {
         Parameters(input): Parameters<ProjectConfigGetParams>,
     ) -> Json<ProjectConfigResponse> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project = match repo.get_by_path(&input.project).await {
+        let project = match resolve_project(&repo, &input.project).await {
             Ok(Some(p)) => p,
             Ok(None) => {
                 return Json(project_config_error(
@@ -864,7 +820,7 @@ impl DjinnMcpServer {
             }
         };
         match repo.get_config(&project.id).await {
-            Ok(Some(config)) => Json(project_config_ok(&project.path, config)),
+            Ok(Some(config)) => Json(project_config_ok(&project, config)),
             Ok(None) => Json(project_config_fallback("ok".into(), &project)),
             Err(e) => Json(project_config_fallback(format!("error: {e}"), &project)),
         }
@@ -876,7 +832,7 @@ impl DjinnMcpServer {
         Parameters(input): Parameters<ProjectConfigSetParams>,
     ) -> Json<ProjectConfigResponse> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project = match repo.get_by_path(&input.project).await {
+        let project = match resolve_project(&repo, &input.project).await {
             Ok(Some(project)) => project,
             Ok(None) => {
                 return Json(project_config_error(
@@ -893,7 +849,7 @@ impl DjinnMcpServer {
             .update_config_field(&project.id, &input.key, &input.value)
             .await
         {
-            Ok(Some(config)) => Json(project_config_ok(&project.path, config)),
+            Ok(Some(config)) => Json(project_config_ok(&project, config)),
             Ok(None) => Json(project_config_fallback(
                 format!("error: invalid key '{}'", input.key),
                 &project,
@@ -910,7 +866,7 @@ impl DjinnMcpServer {
         Parameters(input): Parameters<ProjectGraphExclusionsGetParams>,
     ) -> Json<ProjectGraphExclusionsResponse> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project = match repo.get_by_path(&input.project).await {
+        let project = match resolve_project(&repo, &input.project).await {
             Ok(Some(p)) => p,
             Ok(None) => {
                 return Json(ProjectGraphExclusionsResponse {
@@ -929,22 +885,23 @@ impl DjinnMcpServer {
                 });
             }
         };
+        let slug = project.slug();
         match repo.get_config(&project.id).await {
             Ok(Some(config)) => Json(ProjectGraphExclusionsResponse {
                 status: "ok".into(),
-                project: project.path,
+                project: slug,
                 graph_excluded_paths: config.graph_excluded_paths,
                 graph_orphan_ignore: config.graph_orphan_ignore,
             }),
             Ok(None) => Json(ProjectGraphExclusionsResponse {
                 status: "ok".into(),
-                project: project.path,
+                project: slug,
                 graph_excluded_paths: Vec::new(),
                 graph_orphan_ignore: Vec::new(),
             }),
             Err(e) => Json(ProjectGraphExclusionsResponse {
                 status: format!("error: {e}"),
-                project: project.path,
+                project: slug,
                 graph_excluded_paths: Vec::new(),
                 graph_orphan_ignore: Vec::new(),
             }),
@@ -959,7 +916,7 @@ impl DjinnMcpServer {
         Parameters(input): Parameters<ProjectGraphExclusionsSetParams>,
     ) -> Json<ProjectGraphExclusionsResponse> {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project = match repo.get_by_path(&input.project).await {
+        let project = match resolve_project(&repo, &input.project).await {
             Ok(Some(p)) => p,
             Ok(None) => {
                 return Json(ProjectGraphExclusionsResponse {
@@ -978,6 +935,7 @@ impl DjinnMcpServer {
                 });
             }
         };
+        let slug = project.slug();
 
         // Issue one update_config_field per supplied list. The repo
         // method already validates the JSON round-trip so bad input
@@ -988,7 +946,7 @@ impl DjinnMcpServer {
                 Err(e) => {
                     return Json(ProjectGraphExclusionsResponse {
                         status: format!("error: encode graph_excluded_paths: {e}"),
-                        project: project.path,
+                        project: slug,
                         graph_excluded_paths: Vec::new(),
                         graph_orphan_ignore: Vec::new(),
                     });
@@ -1000,7 +958,7 @@ impl DjinnMcpServer {
             {
                 return Json(ProjectGraphExclusionsResponse {
                     status: format!("error: {e}"),
-                    project: project.path,
+                    project: slug,
                     graph_excluded_paths: Vec::new(),
                     graph_orphan_ignore: Vec::new(),
                 });
@@ -1012,7 +970,7 @@ impl DjinnMcpServer {
                 Err(e) => {
                     return Json(ProjectGraphExclusionsResponse {
                         status: format!("error: encode graph_orphan_ignore: {e}"),
-                        project: project.path,
+                        project: slug,
                         graph_excluded_paths: Vec::new(),
                         graph_orphan_ignore: Vec::new(),
                     });
@@ -1024,7 +982,7 @@ impl DjinnMcpServer {
             {
                 return Json(ProjectGraphExclusionsResponse {
                     status: format!("error: {e}"),
-                    project: project.path,
+                    project: slug,
                     graph_excluded_paths: Vec::new(),
                     graph_orphan_ignore: Vec::new(),
                 });
@@ -1034,19 +992,19 @@ impl DjinnMcpServer {
         match repo.get_config(&project.id).await {
             Ok(Some(config)) => Json(ProjectGraphExclusionsResponse {
                 status: "ok".into(),
-                project: project.path,
+                project: slug,
                 graph_excluded_paths: config.graph_excluded_paths,
                 graph_orphan_ignore: config.graph_orphan_ignore,
             }),
             Ok(None) => Json(ProjectGraphExclusionsResponse {
                 status: "ok".into(),
-                project: project.path,
+                project: slug,
                 graph_excluded_paths: Vec::new(),
                 graph_orphan_ignore: Vec::new(),
             }),
             Err(e) => Json(ProjectGraphExclusionsResponse {
                 status: format!("error: {e}"),
-                project: project.path,
+                project: slug,
                 graph_excluded_paths: Vec::new(),
                 graph_orphan_ignore: Vec::new(),
             }),
@@ -1081,9 +1039,10 @@ impl DjinnMcpServer {
             }
         };
 
-        // `path` is set equal to `clone_path` for github-cloned rows and to the
-        // user-supplied path for legacy rows, so it's the right column either way.
-        let path = project.path;
+        // Synthesize the clone path from the project's GitHub coords —
+        // every consumer derives this locally, none of it is persisted.
+        let path_buf = project_dir(&project.github_owner, &project.github_repo);
+        let path = path_buf.to_string_lossy().into_owned();
         if !Path::new(&path).join(".git").exists() {
             return Json(ProjectBranchesResponse {
                 status: format!("error: not a git repository: {path}"),

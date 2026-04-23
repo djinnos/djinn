@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT id, name, path,\n                      CAST(created_at AS CHAR) as \"created_at!: String\",\n                      target_branch,\n                      auto_merge as \"auto_merge: bool\",\n                      sync_enabled as \"sync_enabled: bool\",\n                      sync_remote\n               FROM projects WHERE id = ?",
+  "query": "SELECT id, name,\n                      github_owner AS \"github_owner!: String\",\n                      github_repo AS \"github_repo!: String\",\n                      CAST(created_at AS CHAR) as \"created_at!: String\",\n                      target_branch,\n                      auto_merge as \"auto_merge: bool\",\n                      sync_enabled as \"sync_enabled: bool\",\n                      sync_remote\n               FROM projects WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -23,15 +23,24 @@
       },
       {
         "ordinal": 2,
-        "name": "path",
+        "name": "github_owner!: String",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
-          "max_size": 2048
+          "flags": "",
+          "max_size": 1020
         }
       },
       {
         "ordinal": 3,
+        "name": "github_repo!: String",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
+      },
+      {
+        "ordinal": 4,
         "name": "created_at!: String",
         "type_info": {
           "type": "Blob",
@@ -40,7 +49,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "target_branch",
         "type_info": {
           "type": "VarString",
@@ -49,7 +58,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "auto_merge: bool",
         "type_info": {
           "type": "Tiny",
@@ -58,7 +67,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "sync_enabled: bool",
         "type_info": {
           "type": "Tiny",
@@ -67,7 +76,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "sync_remote",
         "type_info": {
           "type": "VarString",
@@ -82,7 +91,8 @@
     "nullable": [
       false,
       false,
-      false,
+      true,
+      true,
       true,
       false,
       false,
@@ -90,5 +100,5 @@
       true
     ]
   },
-  "hash": "2bd673ba3bd1c473e862aa4c6e993a62ff9c1530331d5dabad2816b058c5bfd9"
+  "hash": "a78897b15c9d37b7d33ea83f8c727bd7bad1b778e7584f5bb453f26bb4981d62"
 }

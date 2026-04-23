@@ -7,6 +7,7 @@
 mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
+use djinn_core::paths::project_dir;
 use serde_json::json;
 
 #[tokio::test]
@@ -14,11 +15,15 @@ async fn pr_review_context_on_empty_graph_returns_limitations_note() {
     let harness = McpTestHarness::new().await;
     let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;
 
+    let project_path = project_dir(&project.github_owner, &project.github_repo)
+        .to_string_lossy()
+        .into_owned();
+
     let out = harness
         .call_tool(
             "pr_review_context",
             json!({
-                "project_path": project.path.clone(),
+                "project_path": project_path,
                 "changed_ranges": [
                     {"file": "nonexistent.rs", "start_line": 1, "end_line": 10}
                 ],

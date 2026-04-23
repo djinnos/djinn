@@ -30,7 +30,7 @@ async fn board_health_with_no_pool_returns_response_shape() {
         .expect("insert note for memory health summary");
 
     let response = harness
-        .call_tool("board_health", json!({ "project": project.path }))
+        .call_tool("board_health", json!({ "project": project.slug() }))
         .await
         .expect("board_health should dispatch");
 

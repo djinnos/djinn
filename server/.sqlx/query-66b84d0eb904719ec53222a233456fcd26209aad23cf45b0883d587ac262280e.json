@@ -1,15 +1,15 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ? OR note_b_id = ?",
+  "query": "SELECT id FROM projects WHERE github_owner = ? AND github_repo = ?",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "COUNT(*)",
+        "name": "id",
         "type_info": {
-          "type": "LongLong",
+          "type": "VarString",
           "flags": "NOT_NULL",
-          "max_size": 20
+          "max_size": 144
         }
       }
     ],
@@ -20,5 +20,5 @@
       false
     ]
   },
-  "hash": "4bcf2966736f581ed92ff9aa9a3cae089c21440148a1bb38a6c35e7710b70551"
+  "hash": "66b84d0eb904719ec53222a233456fcd26209aad23cf45b0883d587ac262280e"
 }

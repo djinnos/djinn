@@ -95,7 +95,11 @@ where
     let project_id = project.as_ref().map(|project| project.id.clone());
     let canonical_project_path = project
         .as_ref()
-        .map(|project| project.path.clone())
+        .map(|project| {
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_else(|| worktree_path.display().to_string());
     let worktree_project_path = worktree_path.display().to_string();
 

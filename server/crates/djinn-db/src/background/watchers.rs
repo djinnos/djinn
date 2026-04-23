@@ -66,7 +66,8 @@ pub fn spawn_kb_watchers(
                 Ok(projects) => {
                     let mut guard = state_clone.lock().await;
                     for project in projects {
-                        let path = PathBuf::from(&project.path);
+                        let path =
+                            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
                         add_watch(&mut guard, &project.id, &path);
                     }
                     tracing::info!(count = guard.watchers.len(), "KB file watchers initialized");
@@ -91,9 +92,10 @@ pub fn spawn_kb_watchers(
                             if envelope.entity_type == "project" && envelope.action == "created" {
                                 let Some(project) = envelope.parse_payload::<djinn_core::models::Project>() else { continue; };
                                 let mut guard = state_clone.lock().await;
-                                let path = PathBuf::from(&project.path);
+                                let path =
+                                    djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
                                 add_watch(&mut guard, &project.id, &path);
-                                tracing::info!(project = %project.path, "KB watcher added for new project");
+                                tracing::info!(project = %project.slug(), "KB watcher added for new project");
                             } else if envelope.entity_type == "project" && envelope.action == "deleted" {
                             let Some(id) = envelope.id.clone() else { continue; };
                             let mut guard = state_clone.lock().await;
@@ -103,7 +105,10 @@ pub fn spawn_kb_watchers(
                             // Project is already deleted, so we need to find which watcher to remove.
                             // We'll just try to remove any watcher whose path no longer has a project.
                             let current_projects: std::collections::HashSet<PathBuf> = match project_repo.list().await {
-                                Ok(ps) => ps.into_iter().map(|p| PathBuf::from(p.path)).collect(),
+                                Ok(ps) => ps
+                                    .into_iter()
+                                    .map(|p| djinn_core::paths::project_dir(&p.github_owner, &p.github_repo))
+                                    .collect(),
                                 Err(_) => continue,
                             };
                             guard.watchers.retain(|path, _| current_projects.contains(path));

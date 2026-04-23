@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::time::Duration;
 
 use djinn_core::events::EventBus;
@@ -163,7 +162,8 @@ async fn run_project_housekeeping(
     event_bus: &EventBus,
     project: &Project,
 ) -> anyhow::Result<ProjectHousekeepingReport> {
-    let path = Path::new(&project.path);
+    let path_buf = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+    let path = path_buf.as_path();
     let note_repo = NoteRepository::new(db.clone(), event_bus.clone());
     let pruned_associations = note_repo.prune_associations(&project.id).await?;
     let orphan_notes_flagged = note_repo

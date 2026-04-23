@@ -94,12 +94,14 @@ mod tests {
     async fn seed_projects(db: &Database, ids: &[&str]) {
         db.ensure_initialized().await.unwrap();
         for id in ids {
-            let path = format!("/tmp/verif-cache-{id}");
+            let owner = "test";
+            let repo_slug = format!("verif-cache-{id}");
             sqlx::query!(
-                "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+                "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
                 id,
                 id,
-                path,
+                owner,
+                repo_slug,
             )
             .execute(db.pool())
             .await

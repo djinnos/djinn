@@ -69,7 +69,9 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Project,
-            r#"SELECT id, name, path,
+            r#"SELECT id, name,
+                      github_owner AS "github_owner!: String",
+                      github_repo AS "github_repo!: String",
                       CAST(created_at AS CHAR) as "created_at!: String",
                       target_branch,
                       auto_merge as "auto_merge: bool",
@@ -85,7 +87,9 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Project,
-            r#"SELECT id, name, path,
+            r#"SELECT id, name,
+                      github_owner AS "github_owner!: String",
+                      github_repo AS "github_repo!: String",
                       CAST(created_at AS CHAR) as "created_at!: String",
                       target_branch,
                       auto_merge as "auto_merge: bool",
@@ -98,93 +102,38 @@ impl ProjectRepository {
         .await?)
     }
 
-    pub async fn get_by_path(&self, path: &str) -> Result<Option<Project>> {
+    /// Resolve a project reference to its ID. Accepts a UUID (passed
+    /// through when the row exists) or an `"owner/repo"` slug.
+    pub async fn resolve(&self, project_ref: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Project,
-            r#"SELECT id, name, path,
-                      CAST(created_at AS CHAR) as "created_at!: String",
-                      target_branch,
-                      auto_merge as "auto_merge: bool",
-                      sync_enabled as "sync_enabled: bool",
-                      sync_remote
-               FROM projects WHERE path = ?"#,
-            path,
-        )
-        .fetch_optional(self.db.pool())
-        .await?)
-    }
+        let trimmed = project_ref.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
 
-    /// Resolve a project path to its ID. Normalizes trailing slashes.
-    pub async fn resolve_id_by_path(&self, project_path: &str) -> Result<Option<String>> {
-        self.db.ensure_initialized().await?;
-        let normalized = project_path.trim_end_matches('/');
-        Ok(
-            sqlx::query_scalar!("SELECT id FROM projects WHERE path = ?", normalized)
-                .fetch_optional(self.db.pool())
-                .await?,
-        )
-    }
-
-    /// Resolve a project path to its ID, with fuzzy matching for subdirectories.
-    /// If exact match fails, finds the project whose path is the longest prefix
-    /// of the given path (useful when agents pass a subdirectory).
-    pub async fn resolve_id_by_path_fuzzy(&self, project_path: &str) -> Result<Option<String>> {
-        let normalized = project_path.trim_end_matches('/');
-
-        // Try exact match first.
-        if let Some(id) = self.resolve_id_by_path(normalized).await? {
+        // UUID path: if the ref parses as a UUID and maps to a row, use it.
+        if uuid::Uuid::parse_str(trimmed).is_ok()
+            && let Some(id) =
+                sqlx::query_scalar!("SELECT id FROM projects WHERE id = ?", trimmed)
+                    .fetch_optional(self.db.pool())
+                    .await?
+        {
             return Ok(Some(id));
         }
 
-        // Fuzzy: find the project whose path is the longest prefix.
-        self.db.ensure_initialized().await?;
-        let all_rows = sqlx::query!("SELECT id, path FROM projects")
-            .fetch_all(self.db.pool())
+        // Slug path: `owner/repo`.
+        if let Some((owner, repo)) = trimmed.split_once('/') {
+            let id = sqlx::query_scalar!(
+                "SELECT id FROM projects WHERE github_owner = ? AND github_repo = ?",
+                owner,
+                repo,
+            )
+            .fetch_optional(self.db.pool())
             .await?;
-
-        let mut best: Option<(String, usize)> = None;
-        for row in all_rows {
-            let id = row.id;
-            let path = row.path;
-            let root = path.trim_end_matches('/');
-            let matches = normalized
-                .strip_prefix(root)
-                .is_some_and(|suffix| suffix.starts_with('/'));
-            if matches {
-                let len = root.len();
-                if best.as_ref().is_none_or(|(_, best_len)| len > *best_len) {
-                    best = Some((id, len));
-                }
-            }
-        }
-
-        Ok(best.map(|(id, _)| id))
-    }
-
-    /// Resolve a project path to its ID, creating a new project entry if not found.
-    pub async fn resolve_or_create(&self, project_path: &str) -> Result<String> {
-        if let Some(id) = self.resolve_id_by_path(project_path).await? {
             return Ok(id);
         }
 
-        let name = std::path::Path::new(project_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("project");
-
-        self.create(name, project_path).await.map(|p| p.id)
-    }
-
-    /// Get the filesystem path for a project by ID.
-    pub async fn get_path(&self, id: &str) -> Result<Option<String>> {
-        self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_scalar!("SELECT path FROM projects WHERE id = ?", id)
-                .fetch_optional(self.db.pool())
-                .await?,
-        )
+        Ok(None)
     }
 
     /// Insert a project row with a caller-chosen id.
@@ -192,33 +141,45 @@ impl ProjectRepository {
     /// Tests that need a stable, well-known id (e.g. to satisfy a
     /// foreign-key reference from `verification_cache` seeded under the
     /// same id) use this instead of [`Self::create`]'s generated UUID.
-    /// Production code should always use [`Self::create`]; mismatched ids
-    /// break downstream consumers that expect UUIDv7.
-    pub async fn create_with_id(&self, id: &str, name: &str, path: &str) -> Result<Project> {
+    /// Production code should always use [`Self::create_from_github`];
+    /// mismatched ids break downstream consumers that expect UUIDv7.
+    pub async fn create_with_id(
+        &self,
+        id: &str,
+        name: &str,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Project> {
         self.db.ensure_initialized().await?;
         let id_owned = id.to_owned();
         let name_owned = name.to_owned();
-        let path_owned = path.to_owned();
+        let owner_owned = owner.to_owned();
+        let repo_owned = repo.to_owned();
 
         let project: Project = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
             || {
                 let id = id_owned.clone();
                 let name = name_owned.clone();
-                let path = path_owned.clone();
+                let owner = owner_owned.clone();
+                let repo = repo_owned.clone();
                 async move {
                     let mut tx = self.db.pool().begin().await?;
                     sqlx::query!(
-                        "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+                        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
                         id,
                         name,
-                        path,
+                        owner,
+                        repo,
                     )
                     .execute(&mut *tx)
                     .await?;
                     let project = sqlx::query_as!(
                         Project,
-                        r#"SELECT id, name, path, created_at, target_branch,
+                        r#"SELECT id, name,
+                    github_owner AS "github_owner!: String",
+                    github_repo AS "github_repo!: String",
+                    created_at, target_branch,
                                 auto_merge AS "auto_merge!: bool",
                                 sync_enabled AS "sync_enabled!: bool",
                                 sync_remote
@@ -241,38 +202,45 @@ impl ProjectRepository {
         Ok(project)
     }
 
-    pub async fn create(&self, name: &str, path: &str) -> Result<Project> {
+    /// Create a project row with a generated UUID. Prefer
+    /// [`Self::create_from_github`] in production; this exists for
+    /// test fixtures that don't go through the clone path.
+    pub async fn create(&self, name: &str, owner: &str, repo: &str) -> Result<Project> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let name_owned = name.to_owned();
-        let path_owned = path.to_owned();
+        let owner_owned = owner.to_owned();
+        let repo_owned = repo.to_owned();
 
         // create_test_project fires this function from ~every test; under
         // concurrent nextest load Dolt's commit-time conflict detection
         // rejects a fraction of the INSERTs with 1213. Wrap the
         // INSERT+SELECT in a single transaction so a failure rolls back
-        // both and the retry's fresh transaction sees a clean slate
-        // (otherwise a committed INSERT + failed SELECT on a retry would
-        // hit a UNIQUE-constraint violation on `projects.id`).
+        // both and the retry's fresh transaction sees a clean slate.
         let project: Project = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
             || {
                 let id = id.clone();
                 let name = name_owned.clone();
-                let path = path_owned.clone();
+                let owner = owner_owned.clone();
+                let repo = repo_owned.clone();
                 async move {
                     let mut tx = self.db.pool().begin().await?;
                     sqlx::query!(
-                        "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+                        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
                         id,
                         name,
-                        path,
+                        owner,
+                        repo,
                     )
                     .execute(&mut *tx)
                     .await?;
                     let project = sqlx::query_as!(
                         Project,
-                        r#"SELECT id, name, path, created_at, target_branch,
+                        r#"SELECT id, name,
+                    github_owner AS "github_owner!: String",
+                    github_repo AS "github_repo!: String",
+                    created_at, target_branch,
                                 auto_merge AS "auto_merge!: bool",
                                 sync_enabled AS "sync_enabled!: bool",
                                 sync_remote
@@ -297,25 +265,19 @@ impl ProjectRepository {
 
     /// Resolve the GitHub owner/repo coordinates persisted for a project.
     ///
-    /// Returns `Ok(None)` if the project exists but was created before
-    /// Migration 2 (legacy host-path rows leave `github_owner`/`github_repo`
-    /// NULL) or if the project id is unknown. Callers use the presence of
-    /// these coordinates to decide whether GitHub-App-authenticated pushes
-    /// are possible at all for this project.
+    /// Returns `Ok(None)` only when the project id is unknown.
     pub async fn get_github_coords(&self, project_id: &str) -> Result<Option<(String, String)>> {
         self.db.ensure_initialized().await?;
         let row = sqlx::query!(
-            "SELECT github_owner, github_repo FROM projects WHERE id = ?",
+            r#"SELECT
+                 github_owner AS "github_owner!: String",
+                 github_repo  AS "github_repo!: String"
+               FROM projects WHERE id = ?"#,
             project_id
         )
         .fetch_optional(self.db.pool())
         .await?;
-        Ok(row.and_then(|r| match (r.github_owner, r.github_repo) {
-            (Some(owner), Some(repo)) if !owner.is_empty() && !repo.is_empty() => {
-                Some((owner, repo))
-            }
-            _ => None,
-        }))
+        Ok(row.map(|r| (r.github_owner, r.github_repo)))
     }
 
     /// Return the cached GitHub App installation id for a project, if any.
@@ -353,14 +315,14 @@ impl ProjectRepository {
     }
 
     /// Find a project by its GitHub owner/repo coordinates.
-    ///
-    /// Returns `Ok(None)` if no project row has both columns set to the
-    /// provided values (e.g. legacy host-path projects).
     pub async fn get_by_github(&self, owner: &str, repo: &str) -> Result<Option<Project>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Project,
-            r#"SELECT id, name, path, created_at, target_branch,
+            r#"SELECT id, name,
+                    github_owner AS "github_owner!: String",
+                    github_repo AS "github_repo!: String",
+                    created_at, target_branch,
                     auto_merge AS "auto_merge!: bool",
                     sync_enabled AS "sync_enabled!: bool",
                     sync_remote
@@ -375,12 +337,6 @@ impl ProjectRepository {
 
     /// Create a project backed by a GitHub repo the server has cloned locally.
     ///
-    /// `clone_path` should be the absolute path inside the server container
-    /// where the repo has been cloned (e.g. `/var/lib/djinn/projects/acme/widgets`
-    /// under the Helm chart, or `~/.djinn/projects/acme/widgets` in docker-compose).
-    /// `path` is set equal to `clone_path` so existing path-keyed joins and
-    /// resolvers keep working without changes.
-    ///
     /// `installation_id` is the GitHub App installation id that grants
     /// access to the repo; caching it here lets every later push/PR-create
     /// path mint installation tokens without walking the authenticated
@@ -391,7 +347,6 @@ impl ProjectRepository {
         owner: &str,
         repo: &str,
         default_branch: &str,
-        clone_path: &str,
         installation_id: Option<u64>,
     ) -> Result<Project> {
         self.db.ensure_initialized().await?;
@@ -401,15 +356,13 @@ impl ProjectRepository {
         let installation_id_i64: Option<i64> = installation_id.map(|v| v as i64);
         sqlx::query!(
             "INSERT INTO projects
-                (id, name, path, github_owner, github_repo, default_branch, clone_path, target_branch, installation_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (id, name, github_owner, github_repo, default_branch, target_branch, installation_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
             id,
             name,
-            clone_path,
             owner,
             repo,
             default_branch,
-            clone_path,
             default_branch,
             installation_id_i64,
         )
@@ -418,7 +371,10 @@ impl ProjectRepository {
 
         let project = sqlx::query_as!(
             Project,
-            r#"SELECT id, name, path, created_at, target_branch,
+            r#"SELECT id, name,
+                    github_owner AS "github_owner!: String",
+                    github_repo AS "github_repo!: String",
+                    created_at, target_branch,
                     auto_merge AS "auto_merge!: bool",
                     sync_enabled AS "sync_enabled!: bool",
                     sync_remote
@@ -478,19 +434,17 @@ impl ProjectRepository {
         Ok(())
     }
 
-    pub async fn update(&self, id: &str, name: &str, path: &str) -> Result<Project> {
+    pub async fn update(&self, id: &str, name: &str) -> Result<Project> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE projects SET name = ?, path = ? WHERE id = ?",
-            name,
-            path,
-            id
-        )
-        .execute(self.db.pool())
-        .await?;
+        sqlx::query!("UPDATE projects SET name = ? WHERE id = ?", name, id)
+            .execute(self.db.pool())
+            .await?;
         let project = sqlx::query_as!(
             Project,
-            r#"SELECT id, name, path, created_at, target_branch,
+            r#"SELECT id, name,
+                    github_owner AS "github_owner!: String",
+                    github_repo AS "github_repo!: String",
+                    created_at, target_branch,
                     auto_merge AS "auto_merge!: bool",
                     sync_enabled AS "sync_enabled!: bool",
                     sync_remote
@@ -617,7 +571,10 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Project,
-            r#"SELECT id, name, path, created_at, target_branch,
+            r#"SELECT id, name,
+                    github_owner AS "github_owner!: String",
+                    github_repo AS "github_repo!: String",
+                    created_at, target_branch,
                       auto_merge AS "auto_merge!: bool",
                       sync_enabled AS "sync_enabled!: bool",
                       sync_remote
@@ -625,56 +582,6 @@ impl ProjectRepository {
         )
         .fetch_all(self.db.pool())
         .await?)
-    }
-
-    /// Resolve a project reference (path or name) to its ID.
-    ///
-    /// Tries, in order:
-    /// 1. Exact match on `path` or `name` column.
-    /// 2. Longest-prefix match (the project whose path is a parent of the given
-    ///    path), so `/home/user/myapp/src` resolves to a project at
-    ///    `/home/user/myapp`.
-    pub async fn resolve(&self, project_ref: &str) -> Result<Option<String>> {
-        self.db.ensure_initialized().await?;
-        let normalized = project_ref.trim_end_matches('/');
-
-        // 1. Exact match by path or name.
-        let exact = sqlx::query_scalar!(
-            "SELECT id FROM projects WHERE path = ? OR name = ? LIMIT 1",
-            normalized,
-            normalized
-        )
-        .fetch_optional(self.db.pool())
-        .await?;
-
-        if exact.is_some() {
-            return Ok(exact);
-        }
-
-        // 2. Longest-prefix match (subdirectory of a known project).
-        let all_rows = sqlx::query!("SELECT id, path FROM projects")
-            .fetch_all(self.db.pool())
-            .await?;
-
-        let mut best: Option<(String, usize)> = None;
-        for row in all_rows {
-            let id = row.id;
-            let path = row.path;
-            let root = path.trim_end_matches('/');
-            let is_match = normalized == root
-                || normalized
-                    .strip_prefix(root)
-                    .map(|suffix| suffix.starts_with('/'))
-                    .unwrap_or(false);
-            if is_match {
-                let len = root.len();
-                if best.as_ref().map(|(_, bl)| len > *bl).unwrap_or(true) {
-                    best = Some((id, len));
-                }
-            }
-        }
-
-        Ok(best.map(|(id, _)| id))
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
@@ -1017,9 +924,10 @@ mod tests {
     async fn create_and_get_project() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
 
-        let project = repo.create("myapp", "/home/user/myapp").await.unwrap();
+        let project = repo.create("myapp", "acme", "myapp").await.unwrap();
         assert_eq!(project.name, "myapp");
-        assert_eq!(project.path, "/home/user/myapp");
+        assert_eq!(project.github_owner, "acme");
+        assert_eq!(project.github_repo, "myapp");
         assert!(!project.id.is_empty());
 
         let fetched = repo.get(&project.id).await.unwrap().unwrap();
@@ -1031,7 +939,7 @@ mod tests {
         let (bus, captured) = capturing_bus();
         let repo = ProjectRepository::new(test_db(), bus);
 
-        repo.create("proj", "/tmp/proj").await.unwrap();
+        repo.create("proj", "acme", "proj").await.unwrap();
 
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -1046,12 +954,11 @@ mod tests {
         let (bus, captured) = capturing_bus();
         let repo = ProjectRepository::new(test_db(), bus);
 
-        let project = repo.create("old", "/old").await.unwrap();
+        let project = repo.create("old", "acme", "old").await.unwrap();
         captured.lock().unwrap().clear();
 
-        let updated = repo.update(&project.id, "new", "/new").await.unwrap();
+        let updated = repo.update(&project.id, "new").await.unwrap();
         assert_eq!(updated.name, "new");
-        assert_eq!(updated.path, "/new");
 
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -1076,7 +983,7 @@ mod tests {
         let (bus, captured) = capturing_bus();
         let repo = ProjectRepository::new(test_db(), bus);
 
-        let project = repo.create("del", "/del").await.unwrap();
+        let project = repo.create("del", "acme", "del").await.unwrap();
         captured.lock().unwrap().clear();
 
         repo.delete(&project.id).await.unwrap();
@@ -1093,8 +1000,8 @@ mod tests {
     async fn list_projects() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
 
-        repo.create("beta", "/beta").await.unwrap();
-        repo.create("alpha", "/alpha").await.unwrap();
+        repo.create("beta", "acme", "beta").await.unwrap();
+        repo.create("alpha", "acme", "alpha").await.unwrap();
 
         let projects = repo.list().await.unwrap();
         assert_eq!(projects.len(), 2);
@@ -1104,23 +1011,47 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_by_path_returns_project() {
+    async fn resolve_accepts_uuid_and_slug() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
 
-        let project = repo.create("lookup", "/lookup/path").await.unwrap();
-        let found = repo.get_by_path("/lookup/path").await.unwrap().unwrap();
-        assert_eq!(found.id, project.id);
-        assert_eq!(found.path, "/lookup/path");
+        let project = repo.create("lookup", "acme", "lookup").await.unwrap();
 
-        // Missing path returns None.
-        assert!(repo.get_by_path("/nonexistent").await.unwrap().is_none());
+        // UUID round-trip.
+        let by_id = repo.resolve(&project.id).await.unwrap().unwrap();
+        assert_eq!(by_id, project.id);
+
+        // Slug round-trip.
+        let by_slug = repo.resolve("acme/lookup").await.unwrap().unwrap();
+        assert_eq!(by_slug, project.id);
+
+        // Unknown slug + unknown UUID both return None.
+        assert!(repo.resolve("ghost/missing").await.unwrap().is_none());
+        assert!(
+            repo.resolve("00000000-0000-0000-0000-000000000000")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_by_github_returns_project() {
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+
+        let project = repo.create("lookup", "acme", "lookup").await.unwrap();
+        let found = repo.get_by_github("acme", "lookup").await.unwrap().unwrap();
+        assert_eq!(found.id, project.id);
+        assert_eq!(found.github_owner, "acme");
+        assert_eq!(found.github_repo, "lookup");
+
+        assert!(repo.get_by_github("ghost", "missing").await.unwrap().is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_seeds_five_default_roles() {
         let db = test_db();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        let project = repo.create("seeded", "/seeded").await.unwrap();
+        let project = repo.create("seeded", "acme", "seeded").await.unwrap();
 
         let rows_raw = sqlx::query!(
             r#"SELECT `name`, base_role, is_default AS "is_default!: i64" FROM agents WHERE project_id = ? ORDER BY base_role"#,
@@ -1154,8 +1085,8 @@ mod tests {
     async fn seeding_is_idempotent_on_different_projects() {
         let db = test_db();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        repo.create("proj-a", "/proj-a").await.unwrap();
-        repo.create("proj-b", "/proj-b").await.unwrap();
+        repo.create("proj-a", "acme", "proj-a").await.unwrap();
+        repo.create("proj-b", "acme", "proj-b").await.unwrap();
 
         let total: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM agents WHERE is_default = 1")
             .fetch_one(db.pool())
@@ -1169,7 +1100,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_stack_default_is_empty_json_object() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("stack-default", "/stack-default").await.unwrap();
+        let project = repo.create("stack-default", "acme", "stack-default").await.unwrap();
         let stack = repo.get_stack(&project.id).await.unwrap().unwrap();
         assert_eq!(stack, "{}");
     }
@@ -1177,7 +1108,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_stack_round_trips_arbitrary_json() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("stack-rt", "/stack-rt").await.unwrap();
+        let project = repo.create("stack-rt", "acme", "stack-rt").await.unwrap();
 
         let payload = r#"{"primary_language":"Rust","is_monorepo":false}"#;
         repo.set_stack(&project.id, payload).await.unwrap();
@@ -1218,7 +1149,7 @@ mod tests {
     async fn get_config_defaults_to_empty_graph_exclusion_lists() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
         let project = repo
-            .create("graph-defaults", "/graph-defaults")
+            .create("graph-defaults", "acme", "graph-defaults")
             .await
             .unwrap();
         let cfg = repo.get_config(&project.id).await.unwrap().unwrap();
@@ -1229,7 +1160,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_config_field_round_trips_graph_excluded_paths() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("graph-rt", "/graph-rt").await.unwrap();
+        let project = repo.create("graph-rt", "acme", "graph-rt").await.unwrap();
 
         let updated = repo
             .update_config_field(
@@ -1253,7 +1184,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_config_field_round_trips_graph_orphan_ignore() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("graph-orphan", "/graph-orphan").await.unwrap();
+        let project = repo.create("graph-orphan", "acme", "graph-orphan").await.unwrap();
 
         let updated = repo
             .update_config_field(
@@ -1273,7 +1204,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_config_field_rejects_malformed_graph_excluded_paths() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("graph-bad", "/graph-bad").await.unwrap();
+        let project = repo.create("graph-bad", "acme", "graph-bad").await.unwrap();
 
         let err = repo
             .update_config_field(&project.id, "graph_excluded_paths", "not-json")

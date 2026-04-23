@@ -23,13 +23,10 @@ async fn seed_project_with_env_config(
 ) {
     db.ensure_initialized().await.unwrap();
     let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    repo.create_with_id(
-        project_id,
-        project_id,
-        project_path.to_str().expect("utf-8 project path"),
-    )
-    .await
-    .unwrap();
+    let _ = project_path; // path is now derived at runtime; retained for test compat
+    repo.create_with_id(project_id, project_id, "test", project_id)
+        .await
+        .unwrap();
     let raw = serde_json::to_string(config).unwrap();
     repo.set_environment_config(project_id, &raw).await.unwrap();
 }

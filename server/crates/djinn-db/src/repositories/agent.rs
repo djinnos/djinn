@@ -862,12 +862,14 @@ mod tests {
     async fn create_project(db: &Database) -> String {
         db.ensure_initialized().await.unwrap();
         let id = uuid::Uuid::now_v7().to_string();
-        let path = format!("/tmp/test-{id}");
+        let owner = "test";
+        let repo_slug = format!("agent-{id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
             id,
             "test",
-            path,
+            owner,
+            repo_slug,
         )
         .execute(db.pool())
         .await

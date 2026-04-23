@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use axum::body::Body;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use http_body_util::BodyExt;
@@ -10,6 +8,7 @@ use tower::ServiceExt;
 use crate::events::EventBus;
 use crate::server::{self, AppState};
 use djinn_core::models::{Epic, Project, SessionRecord, Task};
+use djinn_core::paths::project_dir;
 use djinn_memory::Note;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
@@ -48,12 +47,19 @@ pub fn create_test_app() -> axum::Router {
 pub async fn create_test_app_with_project() -> (axum::Router, String, tempfile::TempDir) {
     let db = create_test_db();
     let dir = workspace_tempdir("server-test-project-");
-    let path = dir.path().to_string_lossy().to_string();
     let repo = ProjectRepository::new(db.clone(), test_events());
-    repo.create("test-project", &path)
+    let project = repo
+        .create("test-project", "test", "test-project")
         .await
         .expect("failed to register test project");
     let app = create_test_app_with_db(db);
+    // Callers historically got a filesystem path back. Return the synthesized
+    // `{DJINN_HOME}/projects/{owner}/{repo}` location; the TempDir stays alive
+    // for the test's lifetime even though it's no longer the project's canonical
+    // location.
+    let path = project_dir(&project.github_owner, &project.github_repo)
+        .to_string_lossy()
+        .into_owned();
     (app, path, dir)
 }
 
@@ -89,9 +95,8 @@ pub fn test_events() -> EventBus {
 pub async fn create_test_project(db: &Database) -> Project {
     let repo = ProjectRepository::new(db.clone(), test_events());
     let id = uuid::Uuid::now_v7();
-    let path = format!("/tmp/djinn-test-project-{id}");
     let name = format!("test-project-{id}");
-    repo.create(&name, &path)
+    repo.create(&name, "test", &name)
         .await
         .expect("failed to create test project")
 }
@@ -101,7 +106,6 @@ pub async fn create_test_project(db: &Database) -> Project {
 pub async fn create_test_project_with_dir(db: &Database) -> (Project, tempfile::TempDir) {
     let dir = workspace_tempdir("server-test-project-");
     let repo = ProjectRepository::new(db.clone(), test_events());
-    let path = dir.path().to_string_lossy().to_string();
     let name = dir
         .path()
         .file_name()
@@ -109,7 +113,7 @@ pub async fn create_test_project_with_dir(db: &Database) -> (Project, tempfile::
         .to_string_lossy()
         .to_string();
     let project = repo
-        .create(&name, &path)
+        .create(&name, "test", &name)
         .await
         .expect("failed to create test project");
     (project, dir)
@@ -191,11 +195,12 @@ pub async fn create_test_note(db: &Database, project_id: &str) -> Note {
         .expect("failed to load project for note")
         .expect("project not found for note");
 
-    std::fs::create_dir_all(Path::new(&project.path)).expect("failed to create test project path");
+    let project_path = project_dir(&project.github_owner, &project.github_repo);
+    std::fs::create_dir_all(&project_path).expect("failed to create test project path");
 
     repo.create(
         project_id,
-        Path::new(&project.path),
+        &project_path,
         "test note",
         "test note body",
         "research",

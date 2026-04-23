@@ -171,10 +171,11 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
     let db = Database::open_in_memory().expect("open_in_memory test db");
     let events = EventBus::noop();
     let project_repo = ProjectRepository::new(db.clone(), events.clone());
-    // Point the project path at the source repo tempdir so any code that reads
-    // project.path sees a real directory.
+    // Project paths are now derived from (github_owner, github_repo) at
+    // runtime, not persisted, so the supervisor doesn't read project.path
+    // directly. Use a deterministic slug for the fixture.
     let project = project_repo
-        .create("phase1-test", &source_dir.path().display().to_string())
+        .create("phase1-test", "test", "phase1-test")
         .await
         .expect("create project row");
 
@@ -403,10 +404,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     let events = EventBus::noop();
     let project_repo = ProjectRepository::new(db.clone(), events.clone());
     let project = project_repo
-        .create(
-            "phase1-stub-test",
-            &source_dir.path().display().to_string(),
-        )
+        .create("phase1-stub-test", "test", "phase1-stub-test")
         .await
         .expect("create project row");
 

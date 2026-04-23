@@ -160,7 +160,7 @@ mod watcher_transitions {
         let repo_seed =
             ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         let project = repo_seed
-            .create("demo", "/tmp/demo")
+            .create("demo", "test", "demo")
             .await
             .expect("create project");
 
@@ -240,7 +240,7 @@ mod watcher_transitions {
         let db = Database::open_in_memory().expect("open_in_memory");
         let repo_seed = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = repo_seed
-            .create("demo-fail", "/tmp/demo-fail")
+            .create("demo-fail", "test", "demo-fail")
             .await
             .expect("create project");
         repo_seed

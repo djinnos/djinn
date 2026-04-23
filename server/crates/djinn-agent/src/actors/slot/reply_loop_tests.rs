@@ -35,7 +35,10 @@ async fn make_context() -> (
     let project = create_test_project(&db).await;
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
-    (ctx, project.path, task.id, cancel)
+    let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+        .to_string_lossy()
+        .into_owned();
+    (ctx, project_path, task.id, cancel)
 }
 
 fn base_conversation() -> Conversation {

@@ -33,7 +33,7 @@ async fn project_remove_success_and_missing() {
         &app,
         &session_id,
         "project_remove",
-        json!({"name": project.name, "path": project.path.clone()}),
+        json!({"project": project.slug()}),
     )
     .await;
     assert_eq!(removed["status"], "ok");
@@ -42,7 +42,7 @@ async fn project_remove_success_and_missing() {
         &app,
         &session_id,
         "project_remove",
-        json!({"name": project.name, "path": project.path}),
+        json!({"project": project.slug()}),
     )
     .await;
     assert!(

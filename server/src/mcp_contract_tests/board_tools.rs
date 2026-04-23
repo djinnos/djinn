@@ -39,7 +39,7 @@ async fn board_reconcile_releases_stuck_in_progress_without_active_session() {
         &app,
         &session_id,
         "board_reconcile",
-        json!({ "project": project.path }),
+        json!({ "project": project.slug() }),
     )
     .await;
 

@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT id, name, path,\n                      CAST(created_at AS CHAR) as \"created_at!: String\",\n                      target_branch,\n                      auto_merge as \"auto_merge: bool\",\n                      sync_enabled as \"sync_enabled: bool\",\n                      sync_remote\n               FROM projects WHERE path = ?",
+  "query": "SELECT id, name,\n                    github_owner AS \"github_owner!: String\",\n                    github_repo AS \"github_repo!: String\",\n                    created_at, target_branch,\n                    auto_merge AS \"auto_merge!: bool\",\n                    sync_enabled AS \"sync_enabled!: bool\",\n                    sync_remote\n             FROM projects\n             WHERE github_owner = ? AND github_repo = ?",
   "describe": {
     "columns": [
       {
@@ -23,24 +23,33 @@
       },
       {
         "ordinal": 2,
-        "name": "path",
+        "name": "github_owner!: String",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
-          "max_size": 2048
+          "flags": "",
+          "max_size": 1020
         }
       },
       {
         "ordinal": 3,
-        "name": "created_at!: String",
+        "name": "github_repo!: String",
         "type_info": {
-          "type": "Blob",
+          "type": "VarString",
           "flags": "",
-          "max_size": 4294967295
+          "max_size": 1020
         }
       },
       {
         "ordinal": 4,
+        "name": "created_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "target_branch",
         "type_info": {
           "type": "VarString",
@@ -49,17 +58,8 @@
         }
       },
       {
-        "ordinal": 5,
-        "name": "auto_merge: bool",
-        "type_info": {
-          "type": "Tiny",
-          "flags": "NOT_NULL",
-          "max_size": 4
-        }
-      },
-      {
         "ordinal": 6,
-        "name": "sync_enabled: bool",
+        "name": "auto_merge!: bool",
         "type_info": {
           "type": "Tiny",
           "flags": "NOT_NULL",
@@ -68,6 +68,15 @@
       },
       {
         "ordinal": 7,
+        "name": "sync_enabled!: bool",
+        "type_info": {
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "sync_remote",
         "type_info": {
           "type": "VarString",
@@ -77,18 +86,19 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false,
       false,
-      false,
       true,
+      true,
+      false,
       false,
       false,
       false,
       true
     ]
   },
-  "hash": "623259b8bf87a6e6a8707b5f13b25d3ff9580e957e3f9180ef2dc0a0df92a04e"
+  "hash": "5c77d1a29ee5da06cb95a772c91949c2f82668d8eafe1c1995939b58f2199cb8"
 }

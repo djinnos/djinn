@@ -24,7 +24,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     let harness = McpTestHarness::new().await;
     let db = harness.db().clone();
     let (proj, _dir) = common::create_test_project_with_dir(&db).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     let created = harness
         .call_tool(
@@ -45,7 +45,11 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
     assert!(created.get("permalink").and_then(|v| v.as_str()).is_some());
 
     let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve_or_create(project).await.unwrap();
+    let project_id: String = project_repo
+        .resolve(&project)
+        .await
+        .unwrap()
+        .expect("test project should resolve");
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
         .get_by_permalink(&project_id, created["permalink"].as_str().unwrap())
@@ -78,7 +82,7 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
 async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     let created = harness
         .call_tool(
@@ -118,7 +122,7 @@ async fn mcp_memory_write_and_move_accept_case_and_pitfall_types() {
 async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     let created = harness
         .call_tool(
@@ -165,7 +169,7 @@ async fn mcp_memory_read_by_permalink_by_title_and_not_found_error() {
 async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     harness
         .call_tool(
@@ -227,7 +231,7 @@ async fn mcp_memory_search_returns_ranked_results_with_snippets_and_filters() {
 async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     harness
         .call_tool(
@@ -278,7 +282,7 @@ async fn mcp_memory_edit_append_prepend_replace_and_missing_note_error() {
 async fn mcp_memory_move_changes_folder_title_and_permalink() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     let created = harness
         .call_tool(
@@ -304,7 +308,7 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
 async fn mcp_memory_move_can_recover_proposed_adr_and_make_it_visible_to_proposal_list() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     let created = harness
         .call_tool(
@@ -349,7 +353,7 @@ async fn mcp_memory_move_can_recover_proposed_adr_and_make_it_visible_to_proposa
 async fn mcp_memory_delete_success_and_missing_note_error() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     harness
         .call_tool(
@@ -383,7 +387,7 @@ async fn mcp_memory_delete_success_and_missing_note_error() {
 async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     let adr = harness
         .call_tool(
@@ -435,7 +439,7 @@ async fn mcp_memory_list_all_and_filters_by_folder_and_type() {
 async fn mcp_memory_graph_returns_wikilink_edges() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     harness
         .call_tool(
@@ -463,7 +467,7 @@ async fn mcp_memory_graph_returns_wikilink_edges() {
 async fn mcp_memory_recent_orders_by_last_accessed() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     harness
         .call_tool(
@@ -520,7 +524,7 @@ async fn mcp_memory_recent_orders_by_last_accessed() {
 async fn mcp_memory_catalog_returns_structured_catalog() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     harness
         .call_tool(
@@ -544,7 +548,9 @@ async fn mcp_memory_catalog_returns_structured_catalog() {
 #[tokio::test]
 async fn mcp_memory_health_orphans_and_broken_links_shapes() {
     let harness = McpTestHarness::new().await;
-    let project = "/tmp/mcp-memory-health";
+    // Use a slug-shaped reference that isn't seeded; the tool still resolves
+    // and errors silently, and we only assert the response shape below.
+    let project = "test/mcp-memory-health";
 
     // No project seeded: memory_write resolves and errors silently; the test
     // only asserts the shape of the three health / orphans / broken_links
@@ -584,7 +590,7 @@ async fn mcp_memory_health_orphans_and_broken_links_shapes() {
 async fn mcp_memory_history_and_diff_round_trip() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     let created = harness
         .call_tool(
@@ -653,7 +659,7 @@ async fn mcp_memory_history_and_diff_round_trip() {
 async fn mcp_memory_reindex_returns_expected_contract_shape() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     harness
         .call_tool(
@@ -678,7 +684,7 @@ async fn mcp_memory_reindex_returns_expected_contract_shape() {
 async fn mcp_memory_build_context_follows_wikilinks() {
     let harness = McpTestHarness::new().await;
     let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = &proj.path;
+    let project = proj.slug();
 
     let target = harness
         .call_tool(
@@ -726,7 +732,7 @@ async fn mcp_memory_task_refs_returns_tasks_for_permalink() {
     let db = harness.db();
     let (project_row, _dir) = common::create_test_project_with_dir(db).await;
     let epic = common::create_test_epic(db, &project_row.id).await;
-    let project = project_row.path.clone();
+    let project = project_row.slug();
 
     let note = harness
         .call_tool(

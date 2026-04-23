@@ -1,15 +1,15 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT COUNT(*) FROM notes WHERE id = ?",
+  "query": "SELECT id FROM projects WHERE id = ?",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "COUNT(*)",
+        "name": "id",
         "type_info": {
-          "type": "LongLong",
+          "type": "VarString",
           "flags": "NOT_NULL",
-          "max_size": 20
+          "max_size": 144
         }
       }
     ],
@@ -20,5 +20,5 @@
       false
     ]
   },
-  "hash": "fe832ee0142cb8bdcccf2d718512b487202c143454774771ae9ebd1424088fc2"
+  "hash": "7502d49efd67e006ab2ae3d9f70112b3b911dc15a656006e0093f90e5fbd02c5"
 }

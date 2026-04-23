@@ -27,8 +27,20 @@ pub struct CodeGraphParams {
     /// `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
     /// `diff_touches`, `describe`, `status`.
     pub operation: String,
-    /// Path to the project root (used to locate the graph).
+    /// Project identifier — either the UUID (`project_id`) or the
+    /// canonical `"owner/repo"` slug. The handler resolves it to the
+    /// server-managed clone path via `djinn_core::paths::project_dir`
+    /// before dispatching to the graph backend.
+    pub project: String,
+    /// Resolved absolute filesystem path. Populated by the `code_graph`
+    /// dispatch after it resolves `project`; the inner operation handlers
+    /// read this when they need to call into the graph backend.
+    #[serde(skip, default)]
     pub project_path: String,
+    /// Resolved project UUID. Populated by the dispatch alongside
+    /// `project_path`; inner handlers read it for config lookups.
+    #[serde(skip, default)]
+    pub project_id: String,
     /// The node key to query (file path or SCIP symbol string).
     /// Required for `neighbors`, `impact`, `implementations`, and `describe`.
     #[serde(default)]
@@ -407,8 +419,37 @@ impl DjinnMcpServer {
     )]
     pub async fn code_graph(
         &self,
-        Parameters(params): Parameters<CodeGraphParams>,
+        Parameters(mut params): Parameters<CodeGraphParams>,
     ) -> Json<ErrorOr<CodeGraphResponse>> {
+        // Resolve `project` (UUID or slug) to (project_id, clone_path)
+        // once here; inner handlers read the pre-populated `project_id`
+        // and `project_path` fields without hitting the DB again.
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project = match repo.resolve(&params.project).await {
+            Ok(Some(id)) => match repo.get(&id).await {
+                Ok(Some(p)) => p,
+                _ => {
+                    return Json(ErrorOr::Error(ErrorResponse {
+                        error: format!("project not found: {}", params.project),
+                    }));
+                }
+            },
+            Ok(None) => {
+                return Json(ErrorOr::Error(ErrorResponse {
+                    error: format!("project not found: {}", params.project),
+                }));
+            }
+            Err(e) => {
+                return Json(ErrorOr::Error(ErrorResponse {
+                    error: format!("project lookup failed: {e}"),
+                }));
+            }
+        };
+        params.project_id = project.id.clone();
+        params.project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+            .to_string_lossy()
+            .into_owned();
+
         let result = match params.operation.as_str() {
             "neighbors" => self.code_graph_neighbors(&params).await,
             "ranked" => self.code_graph_ranked(&params).await,
@@ -451,30 +492,15 @@ impl DjinnMcpServer {
     /// Load the per-project graph exclusions, rendered into a compiled
     /// [`GraphExclusions`] predicate. On any lookup failure we fall
     /// back to [`GraphExclusions::empty`], which still applies Tier 1
-    /// (universal SCIP module-artifact suppression) — this keeps
-    /// cycles/orphans/ranked output clean even for projects that are
-    /// not registered in the `projects` table (e.g. ad-hoc callers
-    /// passing a raw path).
-    async fn load_graph_exclusions(&self, project_path: &str) -> GraphExclusions {
+    /// (universal SCIP module-artifact suppression).
+    async fn load_graph_exclusions(&self, project_id: &str) -> GraphExclusions {
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project = match repo.get_by_path(project_path).await {
-            Ok(Some(p)) => p,
-            Ok(None) => return GraphExclusions::empty(),
-            Err(e) => {
-                tracing::debug!(
-                    project = %project_path,
-                    error = %e,
-                    "graph_exclusions: project lookup failed; using Tier 1 only",
-                );
-                return GraphExclusions::empty();
-            }
-        };
-        match repo.get_config(&project.id).await {
+        match repo.get_config(project_id).await {
             Ok(Some(config)) => GraphExclusions::from_config(&config),
             Ok(None) => GraphExclusions::empty(),
             Err(e) => {
                 tracing::debug!(
-                    project = %project_path,
+                    project_id = %project_id,
                     error = %e,
                     "graph_exclusions: config read failed; using Tier 1 only",
                 );
@@ -505,7 +531,7 @@ impl DjinnMcpServer {
         // makes the MCP response unusably large. Sort by weight desc and cap
         // at `limit` (default 20, matching other list operations).
         let limit = params.limit.unwrap_or(20).max(0) as usize;
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let (neighbors, file_groups) = match result {
             NeighborsResult::Detailed(mut v) => {
                 v.retain(|n| !exclusions.excludes(&n.key, None, &n.display_name));
@@ -555,7 +581,7 @@ impl DjinnMcpServer {
                 fetch_limit,
             )
             .await?;
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let mut nodes: Vec<RankedNode> = nodes
             .into_iter()
             .filter(|n| !exclusions.excludes(&n.key, None, &n.display_name))
@@ -596,7 +622,7 @@ impl DjinnMcpServer {
             .repo_graph()
             .impact(&params.project_path, key, depth, params.group_by.as_deref())
             .await?;
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let (impact, file_groups) = match result {
             ImpactResult::Detailed(mut v) => {
                 // ImpactEntry has no display_name; match key only (Tier
@@ -636,7 +662,7 @@ impl DjinnMcpServer {
                 fetch_limit,
             )
             .await?;
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let hits: Vec<SearchHit> = hits
             .into_iter()
             .filter(|h| {
@@ -670,7 +696,7 @@ impl DjinnMcpServer {
                 fetch_floor,
             )
             .await?;
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let cycles: Vec<CycleGroup> = cycles
             .into_iter()
             .filter_map(|group| {
@@ -710,7 +736,7 @@ impl DjinnMcpServer {
                 fetch_limit,
             )
             .await?;
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let orphans: Vec<OrphanEntry> = orphans
             .into_iter()
             .filter(|o| {
@@ -757,7 +783,7 @@ impl DjinnMcpServer {
         // boundary-check style query over the graph should not surface
         // edges that touch SCIP-artifact nodes or user-excluded paths,
         // even if the glob pair technically matches.
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let edges: Vec<EdgeEntry> = edges
             .into_iter()
             .filter(|e| {
@@ -852,7 +878,7 @@ impl DjinnMcpServer {
             .repo_graph()
             .diff_touches(&params.project_path, changed_ranges)
             .await?;
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let touched_symbols: Vec<TouchedSymbol> = result
             .touched_symbols
             .into_iter()
@@ -884,7 +910,7 @@ impl DjinnMcpServer {
             .await?;
         // The bridge already applies the exclusions; also defend against
         // noise that might slip in if the bridge is evolved later.
-        let exclusions = self.load_graph_exclusions(&params.project_path).await;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let symbols: Vec<ApiSurfaceEntry> = symbols
             .into_iter()
             .filter(|e| {
@@ -1063,6 +1089,8 @@ mod tests {
     fn test_params(op: &str) -> CodeGraphParams {
         CodeGraphParams {
             operation: op.to_string(),
+            project: "test/test".to_string(),
+            project_id: String::new(),
             project_path: "/tmp".to_string(),
             key: None,
             direction: None,

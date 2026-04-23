@@ -164,7 +164,9 @@ mod tests {
         title: &str,
     ) -> (djinn_core::models::Task, djinn_memory::Note) {
         let project = test_helpers::create_test_project(db).await;
-        std::fs::create_dir_all(Path::new(&project.path)).unwrap();
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&project_path).unwrap();
         let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
             .create_for_project(
                 &project.id,
@@ -186,7 +188,7 @@ mod tests {
         let note = note_repo
             .create(
                 &project.id,
-                Path::new(&project.path),
+                &project_path,
                 title,
                 "body",
                 "research",
@@ -399,7 +401,9 @@ mod tests {
         title: &str,
     ) -> (djinn_core::models::Task, String) {
         let project = test_helpers::create_test_project(db).await;
-        std::fs::create_dir_all(Path::new(&project.path)).unwrap();
+        let project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&project_path).unwrap();
         let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
             .create_for_project(
                 &project.id,
@@ -432,7 +436,7 @@ mod tests {
             )
             .await
             .unwrap();
-        (task, project.path)
+        (task, project_path.to_string_lossy().into_owned())
     }
 
     /// Initialize a minimal git repo at `path` with an initial commit on

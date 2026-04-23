@@ -128,12 +128,15 @@ pub(super) async fn build_repo_map_context_block(
         Err(_) => return None,
     };
 
-    let commit_sha = repo_commit_sha(state, Path::new(&project.path)).await?;
+    let project_dir =
+        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+    let project_path_str = project_dir.to_string_lossy().into_owned();
+    let commit_sha = repo_commit_sha(state, &project_dir).await?;
     let repo_map_repo = RepoMapCacheRepository::new(state.db().clone());
     let cached = repo_map_repo
         .get(RepoMapCacheKey {
             project_id: &project.id,
-            project_path: &project.path,
+            project_path: &project_path_str,
             worktree_path: None,
             commit_sha: &commit_sha,
         })
@@ -241,8 +244,12 @@ pub(super) async fn build_project_context_block(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "No brief yet — suggest /init-project".to_string());
 
+    let project_path_display =
+        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+            .display()
+            .to_string();
     Some(format!(
         "## Current Project\n**Name**: {}  **Path**: {}\n**Open epics**: {}  **Open tasks**: {}\n**Brief**: {}",
-        project.name, project.path, open_epics, open_tasks, brief
+        project.name, project_path_display, open_epics, open_tasks, brief
     ))
 }

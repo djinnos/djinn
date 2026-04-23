@@ -25,7 +25,8 @@ pub(super) async fn sweep_stale_resources(
     // refs for closed, Djinn-authored tasks.
     let _ = session_repo;
     for project in projects {
-        let project_dir = std::path::PathBuf::from(&project.path);
+        let project_dir =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
 
         if let Ok(git) = app_state.git_actor(&project_dir).await
             && let Ok(out) = git

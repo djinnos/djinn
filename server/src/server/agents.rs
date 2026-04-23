@@ -414,8 +414,10 @@ async fn available_mcp_servers(
             )
         })?;
 
+    let project_root =
+        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
     let registry =
-        djinn_agent::verification::settings::load_mcp_server_registry(StdPath::new(&project.path));
+        djinn_agent::verification::settings::load_mcp_server_registry(&project_root);
     let servers = registry
         .into_iter()
         .map(|(name, config)| {
@@ -491,11 +493,12 @@ async fn available_skills(
             )
         })?;
 
-    let project_root = StdPath::new(&project.path);
-    let skill_names = discover_skill_names(project_root);
+    let project_root =
+        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+    let skill_names = discover_skill_names(&project_root);
 
     // Load each discovered skill to get its description
-    let resolved = djinn_agent::skills::load_skills(project_root, &skill_names);
+    let resolved = djinn_agent::skills::load_skills(&project_root, &skill_names);
     let mut skills: Vec<AvailableSkill> = resolved
         .into_iter()
         .map(|s| AvailableSkill {

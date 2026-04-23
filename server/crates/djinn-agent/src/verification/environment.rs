@@ -11,9 +11,9 @@
 //! The fetch helpers accept either a project id (preferred — the in-process
 //! caller already has it) or a workspace path (used by the verification
 //! pipeline, which runs against an ephemeral mirror clone and doesn't know the
-//! project id up-front). The path form delegates to
-//! [`djinn_db::ProjectRepository::resolve_id_by_path_fuzzy`] so that a
-//! subdirectory inside a project still resolves to the correct row.
+//! project id up-front). The path form reverse-parses the canonical
+//! `{projects_root}/{owner}/{repo}` clone-path shape and looks the project up
+//! by GitHub coords via [`djinn_db::ProjectRepository::get_by_github`].
 //!
 //! ## Soft-failure policy
 //!
@@ -37,12 +37,31 @@ use djinn_stack::environment::{EnvironmentConfig, Verification};
 async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Option<String> {
     let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let path_str = worktree_path.to_string_lossy();
-    match repo.resolve_id_by_path_fuzzy(&path_str).await {
-        Ok(Some(id)) => Some(id),
+    // The server-managed clone path has the shape
+    // `{projects_root}/{owner}/{repo}`. Reverse-parse the last two path
+    // segments (owner, repo) and look the project up by GitHub coords.
+    let owner_repo = worktree_path
+        .components()
+        .rev()
+        .take(2)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if owner_repo.len() < 2 {
+        tracing::debug!(
+            path = %path_str,
+            "verification::environment: path too short to parse owner/repo; using empty verification config"
+        );
+        return None;
+    }
+    // rev().take(2) yields [repo, owner]; flip them.
+    let repo_name = &owner_repo[0];
+    let owner_name = &owner_repo[1];
+    match repo.get_by_github(owner_name, repo_name).await {
+        Ok(Some(p)) => Some(p.id),
         Ok(None) => {
             tracing::debug!(
                 path = %path_str,
-                "verification::environment: no project row matched path; using empty verification config"
+                "verification::environment: no project row matched owner/repo; using empty verification config"
             );
             None
         }
@@ -229,7 +248,7 @@ mod tests {
     async fn seed_project_with_config(db: &Database, id: &str, config_json: &str) {
         db.ensure_initialized().await.unwrap();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        repo.create_with_id(id, &format!("p-{id}"), &format!("/tmp/p-{id}"))
+        repo.create_with_id(id, &format!("p-{id}"), "test", id)
             .await
             .unwrap();
         repo.set_environment_config(id, config_json).await.unwrap();
@@ -256,7 +275,7 @@ mod tests {
         // deserializes to schema_version = 0. That's the pre-reseed sentinel.
         db.ensure_initialized().await.unwrap();
         ProjectRepository::new(db.clone(), EventBus::noop())
-            .create_with_id("p1", "p1", "/tmp/p1")
+            .create_with_id("p1", "p1", "test", "p1")
             .await
             .unwrap();
         let v = verification_for_project_id(&db, "p1").await;
@@ -330,7 +349,7 @@ mod tests {
         let db = test_db();
         db.ensure_initialized().await.unwrap();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        repo.create_with_id("p1", "p1", "/tmp/fuzzy-proj")
+        repo.create_with_id("p1", "p1", "test", "fuzzy-proj")
             .await
             .unwrap();
         let rules = vec![VerificationRule {

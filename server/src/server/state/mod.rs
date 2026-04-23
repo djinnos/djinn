@@ -1281,12 +1281,14 @@ impl AppState {
         };
 
         for project in projects {
+            let project_dir =
+                djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
             match note_repo
-                .reindex_from_disk(&project.id, Path::new(&project.path))
+                .reindex_from_disk(&project.id, &project_dir)
                 .await
             {
                 Ok(summary) => tracing::info!(
-                    project = %project.path,
+                    project = %project.slug(),
                     updated = summary.updated,
                     created = summary.created,
                     deleted = summary.deleted,
@@ -1294,7 +1296,7 @@ impl AppState {
                     "startup memory reindex completed"
                 ),
                 Err(e) => tracing::warn!(
-                    project = %project.path,
+                    project = %project.slug(),
                     error = %e,
                     "startup memory reindex failed"
                 ),
@@ -1509,7 +1511,10 @@ fn build_in_process_graph_warmer(
             Box::pin(async move {
                 let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
                 match repo.get(&project_id).await {
-                    Ok(Some(project)) => Some(PathBuf::from(project.path)),
+                    Ok(Some(project)) => Some(djinn_core::paths::project_dir(
+                        &project.github_owner,
+                        &project.github_repo,
+                    )),
                     Ok(None) => None,
                     Err(e) => {
                         tracing::warn!(

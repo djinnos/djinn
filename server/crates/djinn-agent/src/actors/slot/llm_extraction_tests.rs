@@ -77,11 +77,9 @@ async fn make_fixture() -> TestFixture {
     let session_repo = SessionRepository::new(db.clone(), events.clone());
 
     let uid = uuid::Uuid::now_v7().to_string();
+    let name = format!("test-project-{uid}");
     let project = project_repo
-        .create(
-            &format!("test-project-{uid}"),
-            tmpdir.path().to_str().expect("tmpdir path to str"),
-        )
+        .create(&name, "test", &name)
         .await
         .expect("create project");
 
@@ -308,7 +306,7 @@ async fn structural_extraction_flushes_co_access_associations() {
                 name: "memory_read".into(),
                 input: serde_json::json!({
                     "identifier": note_a.permalink,
-                    "project": fixture.project.path
+                    "project": fixture.project.slug()
                 }),
             }],
             metadata: None,
@@ -320,7 +318,7 @@ async fn structural_extraction_flushes_co_access_associations() {
                 name: "memory_read".into(),
                 input: serde_json::json!({
                     "identifier": note_b.permalink,
-                    "project": fixture.project.path
+                    "project": fixture.project.slug()
                 }),
             }],
             metadata: None,
@@ -864,7 +862,7 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
             content: vec![ContentBlock::ToolUse {
                 id: "t3".into(),
                 name: "memory_write".into(),
-                input: serde_json::json!({"identifier": "patterns/new-pattern", "project": fixture.project.path}),
+                input: serde_json::json!({"identifier": "patterns/new-pattern", "project": fixture.project.slug()}),
             }],
             metadata: None,
         },

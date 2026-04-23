@@ -568,11 +568,14 @@ impl EpicRepository {
         }
 
         let id = uuid::Uuid::now_v7().to_string();
+        let owner = "test";
+        let repo_slug = format!("default-{id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, path) VALUES (?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
             id,
             "default",
-            ".",
+            owner,
+            repo_slug,
         )
         .execute(self.db.pool())
         .await?;

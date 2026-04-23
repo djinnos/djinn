@@ -846,7 +846,11 @@ pub(crate) async fn resolve_project_path_for_id(
     app_state: &AgentContext,
 ) -> Option<String> {
     let repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    repo.get_path(project_id).await.ok().flatten()
+    repo.get(project_id).await.ok().flatten().map(|p| {
+        djinn_core::paths::project_dir(&p.github_owner, &p.github_repo)
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 async fn default_target_branch(project_id: &str, app_state: &AgentContext) -> String {
