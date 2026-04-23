@@ -685,12 +685,29 @@ impl RepoGraphOps for RepoGraphBridge {
 
         let (project_root, _index_tree_path) =
             djinn_graph::canonical_graph::normalize_graph_query_paths(project_path);
+        // Reverse-parse `{projects_root}/{owner}/{repo}` from the
+        // normalized path and look the project up by GitHub coords —
+        // every caller that reaches this bridge method passes the
+        // synthesized clone path produced by the graph dispatch.
+        let owner_repo: Vec<String> = project_root
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        if owner_repo.len() < 2 {
+            return Err(format!(
+                "cannot derive owner/repo from path '{project_path}'"
+            ));
+        }
+        let (repo_name, owner_name) = (&owner_repo[0], &owner_repo[1]);
         let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = repo
-            .resolve(project_root.to_string_lossy().as_ref())
+            .get_by_github(owner_name, repo_name)
             .await
             .map_err(|e| format!("resolve project: {e}"))?
-            .ok_or_else(|| format!("no project registered for path '{project_path}'"))?;
+            .ok_or_else(|| format!("no project registered for path '{project_path}'"))?
+            .id;
 
         // Source of truth: the `repo_graph_cache` row written by the K8s
         // graph warmer Job. The server process itself never rebuilds —
