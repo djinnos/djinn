@@ -205,7 +205,13 @@ pub(super) async fn completions_handler_impl(
     }
 
     let mcp = DjinnMcpServer::new(state.mcp_state());
-    let mut tool_schemas = mcp.all_tool_schemas();
+    // Chat only gets a curated slice of the server-wide MCP tool surface.
+    // Dumping `all_tool_schemas()` exposes admin/write tools that chat
+    // has no business invoking (credential_set, project_environment_config_set,
+    // task_update, settings_set, provider_*, agent_*, etc.) and also trips
+    // OpenAI's strict validator on schemas that accept arbitrary JSON objects.
+    let mut tool_schemas =
+        djinn_agent::chat_tools::filter_chat_allowed_mcp_schemas(mcp.all_tool_schemas());
     tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
 
     // Construct the per-request ProjectResolver: shared
@@ -401,8 +407,12 @@ async fn run_chat_loop(
                     &resolve_fn,
                 )
                 .await
-            } else {
+            } else if djinn_agent::chat_tools::is_chat_allowed_mcp_tool(&name) {
                 mcp.dispatch_tool(&name, args).await
+            } else {
+                Err(format!(
+                    "tool '{name}' is not available from chat (admin or write tools are gated)"
+                ))
             };
             match dispatch_result {
                 Ok(value) => {

@@ -146,6 +146,78 @@ pub fn is_chat_extension_tool(name: &str) -> bool {
     CHAT_EXTENSION_TOOLS.contains(&name)
 }
 
+/// Curated allowlist of server-wide `DjinnMcpServer` tools the chat may
+/// call. Shipping the full `DjinnMcpServer::all_tool_schemas()` to the
+/// model leaks every admin/write surface (credential_set,
+/// project_environment_config_set, task_update, settings_set, …) —
+/// also trips OpenAI's strict schema validator on a few tools whose
+/// `object` parameters lack a `properties` field.
+///
+/// Entries here are strictly read-oriented from chat's perspective, plus
+/// the one ADR-050-parity write (`epic_create`) and the GitHub file
+/// fetch. Admin, runtime, and provider tools are not on this list.
+const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
+    // Read-only memory
+    "memory_read",
+    "memory_search",
+    "memory_list",
+    "memory_build_context",
+    "memory_health",
+    "memory_broken_links",
+    "memory_orphans",
+    "memory_associations",
+    "memory_catalog",
+    "memory_recent",
+    "memory_graph",
+    "memory_diff",
+    "memory_history",
+    "memory_task_refs",
+    "memory_extracted_audit",
+    // Read-only tasks + epics
+    "task_show",
+    "task_list",
+    "task_activity_list",
+    "task_blocked_list",
+    "task_blockers_list",
+    "task_memory_refs",
+    "task_ready",
+    "task_count",
+    "task_timeline",
+    "epic_show",
+    "epic_list",
+    "epic_tasks",
+    "epic_count",
+    // ADR-050 §2 parity: the single knowledge-base write chat retains.
+    "epic_create",
+    // GitHub read
+    "github_fetch_file",
+];
+
+/// Returns `true` if this server-wide MCP tool is on the chat allowlist.
+/// Used both to filter the schemas sent to the model and to gate dispatch
+/// when the model asks for an unallowed tool.
+pub fn is_chat_allowed_mcp_tool(name: &str) -> bool {
+    CHAT_ALLOWED_MCP_TOOLS.contains(&name)
+}
+
+/// Filter an `all_tool_schemas()` list down to the chat-allowed subset.
+/// Unknown-shaped entries (missing a string `name`) are dropped
+/// defensively.
+pub fn filter_chat_allowed_mcp_schemas(
+    schemas: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    schemas
+        .into_iter()
+        .filter(|schema| {
+            schema
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(is_chat_allowed_mcp_tool)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 // ─── Chat-specific handlers ──────────────────────────────────────────────
 
 /// Parse + validate the `argv` tool argument.  Shared by every platform.
@@ -467,5 +539,96 @@ mod tests {
             "architect surface must retain `lsp` (ADR-050 §2 amendment — \
              divergence is intentional)"
         );
+    }
+
+    /// Admin / write / runtime / provider / credential / settings tools
+    /// must never appear on the chat allowlist. Regression guard for the
+    /// OpenAI 400 on `project_environment_config_set` and the broader
+    /// "chat was being handed the entire admin surface" bug.
+    #[test]
+    fn chat_allowlist_excludes_admin_and_write_tools() {
+        let forbidden: &[&str] = &[
+            "project_environment_config_set",
+            "project_environment_config_reset",
+            "project_environment_config_get",
+            "project_config_set",
+            "project_config_get",
+            "project_graph_exclusions_set",
+            "project_graph_exclusions_get",
+            "project_add_from_github",
+            "project_remove",
+            "credential_set",
+            "credential_delete",
+            "credential_list",
+            "provider_oauth_start",
+            "provider_remove",
+            "provider_validate",
+            "settings_set",
+            "settings_reset",
+            "settings_get",
+            "memory_write",
+            "memory_edit",
+            "memory_delete",
+            "memory_move",
+            "memory_reindex",
+            "memory_confirm",
+            "task_create",
+            "task_update",
+            "task_transition",
+            "task_claim",
+            "task_comment_add",
+            "epic_update",
+            "epic_close",
+            "epic_reopen",
+            "epic_delete",
+            "agent_create",
+            "agent_update",
+            "agent_show",
+            "agent_list",
+            "agent_metrics",
+            "board_reconcile",
+            "propose_adr_accept",
+            "propose_adr_reject",
+            "execution_kill_task",
+            "retrigger_image_build",
+            "github_app_installations",
+            "github_app_install_url",
+            "github_list_repos",
+            "session_list",
+            "session_show",
+            "session_messages",
+            "session_active",
+            "session_for_task",
+        ];
+        for tool in forbidden {
+            assert!(
+                !is_chat_allowed_mcp_tool(tool),
+                "chat allowlist regression: `{tool}` is admin/write and must \
+                 never appear in CHAT_ALLOWED_MCP_TOOLS"
+            );
+        }
+    }
+
+    /// The filter drops entries not on the allowlist and keeps allowlisted
+    /// entries untouched.
+    #[test]
+    fn filter_drops_disallowed_schemas() {
+        let schemas = vec![
+            serde_json::json!({"name": "memory_read", "description": "x"}),
+            serde_json::json!({"name": "project_environment_config_set", "description": "admin"}),
+            serde_json::json!({"name": "epic_create", "description": "allowed write"}),
+            serde_json::json!({"name": "credential_set", "description": "secrets"}),
+            serde_json::json!({"description": "no name field"}),
+        ];
+        let filtered = filter_chat_allowed_mcp_schemas(schemas);
+        let names: BTreeSet<String> = filtered
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(ToString::to_string))
+            .collect();
+        let expected: BTreeSet<String> = ["memory_read", "epic_create"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(names, expected);
     }
 }
