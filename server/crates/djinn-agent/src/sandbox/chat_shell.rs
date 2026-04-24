@@ -194,11 +194,11 @@ pub struct ChatShellSandbox {
 }
 
 impl ChatShellSandbox {
-    /// Build a sandbox for the given ephemeral-clone directory.
+    /// Build a sandbox for the given workspace clone directory.
     ///
     /// `clone_root` must already exist; this constructor does **not** create
     /// it. Typical callers obtain it from
-    /// `djinn_workspace::chat_clone::ChatCloneCache::acquire`.
+    /// `djinn_workspace::WorkspaceStore::ensure_workspace`.
     pub fn new(clone_root: PathBuf) -> Self {
         // Run the namespace probe as soon as we have a sandbox — the result
         // is cached in a `OnceLock`, so subsequent constructions are free.

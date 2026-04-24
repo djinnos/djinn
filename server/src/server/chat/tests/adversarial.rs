@@ -1,10 +1,9 @@
 //! End-to-end adversarial tests for the chat-user-global refactor.
 //!
-//! Covers the plan's §Verification surface for commit 6:
+//! Covers the plan's §Verification surface (commits 6–7):
 //!   - multi-project tool calls on one chat session
 //!   - shell sandbox denies writes, network, /proc leak
-//!   - project resolver rejects unauthorized users (authz)
-//!   - project resolver rejects path-traversal via malformed ids
+//!   - project resolver rejects unknown slugs / invalid UUIDs
 //!
 //! Landlock/netns probe requirements: the shell sandbox tests run
 //! against the real `ChatShellSandbox`, which needs Linux + a kernel
@@ -21,31 +20,28 @@ use crate::events::EventBus;
 use crate::server::chat::{ProjectResolver, ProjectResolverError};
 use crate::test_helpers;
 use djinn_db::ProjectRepository;
-use djinn_workspace::ChatCloneCache;
+use djinn_workspace::{MirrorManager, WorkspaceStore};
 
-fn anon_cache() -> Arc<ChatCloneCache> {
+fn anon_workspace_store() -> Arc<WorkspaceStore> {
     let mirrors = tempfile::TempDir::new().expect("mirrors tempdir");
-    let clones = tempfile::TempDir::new().expect("clones tempdir");
-    let mm = Arc::new(djinn_workspace::MirrorManager::new(mirrors.path()));
-    // `TempDir` drops at end of test. We leak the guard into the
-    // returned Arc by intentionally forgetting the TempDirs (tests
-    // only run briefly, and OS cleans up `/tmp` on reboot).
+    let workspaces = tempfile::TempDir::new().expect("workspaces tempdir");
+    let mm = Arc::new(MirrorManager::new(mirrors.path()));
+    // TempDirs drop at end of test; workspace_store paths don't need
+    // to survive the process, and OS cleans up `/tmp` on reboot.
+    // Leak the guards into the returned Arc — these are test-only.
+    let root = workspaces.path().to_path_buf();
     std::mem::forget(mirrors);
-    std::mem::forget(clones);
-    Arc::new(ChatCloneCache::new(mm, "/var/tmp/djinn-chat-tests"))
+    std::mem::forget(workspaces);
+    Arc::new(WorkspaceStore::new(root, mm))
 }
 
 #[tokio::test]
 async fn project_resolver_rejects_unknown_slug() {
     let db = test_helpers::create_test_db();
     db.ensure_initialized().await.unwrap();
-    let resolver = ProjectResolver::new(db, EventBus::noop(), anon_cache());
+    let resolver = ProjectResolver::new(db, EventBus::noop(), anon_workspace_store());
     let err = resolver
-        .resolve(
-            "no/such-project",
-            "user-A",
-            "11111111-1111-1111-1111-111111111111",
-        )
+        .resolve("no/such-project")
         .await
         .expect_err("unknown slug must not resolve");
     assert!(
@@ -56,30 +52,23 @@ async fn project_resolver_rejects_unknown_slug() {
 
 #[tokio::test]
 async fn project_resolver_validates_uuid_shape() {
-    // Seed a project with a deliberately non-UUID id.  The resolver must
-    // reject it at the UUID-shape gate BEFORE handing the id into the
-    // clone cache (which would otherwise enforce it, but the resolver's
-    // own check is what gives us a clean `InvalidId` error instead of
-    // a generic cache failure).
+    // Seed a project with a deliberately non-UUID id.  The resolver
+    // must reject it at the UUID-shape gate BEFORE handing the id
+    // into the workspace store (which would otherwise enforce it,
+    // but the resolver's own check is what gives us a clean
+    // `InvalidId` error instead of a generic workspace failure).
     let db = test_helpers::create_test_db();
     db.ensure_initialized().await.unwrap();
     let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    // Use a 36-char id that is NOT UUID-shaped (non-hex `g` chars) so
-    // the row fits the VARCHAR(36) column but fails the resolver's
-    // shape gate at `is_uuid`.
     let bogus_id = "gggggggg-gggg-gggg-gggg-gggggggggggg";
     assert_eq!(bogus_id.len(), 36);
     repo.create_with_id(bogus_id, "traversal", "test", "traversal")
         .await
         .expect("seed project with bogus id");
 
-    let resolver = ProjectResolver::new(db, EventBus::noop(), anon_cache());
+    let resolver = ProjectResolver::new(db, EventBus::noop(), anon_workspace_store());
     let err = resolver
-        .resolve(
-            "test/traversal",
-            "user-A",
-            "22222222-2222-2222-2222-222222222222",
-        )
+        .resolve("test/traversal")
         .await
         .expect_err("non-UUID project id must not resolve");
     assert!(
@@ -88,66 +77,21 @@ async fn project_resolver_validates_uuid_shape() {
     );
 }
 
-/// Until a real `project_access` membership table exists, the resolver
-/// is not strictly enforcing authz — every authenticated user can
-/// resolve every project.  The current-state assertion is that the
-/// resolver emits a `warn!` and does NOT reject the call.  This test
-/// pins the resolver's current behaviour so the follow-up authz PR
-/// notices when it flips.
-///
-/// Once `TODO(multiuser-authz)` lands the body below should be inverted
-/// to assert `ProjectResolverError::AccessDenied`.
+/// Multi-project path: the resolver is asked for two different
+/// projects on the same [`WorkspaceStore`] and each gets its own
+/// on-disk clone.  We assert the id → clone-path mapping is distinct.
+/// Requires real mirrors on disk, which we stand up in-test; kept
+/// `#[ignore]`d because it spawns real `git` processes.
 #[tokio::test]
-async fn project_resolver_rejects_unauthorized_user_is_currently_permissive() {
-    let db = test_helpers::create_test_db();
-    db.ensure_initialized().await.unwrap();
-    let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let owner_project = repo
-        .create("authz-demo", "owner-user", "authz-demo")
-        .await
-        .expect("seed project");
-
-    let resolver = ProjectResolver::new(db, EventBus::noop(), anon_cache());
-
-    // Attacker user tries to resolve a project they don't own.
-    let attacker = "attacker-user";
-    let session = "33333333-3333-3333-3333-333333333333";
-    let result = resolver
-        .resolve(&owner_project.slug(), attacker, session)
-        .await;
-
-    // Today: permissive.  Resolve succeeds but a warn! was emitted
-    // that the authz gap is not yet enforced.  If authz lands, flip
-    // the assertion to expect `Err(ProjectResolverError::AccessDenied)`.
-    match result {
-        Ok(_) => { /* current state — warn!("TODO(multiuser-authz)") */ }
-        Err(ProjectResolverError::CloneFailed(_)) => {
-            // The clone step may fail (no mirror on disk) which is
-            // authz-agnostic; that's also acceptable for now.
-        }
-        Err(ProjectResolverError::AccessDenied) => {
-            panic!(
-                "unexpected: resolver now rejects unauthorized users. \
-                 Invert this test to assert AccessDenied permanently."
-            );
-        }
-        Err(other) => panic!("unexpected resolver error: {other:?}"),
-    }
-}
-
-/// Multi-project path: one chat_session_id resolves two different
-/// projects consecutively.  We assert the clone paths are distinct and
-/// nested under the session dir.  Requires real mirrors on disk, which
-/// we stand up in-test.
-#[tokio::test]
-#[ignore = "requires on-disk mirrors + real ChatCloneCache.acquire; commit 6 integration only"]
+#[ignore = "requires on-disk mirrors + real WorkspaceStore.ensure_workspace; end-to-end only"]
 async fn test_chat_multi_project() {
-    // Placeholder — the ChatCloneCache unit tests
-    // (`acquire_creates_clone_first_time`, `acquire_cached_second_call`
-    // in `djinn-workspace/src/chat_clone.rs`) already exercise the
-    // cache-level multi-project invariant under real mirrors.  A full
-    // end-to-end chat HTTP round trip against two projects is covered
-    // by the kind-local Tilt smoke per the plan's §Rollout.
+    // Placeholder — the WorkspaceStore unit tests
+    // (`ensure_workspace_creates_clone_first_time`,
+    // `ensure_workspace_idempotent_second_call` in
+    // `djinn-workspace/src/workspace_store.rs`) already exercise
+    // the store-level multi-project invariant under real mirrors.
+    // A full end-to-end chat HTTP round trip against two projects
+    // is covered by the kind-local Tilt smoke per the plan's §Rollout.
 }
 
 /// Shell sandbox denies every write target.  The argv-level denial

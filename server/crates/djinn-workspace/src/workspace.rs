@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio::process::Command;
 
 #[derive(Debug, Error)]
-pub enum WorkspaceError {
+pub enum EphemeralWorkspaceError {
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),
 
@@ -82,11 +82,11 @@ impl Workspace {
     pub fn attach_existing(
         path: impl Into<PathBuf>,
         branch: impl Into<String>,
-    ) -> Result<Self, WorkspaceError> {
+    ) -> Result<Self, EphemeralWorkspaceError> {
         let path = path.into();
-        let meta = std::fs::metadata(&path).map_err(WorkspaceError::Io)?;
+        let meta = std::fs::metadata(&path).map_err(EphemeralWorkspaceError::Io)?;
         if !meta.is_dir() {
-            return Err(WorkspaceError::Git(format!(
+            return Err(EphemeralWorkspaceError::Git(format!(
                 "attach_existing: {} is not a directory",
                 path.display()
             )));
@@ -118,7 +118,7 @@ impl Workspace {
         &self,
         message: &str,
         identity: GitIdentity<'_>,
-    ) -> Result<bool, WorkspaceError> {
+    ) -> Result<bool, EphemeralWorkspaceError> {
         self.run_git(&["add", "-A"], &[]).await?;
         let staged = self
             .run_git(&["diff", "--cached", "--name-only"], &[])
@@ -148,7 +148,7 @@ impl Workspace {
         &self,
         args: &[&str],
         extra_env: &[(&str, &str)],
-    ) -> Result<String, WorkspaceError> {
+    ) -> Result<String, EphemeralWorkspaceError> {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(self.root.path()).args(args);
         for (k, v) in extra_env {
@@ -157,7 +157,7 @@ impl Workspace {
         let output = cmd.output().await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(WorkspaceError::Git(format!(
+            return Err(EphemeralWorkspaceError::Git(format!(
                 "git {}: {}",
                 args.join(" "),
                 stderr.trim()
@@ -188,7 +188,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let missing = tmp.path().join("nope");
         let err = Workspace::attach_existing(&missing, "main").unwrap_err();
-        assert!(matches!(err, WorkspaceError::Io(_)));
+        assert!(matches!(err, EphemeralWorkspaceError::Io(_)));
     }
 
     #[test]
@@ -198,7 +198,7 @@ mod tests {
         std::fs::write(&file, b"not a dir").expect("write");
         let err = Workspace::attach_existing(&file, "main").unwrap_err();
         match err {
-            WorkspaceError::Git(msg) => assert!(msg.contains("not a directory")),
+            EphemeralWorkspaceError::Git(msg) => assert!(msg.contains("not a directory")),
             other => panic!("unexpected: {other:?}"),
         }
     }

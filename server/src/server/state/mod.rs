@@ -25,7 +25,7 @@ use djinn_k8s::{K8sGraphWarmer, KubernetesConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_runtime::GraphWarmerService;
-use djinn_workspace::{ChatCloneCache, DEFAULT_CHAT_CLONE_ROOT, MirrorManager, mirrors_root};
+use djinn_workspace::{MirrorManager, WorkspaceStore, mirrors_root, workspaces_root};
 
 mod canonical_graph_refresh_planner;
 mod settings;
@@ -129,12 +129,13 @@ struct Inner {
     /// mutex.  Combined with the `CARGO_BUILD_JOBS` cap this prevents
     /// the parallel-indexer cc-fanout meltdown.
     pub indexer_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Ephemeral-clone cache for the chat subsystem (chat-user-global §3).
-    /// Keyed by `(chat_session_id, project_id)`; each entry is a
-    /// `git clone --local --shared` of the project's bare mirror rooted
-    /// under `/var/tmp/djinn-chat/`.  Acquired per tool call by the
-    /// [`ProjectResolver`]; released wholesale on session end.
-    pub chat_clone_cache: Arc<ChatCloneCache>,
+    /// Persistent per-project read-only workspace store for the chat
+    /// subsystem (commit 7 of chat-user-global).  Owns a single
+    /// `git clone --local --shared` per project under
+    /// `{DJINN_HOME}/workspaces/{project_id}/`.  Acquired per tool
+    /// call by the [`ProjectResolver`]; refreshed by the
+    /// mirror-fetcher after each successful ref-advancing fetch.
+    pub workspace_store: Arc<WorkspaceStore>,
     /// Single-flight gate for background canonical-graph warm tasks spawned
     /// by the in-process graph warmer (`build_in_process_graph_warmer`).
     /// Keyed by `project_id`: membership means a detached warm task is
@@ -213,9 +214,9 @@ impl AppState {
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
-        let chat_clone_cache = Arc::new(ChatCloneCache::new(
+        let workspace_store = Arc::new(WorkspaceStore::new(
+            workspaces_root(),
             Arc::clone(&mirror),
-            PathBuf::from(DEFAULT_CHAT_CLONE_ROOT),
         ));
         Self {
             inner: Arc::new(Inner {
@@ -235,7 +236,7 @@ impl AppState {
                 active_tasks: djinn_agent::context::ActivityTracker::default(),
                 embedding_service: EmbeddingService::new(default_embedding_cache_dir()),
                 indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
-                chat_clone_cache,
+                workspace_store,
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 memory_mount: Mutex::new(None),
                 app_config: tokio::sync::RwLock::new(None),
@@ -542,11 +543,12 @@ impl AppState {
             .remove(project_id);
     }
 
-    /// Shared ephemeral-clone cache for chat sessions.  The resolver
-    /// (`ProjectResolver`) `.acquire`s per tool call; the chat handler
-    /// `.release_session`s on session end.
-    pub fn chat_clone_cache(&self) -> Arc<ChatCloneCache> {
-        self.inner.chat_clone_cache.clone()
+    /// Shared persistent workspace store for chat.  The resolver
+    /// (`ProjectResolver`) calls `ensure_workspace` per tool call; the
+    /// mirror-fetcher calls `sync_workspace` after every ref-advancing
+    /// mirror fetch so the tree stays current.
+    pub fn workspace_store(&self) -> Arc<WorkspaceStore> {
+        self.inner.workspace_store.clone()
     }
 
     pub fn db(&self) -> &Database {
@@ -1074,24 +1076,17 @@ impl AppState {
             backfill_self.backfill_full_mirrors_on_startup().await;
         });
 
-        // chat-user-global: nuke leftover ephemeral chat clones from a
-        // prior process lifetime before wiring the reaper.  Clones are
-        // free to recreate on first tool call; leaving them around on
-        // startup is just stale disk.
-        djinn_workspace::boot_sweep(std::path::Path::new(
-            djinn_workspace::DEFAULT_CHAT_CLONE_ROOT,
-        ))
-        .await;
-        let reaper_cache = self.inner.chat_clone_cache.clone();
-        let _reaper_handle = reaper_cache.spawn_reaper(
-            djinn_workspace::DEFAULT_IDLE,
-            djinn_workspace::DEFAULT_REAPER_PERIOD,
-        );
-        tracing::info!(
-            root = djinn_workspace::DEFAULT_CHAT_CLONE_ROOT,
-            idle_mins = djinn_workspace::DEFAULT_IDLE.as_secs() / 60,
-            "chat_clone_cache: boot sweep complete, reaper spawned"
-        );
+        // commit 7 (chat-user-global): warm the persistent
+        // per-project workspaces on boot so the first chat tool call
+        // against a project doesn't pay the clone latency.
+        // Idempotent — already-warm workspaces fast-path through
+        // `ensure_workspace`'s sync branch.  Serialised per-project
+        // by the store's internal lock; projects warm concurrently
+        // with each other.
+        let warm_workspaces_self = self.clone();
+        tokio::spawn(async move {
+            warm_workspaces_self.warm_workspaces_on_startup().await;
+        });
 
         // Watch .djinn/ directories for KB note changes and auto-reindex.
         djinn_db::background::watchers::spawn_kb_watchers(
@@ -1372,6 +1367,80 @@ impl AppState {
             failed,
             total = projects.len(),
             "mirror full-history backfill complete"
+        );
+    }
+
+    /// Warm every project's persistent chat workspace on boot.
+    ///
+    /// Iterates [`ProjectRepository::list`] and calls
+    /// [`WorkspaceStore::ensure_workspace`] for each row. Missing
+    /// mirrors (projects that haven't been fetched yet) are skipped
+    /// with a debug log; genuine errors log a warn! and keep going.
+    /// The store's per-project lock serialises `ensure_workspace`
+    /// with any concurrent sync-from-mirror-fetch, so this is safe
+    /// to run alongside normal server traffic.
+    async fn warm_workspaces_on_startup(&self) {
+        let project_repo = ProjectRepository::new(self.db().clone(), self.event_bus());
+        let projects = match project_repo.list().await {
+            Ok(projects) => projects,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to list projects for workspace warm");
+                return;
+            }
+        };
+
+        tracing::info!(
+            project_count = projects.len(),
+            "starting chat workspace warm"
+        );
+
+        let store = self.workspace_store();
+        let mut warmed = 0usize;
+        let mut skipped_missing = 0usize;
+        let mut failed = 0usize;
+        for project in &projects {
+            let branch = match project_repo.get_default_branch(&project.id).await {
+                Ok(Some(b)) => b,
+                Ok(None) if !project.target_branch.trim().is_empty() => {
+                    project.target_branch.clone()
+                }
+                Ok(None) => "HEAD".to_owned(),
+                Err(e) => {
+                    tracing::warn!(
+                        project = %project.slug(),
+                        error = %e,
+                        "workspace warm: default-branch lookup failed"
+                    );
+                    failed += 1;
+                    continue;
+                }
+            };
+            match store.ensure_workspace(&project.id, &branch).await {
+                Ok(_) => warmed += 1,
+                Err(djinn_workspace::WorkspaceError::MirrorMissing(_)) => {
+                    skipped_missing += 1;
+                    tracing::debug!(
+                        project = %project.slug(),
+                        "workspace warm skipped: mirror not yet on disk"
+                    );
+                }
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(
+                        project = %project.slug(),
+                        error = %e,
+                        "workspace warm failed"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            warmed,
+            skipped_missing,
+            failed,
+            total = projects.len(),
+            "chat workspace warm complete"
         );
     }
 

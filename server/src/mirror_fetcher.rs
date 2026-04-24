@@ -97,6 +97,49 @@ pub(crate) async fn fetch_one(
     let changed = mirror.fetch_mirror(project_id, &origin_url).await?;
 
     let repo_db = ProjectRepository::new(state.db().clone(), state.event_bus());
+
+    // commit 7 (chat-user-global): when the mirror fetch advanced
+    // refs, sync the persistent chat workspace so the next chat
+    // tool call sees the new commits.  Failures are logged + swallowed
+    // — a failed sync must never break the mirror-fetch tick; the
+    // next tick that advances refs will retry.
+    if changed {
+        let workspace_store = state.workspace_store();
+        let branch = match repo_db.get_default_branch(project_id).await {
+            Ok(Some(b)) => Some(b),
+            Ok(None) => repo_db
+                .get(project_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.target_branch)
+                .filter(|b| !b.trim().is_empty()),
+            Err(e) => {
+                tracing::warn!(project_id, error = %e, "workspace sync: default-branch lookup failed");
+                None
+            }
+        };
+        if let Some(branch) = branch {
+            match workspace_store.sync_workspace(project_id, &branch).await {
+                Ok(()) => tracing::info!(project_id, "synced workspace"),
+                Err(djinn_workspace::WorkspaceError::MirrorMissing(_)) => {
+                    // Workspace hasn't been created yet — first chat
+                    // tool call will call `ensure_workspace`.  Not an
+                    // error worth surfacing.
+                    tracing::debug!(
+                        project_id,
+                        "workspace sync skipped: no workspace on disk yet"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    project_id,
+                    error = ?e,
+                    "workspace sync failed; will retry next tick"
+                ),
+            }
+        }
+    }
+
     let stack_missing = match repo_db.get_stack(project_id).await {
         Ok(Some(s)) => s.trim().is_empty() || s.trim() == "{}",
         Ok(None) => true,

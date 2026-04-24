@@ -13,7 +13,6 @@ use super::{
     apply_chat_skills,
 };
 use crate::server::AppState;
-use crate::server::auth::authenticate;
 use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
@@ -24,11 +23,6 @@ use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_p
 use djinn_control_plane::server::DjinnMcpServer;
 
 const MAX_TOOL_ITERATIONS: usize = 20;
-
-/// When no `djinn_session` cookie is present (dev/test path) we still
-/// need a user_id placeholder.  It's only a placeholder today — once
-/// multiuser authz lands this path must reject the request instead.
-const ANONYMOUS_USER_ID: &str = "anonymous";
 
 pub(super) fn sse_json_event<T: serde::Serialize>(event: &str, payload: &T) -> Event {
     Event::default()
@@ -106,29 +100,16 @@ pub(super) async fn completions_handler_impl(
             (axum::http::StatusCode::BAD_REQUEST, format!("provider credential resolution failed: {e}"))
         })?;
 
-    // Freshly-minted session ids are UUIDv7; the clone cache's UUID-shape
-    // check depends on the value being UUID-formatted.  Inbound
-    // `mcp-session-id` headers that pass through get the same validation
-    // downstream at `ChatCloneCache::acquire`.
+    // Freshly-minted session ids are UUIDv7.  The persistent
+    // `WorkspaceStore` is not session-scoped so the session_id is no
+    // longer load-bearing for on-disk layout, but we keep it for
+    // telemetry + session-affinity routing.
     let session_id = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-
-    // Extract the caller's user_id from the `djinn_session` cookie.  If
-    // authentication is not yet wired in the dev loop, fall back to a
-    // placeholder — the ProjectResolver warn!s on every authz decision
-    // so the gap is visible in logs.
-    let user_id = match authenticate(&state, &headers).await {
-        Ok(Some(user)) => user.id,
-        Ok(None) => ANONYMOUS_USER_ID.to_owned(),
-        Err(e) => {
-            tracing::warn!(error = %e, "chat: auth lookup failed; treating as anonymous");
-            ANONYMOUS_USER_ID.to_owned()
-        }
-    };
 
     let telemetry_meta = TelemetryMeta {
         task_id: None,
@@ -227,22 +208,20 @@ pub(super) async fn completions_handler_impl(
     let mut tool_schemas = mcp.all_tool_schemas();
     tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
 
-    // Construct the per-request ProjectResolver: shared `ChatCloneCache`
-    // across sessions, per-request `lookup_cache` for slug→id memoization.
+    // Construct the per-request ProjectResolver: shared
+    // `WorkspaceStore` across sessions, per-request `lookup_cache`
+    // for slug→id memoization.
     let resolver = Arc::new(ProjectResolver::new(
         state.db().clone(),
         state.event_bus(),
-        state.chat_clone_cache(),
+        state.workspace_store(),
     ));
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
     let spawn_state = state.clone();
-    let spawn_session_id = session_id.clone();
     tokio::spawn(async move {
         run_chat_loop(
             spawn_state,
-            spawn_session_id,
-            user_id,
             provider,
             conversation,
             tool_schemas,
@@ -259,8 +238,6 @@ pub(super) async fn completions_handler_impl(
 #[allow(clippy::too_many_arguments)]
 async fn run_chat_loop(
     state: AppState,
-    session_id: String,
-    user_id: String,
     provider: Box<dyn LlmProvider>,
     mut conversation: Conversation,
     tool_schemas: Vec<serde_json::Value>,
@@ -339,7 +316,6 @@ async fn run_chat_loop(
                             },
                         ))
                         .await;
-                    state.chat_clone_cache().release_session(&session_id).await;
                     return;
                 }
             }
@@ -385,15 +361,11 @@ async fn run_chat_loop(
 
             let dispatch_result = if djinn_agent::chat_tools::is_chat_extension_tool(&name) {
                 let resolver_for_dispatch = resolver.clone();
-                let user_id_for_dispatch = user_id.clone();
-                let session_id_for_dispatch = session_id.clone();
                 let resolve_fn = move |project_ref: String| {
                     let resolver = resolver_for_dispatch.clone();
-                    let user_id = user_id_for_dispatch.clone();
-                    let session_id = session_id_for_dispatch.clone();
                     Box::pin(async move {
                         resolver
-                            .resolve(&project_ref, &user_id, &session_id)
+                            .resolve(&project_ref)
                             .await
                             .map(|resolved| ChatResolvedProject {
                                 id: resolved.id,
@@ -406,11 +378,8 @@ async fn run_chat_loop(
                                 ProjectResolverError::InvalidId => {
                                     "project id invalid (must be UUID-shaped)".to_owned()
                                 }
-                                ProjectResolverError::AccessDenied => {
-                                    "access denied".to_owned()
-                                }
-                                ProjectResolverError::CloneFailed(inner) => {
-                                    format!("clone failed: {inner}")
+                                ProjectResolverError::Workspace(inner) => {
+                                    format!("workspace failed: {inner}")
                                 }
                                 ProjectResolverError::Database(inner) => {
                                     format!("project lookup failed: {inner}")
@@ -488,6 +457,4 @@ async fn run_chat_loop(
             });
         }
     }
-
-    state.chat_clone_cache().release_session(&session_id).await;
 }

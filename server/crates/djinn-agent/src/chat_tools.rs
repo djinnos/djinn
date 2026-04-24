@@ -273,9 +273,14 @@ pub struct ChatResolvedProject {
 
 /// Async callback that turns a `project` tool-arg into a resolved
 /// `(id, clone_path)` tuple.  Implemented on the server side by the
-/// `ProjectResolver` + `ChatCloneCache` + authz check combo; kept as a
-/// boxed future here so `djinn-agent` stays free of a `djinn-server`
-/// dependency.
+/// `ProjectResolver` + `WorkspaceStore` combo; kept as a boxed future
+/// here so `djinn-agent` stays free of a `djinn-server` dependency.
+///
+/// Takes the project ref (slug or UUID) as the only argument — there
+/// is no per-user / per-session identity threaded through: projects
+/// are globally accessible to any authenticated caller under the
+/// one-org-per-deployment model, and the `WorkspaceStore` clone is
+/// shared across every chat session.
 pub type ChatProjectResolveFn<'a> = &'a (dyn Fn(
     String,
 ) -> Pin<

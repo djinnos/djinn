@@ -31,7 +31,7 @@ use std::sync::Arc;
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_db::TaskRunRepository;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
-use djinn_workspace::{MirrorError, MirrorManager, WorkspaceError};
+use djinn_workspace::{EphemeralWorkspaceError, MirrorError, MirrorManager};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info};
@@ -69,7 +69,7 @@ pub enum SupervisorError {
     Mirror(#[from] MirrorError),
 
     #[error("workspace: {0}")]
-    Workspace(#[from] WorkspaceError),
+    Workspace(#[from] EphemeralWorkspaceError),
 
     #[error("db: {0}")]
     Db(#[from] djinn_db::Error),
