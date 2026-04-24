@@ -138,8 +138,8 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
         ],
         "type": "string"
       },
-      "project_path": {
-        "description": "Absolute path to project root",
+      "project": {
+        "description": "Project slug (owner/repo) or UUID. The handler resolves it to the server-managed clone path.",
         "type": "string"
       },
       "query": {
@@ -228,7 +228,7 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
     },
     "required": [
       "operation",
-      "project_path"
+      "project"
     ],
     "type": "object"
   },

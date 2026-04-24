@@ -393,8 +393,8 @@ expression: tool_schemas_architect()
           ],
           "type": "string"
         },
-        "project_path": {
-          "description": "Absolute path to project root",
+        "project": {
+          "description": "Project slug (owner/repo) or UUID. The handler resolves it to the server-managed clone path.",
           "type": "string"
         },
         "query": {
@@ -483,7 +483,7 @@ expression: tool_schemas_architect()
       },
       "required": [
         "operation",
-        "project_path"
+        "project"
       ],
       "type": "object"
     },
@@ -583,8 +583,8 @@ expression: tool_schemas_architect()
           "minimum": 1,
           "type": "integer"
         },
-        "project_path": {
-          "description": "Absolute path to project root",
+        "project": {
+          "description": "Project slug (owner/repo) or UUID. The handler resolves it to the server-managed clone path.",
           "type": "string"
         },
         "seed_entries": {
@@ -603,7 +603,7 @@ expression: tool_schemas_architect()
         }
       },
       "required": [
-        "project_path",
+        "project",
         "changed_ranges"
       ],
       "type": "object"

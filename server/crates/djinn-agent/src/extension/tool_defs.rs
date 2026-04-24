@@ -339,7 +339,7 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
          touches_hot_path (given entry-point and sink SCIP keys plus queried symbols, return which sit on any entry→sink shortest path).".to_string(),
         object!({
             "type": "object",
-            "required": ["operation", "project_path"],
+            "required": ["operation", "project"],
             "properties": {
                 "operation": {
                     "type": "string",
@@ -353,9 +353,9 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                     ],
                     "description": "Graph query to perform"
                 },
-                "project_path": {
+                "project": {
                     "type": "string",
-                    "description": "Absolute path to project root"
+                    "description": "Project slug (owner/repo) or UUID. The handler resolves it to the server-managed clone path."
                 },
                 "key": {
                     "type": "string",
@@ -526,11 +526,11 @@ pub(crate) fn tool_pr_review_context() -> RmcpTool {
             .to_string(),
         object!({
             "type": "object",
-            "required": ["project_path", "changed_ranges"],
+            "required": ["project", "changed_ranges"],
             "properties": {
-                "project_path": {
+                "project": {
                     "type": "string",
-                    "description": "Absolute path to project root"
+                    "description": "Project slug (owner/repo) or UUID. The handler resolves it to the server-managed clone path."
                 },
                 "changed_ranges": {
                     "type": "array",
