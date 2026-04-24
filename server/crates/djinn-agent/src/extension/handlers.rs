@@ -204,9 +204,15 @@ where
             let root = state.working_root_for(worktree_path);
             call_read(state, &call.arguments, &root).await
         }
-        "write" => call_write(state, &call.arguments, worktree_path).await,
-        "edit" => call_edit(state, &call.arguments, worktree_path).await,
-        "apply_patch" => call_apply_patch(state, &call.arguments, worktree_path).await,
+        "write" => {
+            call_write(state, &call.arguments, worktree_path, project_id.as_deref()).await
+        }
+        "edit" => {
+            call_edit(state, &call.arguments, worktree_path, project_id.as_deref()).await
+        }
+        "apply_patch" => {
+            call_apply_patch(state, &call.arguments, worktree_path, project_id.as_deref()).await
+        }
         "lsp" => {
             let root = state.working_root_for(worktree_path);
             call_lsp(state, &call.arguments, &root).await

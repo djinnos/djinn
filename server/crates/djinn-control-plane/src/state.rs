@@ -431,6 +431,24 @@ pub mod stubs {
         ) -> Result<Vec<crate::bridge::ChurnEntry>, String> {
             Ok(vec![])
         }
+        async fn coupling_hotspots(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::CoupledPairEntry>, String> {
+            Ok(vec![])
+        }
+        async fn coupling_hubs(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::CouplingHubEntry>, String> {
+            Ok(vec![])
+        }
     }
 
     /// Build a McpState backed only by an in-memory database (no live actors).

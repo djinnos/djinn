@@ -8,11 +8,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
-    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry, CouplingEntry,
-    CycleGroup, DeadSymbolEntry, DeprecatedHit, EdgeEntry, FileGroupEntry, GraphNeighbor,
-    GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult,
-    NeighborsResult, OrphanEntry, PathResult, ProjectCtx, RankedNode, SearchHit, SymbolAtHit,
-    SymbolDescription, TouchedSymbol,
+    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry, CoupledPairEntry,
+    CouplingEntry, CouplingHubEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit, EdgeEntry,
+    FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry,
+    ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx,
+    RankedNode, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -137,6 +137,13 @@ pub struct CodeGraphParams {
     /// Clamped to `[1, 3650]` server-side.
     #[serde(default)]
     pub since_days: Option<u32>,
+    /// Max files per commit before a commit is skipped in the
+    /// `coupling_hotspots` / `coupling_hubs` aggregation. Default 15.
+    /// Protects the pair-count signal from lockfile refreshes,
+    /// codemods, and similar bulk rewrites that contribute `N^2`
+    /// pairs with essentially zero real coupling information.
+    #[serde(default)]
+    pub max_files_per_commit: Option<u32>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -288,6 +295,20 @@ pub struct ChurnResponse {
     pub files: Vec<ChurnEntry>,
 }
 
+/// Response for the `coupling_hotspots` op — top file pairs ranked by
+/// distinct-commit co-edit count.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CouplingHotspotsResponse {
+    pub pairs: Vec<CoupledPairEntry>,
+}
+
+/// Response for the `coupling_hubs` op — files by cumulative coupling
+/// across all partners (change-propagation risk map).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CouplingHubsResponse {
+    pub hubs: Vec<CouplingHubEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
@@ -313,6 +334,8 @@ pub enum CodeGraphResponse {
     TouchesHotPath(TouchesHotPathResponse),
     Coupling(CouplingResponse),
     Churn(ChurnResponse),
+    CouplingHotspots(CouplingHotspotsResponse),
+    CouplingHubs(CouplingHubsResponse),
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────────
@@ -435,7 +458,7 @@ fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp)."
+        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
     )]
     pub async fn code_graph(
         &self,
@@ -501,6 +524,8 @@ impl DjinnMcpServer {
             "touches_hot_path" => self.code_graph_touches_hot_path(&ctx, &params).await,
             "coupling" => self.code_graph_coupling(&ctx, &params).await,
             "churn" => self.code_graph_churn(&ctx, &params).await,
+            "coupling_hotspots" => self.code_graph_coupling_hotspots(&ctx, &params).await,
+            "coupling_hubs" => self.code_graph_coupling_hubs(&ctx, &params).await,
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
@@ -508,7 +533,7 @@ impl DjinnMcpServer {
                  'symbols_at', 'diff_touches', 'describe', 'status', \
                  'api_surface', 'boundary_check', 'hotspots', 'metrics_at', \
                  'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
-                 'coupling', 'churn'"
+                 'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs'"
             )),
         };
 
@@ -1088,14 +1113,80 @@ impl DjinnMcpServer {
             .ok_or_else(|| format!("'file' is required for operation '{}'", params.operation))?;
         let limit = params.limit.unwrap_or(20).max(0) as usize;
         let limit = limit.clamp(1, 200);
+        // Over-fetch 25× so the exclusion filter doesn't starve the
+        // returned set. Underlying SQL sort is invariant to LIMIT, so
+        // this is effectively free.
+        let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
         let coupled = self
             .state
             .repo_graph()
-            .coupling(ctx, file, limit)
+            .coupling(ctx, file, fetch_limit)
             .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let coupled: Vec<CouplingEntry> = coupled
+            .into_iter()
+            .filter(|c| !exclusions.excludes_path(&c.file_path))
+            .take(limit)
+            .collect();
         Ok(CodeGraphResponse::Coupling(CouplingResponse {
             file: file.to_string(),
             coupled,
+        }))
+    }
+
+    /// Handler for `operation = "coupling_hotspots"`.
+    async fn code_graph_coupling_hotspots(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        let max_files_per_commit =
+            params.max_files_per_commit.unwrap_or(15).clamp(1, 1000) as usize;
+        let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
+        let pairs = self
+            .state
+            .repo_graph()
+            .coupling_hotspots(ctx, fetch_limit, params.since_days, max_files_per_commit)
+            .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let pairs: Vec<CoupledPairEntry> = pairs
+            .into_iter()
+            .filter(|p| {
+                !exclusions.excludes_path(&p.file_a) && !exclusions.excludes_path(&p.file_b)
+            })
+            .take(limit)
+            .collect();
+        Ok(CodeGraphResponse::CouplingHotspots(
+            CouplingHotspotsResponse { pairs },
+        ))
+    }
+
+    /// Handler for `operation = "coupling_hubs"`.
+    async fn code_graph_coupling_hubs(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        let max_files_per_commit =
+            params.max_files_per_commit.unwrap_or(15).clamp(1, 1000) as usize;
+        let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
+        let hubs = self
+            .state
+            .repo_graph()
+            .coupling_hubs(ctx, fetch_limit, params.since_days, max_files_per_commit)
+            .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let hubs: Vec<CouplingHubEntry> = hubs
+            .into_iter()
+            .filter(|h| !exclusions.excludes_path(&h.file_path))
+            .take(limit)
+            .collect();
+        Ok(CodeGraphResponse::CouplingHubs(CouplingHubsResponse {
+            hubs,
         }))
     }
 
@@ -1214,6 +1305,7 @@ mod tests {
             seed_sinks: None,
             symbols: None,
             since_days: None,
+            max_files_per_commit: None,
         }
     }
 

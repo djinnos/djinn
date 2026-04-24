@@ -366,6 +366,24 @@ impl RepoGraphOps for StubRepoGraph {
     ) -> std::result::Result<Vec<crate::bridge::ChurnEntry>, String> {
         Ok(Vec::new())
     }
+    async fn coupling_hotspots(
+        &self,
+        _ctx: &ProjectCtx,
+        _limit: usize,
+        _since_days: Option<u32>,
+        _max_files_per_commit: usize,
+    ) -> std::result::Result<Vec<crate::bridge::CoupledPairEntry>, String> {
+        Ok(Vec::new())
+    }
+    async fn coupling_hubs(
+        &self,
+        _ctx: &ProjectCtx,
+        _limit: usize,
+        _since_days: Option<u32>,
+        _max_files_per_commit: usize,
+    ) -> std::result::Result<Vec<crate::bridge::CouplingHubEntry>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// NoteEmbeddingProvider stub. `model_version` is informational; `embed_note`

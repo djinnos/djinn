@@ -1694,21 +1694,7 @@ impl RepoGraphOps for RepoGraphBridge {
         use djinn_control_plane::bridge::ChurnEntry;
         use djinn_db::CommitFileChangeRepository;
 
-        // `committed_at` is an ISO-8601 UTC string. We render the cutoff
-        // with the same format git itself uses (`%Y-%m-%dT%H:%M:%SZ`)
-        // via a seconds-since-epoch arithmetic → lexicographic string
-        // comparison — no chrono dependency required, and the
-        // comparison stays correct because every stored timestamp uses
-        // the same fixed-width representation.
-        let since = since_days.map(|d| {
-            let clamped = d.clamp(1, 3650) as u64;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let cutoff = now.saturating_sub(clamped * 86_400);
-            format_utc_iso8601(cutoff)
-        });
+        let since = since_days_to_cutoff(since_days);
         let repo = CommitFileChangeRepository::new(self.state.db().clone());
         let rows = repo
             .churn(&ctx.id, limit.max(1), since.as_deref())
@@ -1725,6 +1711,83 @@ impl RepoGraphOps for RepoGraphBridge {
             })
             .collect())
     }
+
+    async fn coupling_hotspots(
+        &self,
+        ctx: &ProjectCtx,
+        limit: usize,
+        since_days: Option<u32>,
+        max_files_per_commit: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CoupledPairEntry>, String> {
+        use djinn_control_plane::bridge::CoupledPairEntry;
+        use djinn_db::CommitFileChangeRepository;
+
+        let since = since_days_to_cutoff(since_days);
+        let repo = CommitFileChangeRepository::new(self.state.db().clone());
+        let rows = repo
+            .top_coupled_pairs(&ctx.id, limit.max(1), since.as_deref(), max_files_per_commit)
+            .await
+            .map_err(|e| format!("coupling_hotspots lookup: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| CoupledPairEntry {
+                file_a: row.file_a,
+                file_b: row.file_b,
+                co_edits: row.co_edits.max(0) as usize,
+                last_co_edit: row.last_co_edit,
+            })
+            .collect())
+    }
+
+    async fn coupling_hubs(
+        &self,
+        ctx: &ProjectCtx,
+        limit: usize,
+        since_days: Option<u32>,
+        max_files_per_commit: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CouplingHubEntry>, String> {
+        use djinn_control_plane::bridge::CouplingHubEntry;
+        use djinn_db::CommitFileChangeRepository;
+
+        let since = since_days_to_cutoff(since_days);
+        let repo = CommitFileChangeRepository::new(self.state.db().clone());
+        // Over-fetch 2000 pairs for stable hub aggregation — the SQL
+        // sort is the work here, the limit is cheap.
+        let rows = repo
+            .coupling_hubs(
+                &ctx.id,
+                limit.max(1),
+                since.as_deref(),
+                max_files_per_commit,
+                2000,
+            )
+            .await
+            .map_err(|e| format!("coupling_hubs lookup: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| CouplingHubEntry {
+                file_path: row.file_path,
+                total_coupling: row.total_coupling.max(0) as usize,
+                partner_count: row.partner_count.max(0) as usize,
+            })
+            .collect())
+    }
+}
+
+/// Render a `since_days` window as an ISO-8601 UTC lower bound
+/// (`YYYY-MM-DDTHH:MM:SSZ`). Stored `committed_at` timestamps use the
+/// same fixed-width format, so a lexicographic string comparison on
+/// the SQL side resolves the window correctly — no chrono dependency.
+fn since_days_to_cutoff(since_days: Option<u32>) -> Option<String> {
+    since_days.map(|d| {
+        let clamped = d.clamp(1, 3650) as u64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cutoff = now.saturating_sub(clamped * 86_400);
+        format_utc_iso8601(cutoff)
+    })
 }
 
 /// Format a Unix timestamp (seconds since epoch) as ISO-8601 UTC with

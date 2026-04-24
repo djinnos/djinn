@@ -66,6 +66,30 @@ pub struct FileChurn {
     pub last_commit_at: String,
 }
 
+/// One file pair emitted by
+/// [`CommitFileChangeRepository::top_coupled_pairs`]. Canonical
+/// ordering: `file_a < file_b` lexicographically so each unordered
+/// pair appears exactly once in the result set.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct CoupledPair {
+    pub file_a: String,
+    pub file_b: String,
+    pub co_edits: i64,
+    pub last_co_edit: String,
+}
+
+/// One file-level hub emitted by
+/// [`CommitFileChangeRepository::coupling_hubs`]. Scored by cumulative
+/// coupling across all partners — a high total_coupling with a low
+/// partner_count flags "always co-edited with the same small cluster",
+/// while a high value on both flags a change-propagation hub.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CouplingHub {
+    pub file_path: String,
+    pub total_coupling: i64,
+    pub partner_count: i64,
+}
+
 pub struct CommitFileChangeRepository {
     db: Database,
 }
@@ -244,6 +268,156 @@ impl CommitFileChangeRepository {
         };
         Ok(rows)
     }
+
+    /// Top `limit` co-edited file *pairs* project-wide, ranked by
+    /// distinct-commit co-edit count.
+    ///
+    /// Callers over-fetch (the MCP dispatch passes 25× the user's
+    /// limit, clamped at 500) so a Rust-side exclusion filter can drop
+    /// matches without starving the returned set. The underlying SQL
+    /// aggregation is invariant to `LIMIT` — the sort is the work — so
+    /// over-fetch is effectively free.
+    ///
+    /// `max_files_per_commit` drops commits that touch more than N
+    /// files before the pair-join. Without this, a single lockfile
+    /// refresh of 200 files contributes ~20k pair-counts and swamps
+    /// the real coupling signal; the default at call sites is 15.
+    ///
+    /// `since_days`: when `Some`, restricts the source commits to
+    /// those with `committed_at >= now - N days` (ISO-8601 lexical
+    /// compare, matching the `churn` op).
+    pub async fn top_coupled_pairs(
+        &self,
+        project_id: &str,
+        limit: usize,
+        since: Option<&str>,
+        max_files_per_commit: usize,
+    ) -> Result<Vec<CoupledPair>> {
+        self.db.ensure_initialized().await?;
+        let limit = limit.clamp(1, 5000) as i64;
+        let max_files = max_files_per_commit.max(1) as i64;
+
+        // Self-join `commit_file_changes` by commit_sha, constraining
+        // `a.file_path < b.file_path` so each unordered pair appears
+        // exactly once. The inner subquery drops big commits (lockfile
+        // refreshes, codemods) before the join — same source table, so
+        // Dolt can still keep it all in one execution plan.
+        let rows: Vec<CoupledPair> = match since {
+            Some(ts) => sqlx::query_as(
+                "SELECT \
+                    a.file_path AS file_a, \
+                    b.file_path AS file_b, \
+                    CAST(COUNT(*) AS SIGNED) AS co_edits, \
+                    MAX(a.committed_at) AS last_co_edit \
+                 FROM commit_file_changes a \
+                 JOIN commit_file_changes b \
+                   ON a.project_id = b.project_id \
+                  AND a.commit_sha = b.commit_sha \
+                 WHERE a.project_id = ? \
+                   AND a.committed_at >= ? \
+                   AND a.file_path < b.file_path \
+                   AND a.commit_sha IN ( \
+                       SELECT commit_sha FROM commit_file_changes \
+                       WHERE project_id = ? AND committed_at >= ? \
+                       GROUP BY commit_sha \
+                       HAVING COUNT(*) <= ? \
+                   ) \
+                 GROUP BY a.file_path, b.file_path \
+                 ORDER BY co_edits DESC, last_co_edit DESC, a.file_path ASC, b.file_path ASC \
+                 LIMIT ?",
+            )
+            .bind(project_id)
+            .bind(ts)
+            .bind(project_id)
+            .bind(ts)
+            .bind(max_files)
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await?,
+            None => sqlx::query_as(
+                "SELECT \
+                    a.file_path AS file_a, \
+                    b.file_path AS file_b, \
+                    CAST(COUNT(*) AS SIGNED) AS co_edits, \
+                    MAX(a.committed_at) AS last_co_edit \
+                 FROM commit_file_changes a \
+                 JOIN commit_file_changes b \
+                   ON a.project_id = b.project_id \
+                  AND a.commit_sha = b.commit_sha \
+                 WHERE a.project_id = ? \
+                   AND a.file_path < b.file_path \
+                   AND a.commit_sha IN ( \
+                       SELECT commit_sha FROM commit_file_changes \
+                       WHERE project_id = ? \
+                       GROUP BY commit_sha \
+                       HAVING COUNT(*) <= ? \
+                   ) \
+                 GROUP BY a.file_path, b.file_path \
+                 ORDER BY co_edits DESC, last_co_edit DESC, a.file_path ASC, b.file_path ASC \
+                 LIMIT ?",
+            )
+            .bind(project_id)
+            .bind(project_id)
+            .bind(max_files)
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await?,
+        };
+        Ok(rows)
+    }
+
+    /// Top `limit` files by cumulative coupling across every partner,
+    /// derived by fetching `fetch_pairs` pairs via
+    /// [`Self::top_coupled_pairs`] and aggregating on the Rust side.
+    ///
+    /// `fetch_pairs` is the over-fetch knob that feeds the hub
+    /// aggregation — pass something comfortably larger than
+    /// `limit * (avg_partner_count)` so the totals stabilise. The MCP
+    /// dispatch passes 2000 by default, which is plenty for hubs-of-20.
+    pub async fn coupling_hubs(
+        &self,
+        project_id: &str,
+        limit: usize,
+        since: Option<&str>,
+        max_files_per_commit: usize,
+        fetch_pairs: usize,
+    ) -> Result<Vec<CouplingHub>> {
+        self.db.ensure_initialized().await?;
+        let pairs = self
+            .top_coupled_pairs(project_id, fetch_pairs, since, max_files_per_commit)
+            .await?;
+
+        use std::collections::HashMap;
+        // (file_path -> (total_coupling, partner_count))
+        let mut agg: HashMap<String, (i64, i64)> = HashMap::new();
+        for pair in &pairs {
+            let a = agg.entry(pair.file_a.clone()).or_insert((0, 0));
+            a.0 = a.0.saturating_add(pair.co_edits);
+            a.1 = a.1.saturating_add(1);
+            let b = agg.entry(pair.file_b.clone()).or_insert((0, 0));
+            b.0 = b.0.saturating_add(pair.co_edits);
+            b.1 = b.1.saturating_add(1);
+        }
+
+        let mut hubs: Vec<CouplingHub> = agg
+            .into_iter()
+            .map(|(file_path, (total_coupling, partner_count))| CouplingHub {
+                file_path,
+                total_coupling,
+                partner_count,
+            })
+            .collect();
+        // Sort by total desc, partner_count desc, path asc for stable
+        // output.
+        hubs.sort_by(|x, y| {
+            y.total_coupling
+                .cmp(&x.total_coupling)
+                .then_with(|| y.partner_count.cmp(&x.partner_count))
+                .then_with(|| x.file_path.cmp(&y.file_path))
+        });
+        hubs.truncate(limit.max(1));
+        Ok(hubs)
+    }
 }
 
 #[cfg(test)]
@@ -399,5 +573,130 @@ mod tests {
         let repo = fresh();
         let n = repo.upsert_batch(&[]).await.expect("noop");
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn top_coupled_pairs_ranks_and_dedups_pairs() {
+        let repo = fresh();
+        // c1: a+b  (pair a↔b : 1)
+        // c2: a+b+c (a↔b : 2, a↔c : 1, b↔c : 1)
+        // c3: a+c  (a↔c : 2)
+        let commits: [(&str, &str, Vec<&str>); 3] = [
+            ("c1", "2026-04-01T00:00:00Z", vec!["src/a.rs", "src/b.rs"]),
+            (
+                "c2",
+                "2026-04-02T00:00:00Z",
+                vec!["src/a.rs", "src/b.rs", "src/c.rs"],
+            ),
+            ("c3", "2026-04-03T00:00:00Z", vec!["src/a.rs", "src/c.rs"]),
+        ];
+        let mut rows = Vec::new();
+        for (sha, ts, paths) in commits.iter() {
+            for p in paths {
+                rows.push(row("p1", sha, p, ts));
+            }
+        }
+        repo.upsert_batch(&rows).await.expect("upsert");
+
+        let pairs = repo
+            .top_coupled_pairs("p1", 100, None, 15)
+            .await
+            .expect("pairs");
+        // Three unordered pairs: a↔b=2, a↔c=2, b↔c=1
+        assert_eq!(pairs.len(), 3);
+        // Canonical ordering means a<b, a<c, b<c.
+        let ab = pairs
+            .iter()
+            .find(|p| p.file_a == "src/a.rs" && p.file_b == "src/b.rs")
+            .expect("a↔b");
+        let ac = pairs
+            .iter()
+            .find(|p| p.file_a == "src/a.rs" && p.file_b == "src/c.rs")
+            .expect("a↔c");
+        let bc = pairs
+            .iter()
+            .find(|p| p.file_a == "src/b.rs" && p.file_b == "src/c.rs")
+            .expect("b↔c");
+        assert_eq!(ab.co_edits, 2);
+        assert_eq!(ac.co_edits, 2);
+        assert_eq!(bc.co_edits, 1);
+    }
+
+    #[tokio::test]
+    async fn top_coupled_pairs_skips_big_commits() {
+        let repo = fresh();
+        // A small real commit — a+b — plus a "lockfile refresh" that
+        // touches a+b+x+y+z. With max_files_per_commit=3 the big
+        // commit is dropped before the pair join, so a↔b stays at 1.
+        let mut rows = Vec::new();
+        for p in ["src/a.rs", "src/b.rs"] {
+            rows.push(row("p1", "small", p, "2026-04-01T00:00:00Z"));
+        }
+        for p in ["src/a.rs", "src/b.rs", "src/x.rs", "src/y.rs", "src/z.rs"] {
+            rows.push(row("p1", "big", p, "2026-04-02T00:00:00Z"));
+        }
+        repo.upsert_batch(&rows).await.expect("upsert");
+
+        // max_files=3 → drop "big"; only "small" contributes a↔b.
+        let pairs = repo
+            .top_coupled_pairs("p1", 100, None, 3)
+            .await
+            .expect("pairs");
+        let ab = pairs
+            .iter()
+            .find(|p| p.file_a == "src/a.rs" && p.file_b == "src/b.rs")
+            .expect("a↔b");
+        assert_eq!(ab.co_edits, 1);
+        assert!(!pairs.iter().any(|p| p.file_b == "src/x.rs" || p.file_a == "src/x.rs"));
+
+        // max_files=10 → both commits counted, a↔b = 2.
+        let pairs = repo
+            .top_coupled_pairs("p1", 100, None, 10)
+            .await
+            .expect("pairs");
+        let ab = pairs
+            .iter()
+            .find(|p| p.file_a == "src/a.rs" && p.file_b == "src/b.rs")
+            .expect("a↔b");
+        assert_eq!(ab.co_edits, 2);
+    }
+
+    #[tokio::test]
+    async fn coupling_hubs_aggregates_bidirectionally() {
+        let repo = fresh();
+        // Build a "hub" shape: a is co-edited with b, c, d; b and c
+        // only share with a.
+        let commits: [(&str, &str, Vec<&str>); 3] = [
+            ("c1", "2026-04-01T00:00:00Z", vec!["src/a.rs", "src/b.rs"]),
+            ("c2", "2026-04-02T00:00:00Z", vec!["src/a.rs", "src/c.rs"]),
+            ("c3", "2026-04-03T00:00:00Z", vec!["src/a.rs", "src/d.rs"]),
+        ];
+        let mut rows = Vec::new();
+        for (sha, ts, paths) in commits.iter() {
+            for p in paths {
+                rows.push(row("p1", sha, p, ts));
+            }
+        }
+        repo.upsert_batch(&rows).await.expect("upsert");
+
+        let hubs = repo
+            .coupling_hubs("p1", 10, None, 15, 2000)
+            .await
+            .expect("hubs");
+        // a.rs pairs with b, c, d → total_coupling=3, partner_count=3.
+        let a = hubs
+            .iter()
+            .find(|h| h.file_path == "src/a.rs")
+            .expect("hub a");
+        assert_eq!(a.total_coupling, 3);
+        assert_eq!(a.partner_count, 3);
+        // Spokes — each appears in one pair only.
+        for spoke in ["src/b.rs", "src/c.rs", "src/d.rs"] {
+            let h = hubs.iter().find(|h| h.file_path == spoke).unwrap();
+            assert_eq!(h.total_coupling, 1);
+            assert_eq!(h.partner_count, 1);
+        }
+        // a.rs wins on total.
+        assert_eq!(hubs[0].file_path, "src/a.rs");
     }
 }

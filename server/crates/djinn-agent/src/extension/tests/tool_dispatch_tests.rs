@@ -20,11 +20,131 @@ async fn write_rejects_symlink_escape_outside_worktree() {
 
     let state =
         crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
-    let result = call_write(&state, &args, worktree.path()).await;
+    let result = call_write(&state, &args, worktree.path(), None).await;
     assert!(result.is_err());
     let err = result.err().unwrap_or_default();
     assert!(err.contains("outside worktree"));
     assert!(!outside.path().join("pwned.txt").exists());
+}
+
+/// `call_write` should enrich its response with a `related_files` list
+/// when the coupling index has co-edit data for the touched path and
+/// the dispatcher hands us a `project_id`. Verifies the write-nudge
+/// wire-up end-to-end: threshold (`co_edits >= 2`), exclusion filter,
+/// and top-5 cap.
+#[tokio::test]
+async fn call_write_emits_related_files_when_coupling_data_exists() {
+    use djinn_db::{CommitFileChange, CommitFileChangeRepository};
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-coupling-");
+
+    // Seed commit_file_changes so that `src/a.rs` co-edits twice with
+    // `src/b.rs` (→ related, co_edits=2), once with `src/c.rs` (→
+    // below threshold, dropped), and `dist/out.js` lives under an
+    // exclusion glob that we configure on the project.
+    let repo = CommitFileChangeRepository::new(db.clone());
+    let pid = project.id.as_str();
+    let row = |sha: &str, path: &str, ts: &str| CommitFileChange {
+        project_id: pid.to_owned(),
+        commit_sha: sha.into(),
+        file_path: path.into(),
+        change_kind: "M".into(),
+        committed_at: ts.into(),
+        author_email: "t@t".into(),
+        insertions: 1,
+        deletions: 0,
+        old_path: None,
+    };
+    let rows = vec![
+        row("c1", "src/a.rs", "2026-04-01T00:00:00Z"),
+        row("c1", "src/b.rs", "2026-04-01T00:00:00Z"),
+        row("c2", "src/a.rs", "2026-04-02T00:00:00Z"),
+        row("c2", "src/b.rs", "2026-04-02T00:00:00Z"),
+        row("c3", "src/a.rs", "2026-04-03T00:00:00Z"),
+        row("c3", "src/c.rs", "2026-04-03T00:00:00Z"),
+        row("c4", "src/a.rs", "2026-04-04T00:00:00Z"),
+        row("c4", "dist/out.js", "2026-04-04T00:00:00Z"),
+        row("c5", "src/a.rs", "2026-04-05T00:00:00Z"),
+        row("c5", "dist/out.js", "2026-04-05T00:00:00Z"),
+    ];
+    repo.upsert_batch(&rows).await.expect("seed coupling");
+
+    // Set an exclusion glob that hides `dist/**` — the reused
+    // `GraphExclusions` matcher should drop `dist/out.js` from the
+    // `related_files` output even though it has co_edits=2.
+    let project_repo = djinn_db::ProjectRepository::new(db.clone(), EventBus::noop());
+    project_repo
+        .update_config_field(&project.id, "graph_excluded_paths", "[\"dist/**\"]")
+        .await
+        .expect("set exclusions");
+
+    // Pre-create `src/` so the `canonicalize(parent)` path check in
+    // ensure_path_within_worktree can resolve the directory.
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    let args = Some(
+        serde_json::json!({
+            "path": "src/a.rs",
+            "content": "// hello\n",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let response = call_write(&state, &args, worktree.path(), Some(pid))
+        .await
+        .expect("write");
+
+    let related = response
+        .get("related_files")
+        .and_then(|v| v.as_array())
+        .expect("related_files present");
+    // Expect exactly one entry: src/b.rs (co_edits=2). src/c.rs is
+    // below threshold; dist/out.js is excluded.
+    assert_eq!(related.len(), 1, "expected 1 entry, got {related:?}");
+    let first = &related[0];
+    assert_eq!(first.get("path").and_then(|v| v.as_str()), Some("src/b.rs"));
+    assert_eq!(first.get("co_edits").and_then(|v| v.as_i64()), Some(2));
+}
+
+/// `call_write` should NOT emit `related_files` when there's no
+/// coupling data for the project — the field is omitted rather than
+/// serialized as `null` or `[]` to keep the JSON shape stable for
+/// day-one projects.
+#[tokio::test]
+async fn call_write_omits_related_files_when_coupling_empty() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-coupling-empty-");
+
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    let args = Some(
+        serde_json::json!({
+            "path": "src/lonely.rs",
+            "content": "// new file\n",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let response = call_write(&state, &args, worktree.path(), Some(project.id.as_str()))
+        .await
+        .expect("write");
+    assert!(
+        response.get("related_files").is_none(),
+        "expected no related_files field, got {response:?}"
+    );
 }
 
 #[tokio::test]

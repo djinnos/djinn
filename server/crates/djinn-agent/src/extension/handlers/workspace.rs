@@ -122,12 +122,15 @@ pub(crate) async fn call_write(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
+    project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: WriteParams = parse_args(arguments)?;
     let path = resolve_path(&p.path, worktree_path);
 
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
+
+    let touched_rel = relative_to_worktree(&path, worktree_path);
 
     state
         .file_time
@@ -177,12 +180,19 @@ pub(crate) async fn call_write(
             state.lsp.touch_file(worktree_path, &path, true).await;
             let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
 
-            Ok(serde_json::json!({
+            let response = serde_json::json!({
                 "ok": true,
                 "path": path.display().to_string(),
                 "bytes": p.content.len(),
                 "diagnostics": diag_xml,
-            }))
+            });
+            let response = match (project_id, touched_rel.as_deref()) {
+                (Some(pid), Some(rel)) => {
+                    enrich_with_related_files(response, state, pid, &[rel.to_string()]).await
+                }
+                _ => response,
+            };
+            Ok(response)
         })
         .await
 }
@@ -191,12 +201,15 @@ pub(super) async fn call_edit(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
+    project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: EditParams = parse_args(arguments)?;
     let path = resolve_path(&p.path, worktree_path);
 
     // Ensure path is within worktree
     ensure_path_within_worktree(&path, worktree_path)?;
+
+    let touched_rel = relative_to_worktree(&path, worktree_path);
 
     state
         .file_time
@@ -249,6 +262,12 @@ pub(super) async fn call_edit(
             if let Some(note) = match_note {
                 result["match_note"] = serde_json::Value::String(note);
             }
+            let result = match (project_id, touched_rel.as_deref()) {
+                (Some(pid), Some(rel)) => {
+                    enrich_with_related_files(result, state, pid, &[rel.to_string()]).await
+                }
+                _ => result,
+            };
             Ok(result)
         })
         .await
@@ -258,6 +277,7 @@ pub(super) async fn call_apply_patch(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
+    project_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: ApplyPatchParams = parse_args(arguments)?;
 
@@ -322,9 +342,134 @@ pub(super) async fn call_apply_patch(
 
     let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
 
-    Ok(serde_json::json!({
+    let response = serde_json::json!({
         "ok": true,
         "files": affected,
         "diagnostics": diag_xml,
-    }))
+    });
+
+    // Compute the union of related files across every touched path —
+    // non-deleted only (deletes can't meaningfully nudge related edits).
+    let touched_rel: Vec<String> = results
+        .iter()
+        .filter(|(_, action)| *action != "deleted")
+        .filter_map(|(file_path, _)| relative_to_worktree(file_path, worktree_path))
+        .collect();
+
+    let response = match project_id {
+        Some(pid) if !touched_rel.is_empty() => {
+            enrich_with_related_files(response, state, pid, &touched_rel).await
+        }
+        _ => response,
+    };
+    Ok(response)
+}
+
+/// Resolve the path to a repo-relative form for coupling lookup. Paths
+/// outside the worktree (e.g. absolute paths not under `worktree_path`)
+/// return `None` — the nudge is best-effort, a miss just drops the
+/// enrichment.
+fn relative_to_worktree(path: &Path, worktree_path: &Path) -> Option<String> {
+    path.strip_prefix(worktree_path)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Append a `related_files` array to the write response JSON, populated
+/// by the file-keyed coupling query with project-level exclusions
+/// applied. Design notes:
+///
+/// * **Thresholds.** Returns the top 5 peers with `co_edits >= 2`. A
+///   single co-edit is a random commit, not coupling — keeping the
+///   single-shot peers in would dilute the signal on day-one projects.
+/// * **Multi-file writes** (apply_patch): takes the union of peers
+///   across every touched path, dedups, picks the 5 highest-count
+///   entries (higher co_edits wins on tie).
+/// * **Error swallowing.** Every step is best-effort. On any failure
+///   (DB blip, no coupling data yet, project_id resolves to nothing) we
+///   log at warn level and return the response unchanged — the write
+///   itself has already succeeded and the user should never see a
+///   coupling error masking that.
+/// * **Reads NOT nudged.** Reads are 10–50× more frequent than writes;
+///   flooding read responses with coupling noise dilutes the signal.
+async fn enrich_with_related_files(
+    mut response: serde_json::Value,
+    state: &AgentContext,
+    project_id: &str,
+    touched_paths: &[String],
+) -> serde_json::Value {
+    use djinn_control_plane::tools::graph_exclusions::load_project_exclusion_matcher;
+    use djinn_db::CommitFileChangeRepository;
+
+    if touched_paths.is_empty() {
+        return response;
+    }
+
+    let matcher =
+        load_project_exclusion_matcher(&state.db, &state.event_bus, project_id).await;
+    let repo = CommitFileChangeRepository::new(state.db.clone());
+
+    // (file_path -> co_edits) — union across touched paths, keeping the
+    // highest observed co_edits count per path.
+    use std::collections::HashMap;
+    let mut merged: HashMap<String, i64> = HashMap::new();
+    let touched_set: std::collections::HashSet<&str> =
+        touched_paths.iter().map(|s| s.as_str()).collect();
+
+    for touched in touched_paths {
+        match repo.top_coupled(project_id, touched, 50).await {
+            Ok(rows) => {
+                for row in rows {
+                    // Skip the files we just touched — "related to
+                    // itself" is noise.
+                    if touched_set.contains(row.file_path.as_str()) {
+                        continue;
+                    }
+                    if matcher.excludes_path(&row.file_path) {
+                        continue;
+                    }
+                    if row.co_edit_count < 2 {
+                        continue;
+                    }
+                    let entry = merged.entry(row.file_path).or_insert(0);
+                    if row.co_edit_count > *entry {
+                        *entry = row.co_edit_count;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    project_id = %project_id,
+                    touched = %touched,
+                    error = %e,
+                    "enrich_with_related_files: coupling query failed; skipping",
+                );
+            }
+        }
+    }
+
+    if merged.is_empty() {
+        return response;
+    }
+    let mut related: Vec<(String, i64)> = merged.into_iter().collect();
+    // Higher co_edits wins on tie (brief §C.4); stable by path for
+    // deterministic output in tests.
+    related.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    related.truncate(5);
+
+    let value = serde_json::Value::Array(
+        related
+            .into_iter()
+            .map(|(path, co_edits)| {
+                serde_json::json!({
+                    "path": path,
+                    "co_edits": co_edits,
+                })
+            })
+            .collect(),
+    );
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("related_files".to_string(), value);
+    }
+    response
 }

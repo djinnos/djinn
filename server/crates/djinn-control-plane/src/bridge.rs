@@ -442,6 +442,27 @@ pub struct CouplingEntry {
     pub supporting_commit_samples: Vec<String>,
 }
 
+/// A single file-pair hit emitted by `coupling_hotspots`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CoupledPairEntry {
+    pub file_a: String,
+    pub file_b: String,
+    pub co_edits: usize,
+    /// ISO-8601 UTC timestamp of the most recent commit that touched
+    /// both files.
+    pub last_co_edit: String,
+}
+
+/// A single coupling-hub hit emitted by `coupling_hubs`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CouplingHubEntry {
+    pub file_path: String,
+    /// Sum of `co_edits` across every pair the file participates in.
+    pub total_coupling: usize,
+    /// Number of distinct files this file has been co-edited with.
+    pub partner_count: usize,
+}
+
 /// A single churn row emitted by `churn`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ChurnEntry {
@@ -701,4 +722,26 @@ pub trait RepoGraphOps: Send + Sync {
         limit: usize,
         since_days: Option<u32>,
     ) -> Result<Vec<ChurnEntry>, String>;
+
+    /// Top file *pairs* by co-edit count, project-wide. `since_days`
+    /// and `max_files_per_commit` mirror the coupling-index knobs (see
+    /// `djinn_db::CommitFileChangeRepository::top_coupled_pairs`).
+    async fn coupling_hotspots(
+        &self,
+        ctx: &ProjectCtx,
+        limit: usize,
+        since_days: Option<u32>,
+        max_files_per_commit: usize,
+    ) -> Result<Vec<CoupledPairEntry>, String>;
+
+    /// Top files by cumulative coupling across all partners (sum of
+    /// `co_edits` over every pair the file participates in). Useful
+    /// for change-propagation risk mapping.
+    async fn coupling_hubs(
+        &self,
+        ctx: &ProjectCtx,
+        limit: usize,
+        since_days: Option<u32>,
+        max_files_per_commit: usize,
+    ) -> Result<Vec<CouplingHubEntry>, String>;
 }

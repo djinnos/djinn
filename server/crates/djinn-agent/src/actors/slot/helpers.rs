@@ -1229,6 +1229,26 @@ mod tests {
         ) -> Result<Vec<djinn_control_plane::bridge::ChurnEntry>, String> {
             Err("unused in test".into())
         }
+
+        async fn coupling_hotspots(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::CoupledPairEntry>, String> {
+            Err("unused in test".into())
+        }
+
+        async fn coupling_hubs(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::CouplingHubEntry>, String> {
+            Err("unused in test".into())
+        }
     }
 
     async fn setup_project() -> (Database, AgentContext, Project, tempfile::TempDir) {

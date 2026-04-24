@@ -27,7 +27,8 @@ pub use repositories::{
         WindowedRoleMetrics,
     },
     commit_file_changes::{
-        CommitFileChange, CommitFileChangeRepository, CoupledFile, FileChurn,
+        CommitFileChange, CommitFileChangeRepository, CoupledFile, CoupledPair, CouplingHub,
+        FileChurn,
     },
     dolt_branch::{
         DoltBranchError, DoltBranchLifecycle, DoltBranchLifecycleAction, DoltBranchLifecycleResult,

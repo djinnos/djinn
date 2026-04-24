@@ -27,7 +27,8 @@
 //! canonical warmer cache valid across config edits — changing an
 //! exclusion list is a zero-cost operation.
 
-use djinn_db::ProjectConfig;
+use djinn_core::events::EventBus;
+use djinn_db::{Database, ProjectConfig, ProjectRepository};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::collections::HashSet;
 
@@ -139,6 +140,46 @@ impl GraphExclusions {
             return true;
         }
         matches!(file, Some(f) if self.orphan_ignore.contains(f))
+    }
+
+    /// File-path-only predicate used by the coupling subsystem (and any
+    /// caller whose inputs are bare repo-relative paths, no SCIP key /
+    /// display name). Binds the path against `file`, `display_name`,
+    /// and `key` so the same glob patterns that hide `workspace-hack/**`
+    /// from the SCIP graph also filter the coupling index.
+    pub fn excludes_path(&self, path: &str) -> bool {
+        self.excludes(path, Some(path), path)
+    }
+}
+
+/// Load the per-project [`GraphExclusions`] matcher from the
+/// `project_graph_exclusions` config fields. On any lookup failure
+/// (project row missing, DB blip) we fall back to
+/// [`GraphExclusions::empty`] — Tier 1 still applies, which keeps
+/// behaviour consistent with the SCIP graph's own
+/// `DjinnMcpServer::load_graph_exclusions`.
+///
+/// Exposed as a free function so callers outside the `DjinnMcpServer`
+/// struct (the agent workspace handlers live in a different crate) can
+/// reuse exactly the same matcher semantics used by the `code_graph`
+/// MCP ops.
+pub async fn load_project_exclusion_matcher(
+    db: &Database,
+    event_bus: &EventBus,
+    project_id: &str,
+) -> GraphExclusions {
+    let repo = ProjectRepository::new(db.clone(), event_bus.clone());
+    match repo.get_config(project_id).await {
+        Ok(Some(config)) => GraphExclusions::from_config(&config),
+        Ok(None) => GraphExclusions::empty(),
+        Err(e) => {
+            tracing::debug!(
+                project_id = %project_id,
+                error = %e,
+                "load_project_exclusion_matcher: config read failed; using Tier 1 only",
+            );
+            GraphExclusions::empty()
+        }
     }
 }
 
