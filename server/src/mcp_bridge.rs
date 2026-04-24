@@ -852,6 +852,8 @@ impl RepoGraphOps for RepoGraphBridge {
             } else {
                 (end, range.start_line)
             };
+            let start_u32 = u32::try_from(start.max(0)).unwrap_or(0);
+            let end_u32 = u32::try_from(end.max(0)).unwrap_or(0);
             let file_path = std::path::Path::new(&range.file);
             let file_present = graph.file_node(file_path).is_some();
             if file_present {
@@ -861,7 +863,7 @@ impl RepoGraphOps for RepoGraphBridge {
             } else if seen_unknown.insert(range.file.clone()) {
                 unknown_files.push(range.file.clone());
             }
-            for idx in graph.symbols_enclosing(file_path, start, end) {
+            for idx in graph.symbols_enclosing(file_path, start_u32, end_u32) {
                 touched_indices.insert(idx);
             }
         }

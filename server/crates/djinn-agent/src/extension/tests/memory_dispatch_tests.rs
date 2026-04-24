@@ -39,7 +39,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         "memory_search",
         Some(
             serde_json::json!({
-                "project": project_path.clone(),
+                "project": project.slug(),
                 "query": "architecture",
                 "limit": 5
             })
@@ -72,7 +72,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         "memory_read",
         Some(
             serde_json::json!({
-                "project": project_path.clone(),
+                "project": project.slug(),
                 "identifier": seed.permalink
             })
             .as_object()
@@ -104,7 +104,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         "memory_list",
         Some(
             serde_json::json!({
-                "project": project_path.clone(),
+                "project": project.slug(),
                 "folder": "decisions",
                 "depth": 1
             })
@@ -137,7 +137,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         "memory_build_context",
         Some(
             serde_json::json!({
-                "project": project_path.clone(),
+                "project": project.slug(),
                 "url": format!("memory://{}", seed.permalink),
                 "budget": 512,
                 "max_related": 5
@@ -196,6 +196,7 @@ async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() 
         "memory_move",
         Some(
             serde_json::json!({
+                "project": project.slug(),
                 "identifier": note.permalink,
                 "type": "proposed_adr"
             })
@@ -254,7 +255,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         &state,
         "memory_broken_links",
         Some(
-            serde_json::json!({})
+            serde_json::json!({ "project": project.slug() })
                 .as_object()
                 .expect("empty args object")
                 .clone(),
@@ -277,7 +278,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         &state,
         "memory_broken_links",
         Some(
-            serde_json::json!({ "folder": "" })
+            serde_json::json!({ "project": project.slug(), "folder": "" })
                 .as_object()
                 .expect("broken_links args object")
                 .clone(),
@@ -300,7 +301,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         &state,
         "memory_orphans",
         Some(
-            serde_json::json!({})
+            serde_json::json!({ "project": project.slug() })
                 .as_object()
                 .expect("empty args object")
                 .clone(),
@@ -323,7 +324,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         &state,
         "memory_orphans",
         Some(
-            serde_json::json!({ "folder": "" })
+            serde_json::json!({ "project": project.slug(), "folder": "" })
                 .as_object()
                 .expect("orphans args object")
                 .clone(),
@@ -359,7 +360,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         "memory_write",
         Some(
             serde_json::json!({
-                "project": worktree.display().to_string(),
+                "project": project.slug(),
                 "title": "Project Roadmap",
                 "content": "tracks [[ADR-043 Repo Graph]]",
                 "type": "roadmap"
@@ -386,7 +387,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         "memory_edit",
         Some(
             serde_json::json!({
-                "project": worktree.display().to_string(),
+                "project": project.slug(),
                 "identifier": "roadmap",
                 "operation": "append",
                 "content": "next wave"
@@ -467,7 +468,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         "memory_write",
         Some(
             serde_json::json!({
-                "project": worktree.display().to_string(),
+                "project": project.slug(),
                 "title": "Project Brief",
                 "content": "tracks [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]]",
                 "type": "brief"
@@ -494,7 +495,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         "memory_edit",
         Some(
             serde_json::json!({
-                "project": worktree.display().to_string(),
+                "project": project.slug(),
                 "identifier": "brief",
                 "operation": "append",
                 "content": "next wave"
@@ -637,7 +638,7 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
         "memory_edit",
         Some(
             serde_json::json!({
-                "project": worktree.display().to_string(),
+                "project": project.slug(),
                 "identifier": "requirements/v1-requirements",
                 "operation": "find_replace",
                 "find_text": "[[Cognitive Memory Scope]]",

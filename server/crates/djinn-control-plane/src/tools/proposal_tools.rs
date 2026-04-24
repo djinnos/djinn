@@ -36,6 +36,31 @@ use djinn_db::{EpicRepository, ProjectRepository};
 const DECISIONS_SUBDIR: &str = ".djinn/decisions";
 const PROPOSED_SUBDIR: &str = ".djinn/decisions/proposed";
 
+/// Resolve a `project` argument (UUID or `owner/repo` slug) to the
+/// synthesized `project_dir(owner, repo)` filesystem root. Errors
+/// with a stable "project not found: <ref>" message so callers can
+/// surface it straight through.
+async fn resolve_project_root(
+    server: &DjinnMcpServer,
+    project_ref: &str,
+) -> Result<PathBuf, String> {
+    let repo = ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
+    let id = repo
+        .resolve(project_ref)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("project not found: {project_ref}"))?;
+    let proj = repo
+        .get(&id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("project not found: {project_ref}"))?;
+    Ok(djinn_core::paths::project_dir(
+        &proj.github_owner,
+        &proj.github_repo,
+    ))
+}
+
 fn decisions_dir(project_root: &Path) -> PathBuf {
     project_root.join(DECISIONS_SUBDIR)
 }
@@ -405,7 +430,15 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ProposeAdrShowParams>,
     ) -> Json<ProposeAdrShowResponse> {
-        let root = PathBuf::from(&p.project);
+        let root = match resolve_project_root(self, &p.project).await {
+            Ok(root) => root,
+            Err(e) => {
+                return Json(ProposeAdrShowResponse {
+                    adr: None,
+                    error: Some(e),
+                });
+            }
+        };
         let path = proposed_file_for(&root, &p.id);
         if !path.exists() {
             return Json(ProposeAdrShowResponse {
@@ -436,7 +469,16 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ProposeAdrAcceptParams>,
     ) -> Json<ProposeAdrAcceptResponse> {
-        let root = PathBuf::from(&p.project);
+        let root = match resolve_project_root(self, &p.project).await {
+            Ok(root) => root,
+            Err(e) => {
+                return Json(ProposeAdrAcceptResponse {
+                    accepted_path: None,
+                    epic: None,
+                    error: Some(e),
+                });
+            }
+        };
         let src = proposed_file_for(&root, &p.id);
         if !src.exists() {
             return Json(ProposeAdrAcceptResponse {
@@ -587,7 +629,16 @@ impl DjinnMcpServer {
                 error: Some("rejection reason is required".to_string()),
             });
         }
-        let root = PathBuf::from(&p.project);
+        let root = match resolve_project_root(self, &p.project).await {
+            Ok(root) => root,
+            Err(e) => {
+                return Json(ProposeAdrRejectResponse {
+                    ok: false,
+                    feedback_target: None,
+                    error: Some(e),
+                });
+            }
+        };
         let path = proposed_file_for(&root, &p.id);
         if !path.exists() {
             return Json(ProposeAdrRejectResponse {

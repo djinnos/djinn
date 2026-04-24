@@ -24,9 +24,35 @@ mod tests {
         tempfile::tempdir_in(base).expect("create server crate tempdir")
     }
 
+    /// Removes a directory tree on drop. Used by tests that write into the
+    /// synthesized `project_dir(owner, repo)` location (under `$DJINN_HOME`
+    /// or `~/.djinn/projects`) since those paths are outside any `TempDir`
+    /// and would otherwise accumulate forever.
+    struct PathCleanupGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl PathCleanupGuard {
+        fn new(path: std::path::PathBuf) -> Self {
+            Self { path }
+        }
+    }
+
+    impl Drop for PathCleanupGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
     async fn create_project(db: &Database, _root: &std::path::Path) -> djinn_core::models::Project {
+        // Generate a unique owner/repo per test to isolate the derived
+        // `project_dir({owner}/{repo})` paths that the MCP tools scan —
+        // multiple tests sharing "test/test-project" would otherwise race
+        // on the same `~/.djinn/projects/test/test-project/.djinn` tree.
+        let id = uuid::Uuid::now_v7();
+        let repo_name = format!("test-project-{id}");
         ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", "test", "test-project")
+            .create(&repo_name, "test", &repo_name)
             .await
             .unwrap()
     }
@@ -57,16 +83,18 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_write_and_edit_regenerate_summaries_without_blocking_ack() {
-        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let canonical =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        let _guard = PathCleanupGuard::new(canonical);
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Summary Note".to_string(),
                 content: "Sentence one. Sentence two.\n\nMore context follows here.".to_string(),
                 note_type: "reference".to_string(),
@@ -100,7 +128,7 @@ mod tests {
 
         let Json(edited) = server
             .memory_edit(Parameters(EditParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 identifier: note_id.clone(),
                 operation: "append".to_string(),
                 content: "Fresh closing details.".to_string(),
@@ -122,15 +150,18 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn first_access_backfills_missing_summaries() {
-        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let canonical =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&canonical).expect("create canonical project dir");
+        let _guard = PathCleanupGuard::new(canonical.clone());
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
         let legacy = repo
             .create(
                 &project.id,
-                tmp.path(),
+                &canonical,
                 "Legacy Note",
                 "Legacy note body. It has enough content for summaries.\n\nSecond paragraph here.",
                 "reference",
@@ -142,7 +173,7 @@ mod tests {
 
         let Json(response) = server
             .memory_read(Parameters(ReadParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 identifier: legacy.permalink.clone(),
             }))
             .await;
@@ -223,11 +254,17 @@ mod tests {
 
     #[tokio::test]
     async fn proposal_pipeline_regression_worktree_draft_survives_sync_and_is_listed() {
-        let project_tmp = workspace_tempdir();
         let worktree_tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let project = create_project(&db, project_tmp.path()).await;
+        let project = create_project(&db, std::path::Path::new("")).await;
+        // `propose_adr_list` scans `project_dir(owner, repo)`, not the note's
+        // worktree path. Point the canonical NoteRepository writes at the same
+        // derived location so what's synced is what's listed.
+        let canonical_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&canonical_path).expect("create canonical project dir");
+        let _canonical_guard = PathCleanupGuard::new(canonical_path.clone());
         let server = DjinnMcpServer::new(state);
         let canonical_repo = NoteRepository::new(db.clone(), EventBus::noop());
         let worktree_repo = NoteRepository::new(db.clone(), EventBus::noop())
@@ -236,7 +273,7 @@ mod tests {
         let created = worktree_repo
             .create(
                 &project.id,
-                project_tmp.path(),
+                &canonical_path,
                 "Pipeline Draft",
                 "---\ntitle: Pipeline Draft\nwork_shape: epic\noriginating_spike_id: ih6u-regression\n---\n\n# Pipeline Draft\n\nSurvives task completion.\n",
                 "adr",
@@ -248,7 +285,7 @@ mod tests {
         let moved = worktree_repo
             .move_note(
                 &created.id,
-                project_tmp.path(),
+                &canonical_path,
                 "Pipeline Draft",
                 "proposed_adr",
             )
@@ -269,7 +306,7 @@ mod tests {
         .expect("overwrite moved draft with proposal frontmatter");
 
         let synced = worktree_repo
-            .sync_worktree_notes_to_canonical(&project.id, project_tmp.path(), worktree_tmp.path())
+            .sync_worktree_notes_to_canonical(&project.id, &canonical_path, worktree_tmp.path())
             .await
             .expect("sync worktree notes to canonical memory");
         assert_eq!(synced, 1);
@@ -289,7 +326,7 @@ mod tests {
         let response = server
             .dispatch_tool(
                 "propose_adr_list",
-                json!({ "project": project_tmp.path().to_str().unwrap() }),
+                json!({ "project": project.slug() }),
             )
             .await
             .expect("dispatch propose_adr_list after sync");
@@ -314,13 +351,15 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_list() {
-        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let canonical =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        let _guard = PathCleanupGuard::new(canonical.clone());
         let server = DjinnMcpServer::new(state);
 
-        let proposed_dir = tmp.path().join(".djinn/decisions/proposed");
+        let proposed_dir = canonical.join(".djinn/decisions/proposed");
         std::fs::create_dir_all(&proposed_dir).unwrap();
         std::fs::write(
             proposed_dir.join("adr-999-routing.md"),
@@ -331,7 +370,7 @@ mod tests {
         let response = server
             .dispatch_tool(
                 "propose_adr_list",
-                json!({ "project": tmp.path().to_str().unwrap() }),
+                json!({ "project": project.slug() }),
             )
             .await
             .expect("dispatch propose_adr_list");
@@ -356,13 +395,15 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_show() {
-        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let canonical =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        let _guard = PathCleanupGuard::new(canonical.clone());
         let server = DjinnMcpServer::new(state);
 
-        let proposed_dir = tmp.path().join(".djinn/decisions/proposed");
+        let proposed_dir = canonical.join(".djinn/decisions/proposed");
         std::fs::create_dir_all(&proposed_dir).unwrap();
         std::fs::write(
             proposed_dir.join("adr-999-routing.md"),
@@ -373,7 +414,7 @@ mod tests {
         let response = server
             .dispatch_tool(
                 "propose_adr_show",
-                json!({ "project": tmp.path().to_str().unwrap(), "id": "adr-999-routing" }),
+                json!({ "project": project.slug(), "id": "adr-999-routing" }),
             )
             .await
             .expect("dispatch propose_adr_show");
@@ -396,13 +437,15 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_accept() {
-        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let canonical =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        let _guard = PathCleanupGuard::new(canonical.clone());
         let server = DjinnMcpServer::new(state);
 
-        let proposed_dir = tmp.path().join(".djinn/decisions/proposed");
+        let proposed_dir = canonical.join(".djinn/decisions/proposed");
         std::fs::create_dir_all(&proposed_dir).unwrap();
         std::fs::write(
             proposed_dir.join("adr-999-routing.md"),
@@ -414,7 +457,7 @@ mod tests {
             .dispatch_tool(
                 "propose_adr_accept",
                 json!({
-                    "project": tmp.path().to_str().unwrap(),
+                    "project": project.slug(),
                     "id": "adr-999-routing",
                     "create_epic": false
                 }),
@@ -429,12 +472,12 @@ mod tests {
             .expect("accepted path");
         assert!(accepted_path.ends_with(".djinn/decisions/adr-999-routing.md"));
         assert!(
-            tmp.path()
+            canonical
                 .join(".djinn/decisions/adr-999-routing.md")
                 .exists()
         );
         assert!(
-            !tmp.path()
+            !canonical
                 .join(".djinn/decisions/proposed/adr-999-routing.md")
                 .exists()
         );
@@ -442,13 +485,15 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_reject() {
-        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let canonical =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        let _guard = PathCleanupGuard::new(canonical.clone());
         let server = DjinnMcpServer::new(state);
 
-        let proposed_dir = tmp.path().join(".djinn/decisions/proposed");
+        let proposed_dir = canonical.join(".djinn/decisions/proposed");
         std::fs::create_dir_all(&proposed_dir).unwrap();
         std::fs::write(
             proposed_dir.join("adr-999-routing.md"),
@@ -460,7 +505,7 @@ mod tests {
             .dispatch_tool(
                 "propose_adr_reject",
                 json!({
-                    "project": tmp.path().to_str().unwrap(),
+                    "project": project.slug(),
                     "id": "adr-999-routing",
                     "reason": "Not aligned with current direction"
                 }),
@@ -474,7 +519,7 @@ mod tests {
             Some(true)
         );
         assert!(
-            !tmp.path()
+            !canonical
                 .join(".djinn/decisions/proposed/adr-999-routing.md")
                 .exists()
         );

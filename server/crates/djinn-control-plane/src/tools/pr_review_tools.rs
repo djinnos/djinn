@@ -48,7 +48,7 @@ pub struct PrReviewContextParams {
     pub boundary_rules: Vec<BoundaryRule>,
     /// Churn look-back window for the hotspot overlap. Defaults to 90.
     #[serde(default)]
-    pub hotspots_window_days: Option<u32>,
+    pub hotspots_window_days: Option<i64>,
     /// Per-list result caps. Missing fields fall back to the defaults
     /// encoded in `ResolvedCaps::default_caps`.
     #[serde(default)]
@@ -59,13 +59,13 @@ pub struct PrReviewContextParams {
 /// `None` uses the default from `default_caps`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct PrReviewCaps {
-    pub touched_symbols: Option<usize>,
-    pub blast_radius: Option<usize>,
-    pub hotspot_overlap: Option<usize>,
-    pub touched_cycles: Option<usize>,
-    pub touched_boundary_violations: Option<usize>,
-    pub touched_deprecated: Option<usize>,
-    pub hot_path_overlap: Option<usize>,
+    pub touched_symbols: Option<i64>,
+    pub blast_radius: Option<i64>,
+    pub hotspot_overlap: Option<i64>,
+    pub touched_cycles: Option<i64>,
+    pub touched_boundary_violations: Option<i64>,
+    pub touched_deprecated: Option<i64>,
+    pub hot_path_overlap: Option<i64>,
 }
 
 // ── Response types ─────────────────────────────────────────────────────────────
@@ -146,28 +146,39 @@ const DEFAULT_HOT_PATH_OVERLAP_CAP: usize = 20;
 /// Resolve caller-supplied overrides against the built-in defaults.
 fn default_caps(caps: &Option<PrReviewCaps>) -> ResolvedCaps {
     let c = caps.as_ref();
+    let cap = |val: Option<i64>, default: usize| -> usize {
+        val.and_then(|v| usize::try_from(v.max(0)).ok())
+            .unwrap_or(default)
+    };
     ResolvedCaps {
-        touched_symbols: c
-            .and_then(|c| c.touched_symbols)
-            .unwrap_or(DEFAULT_TOUCHED_SYMBOLS_CAP),
-        blast_radius: c
-            .and_then(|c| c.blast_radius)
-            .unwrap_or(DEFAULT_BLAST_RADIUS_CAP),
-        hotspot_overlap: c
-            .and_then(|c| c.hotspot_overlap)
-            .unwrap_or(DEFAULT_HOTSPOT_OVERLAP_CAP),
-        touched_cycles: c
-            .and_then(|c| c.touched_cycles)
-            .unwrap_or(DEFAULT_TOUCHED_CYCLES_CAP),
-        touched_boundary_violations: c
-            .and_then(|c| c.touched_boundary_violations)
-            .unwrap_or(DEFAULT_TOUCHED_BOUNDARY_VIOLATIONS_CAP),
-        touched_deprecated: c
-            .and_then(|c| c.touched_deprecated)
-            .unwrap_or(DEFAULT_TOUCHED_DEPRECATED_CAP),
-        hot_path_overlap: c
-            .and_then(|c| c.hot_path_overlap)
-            .unwrap_or(DEFAULT_HOT_PATH_OVERLAP_CAP),
+        touched_symbols: cap(
+            c.and_then(|c| c.touched_symbols),
+            DEFAULT_TOUCHED_SYMBOLS_CAP,
+        ),
+        blast_radius: cap(
+            c.and_then(|c| c.blast_radius),
+            DEFAULT_BLAST_RADIUS_CAP,
+        ),
+        hotspot_overlap: cap(
+            c.and_then(|c| c.hotspot_overlap),
+            DEFAULT_HOTSPOT_OVERLAP_CAP,
+        ),
+        touched_cycles: cap(
+            c.and_then(|c| c.touched_cycles),
+            DEFAULT_TOUCHED_CYCLES_CAP,
+        ),
+        touched_boundary_violations: cap(
+            c.and_then(|c| c.touched_boundary_violations),
+            DEFAULT_TOUCHED_BOUNDARY_VIOLATIONS_CAP,
+        ),
+        touched_deprecated: cap(
+            c.and_then(|c| c.touched_deprecated),
+            DEFAULT_TOUCHED_DEPRECATED_CAP,
+        ),
+        hot_path_overlap: cap(
+            c.and_then(|c| c.hot_path_overlap),
+            DEFAULT_HOT_PATH_OVERLAP_CAP,
+        ),
     }
 }
 
@@ -330,11 +341,12 @@ impl DjinnMcpServer {
 
         // Step 6: hotspot overlap — retain entries whose file is in
         // `affected_files`.
-        let window_days = params.hotspots_window_days.unwrap_or(90);
+        let window_days = params.hotspots_window_days.unwrap_or(90).max(0);
+        let window_days_u32 = u32::try_from(window_days).unwrap_or(90);
         let hotspots = self
             .state
             .repo_graph()
-            .hotspots(&ctx, window_days, None, 200)
+            .hotspots(&ctx, window_days_u32, None, 200)
             .await?;
         let affected_set: std::collections::HashSet<&str> =
             affected_files.iter().map(|s| s.as_str()).collect();

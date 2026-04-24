@@ -10,6 +10,26 @@ mod tests {
         std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
         tempfile::tempdir_in(base).expect("create server crate tempdir")
     }
+
+    /// Removes a directory tree on drop. Used by tests that write into the
+    /// synthesized `project_dir(owner, repo)` location (under `$DJINN_HOME`
+    /// or `~/.djinn/projects`) since those paths are outside any `TempDir`
+    /// and would otherwise accumulate forever.
+    struct PathCleanupGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl PathCleanupGuard {
+        fn new(path: std::path::PathBuf) -> Self {
+            Self { path }
+        }
+    }
+
+    impl Drop for PathCleanupGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -27,8 +47,14 @@ mod tests {
     };
 
     async fn create_project(db: &Database, _root: &std::path::Path) -> djinn_core::models::Project {
+        // Unique owner/repo per test — `memory_write` derives canonical
+        // `project_dir(owner, repo)` which is outside any `TempDir`, so
+        // parallel tests sharing "test/test-project" would stomp each
+        // other on the same `~/.djinn/projects/test/test-project` tree.
+        let id = uuid::Uuid::now_v7();
+        let repo_name = format!("test-project-{id}");
         ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("test-project", "test", "test-project")
+            .create(&repo_name, "test", &repo_name)
             .await
             .unwrap()
     }
@@ -38,13 +64,13 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
         // Create first note
         let Json(created1) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Research Topic".to_string(),
                 content: "This is a research note about async Rust patterns.".to_string(),
                 note_type: "research".to_string(),
@@ -61,7 +87,7 @@ mod tests {
         // Use a slightly different title to avoid permalink collision
         let Json(created2) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Research Topic Two".to_string(),
                 content: "This is a research note about async Rust patterns.".to_string(),
                 note_type: "research".to_string(),
@@ -85,14 +111,14 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         // Create first pattern note
         let Json(created1) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Async Pattern".to_string(),
                 content: "Use tokio::spawn for concurrent task execution in Rust async code."
                     .to_string(),
@@ -139,7 +165,7 @@ mod tests {
         // Create a pattern note
         let Json(pattern) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Error Handling Pattern".to_string(),
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
                 note_type: "pattern".to_string(),
@@ -154,7 +180,7 @@ mod tests {
         // Create an ADR in decisions folder with similar content
         let Json(adr) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Error Handling ADR".to_string(),
                 content: "Use Result types for explicit error handling in Rust.".to_string(),
                 note_type: "adr".to_string(),
@@ -209,13 +235,13 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
         // Create a pattern note with unique content
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Unique Pattern XYZ123".to_string(),
                 content:
                     "This content is completely unique and should not match anything. XYZ123ABC"
@@ -243,7 +269,7 @@ mod tests {
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Canonical Pattern".to_string(),
                 content: "Alpha\r\nBeta\n".to_string(),
                 note_type: "pattern".to_string(),
@@ -267,7 +293,7 @@ mod tests {
 
         let Json(reused) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Canonical Pattern Copy".to_string(),
                 content: "  Alpha\nBeta  ".to_string(),
                 note_type: "pattern".to_string(),
@@ -329,7 +355,7 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
@@ -341,7 +367,7 @@ mod tests {
         // Write first note
         let Json(r1) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "Auth Token Validation Pattern".to_string(),
                 content: shared.to_string(),
                 note_type: "pattern".to_string(),
@@ -356,7 +382,7 @@ mod tests {
         // Write second note with same content to trigger detection
         let Json(r2) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "JWT Bearer Auth Validation".to_string(),
                 content: shared.to_string(),
                 note_type: "pattern".to_string(),
@@ -392,12 +418,16 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, project_tmp.path()).await;
+        let canonical_dir =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&canonical_dir).expect("create canonical project dir");
+        let _canonical_guard = PathCleanupGuard::new(canonical_dir.clone());
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         repo.create(
             &project.id,
-            project_tmp.path(),
+            &canonical_dir,
             "ADR-008 Example",
             "body",
             "adr",
@@ -407,7 +437,7 @@ mod tests {
         .unwrap();
         repo.create(
             &project.id,
-            project_tmp.path(),
+            &canonical_dir,
             "ADR-043 Repo Graph",
             "body",
             "adr",
@@ -417,7 +447,7 @@ mod tests {
         .unwrap();
 
         let worktree_root = Some(PathBuf::from(&worktree_tmp));
-        let project_path = project_tmp.path().to_str().unwrap().to_string();
+        let project_path = project.slug();
 
         let Json(initial_brief) = server
             .memory_write_with_worktree(
@@ -505,7 +535,7 @@ mod tests {
             .await;
         assert!(updated_brief.error.is_none(), "{:?}", updated_brief.error);
 
-        repo.reindex_from_disk(&project.id, project_tmp.path())
+        repo.reindex_from_disk(&project.id, &canonical_dir)
             .await
             .unwrap();
 
@@ -574,7 +604,7 @@ mod tests {
         let Json(created) = server
             .memory_write_with_worktree(
                 Parameters(WriteParams {
-                    project: worktree_tmp.to_string_lossy().to_string(),
+                    project: project.slug(),
                     title: "Project Brief".to_string(),
                     content: "Links [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]] and [[roadmap]].".to_string(),
                     note_type: "brief".to_string(),
@@ -594,7 +624,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let canonical_path = project_tmp.path().join(".djinn/brief.md");
+        let canonical_dir =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        let _canonical_guard = PathCleanupGuard::new(canonical_dir.clone());
+        let canonical_path = canonical_dir.join(".djinn/brief.md");
         let worktree_path = worktree_tmp.join(".djinn/brief.md");
         assert_eq!(
             std::path::Path::new(&note.file_path),
@@ -609,8 +642,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            !project_tmp
-                .path()
+            !canonical_dir
                 .join(".djinn/reference/project-brief.md")
                 .exists()
         );
@@ -641,7 +673,7 @@ mod tests {
         let Json(created) = server
             .memory_write_with_worktree(
                 Parameters(WriteParams {
-                    project: worktree_tmp.to_string_lossy().to_string(),
+                    project: project.slug(),
                     title: title.to_string(),
                     content: content.to_string(),
                     note_type: "design".to_string(),
@@ -662,8 +694,15 @@ mod tests {
             .unwrap()
             .expect("canonical row should exist immediately");
 
-        let canonical_path = project_tmp.path().join(
+        let canonical_path = djinn_core::paths::project_dir(
+            &project.github_owner,
+            &project.github_repo,
+        )
+        .join(
             ".djinn/design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy.md",
+        );
+        let _canonical_guard = PathCleanupGuard::new(
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
         );
         let worktree_path = worktree_tmp.join(
             ".djinn/design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy.md",
@@ -685,7 +724,7 @@ mod tests {
         let read_back = ops::memory_read(
             &server,
             ReadParams {
-                project: project_tmp.path().to_string_lossy().to_string(),
+                project: project.slug(),
                 identifier: permalink.to_string(),
             },
         )
@@ -698,7 +737,7 @@ mod tests {
         let listed = ops::memory_list(
             &server,
             ListParams {
-                project: project_tmp.path().to_string_lossy().to_string(),
+                project: project.slug(),
                 folder: Some("design".to_string()),
                 note_type: Some("design".to_string()),
                 depth: Some(1),
@@ -727,12 +766,16 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, project_tmp.path()).await;
+        let canonical_dir =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        std::fs::create_dir_all(&canonical_dir).expect("create canonical project dir");
+        let _canonical_guard = PathCleanupGuard::new(canonical_dir.clone());
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         repo.create(
             &project.id,
-            project_tmp.path(),
+            &canonical_dir,
             "V1 Requirements",
             "References [[Cognitive Memory Scope]].",
             "requirement",
@@ -744,7 +787,7 @@ mod tests {
         let Json(edited) = server
             .memory_edit_with_worktree(
                 Parameters(EditParams {
-                    project: worktree_tmp.to_string_lossy().to_string(),
+                    project: project.slug(),
                     identifier: "requirements/v1-requirements".to_string(),
                     operation: "find_replace".to_string(),
                     content: "[[reference/cognitive-memory-scope]]".to_string(),
@@ -757,9 +800,7 @@ mod tests {
             .await;
         assert!(edited.error.is_none(), "{:?}", edited.error);
 
-        let canonical_path = project_tmp
-            .path()
-            .join(".djinn/requirements/v1-requirements.md");
+        let canonical_path = canonical_dir.join(".djinn/requirements/v1-requirements.md");
         let worktree_path = worktree_tmp.join(".djinn/requirements/v1-requirements.md");
         assert!(canonical_path.exists());
         assert!(worktree_path.exists());
@@ -774,8 +815,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            !project_tmp
-                .path()
+            !canonical_dir
                 .join(".djinn/reference/v1-requirements.md")
                 .exists()
         );
@@ -788,12 +828,12 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "ADR-300 Empty Scope".to_string(),
                 content: "body for ADR-300".to_string(),
                 note_type: "adr".to_string(),
@@ -820,12 +860,12 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "ADR-301 Scoped".to_string(),
                 content: "scoped body".to_string(),
                 note_type: "adr".to_string(),
@@ -848,12 +888,12 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "ADR-302 Unscoped".to_string(),
                 content: "unscoped body".to_string(),
                 note_type: "adr".to_string(),
@@ -873,12 +913,12 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "ADR-303 Editable".to_string(),
                 content: "The quick brown fox".to_string(),
                 note_type: "adr".to_string(),
@@ -892,7 +932,7 @@ mod tests {
 
         let Json(edited) = server
             .memory_edit(Parameters(EditParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 identifier: created.permalink.clone().unwrap(),
                 operation: "find_replace".to_string(),
                 content: "slow purple turtle".to_string(),
@@ -920,13 +960,13 @@ mod tests {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let _project = create_project(&db, tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 title: "ADR-304 NoopEdit".to_string(),
                 content: "hello world".to_string(),
                 note_type: "adr".to_string(),
@@ -949,7 +989,7 @@ mod tests {
 
         let Json(edited) = server
             .memory_edit(Parameters(EditParams {
-                project: tmp.path().to_str().unwrap().to_string(),
+                project: project.slug(),
                 identifier: created.permalink.clone().unwrap(),
                 operation: "find_replace".to_string(),
                 content: "hello".to_string(),

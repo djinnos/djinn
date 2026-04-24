@@ -42,8 +42,10 @@ pub fn create_test_app() -> axum::Router {
 /// Create an Axum router with a test project pre-registered in the DB (bypasses
 /// `project_add` path and GitHub validation for CI compatibility).
 ///
-/// Returns `(Router, project_path, TempDir)`. The `TempDir` guard must be kept
-/// alive for the duration of the test or the temp directory will be deleted.
+/// Returns `(Router, project_ref, TempDir)`. The `project_ref` is the
+/// `owner/repo` slug — the shape MCP tools now accept since the `path`
+/// column was dropped. The `TempDir` guard must be kept alive for the
+/// duration of the test or the temp directory will be deleted.
 pub async fn create_test_app_with_project() -> (axum::Router, String, tempfile::TempDir) {
     let db = create_test_db();
     let dir = workspace_tempdir("server-test-project-");
@@ -53,14 +55,7 @@ pub async fn create_test_app_with_project() -> (axum::Router, String, tempfile::
         .await
         .expect("failed to register test project");
     let app = create_test_app_with_db(db);
-    // Callers historically got a filesystem path back. Return the synthesized
-    // `{DJINN_HOME}/projects/{owner}/{repo}` location; the TempDir stays alive
-    // for the test's lifetime even though it's no longer the project's canonical
-    // location.
-    let path = project_dir(&project.github_owner, &project.github_repo)
-        .to_string_lossy()
-        .into_owned();
-    (app, path, dir)
+    (app, project.slug(), dir)
 }
 
 /// Create an Axum router wired to the given database (for tests that seed data externally).

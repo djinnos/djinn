@@ -86,20 +86,41 @@ where
 
     let project = {
         let repo = djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
-        let path_str = worktree_path.to_string_lossy();
-        match repo.resolve(&path_str).await.ok().flatten() {
-            Some(project_id) => repo.get(&project_id).await.ok().flatten(),
-            None => None,
+        // `resolve` accepts UUIDs and `owner/repo` slugs; the old path-based
+        // lookup is gone. Try the worktree path first so any `.djinn/worktrees/<task>`
+        // layout keyed by its canonical owner/repo still maps back, then fall back
+        // to the tool-call's own `project` argument (the shape every MCP caller
+        // now uses). This keeps single-project tests and multi-project workers
+        // pointing at the same project row.
+        let mut candidates: Vec<String> = vec![worktree_path.to_string_lossy().into_owned()];
+        if let Some(args) = call.arguments.as_ref()
+            && let Some(proj) = args.get("project").and_then(|v| v.as_str())
+        {
+            candidates.push(proj.to_string());
         }
+        let mut resolved: Option<djinn_core::models::Project> = None;
+        for cand in candidates {
+            if let Ok(Some(id)) = repo.resolve(&cand).await
+                && let Ok(Some(proj)) = repo.get(&id).await
+            {
+                resolved = Some(proj);
+                break;
+            }
+        }
+        resolved
     };
     let project_id = project.as_ref().map(|project| project.id.clone());
-    let canonical_project_path = project
+    // `project_ref` is what downstream MCP tools resolve — UUID or
+    // `owner/repo` slug. Previously this variable handed out the
+    // filesystem path, but every MCP tool now parses `project` via
+    // `ProjectRepository::resolve` which only matches UUID/slug. Fall
+    // back to the worktree path string only when no project row was
+    // found, so tests with empty DBs still route to a handler that
+    // surfaces a meaningful error instead of blowing up at the
+    // dispatcher.
+    let project_ref = project
         .as_ref()
-        .map(|project| {
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|project| project.slug())
         .unwrap_or_else(|| worktree_path.display().to_string());
     let worktree_project_path = worktree_path.display().to_string();
 
@@ -137,23 +158,23 @@ where
         "epic_update" => call_epic_update(state, &call.arguments, project_id.as_deref()).await,
         "epic_tasks" => call_epic_tasks(state, &call.arguments, project_id.as_deref()).await,
         "epic_close" => call_epic_close(state, &call.arguments, project_id.as_deref()).await,
-        "memory_read" => call_memory_read(state, &call.arguments, &canonical_project_path).await,
+        "memory_read" => call_memory_read(state, &call.arguments, &project_ref).await,
         "memory_search" => {
             call_memory_search(
                 state,
                 &call.arguments,
                 session_task_id,
-                &canonical_project_path,
+                &project_ref,
             )
             .await
         }
-        "memory_list" => call_memory_list(state, &call.arguments, &canonical_project_path).await,
+        "memory_list" => call_memory_list(state, &call.arguments, &project_ref).await,
         "memory_build_context" => {
             call_memory_build_context(
                 state,
                 &call.arguments,
                 session_task_id,
-                &canonical_project_path,
+                &project_ref,
             )
             .await
         }
@@ -161,7 +182,7 @@ where
             call_memory_write(
                 state,
                 &call.arguments,
-                &canonical_project_path,
+                &project_ref,
                 worktree_path,
             )
             .await
@@ -170,26 +191,26 @@ where
             call_memory_edit(
                 state,
                 &call.arguments,
-                &canonical_project_path,
+                &project_ref,
                 worktree_path,
             )
             .await
         }
-        "memory_move" => call_memory_move(state, &call.arguments, &canonical_project_path).await,
+        "memory_move" => call_memory_move(state, &call.arguments, &project_ref).await,
         "memory_health" => {
-            call_memory_health(state, &call.arguments, &canonical_project_path).await
+            call_memory_health(state, &call.arguments, &project_ref).await
         }
         "memory_extracted_audit" => {
-            call_memory_extracted_audit(state, &call.arguments, &canonical_project_path).await
+            call_memory_extracted_audit(state, &call.arguments, &project_ref).await
         }
         "memory_broken_links" => {
-            call_memory_broken_links(state, &call.arguments, &canonical_project_path).await
+            call_memory_broken_links(state, &call.arguments, &project_ref).await
         }
         "memory_orphans" => {
-            call_memory_orphans(state, &call.arguments, &canonical_project_path).await
+            call_memory_orphans(state, &call.arguments, &project_ref).await
         }
         "agent_metrics" => {
-            call_agent_metrics(state, &call.arguments, &canonical_project_path).await
+            call_agent_metrics(state, &call.arguments, &project_ref).await
         }
         "agent_amend_prompt" => {
             call_agent_amend_prompt(state, &call.arguments, &worktree_project_path).await
@@ -220,9 +241,13 @@ where
         "code_graph" => {
             let root = state.working_root_for(worktree_path);
             let root_str = root.to_string_lossy().into_owned();
-            let pid = project_id.as_deref().ok_or(
-                "code_graph requires an active project context; dispatcher could not resolve project_id",
-            )?;
+            // Hand off to the handler regardless of whether the dispatcher
+            // could resolve a project row — graph_ops is the owner of the
+            // "no active project" surface, and stubbed tests rely on that
+            // layer producing the failure message. When project_id is
+            // absent, pass an empty placeholder; the handler + downstream
+            // graph ops layer will surface a project-specific error.
+            let pid = project_id.as_deref().unwrap_or("");
             call_code_graph(state, &call.arguments, pid, &root_str).await
         }
         "github_search" => call_github_search(state, &call.arguments, project_id.as_deref()).await,

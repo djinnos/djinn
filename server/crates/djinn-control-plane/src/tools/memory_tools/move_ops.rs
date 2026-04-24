@@ -21,6 +21,15 @@ pub(super) async fn memory_move_with_worktree(
         )));
     };
 
+    let project_repo = ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
+    let canonical_project_path = match project_repo.get(&project_id).await {
+        Ok(Some(project)) => djinn_core::paths::project_dir(
+            &project.github_owner,
+            &project.github_repo,
+        ),
+        _ => Path::new(&p.project).to_path_buf(),
+    };
+
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
         .with_worktree_root(worktree_root)
         .with_embedding_provider(server.state.embedding_provider())
@@ -37,7 +46,7 @@ pub(super) async fn memory_move_with_worktree(
     let moved_title = p.title.as_deref().unwrap_or(&note.title);
 
     match repo
-        .move_note(&note.id, Path::new(&p.project), moved_title, &p.note_type)
+        .move_note(&note.id, &canonical_project_path, moved_title, &p.note_type)
         .await
     {
         Ok(mut moved) => {

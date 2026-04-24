@@ -38,42 +38,43 @@ async fn resolve_project_id_for_path(db: &Database, worktree_path: &Path) -> Opt
     let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let path_str = worktree_path.to_string_lossy();
     // The server-managed clone path has the shape
-    // `{projects_root}/{owner}/{repo}`. Reverse-parse the last two path
-    // segments (owner, repo) and look the project up by GitHub coords.
-    let owner_repo = worktree_path
+    // `{projects_root}/{owner}/{repo}` — but workers operate on worktrees
+    // rooted *under* that path (e.g. `{projects_root}/{owner}/{repo}/.djinn/worktrees/<id>`),
+    // so an exact last-two-components parse misses anything deeper than
+    // the clone root. Walk the ancestry: at each ancestor, take its last
+    // two components and try a GitHub lookup. First hit wins.
+    let components: Vec<String> = worktree_path
         .components()
-        .rev()
-        .take(2)
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    if owner_repo.len() < 2 {
+        .collect();
+    if components.len() < 2 {
         tracing::debug!(
             path = %path_str,
             "verification::environment: path too short to parse owner/repo; using empty verification config"
         );
         return None;
     }
-    // rev().take(2) yields [repo, owner]; flip them.
-    let repo_name = &owner_repo[0];
-    let owner_name = &owner_repo[1];
-    match repo.get_by_github(owner_name, repo_name).await {
-        Ok(Some(p)) => Some(p.id),
-        Ok(None) => {
-            tracing::debug!(
-                path = %path_str,
-                "verification::environment: no project row matched owner/repo; using empty verification config"
-            );
-            None
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                path = %path_str,
-                "verification::environment: failed to resolve project id from path; using empty verification config"
-            );
-            None
+    for window_end in (2..=components.len()).rev() {
+        let owner_name = &components[window_end - 2];
+        let repo_name = &components[window_end - 1];
+        match repo.get_by_github(owner_name, repo_name).await {
+            Ok(Some(p)) => return Some(p.id),
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path_str,
+                    "verification::environment: failed to resolve project id from path; using empty verification config"
+                );
+                return None;
+            }
         }
     }
+    tracing::debug!(
+        path = %path_str,
+        "verification::environment: no project row matched any ancestor owner/repo; using empty verification config"
+    );
+    None
 }
 
 /// Fetch + deserialize the full `environment_config` blob for a project id.
@@ -360,8 +361,9 @@ mod tests {
             .await
             .unwrap();
 
-        // A subdirectory under the project path should resolve fuzzy-prefix.
-        let v = verification_for_path(&db, Path::new("/tmp/fuzzy-proj/crates/foo")).await;
+        // A subdirectory under the project path should resolve by walking
+        // ancestors until `{owner}/{repo}` matches a registered project.
+        let v = verification_for_path(&db, Path::new("/tmp/test/fuzzy-proj/crates/foo")).await;
         assert_eq!(v.rules.len(), 1);
     }
 }

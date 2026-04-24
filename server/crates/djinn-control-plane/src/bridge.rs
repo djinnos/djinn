@@ -222,10 +222,10 @@ pub struct ChangedRange {
     /// Repository-relative path of the file the hunk lives in.
     pub file: String,
     /// Inclusive 1-indexed first line of the hunk.
-    pub start_line: u32,
+    pub start_line: i64,
     /// Inclusive 1-indexed last line of the hunk. Defaults to `start_line`
     /// when the caller passed a single-line hunk.
-    pub end_line: Option<u32>,
+    pub end_line: Option<i64>,
 }
 
 /// A single symbol (or file) whose definition range encloses a queried

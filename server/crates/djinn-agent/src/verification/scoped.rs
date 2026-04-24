@@ -378,17 +378,20 @@ mod tests {
     async fn end_to_end_dolt_backed_resolution_matches_rule() {
         let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
-        // Retain the tempdir so the DB path row outlives the test fn.
-        let persistent = dir.keep();
-        let base = init_git_repo_with_task_branch(&persistent, "main", "task/test");
+        // Path-based project resolution is now reverse-parse of `{owner}/{repo}`
+        // ancestor components (see `resolve_project_id_for_path`). Lay the
+        // tempdir out as `.../test/p1/` so the walk finds the seeded project.
+        let project_root = dir.keep().join("test").join("p1");
+        std::fs::create_dir_all(&project_root).expect("create project root");
+        let base = init_git_repo_with_task_branch(&project_root, "main", "task/test");
         let verification = make_verification(vec![VerificationRule {
             match_pattern: "crates/djinn-control-plane/**".into(),
             commands: vec!["cargo test -p djinn-control-plane".into()],
         }]);
-        seed_project_with_verification(&db, "p1", &persistent, verification).await;
-        git_commit_file(&persistent, "crates/djinn-control-plane/src/lib.rs", "// mcp");
+        seed_project_with_verification(&db, "p1", &project_root, verification).await;
+        git_commit_file(&project_root, "crates/djinn-control-plane/src/lib.rs", "// mcp");
 
-        let result = resolve_scoped_commands(&db, &persistent, &base, None).await;
+        let result = resolve_scoped_commands(&db, &project_root, &base, None).await;
         assert_eq!(result, vec!["cargo test -p djinn-control-plane"]);
     }
 }

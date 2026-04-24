@@ -28,7 +28,7 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
 
     let show_args = Some(
         serde_json::json!({
-            "project": project_path.clone(),
+            "project": project.slug(),
             "id": epic.short_id,
         })
         .as_object()
@@ -44,7 +44,7 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
 
     let update_args = Some(
         serde_json::json!({
-            "project": project_path.clone(),
+            "project": project.slug(),
             "id": epic.short_id,
             "title": "updated epic title",
             "description": "updated epic description",
@@ -68,7 +68,7 @@ async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
 
     let tasks_args = Some(
         serde_json::json!({
-            "project": project_path.clone(),
+            "project": project.slug(),
             "id": epic.short_id,
             "limit": 10,
             "offset": 0,

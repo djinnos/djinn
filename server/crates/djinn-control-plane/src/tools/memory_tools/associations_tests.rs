@@ -106,7 +106,7 @@ mod tests {
 
         let resp = call_associations(
             &server,
-            tmp.path().to_str().unwrap(),
+            &project.slug(),
             &note.permalink,
             None,
             None,
@@ -143,7 +143,7 @@ mod tests {
 
         let resp = call_associations(
             &server,
-            tmp.path().to_str().unwrap(),
+            &project.slug(),
             &note_a.permalink,
             None,
             None,
@@ -196,7 +196,7 @@ mod tests {
 
         let resp = call_associations(
             &server,
-            tmp.path().to_str().unwrap(),
+            &project.slug(),
             &seed.permalink,
             None,
             None,
@@ -246,7 +246,7 @@ mod tests {
         // With high min_weight, only the strong association should appear
         let resp = call_associations(
             &server,
-            tmp.path().to_str().unwrap(),
+            &project.slug(),
             &seed.permalink,
             Some(0.5),
             None,

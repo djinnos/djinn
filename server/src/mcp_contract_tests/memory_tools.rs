@@ -7,9 +7,8 @@
 //! surface the control-plane `call_tool(name, args)` entrypoint does not yet
 //! expose.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use djinn_db::ProjectRepository;
 use serde_json::json;
 
 use crate::events::EventBus;
@@ -20,15 +19,28 @@ use crate::test_helpers::{
 };
 use djinn_db::NoteRepository;
 
+/// Removes a directory tree on drop. Tests that write into the
+/// synthesized `project_dir(owner, repo)` location (outside the
+/// `TempDir` tree returned by the test harness) use this so the files
+/// don't accumulate under `~/.djinn/projects`.
+struct DirCleanup(PathBuf);
+
+impl Drop for DirCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[tokio::test]
 async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_and_lists() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
-    let project_path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo)
-        .to_string_lossy()
-        .into_owned();
-    let project = &project_path;
-    let worktree = Path::new(project).join(".djinn/worktrees/proposal-pipeline-regression");
+    let canonical_path =
+        djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo);
+    std::fs::create_dir_all(&canonical_path).expect("create canonical project dir");
+    let _canonical_guard = DirCleanup(canonical_path.clone());
+    let project_slug = proj.slug();
+    let worktree = canonical_path.join(".djinn/worktrees/proposal-pipeline-regression");
     std::fs::create_dir_all(worktree.join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
     let worktree_header = worktree.to_string_lossy().to_string();
@@ -43,7 +55,7 @@ async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_
         &session_id,
         "memory_write",
         json!({
-            "project": project,
+            "project": project_slug,
             "title": "Pipeline Regression Draft",
             "content": "---\nwork_shape: epic\noriginating_spike_id: ih6u-regression\n---\n\n# Pipeline Regression Draft\n\nRecovered draft survives close.\n",
             "type": "adr"
@@ -65,7 +77,7 @@ async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_
         &session_id,
         "memory_move",
         json!({
-            "project": project,
+            "project": project_slug,
             "identifier": created["permalink"],
             "type": "proposed_adr"
         }),
@@ -87,19 +99,17 @@ async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_
     )
     .expect("overwrite recovered draft with proposal frontmatter");
 
-    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve(project).await.unwrap().expect("test project must resolve");
     let worktree_repo = NoteRepository::new(db.clone(), EventBus::noop())
         .with_worktree_root(Some(worktree.clone()));
     let synced = worktree_repo
-        .sync_worktree_notes_to_canonical(&project_id, Path::new(project), &worktree)
+        .sync_worktree_notes_to_canonical(&proj.id, &canonical_path, &worktree)
         .await
         .expect("sync worktree notes to canonical memory");
     assert_eq!(synced, 1);
 
     let canonical_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let canonical = canonical_repo
-        .get_by_permalink(&project_id, "decisions/proposed/pipeline-regression-draft")
+        .get_by_permalink(&proj.id, "decisions/proposed/pipeline-regression-draft")
         .await
         .unwrap()
         .unwrap();
@@ -110,7 +120,7 @@ async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_
         &app,
         &session_id,
         "propose_adr_list",
-        json!({"project": project}),
+        json!({"project": project_slug}),
     )
     .await;
 
@@ -126,10 +136,10 @@ async fn mcp_proposal_pipeline_regression_recovers_worktree_draft_survives_sync_
 async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
-    let project_path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo)
-        .to_string_lossy()
-        .into_owned();
-    let project = &project_path;
+    let canonical_path =
+        djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo);
+    let _canonical_guard = DirCleanup(canonical_path.clone());
+    let project_slug = proj.slug();
     let worktree = workspace_tempdir("mcp-memory-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
@@ -144,32 +154,30 @@ async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
         &app,
         &session_id,
         "memory_write",
-        json!({"project": project, "title": "Worktree Note", "content": "alpha", "type": "reference"}),
+        json!({"project": project_slug, "title": "Worktree Note", "content": "alpha", "type": "reference"}),
         &[("x-djinn-worktree-root", &worktree_header)],
     )
     .await;
 
-    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve(project).await.unwrap().expect("test project must resolve");
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
-        .get_by_permalink(&project_id, created["permalink"].as_str().unwrap())
+        .get_by_permalink(&proj.id, created["permalink"].as_str().unwrap())
         .await
         .unwrap()
         .unwrap();
 
-    let canonical_path = Path::new(&note.file_path).to_path_buf();
+    let canonical_note_path = Path::new(&note.file_path).to_path_buf();
     let worktree_path = worktree.path().join(".djinn/reference/worktree-note.md");
     assert_eq!(
-        canonical_path,
-        Path::new(project).join(".djinn/reference/worktree-note.md")
+        canonical_note_path,
+        canonical_path.join(".djinn/reference/worktree-note.md")
     );
     assert!(
         worktree_path.exists(),
         "note file should be created in worktree .djinn"
     );
     assert!(
-        !canonical_path.exists(),
+        !canonical_note_path.exists(),
         "canonical .djinn path should remain untouched during worktree session writes"
     );
 
@@ -177,7 +185,7 @@ async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
         &app,
         &session_id,
         "memory_edit",
-        json!({"project": project, "identifier": created["permalink"], "operation": "append", "content": "beta"}),
+        json!({"project": project_slug, "identifier": created["permalink"], "operation": "append", "content": "beta"}),
         &[("x-djinn-worktree-root", &worktree_header)],
     )
     .await;
@@ -190,7 +198,7 @@ async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
         &app,
         &session_id,
         "memory_delete",
-        json!({"project": project, "identifier": created["permalink"]}),
+        json!({"project": project_slug, "identifier": created["permalink"]}),
         &[("x-djinn-worktree-root", &worktree_header)],
     )
     .await;
@@ -205,10 +213,10 @@ async fn mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops() {
 async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_worktree() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
-    let project_path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo)
-        .to_string_lossy()
-        .into_owned();
-    let project = &project_path;
+    let canonical_path =
+        djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo);
+    let _canonical_guard = DirCleanup(canonical_path.clone());
+    let project_slug = proj.slug();
     let worktree = workspace_tempdir("mcp-memory-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
@@ -223,7 +231,7 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
         &app,
         &session_id,
         "memory_write",
-        json!({"project": project, "title": "Project Brief", "content": "alpha", "type": "brief"}),
+        json!({"project": project_slug, "title": "Project Brief", "content": "alpha", "type": "brief"}),
         &[("x-djinn-worktree-root", &worktree_header)],
     )
     .await;
@@ -233,28 +241,26 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
         &app,
         &session_id,
         "memory_edit",
-        json!({"project": project, "identifier": "brief", "operation": "append", "content": "beta"}),
+        json!({"project": project_slug, "identifier": "brief", "operation": "append", "content": "beta"}),
         &[("x-djinn-worktree-root", &worktree_header)],
     )
     .await;
     assert!(edited["content"].as_str().unwrap().contains("beta"));
 
-    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve(project).await.unwrap().expect("test project must resolve");
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     let note = note_repo
-        .get_by_permalink(&project_id, "brief")
+        .get_by_permalink(&proj.id, "brief")
         .await
         .unwrap()
         .unwrap();
 
     assert_eq!(note.permalink, "brief");
     assert_eq!(note.note_type, "brief");
-    let canonical_path = Path::new(&note.file_path).to_path_buf();
+    let canonical_note_path = Path::new(&note.file_path).to_path_buf();
     let worktree_path = worktree.path().join(".djinn/brief.md");
-    assert_eq!(canonical_path, Path::new(project).join(".djinn/brief.md"));
+    assert_eq!(canonical_note_path, canonical_path.join(".djinn/brief.md"));
     assert!(
-        canonical_path.exists(),
+        canonical_note_path.exists(),
         "singleton canonical file should exist"
     );
     assert!(
@@ -263,7 +269,7 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
     );
 
     let canonical_contents =
-        std::fs::read_to_string(&canonical_path).expect("read canonical brief");
+        std::fs::read_to_string(&canonical_note_path).expect("read canonical brief");
     let worktree_contents =
         std::fs::read_to_string(&worktree_path).expect("read worktree brief");
     assert!(canonical_contents.contains("alpha"));
@@ -272,14 +278,14 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
 
     assert!(
         note_repo
-            .get_by_permalink(&project_id, "reference/project-brief")
+            .get_by_permalink(&proj.id, "reference/project-brief")
             .await
             .unwrap()
             .is_none(),
         "singleton write should not retarget to reference note"
     );
     assert!(
-        !Path::new(project)
+        !canonical_path
             .join(".djinn/reference/project-brief.md")
             .exists(),
         "singleton write should not create duplicate typed note"
@@ -290,10 +296,11 @@ async fn mcp_singleton_memory_writes_use_canonical_project_root_and_mirror_workt
 async fn mcp_current_requirement_edits_use_canonical_project_root_and_mirror_worktree() {
     let db = create_test_db();
     let (proj, _dir) = create_test_project_with_dir(&db).await;
-    let project_path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo)
-        .to_string_lossy()
-        .into_owned();
-    let project = &project_path;
+    let canonical_path =
+        djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo);
+    std::fs::create_dir_all(&canonical_path).expect("create canonical project dir");
+    let _canonical_guard = DirCleanup(canonical_path.clone());
+    let project_slug = proj.slug();
     let worktree = workspace_tempdir("mcp-current-requirement-worktree-");
     std::fs::create_dir_all(worktree.path().join(".git")).expect("create synthetic .git dir");
     let app = create_test_app_with_db(db.clone());
@@ -304,13 +311,11 @@ async fn mcp_current_requirement_edits_use_canonical_project_root_and_mirror_wor
     )
     .await;
 
-    let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let project_id: String = project_repo.resolve(project).await.unwrap().expect("test project must resolve");
     let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
     note_repo
         .create(
-            &project_id,
-            Path::new(project),
+            &proj.id,
+            &canonical_path,
             "V1 Requirements",
             "alpha [[Cognitive Memory Scope]]",
             "requirement",
@@ -324,7 +329,7 @@ async fn mcp_current_requirement_edits_use_canonical_project_root_and_mirror_wor
         &session_id,
         "memory_edit",
         json!({
-            "project": project,
+            "project": project_slug,
             "identifier": "requirements/v1-requirements",
             "operation": "find_replace",
             "find_text": "[[Cognitive Memory Scope]]",
@@ -336,22 +341,22 @@ async fn mcp_current_requirement_edits_use_canonical_project_root_and_mirror_wor
     assert!(edited["content"].as_str().unwrap().contains("[[reference/cognitive-memory-scope]]"));
 
     let note = note_repo
-        .get_by_permalink(&project_id, "requirements/v1-requirements")
+        .get_by_permalink(&proj.id, "requirements/v1-requirements")
         .await
         .unwrap()
         .unwrap();
 
-    let canonical_path = Path::new(&note.file_path).to_path_buf();
+    let canonical_note_path = Path::new(&note.file_path).to_path_buf();
     let worktree_path = worktree.path().join(".djinn/requirements/v1-requirements.md");
     assert_eq!(
-        canonical_path,
-        Path::new(project).join(".djinn/requirements/v1-requirements.md")
+        canonical_note_path,
+        canonical_path.join(".djinn/requirements/v1-requirements.md")
     );
-    assert!(canonical_path.exists(), "current-note canonical file should exist");
+    assert!(canonical_note_path.exists(), "current-note canonical file should exist");
     assert!(worktree_path.exists(), "current-note worktree mirror should exist");
 
     let canonical_contents =
-        std::fs::read_to_string(&canonical_path).expect("read canonical requirements");
+        std::fs::read_to_string(&canonical_note_path).expect("read canonical requirements");
     let worktree_contents =
         std::fs::read_to_string(&worktree_path).expect("read worktree requirements");
     assert!(canonical_contents.contains("[[reference/cognitive-memory-scope]]"));
@@ -359,14 +364,14 @@ async fn mcp_current_requirement_edits_use_canonical_project_root_and_mirror_wor
 
     assert!(
         note_repo
-            .get_by_permalink(&project_id, "reference/v1-requirements")
+            .get_by_permalink(&proj.id, "reference/v1-requirements")
             .await
             .unwrap()
             .is_none(),
         "current-note edit should not retarget to reference note"
     );
     assert!(
-        !Path::new(project)
+        !canonical_path
             .join(".djinn/reference/v1-requirements.md")
             .exists(),
         "current-note edit should not create duplicate typed note"

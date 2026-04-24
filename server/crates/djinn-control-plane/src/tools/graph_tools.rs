@@ -95,11 +95,11 @@ pub struct CodeGraphParams {
     pub file: Option<String>,
     /// 1-indexed inclusive start line for `symbols_at`.
     #[serde(default)]
-    pub start_line: Option<u32>,
+    pub start_line: Option<i64>,
     /// 1-indexed inclusive end line for `symbols_at`. Defaults to
     /// `start_line` when omitted.
     #[serde(default)]
-    pub end_line: Option<u32>,
+    pub end_line: Option<i64>,
     /// List of `(file, start_line, end_line?)` hunks for `diff_touches`.
     #[serde(default)]
     pub changed_ranges: Option<Vec<ChangedRange>>,
@@ -114,7 +114,7 @@ pub struct CodeGraphParams {
     /// Churn look-back window in days for `hotspots` (default 90, clamped
     /// to 365).
     #[serde(default)]
-    pub window_days: Option<u32>,
+    pub window_days: Option<i64>,
     /// Optional file glob restricting `hotspots` to a subset of paths.
     #[serde(default)]
     pub file_glob: Option<String>,
@@ -136,14 +136,14 @@ pub struct CodeGraphParams {
     /// Time-window (in days) for the `churn` op. Omit for all-time.
     /// Clamped to `[1, 3650]` server-side.
     #[serde(default)]
-    pub since_days: Option<u32>,
+    pub since_days: Option<i64>,
     /// Max files per commit before a commit is skipped in the
     /// `coupling_hotspots` / `coupling_hubs` aggregation. Default 15.
     /// Protects the pair-count signal from lockfile refreshes,
     /// codemods, and similar bulk rewrites that contribute `N^2`
     /// pairs with essentially zero real coupling information.
     #[serde(default)]
-    pub max_files_per_commit: Option<u32>,
+    pub max_files_per_commit: Option<i64>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -909,11 +909,12 @@ impl DjinnMcpServer {
                 params.operation
             )
         })?;
-        let end_line = params.end_line;
+        let start_line_u32 = u32::try_from(start_line.max(0)).unwrap_or(0);
+        let end_line_u32 = params.end_line.map(|n| u32::try_from(n.max(0)).unwrap_or(0));
         let hits = self
             .state
             .repo_graph()
-            .symbols_at(ctx, file, start_line, end_line)
+            .symbols_at(ctx, file, start_line_u32, end_line_u32)
             .await?;
         Ok(CodeGraphResponse::SymbolsAt(SymbolsAtResponse {
             file: file.to_string(),
@@ -1031,6 +1032,7 @@ impl DjinnMcpServer {
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let window = params.window_days.unwrap_or(90).clamp(1, 365);
+        let window_u32 = u32::try_from(window).unwrap_or(90);
         let limit = params.limit.unwrap_or(20).max(0) as usize;
         let limit = limit.clamp(1, 100);
         let hotspots = self
@@ -1038,7 +1040,7 @@ impl DjinnMcpServer {
             .repo_graph()
             .hotspots(
                 ctx,
-                window,
+                window_u32,
                 params.file_glob.as_deref(),
                 limit,
             )
@@ -1145,10 +1147,13 @@ impl DjinnMcpServer {
         let max_files_per_commit =
             params.max_files_per_commit.unwrap_or(15).clamp(1, 1000) as usize;
         let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
+        let since_days_u32 = params
+            .since_days
+            .map(|d| u32::try_from(d.max(0)).unwrap_or(0));
         let pairs = self
             .state
             .repo_graph()
-            .coupling_hotspots(ctx, fetch_limit, params.since_days, max_files_per_commit)
+            .coupling_hotspots(ctx, fetch_limit, since_days_u32, max_files_per_commit)
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let pairs: Vec<CoupledPairEntry> = pairs
@@ -1174,10 +1179,13 @@ impl DjinnMcpServer {
         let max_files_per_commit =
             params.max_files_per_commit.unwrap_or(15).clamp(1, 1000) as usize;
         let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
+        let since_days_u32 = params
+            .since_days
+            .map(|d| u32::try_from(d.max(0)).unwrap_or(0));
         let hubs = self
             .state
             .repo_graph()
-            .coupling_hubs(ctx, fetch_limit, params.since_days, max_files_per_commit)
+            .coupling_hubs(ctx, fetch_limit, since_days_u32, max_files_per_commit)
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let hubs: Vec<CouplingHubEntry> = hubs
@@ -1198,10 +1206,13 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let limit = params.limit.unwrap_or(20).max(0) as usize;
         let limit = limit.clamp(1, 200);
+        let since_days_u32 = params
+            .since_days
+            .map(|d| u32::try_from(d.max(0)).unwrap_or(0));
         let files = self
             .state
             .repo_graph()
-            .churn(ctx, limit, params.since_days)
+            .churn(ctx, limit, since_days_u32)
             .await?;
         Ok(CodeGraphResponse::Churn(ChurnResponse { files }))
     }
@@ -1383,7 +1394,7 @@ mod tests {
     fn parses_code_graph_params_from_json() {
         let json = serde_json::json!({
             "operation": "neighbors",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "key": "src/main.rs",
             "direction": "outgoing"
         });
@@ -1399,7 +1410,7 @@ mod tests {
     fn parses_ranked_params_from_json() {
         let json = serde_json::json!({
             "operation": "ranked",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "kind_filter": "file",
             "limit": 10
         });
@@ -1414,7 +1425,7 @@ mod tests {
     fn parses_impact_params_from_json() {
         let json = serde_json::json!({
             "operation": "impact",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "key": "scip-rust . . . MyStruct#",
             "limit": 5
         });
@@ -1428,7 +1439,7 @@ mod tests {
     fn parses_implementations_params_from_json() {
         let json = serde_json::json!({
             "operation": "implementations",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "key": "scip-rust . . . Trait#"
         });
         let params: CodeGraphParams = serde_json::from_value(json).unwrap();
@@ -1440,7 +1451,7 @@ mod tests {
     fn parses_search_params_from_json() {
         let json = serde_json::json!({
             "operation": "search",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "query": "AgentSession",
             "kind_filter": "symbol",
             "limit": 5,
@@ -1456,7 +1467,7 @@ mod tests {
     fn parses_cycles_params_from_json() {
         let json = serde_json::json!({
             "operation": "cycles",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "min_size": 3,
         });
         let params: CodeGraphParams = serde_json::from_value(json).unwrap();
@@ -1468,7 +1479,7 @@ mod tests {
     fn parses_orphans_params_from_json() {
         let json = serde_json::json!({
             "operation": "orphans",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "visibility": "private",
             "limit": 25,
         });
@@ -1481,7 +1492,7 @@ mod tests {
     fn parses_path_params_from_json() {
         let json = serde_json::json!({
             "operation": "path",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "from": "src/a.rs",
             "to": "src/b.rs",
             "max_depth": 6,
@@ -1496,7 +1507,7 @@ mod tests {
     fn parses_edges_params_from_json() {
         let json = serde_json::json!({
             "operation": "edges",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "from_glob": "server/src/**",
             "to_glob": "server/crates/**",
             "edge_kind": "FileReference",
@@ -1511,7 +1522,7 @@ mod tests {
     fn parses_describe_params_from_json() {
         let json = serde_json::json!({
             "operation": "describe",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "key": "scip-rust . . . AgentSession#",
         });
         let params: CodeGraphParams = serde_json::from_value(json).unwrap();
@@ -1523,7 +1534,7 @@ mod tests {
     fn parses_symbols_at_params_from_json() {
         let json = serde_json::json!({
             "operation": "symbols_at",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "file": "src/lib.rs",
             "start_line": 42,
             "end_line": 48,
@@ -1539,7 +1550,7 @@ mod tests {
     fn parses_symbols_at_params_without_end_line() {
         let json = serde_json::json!({
             "operation": "symbols_at",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "file": "src/lib.rs",
             "start_line": 17,
         });
@@ -1552,7 +1563,7 @@ mod tests {
     fn parses_api_surface_params_from_json() {
         let json = serde_json::json!({
             "operation": "api_surface",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "module_glob": "server/src/**",
             "visibility": "public",
             "limit": 50,
@@ -1568,7 +1579,7 @@ mod tests {
     fn parses_boundary_check_params_from_json() {
         let json = serde_json::json!({
             "operation": "boundary_check",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "rules": [
                 {"from_glob": "server/src/**", "to_glob": "ui/**"},
                 {"from_glob": "ui/**", "to_glob": "server/src/**"},
@@ -1585,7 +1596,7 @@ mod tests {
     fn parses_hotspots_params_from_json() {
         let json = serde_json::json!({
             "operation": "hotspots",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "window_days": 30,
             "file_glob": "server/src/**",
             "limit": 10,
@@ -1601,18 +1612,18 @@ mod tests {
     fn parses_metrics_at_params_from_json() {
         let json = serde_json::json!({
             "operation": "metrics_at",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
         });
         let params: CodeGraphParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.operation, "metrics_at");
-        assert_eq!(params.project_path, "/workspace/repo");
+        assert_eq!(params.project, "/workspace/repo");
     }
 
     #[test]
     fn parses_dead_symbols_params_from_json() {
         let json = serde_json::json!({
             "operation": "dead_symbols",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "confidence": "med",
             "limit": 75,
         });
@@ -1626,7 +1637,7 @@ mod tests {
     fn parses_deprecated_callers_params_from_json() {
         let json = serde_json::json!({
             "operation": "deprecated_callers",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "limit": 25,
         });
         let params: CodeGraphParams = serde_json::from_value(json).unwrap();
@@ -1638,7 +1649,7 @@ mod tests {
     fn parses_touches_hot_path_params_from_json() {
         let json = serde_json::json!({
             "operation": "touches_hot_path",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "seed_entries": ["scip-rust . . . entry#"],
             "seed_sinks": ["scip-rust . . . sink#"],
             "symbols": ["scip-rust . . . foo#", "scip-rust . . . bar#"],
@@ -1654,7 +1665,7 @@ mod tests {
     fn parses_diff_touches_params_from_json() {
         let json = serde_json::json!({
             "operation": "diff_touches",
-            "project_path": "/workspace/repo",
+            "project": "/workspace/repo",
             "changed_ranges": [
                 {"file": "src/a.rs", "start_line": 10, "end_line": 20},
                 {"file": "src/b.rs", "start_line": 5},

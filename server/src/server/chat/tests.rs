@@ -8,5 +8,7 @@ mod handler;
 mod mcp_dispatch;
 #[path = "tests/prompt.rs"]
 mod prompt;
+#[path = "tests/sessions_endpoints.rs"]
+mod sessions_endpoints;
 #[path = "tests/sse.rs"]
 mod sse;

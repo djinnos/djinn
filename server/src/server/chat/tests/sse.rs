@@ -46,3 +46,19 @@ fn tool_call_payload_serialization_keeps_existing_keys_for_backward_compat() {
     assert_eq!(value.get("id").and_then(|v| v.as_str()), Some("call-456"));
     assert_eq!(value.get("input"), Some(&json!({"query": "foo"})));
 }
+
+#[test]
+fn session_title_sse_payload_shape() {
+    use super::super::SessionTitlePayload;
+    let payload = SessionTitlePayload {
+        session_id: "018f...".to_string(),
+        title: "Persisted chat discussion".to_string(),
+    };
+    let event = sse_json_event("session_title", &payload);
+    let serialized = format!("{event:?}");
+    assert!(serialized.contains("event: session_title"));
+
+    let value = serde_json::to_value(payload).expect("payload serializes");
+    assert_eq!(value["session_id"].as_str(), Some("018f..."));
+    assert_eq!(value["title"].as_str(), Some("Persisted chat discussion"));
+}

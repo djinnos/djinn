@@ -727,8 +727,7 @@ expression: signatures
           "properties": {
             "end_line": {
               "description": "Inclusive 1-indexed last line of the hunk. Defaults to `start_line`\nwhen the caller passed a single-line hunk.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             },
@@ -738,8 +737,7 @@ expression: signatures
             },
             "start_line": {
               "description": "Inclusive 1-indexed first line of the hunk.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -782,8 +780,7 @@ expression: signatures
         "end_line": {
           "default": null,
           "description": "1-indexed inclusive end line for `symbols_at`. Defaults to\n`start_line` when omitted.",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "nullable": true,
           "type": "integer"
         },
@@ -843,6 +840,13 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
+        "max_files_per_commit": {
+          "default": null,
+          "description": "Max files per commit before a commit is skipped in the\n`coupling_hotspots` / `coupling_hubs` aggregation. Default 15.\nProtects the pair-count signal from lockfile refreshes,\ncodemods, and similar bulk rewrites that contribute `N^2`\npairs with essentially zero real coupling information.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
         "min_size": {
           "default": null,
           "description": "Minimum SCC size for `cycles` (default 2).",
@@ -897,6 +901,13 @@ expression: signatures
           "nullable": true,
           "type": "array"
         },
+        "since_days": {
+          "default": null,
+          "description": "Time-window (in days) for the `churn` op. Omit for all-time.\nClamped to `[1, 3650]` server-side.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
         "sort_by": {
           "default": null,
           "description": "Sort key for `ranked`: `pagerank` (default), `in_degree`, `out_degree`,\nor `total_degree`.",
@@ -906,8 +917,7 @@ expression: signatures
         "start_line": {
           "default": null,
           "description": "1-indexed inclusive start line for `symbols_at`.",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "nullable": true,
           "type": "integer"
         },
@@ -941,8 +951,7 @@ expression: signatures
         "window_days": {
           "default": null,
           "description": "Churn look-back window in days for `hotspots` (default 90, clamped\nto 365).",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "nullable": true,
           "type": "integer"
         }
@@ -4561,8 +4570,7 @@ expression: signatures
           "properties": {
             "end_line": {
               "description": "Inclusive 1-indexed last line of the hunk. Defaults to `start_line`\nwhen the caller passed a single-line hunk.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             },
@@ -4572,8 +4580,7 @@ expression: signatures
             },
             "start_line": {
               "description": "Inclusive 1-indexed first line of the hunk.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             }
           },
@@ -4587,44 +4594,37 @@ expression: signatures
           "description": "Per-list caps overriding the built-in defaults. Any field left\n`None` uses the default from `default_caps`.",
           "properties": {
             "blast_radius": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             },
             "hot_path_overlap": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             },
             "hotspot_overlap": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             },
             "touched_boundary_violations": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             },
             "touched_cycles": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             },
             "touched_deprecated": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             },
             "touched_symbols": {
-              "format": "uint",
-              "minimum": 0,
+              "format": "int64",
               "nullable": true,
               "type": "integer"
             }
@@ -4665,8 +4665,7 @@ expression: signatures
         "hotspots_window_days": {
           "default": null,
           "description": "Churn look-back window for the hotspot overlap. Defaults to 90.",
-          "format": "uint32",
-          "minimum": 0,
+          "format": "int64",
           "nullable": true,
           "type": "integer"
         },
@@ -6525,6 +6524,8 @@ expression: signatures
               "type": "string"
             },
             "project_id": {
+              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+              "nullable": true,
               "type": "string"
             },
             "started_at": {
@@ -6553,7 +6554,6 @@ expression: signatures
           },
           "required": [
             "id",
-            "project_id",
             "model_id",
             "agent_type",
             "started_at",
@@ -6697,6 +6697,8 @@ expression: signatures
               "type": "string"
             },
             "project_id": {
+              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+              "nullable": true,
               "type": "string"
             },
             "started_at": {
@@ -6725,7 +6727,6 @@ expression: signatures
           },
           "required": [
             "id",
-            "project_id",
             "model_id",
             "agent_type",
             "started_at",
@@ -6873,6 +6874,8 @@ expression: signatures
           "type": "string"
         },
         "project_id": {
+          "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+          "nullable": true,
           "type": "string"
         },
         "started_at": {
@@ -7907,6 +7910,8 @@ expression: signatures
               "type": "string"
             },
             "project_id": {
+              "description": "`None` for chat sessions (global, user-scoped); `Some(_)` for every\nother agent type. See `SessionRecord::project_id`.",
+              "nullable": true,
               "type": "string"
             },
             "started_at": {
@@ -7935,7 +7940,6 @@ expression: signatures
           },
           "required": [
             "id",
-            "project_id",
             "model_id",
             "agent_type",
             "started_at",
