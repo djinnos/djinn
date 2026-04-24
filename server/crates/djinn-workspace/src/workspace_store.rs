@@ -163,35 +163,66 @@ impl WorkspaceStore {
             return Err(WorkspaceError::MirrorMissing(project_id.to_string()));
         }
 
+        // Self-heal: backfill the mirror to full if it's still a partial
+        // clone (extensions.partialClone + objects/info/promisor present).
+        // Idempotent — short-circuits when already full. This closes a
+        // startup race: `backfill_full_mirrors_on_startup` and
+        // `warm_workspaces_on_startup` spawn as independent tasks; a
+        // workspace warm that wins the race hits a blobless mirror and
+        // `git clone --local --shared --branch <b>` fails on checkout with
+        // "unable to read sha1 file". Running ensure_full_mirror inline
+        // here makes ensure_workspace self-sufficient regardless of task
+        // ordering. The mirror manager's per-project lock serializes this
+        // with concurrent callers; the workspace lock acquired below is a
+        // different mutex so there is no deadlock.
+        self.mirror_manager
+            .ensure_full_mirror(project_id)
+            .await
+            .map_err(|e| WorkspaceError::Git(format!("ensure_full_mirror: {e}")))?;
+
         let lock = self.lock_for(project_id).await;
         let _held = lock.lock().await;
 
         if target.exists() {
-            // Fast-path: sync so the next reader sees fresh refs.
-            // We already hold the per-project lock, so inline the
-            // sync body rather than re-entering `sync_workspace`.
-            debug!(
-                project_id,
-                branch = default_branch,
-                "ensure_workspace: fast-path sync"
-            );
-            run_git_command(
-                target.clone(),
-                vec!["fetch".into(), "origin".into()],
-            )
-            .await
-            .map_err(|e| git_err("git fetch origin", e))?;
-            run_git_command(
-                target.clone(),
-                vec![
-                    "reset".into(),
-                    "--hard".into(),
-                    format!("origin/{default_branch}"),
-                ],
-            )
-            .await
-            .map_err(|e| git_err("git reset --hard", e))?;
-            return Ok(target);
+            // Detect half-cloned workspaces left behind by a prior failed
+            // `git clone --local --shared --branch` (e.g. the pre-fix race
+            // where the mirror was still blobless so checkout aborted).
+            // If `.git/HEAD` is missing the dir is unusable — nuke and fall
+            // through to the cold-clone path.
+            if !target.join(".git").join("HEAD").exists() {
+                info!(
+                    project_id,
+                    path = ?target,
+                    "ensure_workspace: target exists but is not a git repo — removing and re-cloning"
+                );
+                tokio::fs::remove_dir_all(&target).await?;
+            } else {
+                // Fast-path: sync so the next reader sees fresh refs.
+                // We already hold the per-project lock, so inline the
+                // sync body rather than re-entering `sync_workspace`.
+                debug!(
+                    project_id,
+                    branch = default_branch,
+                    "ensure_workspace: fast-path sync"
+                );
+                run_git_command(
+                    target.clone(),
+                    vec!["fetch".into(), "origin".into()],
+                )
+                .await
+                .map_err(|e| git_err("git fetch origin", e))?;
+                run_git_command(
+                    target.clone(),
+                    vec![
+                        "reset".into(),
+                        "--hard".into(),
+                        format!("origin/{default_branch}"),
+                    ],
+                )
+                .await
+                .map_err(|e| git_err("git reset --hard", e))?;
+                return Ok(target);
+            }
         }
 
         tokio::fs::create_dir_all(&self.root).await?;
