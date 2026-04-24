@@ -12,8 +12,13 @@
 //! task-runs; all durable state lives in the mirror or in the task branch
 //! pushed back to the origin remote.
 
+pub mod chat_clone;
 pub mod mirror;
 pub mod workspace;
 
+pub use chat_clone::{
+    ChatClone, ChatCloneCache, ChatCloneError, DEFAULT_CHAT_CLONE_ROOT, DEFAULT_IDLE,
+    DEFAULT_REAPER_PERIOD, boot_sweep,
+};
 pub use mirror::{MirrorError, MirrorManager, mirror_path_for, mirrors_root};
 pub use workspace::{GitIdentity, Workspace, WorkspaceError};
