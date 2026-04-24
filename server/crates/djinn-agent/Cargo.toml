@@ -49,6 +49,7 @@ workspace-hack.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
+seccompiler = "0.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }

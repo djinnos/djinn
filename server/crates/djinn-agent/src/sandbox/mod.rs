@@ -12,6 +12,14 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+#[cfg(target_os = "linux")]
+pub mod chat_shell;
+// Re-exports used by the chat handler in commits 5 and 6; suppress the
+// unused-import warning until the rewire lands.
+#[cfg(target_os = "linux")]
+#[allow(unused_imports)]
+pub use chat_shell::{ChatShellError, ChatShellRequest, ChatShellResult, ChatShellSandbox};
+
 // ─── Trait ────────────────────────────────────────────────────────────────────
 
 /// Policy enforcement interface for agent shell calls.
