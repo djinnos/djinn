@@ -7,11 +7,43 @@ tags: ["adr","architecture","agent","architect","chat","scip","code-graph","repo
 
 # ADR-050: Architect/Chat Code-Graph Consolidation, Canonical SCIP Indexing, and Graph Query Extensions
 
-## Status: Draft
+## Status: Draft (amended 2026-04-24)
 
-Date: 2026-04-07
+Date: 2026-04-07 (amended 2026-04-24 for chat-user-global)
 
 Related: [[ADR-043 Repository Map — SCIP-Powered Structural Context]], [[ADR-044 Interactive Code Intelligence]], [[ADR-046: Chat-Driven Planning — Drafting Epics, Research Agent Deliverables, and Memory Write Access]], [[ADR-047 Repo-Graph Query Seam]], [[ADR-034 Agent Role Hierarchy]]
+
+## Amendment 2026-04-24 — chat-user-global refactor
+
+The chat-user-global refactor (branch `feat/chat-user-global`) reshapes the
+chat tool surface.  The §2 parity contract below remains binding *for the
+code-analysis subset* but no longer requires full symmetry.  Concretely:
+
+- **Chat drops `lsp`.**  Chat is single-turn and read-only against an
+  ephemeral clone that should not host a stateful `rust-analyzer`
+  process writing cache files.  The architect keeps `lsp` because it
+  runs in a long-lived patrol context with a warm canonical index tree.
+  The parity test in `chat_tools.rs` is rewritten accordingly: chat's
+  surface is pinned explicitly (`shell, read, code_graph,
+  pr_review_context, github_search, project_list`), and a separate
+  assertion guards the intentional divergence on `lsp`.
+- **Chat requires a `project` argument on every per-project tool.**
+  Chat sessions are user-scoped and no longer pinned to a single
+  project, so `shell`, `read`, `code_graph`, and `pr_review_context`
+  all take a required `project` (slug or UUID).  Worker/architect
+  schemas are unchanged — those agents keep their pinned-task-worktree
+  model.  Chat-specific schemas live in
+  `server/crates/djinn-agent/src/chat_tools.rs`; agent-facing schemas
+  stay in `server/crates/djinn-agent/src/extension/tool_defs.rs`.
+- **Chat adds `project_list`.**  Without session-time pinning, chat
+  callers need discoverability — a trivial wrapper over
+  `ProjectRepository::list`.  Not added to architect (architect
+  dispatch already knows its target project).
+
+Supersedes the "§2 Architect/Chat capability parity is a contract"
+clause **only for `lsp`**.  Every other code-reading or analysis
+capability remains symmetric; future additions still land on both
+surfaces unless an amendment says otherwise.
 
 ## Context
 
