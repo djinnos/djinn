@@ -200,6 +200,16 @@ pub fn is_chat_allowed_mcp_tool(name: &str) -> bool {
     CHAT_ALLOWED_MCP_TOOLS.contains(&name)
 }
 
+/// Union predicate: `true` iff `name` is valid in chat at all, regardless
+/// of which dispatch tier handles it. The two backing lists
+/// ([`CHAT_EXTENSION_TOOLS`] and [`CHAT_ALLOWED_MCP_TOOLS`]) partition
+/// chat's surface by routing target, but callers that only care "is this
+/// tool exposed to chat?" should reach for this helper rather than OR-ing
+/// the two predicates by hand.
+pub fn is_chat_allowed_tool(name: &str) -> bool {
+    is_chat_extension_tool(name) || is_chat_allowed_mcp_tool(name)
+}
+
 /// Filter an `all_tool_schemas()` list down to the chat-allowed subset.
 /// Unknown-shaped entries (missing a string `name`) are dropped
 /// defensively.
@@ -605,6 +615,42 @@ mod tests {
                 !is_chat_allowed_mcp_tool(tool),
                 "chat allowlist regression: `{tool}` is admin/write and must \
                  never appear in CHAT_ALLOWED_MCP_TOOLS"
+            );
+        }
+    }
+
+    /// `is_chat_allowed_tool` unions the two routing-tier lists. Disjoint
+    /// by construction — a tool is either dispatched in-process or via
+    /// the MCP router, never both. This test asserts that invariant and
+    /// the union shape.
+    #[test]
+    fn is_chat_allowed_tool_unions_the_two_tiers() {
+        // Extension tools are in.
+        assert!(is_chat_allowed_tool("shell"));
+        assert!(is_chat_allowed_tool("project_list"));
+        // MCP tools are in.
+        assert!(is_chat_allowed_tool("memory_read"));
+        assert!(is_chat_allowed_tool("epic_create"));
+        // Admin/write tools are out.
+        assert!(!is_chat_allowed_tool("credential_set"));
+        assert!(!is_chat_allowed_tool("project_environment_config_set"));
+        assert!(!is_chat_allowed_tool("task_update"));
+        // Totally unknown names are out.
+        assert!(!is_chat_allowed_tool("not_a_real_tool"));
+
+        // Disjointness: no tool is both an extension and an MCP tool.
+        for name in CHAT_EXTENSION_TOOLS {
+            assert!(
+                !is_chat_allowed_mcp_tool(name),
+                "tool `{name}` is both an extension tool AND on the MCP \
+                 allowlist — the two tiers must be disjoint"
+            );
+        }
+        for name in CHAT_ALLOWED_MCP_TOOLS {
+            assert!(
+                !is_chat_extension_tool(name),
+                "tool `{name}` is both on the MCP allowlist AND an extension \
+                 tool — the two tiers must be disjoint"
             );
         }
     }
