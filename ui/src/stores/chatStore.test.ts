@@ -1,5 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChatStore, type ChatMessage } from './chatStore';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { useChatStore, type ChatMessage, type ChatSession } from './chatStore';
+
+function makeSession(id: string, overrides?: Partial<ChatSession>): ChatSession {
+  return {
+    id,
+    title: 'New Chat',
+    projectSlug: null,
+    model: null,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
 
 describe('chatStore', () => {
   beforeEach(() => {
@@ -9,118 +21,127 @@ describe('chatStore', () => {
       streamingBySession: {},
       loadingBySession: {},
       thinkingStartTimeBySession: {},
+      draftBySession: {},
+      globalDraft: '',
       activeSessionId: null,
     });
   });
 
-  it('creates session and sets it active', () => {
-    const id = useChatStore.getState().createSession('/p');
-    const state = useChatStore.getState();
-    expect(state.activeSessionId).toBe(id);
-    expect(state.sessions[0].id).toBe(id);
-    expect(state.sessions[0].projectSlug).toBe('/p');
-    expect(state.messagesBySession[id]).toEqual([]);
+  it('setSessions replaces the in-memory session list', () => {
+    useChatStore.getState().setSessions([makeSession('a'), makeSession('b')]);
+    expect(useChatStore.getState().sessions.map((s) => s.id)).toEqual(['a', 'b']);
   });
 
-  it('deletes session and clears related maps', () => {
-    const a = useChatStore.getState().createSession('/p');
-    const b = useChatStore.getState().createSession('/p');
-    useChatStore.getState().setActiveSession(a);
-    useChatStore.getState().deleteSession(a);
-    const state = useChatStore.getState();
-    expect(state.sessions.find((s) => s.id === a)).toBeUndefined();
-    expect(state.messagesBySession[a]).toBeUndefined();
-    expect(state.streamingBySession[a]).toBeUndefined();
-    expect(state.loadingBySession[a]).toBeUndefined();
-    expect(state.thinkingStartTimeBySession[a]).toBeUndefined();
-    expect(state.activeSessionId).toBe(b);
+  it('upsertSession inserts a new session and updates existing ones', () => {
+    useChatStore.getState().upsertSession(makeSession('a', { title: 'first' }));
+    useChatStore.getState().upsertSession(makeSession('b', { title: 'second' }));
+    expect(useChatStore.getState().sessions.map((s) => s.id)).toEqual(['b', 'a']);
+
+    useChatStore.getState().upsertSession(makeSession('a', { title: 'updated' }));
+    const updated = useChatStore.getState().sessions.find((s) => s.id === 'a')!;
+    expect(updated.title).toBe('updated');
+    expect(useChatStore.getState().sessions).toHaveLength(2);
   });
 
-  it('adds messages and auto-titles first user message', () => {
-    const id = useChatStore.getState().createSession(null);
-    const msg: ChatMessage = { id: 'm1', role: 'user', content: 'Hello there title', createdAt: 1 };
-    useChatStore.getState().addMessage(id, msg);
-    const s = useChatStore.getState().sessions.find((x) => x.id === id)!;
-    expect(useChatStore.getState().messagesBySession[id]).toHaveLength(1);
-    expect(s.title).toBe('Hello there title');
+  it('removeSession drops a session and its caches, falling back to next active', () => {
+    useChatStore.getState().setSessions([makeSession('a'), makeSession('b')]);
+    useChatStore.getState().setActiveSession('a');
+    useChatStore.getState().setSessionMessages('a', []);
+    useChatStore.getState().appendStreamingText('a', 'x');
+
+    useChatStore.getState().removeSession('a');
+    const state = useChatStore.getState();
+    expect(state.sessions.find((s) => s.id === 'a')).toBeUndefined();
+    expect(state.messagesBySession.a).toBeUndefined();
+    expect(state.streamingBySession.a).toBeUndefined();
+    expect(state.loadingBySession.a).toBeUndefined();
+    expect(state.thinkingStartTimeBySession.a).toBeUndefined();
+    expect(state.activeSessionId).toBe('b');
+  });
+
+  it('setSessionMessages seeds the in-memory cache for a session', () => {
+    const msgs: ChatMessage[] = [
+      { id: 'm1', role: 'user', content: 'hi', createdAt: 1 },
+      { id: 'm2', role: 'assistant', content: 'hello', createdAt: 2 },
+    ];
+    useChatStore.getState().setSessionMessages('a', msgs);
+    expect(useChatStore.getState().messagesBySession.a).toEqual(msgs);
+  });
+
+  it('addMessage appends but does not auto-title', () => {
+    useChatStore.getState().upsertSession(makeSession('a', { title: 'New Chat' }));
+    useChatStore.getState().addMessage('a', {
+      id: 'm1',
+      role: 'user',
+      content: 'This would have auto-titled before',
+      createdAt: 1,
+    });
+    const session = useChatStore.getState().sessions.find((s) => s.id === 'a')!;
+    expect(useChatStore.getState().messagesBySession.a).toHaveLength(1);
+    // Server owns titling now — the store shouldn't rewrite the title locally.
+    expect(session.title).toBe('New Chat');
   });
 
   it('appendStreamingText appends and sets loading', () => {
-    const id = useChatStore.getState().createSession(null);
-    useChatStore.getState().setThinkingStartTime(id, 123);
-    useChatStore.getState().appendStreamingText(id, 'hel');
-    useChatStore.getState().appendStreamingText(id, 'lo');
+    useChatStore.getState().upsertSession(makeSession('a'));
+    useChatStore.getState().setThinkingStartTime('a', 123);
+    useChatStore.getState().appendStreamingText('a', 'hel');
+    useChatStore.getState().appendStreamingText('a', 'lo');
     const state = useChatStore.getState();
-    expect(state.streamingBySession[id]).toBe('hello');
-    expect(state.loadingBySession[id]).toBe(true);
-    expect(state.thinkingStartTimeBySession[id]).toBeNull();
+    expect(state.streamingBySession.a).toBe('hello');
+    expect(state.loadingBySession.a).toBe(true);
+    expect(state.thinkingStartTimeBySession.a).toBeNull();
   });
 
   it('finalizeStreaming creates assistant message from buffer and clears flags', () => {
-    const id = useChatStore.getState().createSession(null);
-    useChatStore.getState().setThinkingStartTime(id, 123);
-    useChatStore.getState().appendStreamingText(id, 'stream');
-    useChatStore.getState().finalizeStreaming(id);
+    useChatStore.getState().upsertSession(makeSession('a'));
+    useChatStore.getState().setThinkingStartTime('a', 123);
+    useChatStore.getState().appendStreamingText('a', 'stream');
+    useChatStore.getState().finalizeStreaming('a');
     const state = useChatStore.getState();
-    expect(state.messagesBySession[id]).toHaveLength(1);
-    expect(state.messagesBySession[id][0].role).toBe('assistant');
-    expect(state.messagesBySession[id][0].content).toBe('stream');
-    expect(state.streamingBySession[id]).toBe('');
-    expect(state.loadingBySession[id]).toBe(false);
-    expect(state.thinkingStartTimeBySession[id]).toBeNull();
+    expect(state.messagesBySession.a).toHaveLength(1);
+    expect(state.messagesBySession.a[0].role).toBe('assistant');
+    expect(state.messagesBySession.a[0].content).toBe('stream');
+    expect(state.streamingBySession.a).toBe('');
+    expect(state.loadingBySession.a).toBe(false);
+    expect(state.thinkingStartTimeBySession.a).toBeNull();
   });
 
-  it('finalizeStreaming with explicit message does not add blank content', () => {
-    const id = useChatStore.getState().createSession(null);
-    useChatStore.getState().finalizeStreaming(id, { id: 'x', role: 'assistant', content: '   ', createdAt: 2 });
-    expect(useChatStore.getState().messagesBySession[id]).toHaveLength(0);
+  it('finalizeStreaming with explicit blank content does not add a message', () => {
+    useChatStore.getState().upsertSession(makeSession('a'));
+    useChatStore.getState().finalizeStreaming('a', { id: 'x', role: 'assistant', content: '   ', createdAt: 2 });
+    expect(useChatStore.getState().messagesBySession.a ?? []).toHaveLength(0);
   });
 
-
-
-  it('updates session title directly', () => {
-    const id = useChatStore.getState().createSession(null);
-    useChatStore.getState().updateSessionTitle(id, 'Generated Title');
-    expect(useChatStore.getState().sessions.find((s) => s.id === id)?.title).toBe('Generated Title');
+  it('updateSessionTitle writes a normalized title', () => {
+    useChatStore.getState().upsertSession(makeSession('a'));
+    useChatStore.getState().updateSessionTitle('a', '  Generated   Title  ');
+    expect(useChatStore.getState().sessions.find((s) => s.id === 'a')?.title).toBe('Generated Title');
   });
 
   it('clearStreaming resets streaming and loading', () => {
-    const id = useChatStore.getState().createSession(null);
-    useChatStore.getState().setThinkingStartTime(id, 123);
-    useChatStore.getState().appendStreamingText(id, 'x');
-    useChatStore.getState().clearStreaming(id);
-    expect(useChatStore.getState().streamingBySession[id]).toBe('');
-    expect(useChatStore.getState().loadingBySession[id]).toBe(false);
-    expect(useChatStore.getState().thinkingStartTimeBySession[id]).toBeNull();
+    useChatStore.getState().upsertSession(makeSession('a'));
+    useChatStore.getState().setThinkingStartTime('a', 123);
+    useChatStore.getState().appendStreamingText('a', 'x');
+    useChatStore.getState().clearStreaming('a');
+    expect(useChatStore.getState().streamingBySession.a).toBe('');
+    expect(useChatStore.getState().loadingBySession.a).toBe(false);
+    expect(useChatStore.getState().thinkingStartTimeBySession.a).toBeNull();
   });
 
   it('sets and clears thinking start time per session', () => {
-    const id = useChatStore.getState().createSession(null);
-    useChatStore.getState().setThinkingStartTime(id, 999);
-    expect(useChatStore.getState().thinkingStartTimeBySession[id]).toBe(999);
+    useChatStore.getState().upsertSession(makeSession('a'));
+    useChatStore.getState().setThinkingStartTime('a', 999);
+    expect(useChatStore.getState().thinkingStartTimeBySession.a).toBe(999);
 
-    useChatStore.getState().setThinkingStartTime(id, null);
-    expect(useChatStore.getState().thinkingStartTimeBySession[id]).toBeNull();
+    useChatStore.getState().setThinkingStartTime('a', null);
+    expect(useChatStore.getState().thinkingStartTimeBySession.a).toBeNull();
   });
 
-  it('filters sessions by project path', () => {
-    useChatStore.getState().createSession('/a');
-    useChatStore.getState().createSession('/b');
-    useChatStore.getState().createSession('/a');
-    expect(useChatStore.getState().getSessionsForProject('/a')).toHaveLength(2);
-    expect(useChatStore.getState().getSessionsForProject('/b')).toHaveLength(1);
-  });
-
-  it('truncates long auto title', () => {
-    const id = useChatStore.getState().createSession(null);
-    const now = vi.spyOn(Date, 'now').mockReturnValue(123);
-    useChatStore.getState().addMessage(id, {
-      id: 'u',
-      role: 'user',
-      content: 'a'.repeat(80),
-      createdAt: 1,
-    });
-    expect(useChatStore.getState().sessions.find((s) => s.id === id)?.title.endsWith('…')).toBe(true);
-    now.mockRestore();
+  it('setDraft writes per-session and global drafts', () => {
+    useChatStore.getState().setDraft('a', 'hello');
+    useChatStore.getState().setDraft(null, 'global');
+    expect(useChatStore.getState().draftBySession.a).toBe('hello');
+    expect(useChatStore.getState().globalDraft).toBe('global');
   });
 });

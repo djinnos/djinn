@@ -154,9 +154,7 @@ env:
   # https://github.com/settings/apps/<your-app>/edit (the path is
   # `/auth/github/callback`).
   publicUrl: "http://localhost:3000"
-  # The SPA is served by the Vite dev server on :1420, separate from the
-  # API on :3000. `DJINN_WEB_URL` is what the server 302s to after OAuth
-  # succeeds — without this, login lands on http://localhost:3000/ which
-  # has no SPA bundle. Production builds that serve the SPA from the API
-  # pod would leave this empty.
-  webUrl: "http://localhost:1420"
+  # `DJINN_WEB_URL` is what the server 302s to after OAuth succeeds. The
+  # SPA is served same-origin by djinn-server on :3000 (rust-embed of
+  # ui/dist), so this matches publicUrl.
+  webUrl: "http://localhost:3000"

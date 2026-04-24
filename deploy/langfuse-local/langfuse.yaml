@@ -1,7 +1,7 @@
 # Self-hosted Langfuse v3 for local development — deployed into the djinn
 # namespace alongside the djinn chart so service DNS stays simple.
 #
-# Ported from server/docker/docker-compose.langfuse.yml. Differences:
+# Notes:
 #   - Postgres/ClickHouse/Redis/MinIO run as single-replica Deployments with
 #     emptyDir volumes. Laptop dev → disposable state.
 #   - Langfuse web seeds org/project/user/API keys on first boot via

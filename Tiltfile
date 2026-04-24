@@ -105,9 +105,10 @@ local_resource(
 # placeholder) UI. Re-fires on any UI source change, which cascades into
 # a server rebuild via resource_deps below.
 #
-# For fast UI iteration the `djinn-ui` resource further down keeps the
-# Vite dev server alive at :1420 with HMR — embed at :3000/ only refreshes
-# when this resource fires (i.e. via `pnpm build`).
+# All dev + prod traffic goes to :3000 (single origin, same as shipping
+# image). The previous :1420 Vite HMR shortcut was removed — per-origin
+# localStorage caused UI drift between the two URLs. UI edits now cost a
+# `pnpm build` + server rebuild + pod roll cycle.
 local_resource(
     'djinn-ui-dist',
     cmd=' && '.join([
@@ -311,33 +312,6 @@ k8s_resource(
         port_forward(6334, 6334, name='grpc'),
     ],
     labels=['infra'],
-)
-
-# --- Vite dev server for the React UI -----------------------------------
-# Host-side (not in-cluster) so HMR works over localhost and pnpm caches
-# persist. values.local.yaml's env.webUrl already points djinn-server's
-# OAuth redirect at http://localhost:1420, so everything just works
-# without Ingress. Node_modules install is handled upstream by the
-# `djinn-ui-dist` resource.
-#
-# Two URLs end up serving the same UI during dev:
-#   http://localhost:1420  — Vite dev server, HMR, rebuilds on save
-#   http://localhost:3000  — djinn-server with the embedded build, only
-#                            refreshed when `djinn-ui-dist` fires
-# Day-to-day UI work should use :1420. :3000 is how the UI ships to
-# production (single image, same-origin) and is worth smoke-testing
-# before committing.
-local_resource(
-    'djinn-ui',
-    serve_cmd='cd ui && pnpm dev --host',
-    serve_env={'VITE_DJINN_SERVER_URL': 'http://localhost:3000'},
-    readiness_probe=probe(
-        period_secs=5,
-        http_get=http_get_action(port=1420, path='/'),
-    ),
-    links=['http://localhost:1420'],
-    resource_deps=['djinn-server', 'djinn-ui-dist'],
-    labels=['djinn'],
 )
 
 # Langfuse: only the web UI + MinIO console are useful on the host. The

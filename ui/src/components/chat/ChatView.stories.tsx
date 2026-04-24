@@ -26,7 +26,16 @@ function ChatViewSeeded({
     });
 
     if (withMessages) {
-      const sessionId = useChatStore.getState().createSession("djinnos/desktop", "anthropic/claude-sonnet-4-6");
+      const sessionId = "story-session-1";
+      const now = Date.now();
+      useChatStore.getState().upsertSession({
+        id: sessionId,
+        title: "New Chat",
+        projectSlug: "djinnos/desktop",
+        model: "anthropic/claude-sonnet-4-6",
+        createdAt: now,
+        updatedAt: now,
+      });
       useChatStore.getState().setActiveSession(sessionId);
       useChatStore.getState().addMessage(sessionId, {
         id: "m1",

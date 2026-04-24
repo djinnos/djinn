@@ -44,4 +44,9 @@ pub struct SessionRecord {
     /// struct also carried a `worktree_path: Option<String>` field mirroring
     /// the now-dropped `sessions.worktree_path` column.
     pub task_run_id: Option<String>,
+    /// Human-readable title.  Populated (and auto-generated) for
+    /// `agent_type='chat'` sessions; `NULL` for every other agent type.
+    /// Added in migration 16.
+    #[serde(default)]
+    pub title: Option<String>,
 }

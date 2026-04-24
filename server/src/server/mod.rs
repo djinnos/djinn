@@ -33,6 +33,7 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
         .route("/events", get(sse::events_handler))
         .route("/db-info", get(sse::db_info_handler))
         .route("/api/chat/completions", post(chat::completions_handler))
+        .merge(chat::sessions::router())
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
         .merge(auth::router())

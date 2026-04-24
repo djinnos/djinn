@@ -9,8 +9,7 @@ import { useProviderGateStore } from '@/stores/providerGateStore';
  * Onboarding gate rendered when no provider credential has been configured.
  * Post-migration the UI only offers self-serve Codex OAuth; every other
  * provider (Anthropic, OpenAI API, Google, Azure, AWS Bedrock, Vertex AI)
- * is operator-provisioned via Helm values. See `DEPLOY.md` →
- * "Provider credentials".
+ * is operator-provisioned via Helm values (`secrets.providers.*`).
  */
 export function ProviderOnboarding() {
   const { refresh } = useProviderGateStore();
@@ -54,9 +53,7 @@ export function ProviderOnboarding() {
                 API-key providers are provisioned per-deployment. Your operator sets them via
                 Helm values (
                 <code className="rounded bg-muted px-1 py-0.5 text-xs">secrets.providers.*</code>
-                ) and they&apos;re bootstrapped into the encrypted vault at server start. See{' '}
-                <code className="rounded bg-muted px-1 py-0.5 text-xs">DEPLOY.md</code> in the repo
-                for details.
+                ) and they&apos;re bootstrapped into the encrypted vault at server start.
               </p>
             </div>
           </div>

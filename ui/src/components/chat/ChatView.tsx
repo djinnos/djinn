@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchProviderModels } from '@/api/settings';
 import { sendChatMessage } from '@/api/chat';
+import { getChatSessionMessages } from '@/api/chatSessions';
 import { Shimmer } from '@/components/ai-elements/shimmer';
 import { toast } from '@/lib/toast';
 import { useChatStore, type ChatAttachment, type ChatMessage } from '@/stores/chatStore';
@@ -14,7 +15,15 @@ import { AnimatePresence, motion } from 'framer-motion';
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const MODEL_STORAGE_KEY = 'djinnos-chat-model';
 
+function generateSessionId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function ChatView() {
+  const queryClient = useQueryClient();
   const isAllProjects = useIsAllProjects();
   const selectedProject = useSelectedProject();
   const projectSlug =
@@ -22,12 +31,13 @@ export function ChatView() {
       ? null
       : `${selectedProject.github_owner}/${selectedProject.github_repo}`;
 
-  const createSession = useChatStore((state) => state.createSession);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
   const activeSession = useChatStore((state) =>
     state.activeSessionId ? state.sessions.find((session) => session.id === state.activeSessionId) ?? null : null
   );
   const setActiveSession = useChatStore((state) => state.setActiveSession);
+  const upsertSession = useChatStore((state) => state.upsertSession);
+  const setSessionMessages = useChatStore((state) => state.setSessionMessages);
   const setSessionModel = useChatStore((state) => state.setSessionModel);
   const addMessage = useChatStore((state) => state.addMessage);
   const appendStreamingText = useChatStore((state) => state.appendStreamingText);
@@ -47,11 +57,26 @@ export function ChatView() {
   );
 
   const [abortController, setAbortController] = useState<AbortController | null>(null);
-  const toolCallsRef = useRef<string[]>([]);
-  const [toolCalls, setToolCalls] = useState<string[]>([]);
+  type StreamingToolCall = { name: string; input?: unknown };
+  const toolCallsRef = useRef<StreamingToolCall[]>([]);
+  const [toolCalls, setToolCalls] = useState<StreamingToolCall[]>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const { data: models = [] } = useQuery({ queryKey: ['provider-models-connected'], queryFn: fetchProviderModels });
+
+  // Lazily fetch messages for the active session. The store treats this as
+  // a cache seed — subsequent edits during streaming stay in memory.
+  const { data: fetchedMessages } = useQuery({
+    queryKey: ['chat-sessions', activeSessionId, 'messages'],
+    queryFn: () => getChatSessionMessages(activeSessionId as string),
+    enabled: Boolean(activeSessionId),
+  });
+
+  useEffect(() => {
+    if (activeSessionId && fetchedMessages) {
+      setSessionMessages(activeSessionId, fetchedMessages);
+    }
+  }, [activeSessionId, fetchedMessages, setSessionMessages]);
 
   const groupedModels = useMemo(() => {
     const groups = new Map<string, typeof models>();
@@ -117,8 +142,24 @@ export function ChatView() {
   }, [messages, streamingText, activeSessionId]);
 
   const send = async (text: string, attachments: ChatAttachment[] = []) => {
-    const sessionId = activeSessionId ?? createSession(projectSlug, selectedModel !== 'unknown/model' ? selectedModel : null);
-    if (!activeSessionId) setActiveSession(sessionId);
+    // Reuse the active session id if one is open; otherwise mint a new UUID
+    // the server will attach to the row it creates for this completion.
+    const isNewSession = !activeSessionId;
+    const sessionId = activeSessionId ?? generateSessionId();
+
+    if (isNewSession) {
+      const now = Date.now();
+      upsertSession({
+        id: sessionId,
+        title: 'New Chat',
+        projectSlug,
+        model: selectedModel !== 'unknown/model' ? selectedModel : null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      setActiveSession(sessionId);
+    }
+
     if (selectedModel !== 'unknown/model') setSessionModel(sessionId, selectedModel);
 
     addMessage(sessionId, {
@@ -139,12 +180,13 @@ export function ChatView() {
     const currentMessages = useChatStore.getState().messagesBySession[sessionId] ?? [];
 
     await sendChatMessage(
+      sessionId,
       currentMessages,
       selectedModel,
       projectSlug,
       (delta) => appendStreamingText(sessionId, delta),
-      (toolName) => {
-        toolCallsRef.current = [...toolCallsRef.current, toolName];
+      (toolName, input) => {
+        toolCallsRef.current = [...toolCallsRef.current, { name: toolName, input }];
         setToolCalls(toolCallsRef.current);
       },
       () => {
@@ -152,38 +194,11 @@ export function ChatView() {
           id: `${Date.now()}-assistant`,
           role: 'assistant',
           createdAt: Date.now(),
-          toolCalls: toolCallsRef.current.map((name) => ({ name })),
+          toolCalls: toolCallsRef.current.map((tc) => ({ name: tc.name, input: tc.input })),
         });
-
-        const state = useChatStore.getState();
-        const session = state.sessions.find((s) => s.id === sessionId);
-        const sessionMessages = state.messagesBySession[sessionId] ?? [];
-        const firstUserMessage = sessionMessages.find((m) => m.role === 'user');
-        const firstAssistantMessage = sessionMessages.find((m) => m.role === 'assistant');
-
-        if (
-          session?.title === 'New Chat' &&
-          firstUserMessage &&
-          firstAssistantMessage
-        ) {
-          void sendChatMessage(
-            [
-              { ...firstUserMessage, content: firstUserMessage.content },
-              { ...firstAssistantMessage, content: firstAssistantMessage.content },
-            ],
-            selectedModel,
-            projectSlug,
-            () => {},
-            () => {},
-            () => {},
-            () => {},
-            {
-              systemPrompt:
-                'Generate a concise 3-6 word title for this conversation. Return only the title text, nothing else.',
-              onCompleteText: (titleText) => updateSessionTitle(sessionId, titleText),
-            }
-          );
-        }
+        // The server persisted a new row — invalidate the sidebar list so the
+        // freshly-created session (and its server-assigned timestamps) show up.
+        void queryClient.invalidateQueries({ queryKey: ['chat-sessions'] });
       },
       (message) => {
         toast.error(message);
@@ -192,10 +207,16 @@ export function ChatView() {
           role: 'assistant',
           content: 'Something went wrong while generating a response.',
           createdAt: Date.now(),
-          toolCalls: toolCallsRef.current.map((name) => ({ name, success: false })),
+          toolCalls: toolCallsRef.current.map((tc) => ({ name: tc.name, input: tc.input, success: false })),
         });
       },
-      { signal: controller.signal }
+      {
+        signal: controller.signal,
+        onSessionTitle: (title) => {
+          updateSessionTitle(sessionId, title);
+          void queryClient.invalidateQueries({ queryKey: ['chat-sessions'] });
+        },
+      }
     );
 
     setAbortController(null);
@@ -225,7 +246,7 @@ export function ChatView() {
                       id: 'streaming',
                       role: 'assistant',
                       content: streamingText,
-                      toolCalls: toolCalls.length > 0 ? toolCalls.map((name) => ({ name })) : undefined,
+                      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
                       createdAt: Date.now(),
                     }}
                   />
@@ -244,7 +265,7 @@ export function ChatView() {
                             id: 'thinking-tools',
                             role: 'assistant',
                             content: '',
-                            toolCalls: toolCalls.map((name) => ({ name })),
+                            toolCalls: toolCalls,
                             createdAt: Date.now(),
                           }}
                         />

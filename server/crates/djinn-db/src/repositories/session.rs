@@ -60,7 +60,7 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -89,7 +89,7 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -149,7 +149,7 @@ impl SessionRepository {
         let running_sessions = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions WHERE `status` = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -183,7 +183,7 @@ impl SessionRepository {
         let orphans = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions WHERE task_id = ? AND `status` = 'running'"#,
             task_id
         )
@@ -216,7 +216,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions WHERE id = ?"#,
             id
         )
@@ -233,7 +233,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions WHERE project_id = ? AND id = ?"#,
             project_id,
             id
@@ -247,7 +247,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions WHERE task_id = ? ORDER BY started_at DESC"#,
             task_id
         )
@@ -264,7 +264,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
              WHERE project_id = ? AND task_id = ? ORDER BY started_at DESC"#,
             project_id,
@@ -279,7 +279,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
              WHERE `status` = 'running' ORDER BY started_at DESC"#
         )
@@ -292,7 +292,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
              WHERE project_id = ? AND `status` = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -312,7 +312,7 @@ impl SessionRepository {
             r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
                     s.started_at, s.ended_at,
                     s.`status` AS "status!", s.tokens_in, s.tokens_out,
-                    s.task_run_id
+                    s.task_run_id, s.title
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
              WHERE s.`status` = 'running' AND s.agent_type = 'planner' AND t.epic_id = ?
@@ -328,7 +328,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
              WHERE task_id = ? AND `status` = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -403,7 +403,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
              WHERE task_id = ? AND `status` = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -475,7 +475,7 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
              WHERE task_id = ? AND `status` = 'paused' AND agent_type = ?
              ORDER BY started_at DESC LIMIT 1"#,
@@ -484,6 +484,126 @@ impl SessionRepository {
         )
         .fetch_optional(self.db.pool())
         .await?)
+    }
+
+    // ── Chat session (`agent_type = 'chat'`, project_id NULL) ────────────
+    //
+    // Chat sessions are user-scoped, global-across-projects, and carry a
+    // client-minted UUID as their primary key (the client also uses this
+    // UUID as the SSE session-affinity key).  The following methods are
+    // chat-only; non-chat sessions continue to use `create()` + the
+    // agent-type-specific lookups above.
+
+    /// Idempotently create a chat session row keyed by the client-minted id.
+    ///
+    /// Invariant: `agent_type = 'chat'` and `project_id IS NULL` (enforced
+    /// by migration 15's CHECK constraint).  The initial title is "New
+    /// Chat"; [`Self::update_chat_title`] overwrites it after the first
+    /// assistant reply lands.  Safe to call on every /completions request:
+    /// if the id already exists we leave every column alone and return
+    /// the existing row (INSERT IGNORE + re-fetch).
+    pub async fn upsert_chat_session(
+        &self,
+        session_id: &str,
+        model_id: &str,
+    ) -> Result<SessionRecord> {
+        self.db.ensure_initialized().await?;
+
+        let created_by_user_id = djinn_core::auth_context::current_user_id();
+        let initial_title = "New Chat";
+
+        // INSERT IGNORE is the closest equivalent to "create if missing, no-op
+        // otherwise" that Dolt/MySQL exposes without an extra round-trip.
+        sqlx::query!(
+            "INSERT IGNORE INTO sessions
+                (id, project_id, task_id, model_id, agent_type, `status`,
+                 created_by_user_id, task_run_id, title)
+             VALUES (?, NULL, NULL, ?, 'chat', 'running', ?, NULL, ?)",
+            session_id,
+            model_id,
+            created_by_user_id,
+            initial_title,
+        )
+        .execute(self.db.pool())
+        .await?;
+
+        let session = sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE id = ? AND agent_type = 'chat'"#,
+            session_id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+
+        Ok(session)
+    }
+
+    /// Fetch a single chat session by id (scoped to `agent_type = 'chat'`).
+    pub async fn get_chat_session(&self, session_id: &str) -> Result<Option<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE id = ? AND agent_type = 'chat'"#,
+            session_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// List chat sessions for the current user, newest first (by last
+    /// assistant/user message; falls back to `started_at`).
+    pub async fn list_chat_sessions(&self) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        // COALESCE against the most recent message's created_at so a freshly
+        // created empty session still sorts.  We rely on lexicographic sort
+        // over the ISO-8601 timestamp strings stored in both columns.
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
+                    s.started_at, s.ended_at,
+                    s.`status` AS "status!", s.tokens_in, s.tokens_out,
+                    s.task_run_id, s.title
+             FROM sessions s
+             LEFT JOIN (
+                SELECT session_id, MAX(created_at) AS last_at
+                FROM session_messages
+                GROUP BY session_id
+             ) m ON m.session_id = s.id
+             WHERE s.agent_type = 'chat'
+             ORDER BY COALESCE(m.last_at, s.started_at) DESC"#,
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Overwrite a chat session's title.  No-op if the session is not chat-typed.
+    pub async fn update_chat_title(&self, session_id: &str, title: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE sessions SET title = ? WHERE id = ? AND agent_type = 'chat'",
+            title,
+            session_id,
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Delete a chat session row.  `session_messages` rows are cascade-deleted
+    /// by the `fk_session_messages_session ON DELETE CASCADE` FK in migration 1.
+    pub async fn delete_chat_session(&self, session_id: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query!(
+            "DELETE FROM sessions WHERE id = ? AND agent_type = 'chat'",
+            session_id,
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected())
     }
 }
 

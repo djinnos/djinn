@@ -29,11 +29,18 @@ async fn post_chat_with_app(
     (status, text)
 }
 
+/// Fresh UUIDv7 for each test — chat completions now require a
+/// client-minted session id.
+fn fresh_session_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completions_rejects_empty_messages() {
     let (status, body) = post_chat(serde_json::json!({
         "model": "openai/gpt-4o-mini",
-        "messages": []
+        "messages": [],
+        "session_id": fresh_session_id(),
     }))
     .await;
 
@@ -42,10 +49,40 @@ async fn completions_rejects_empty_messages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completions_rejects_missing_session_id() {
+    let (status, body) = post_chat(serde_json::json!({
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hello"}],
+    }))
+    .await;
+
+    // Missing `session_id` fails serde deserialization → 422.
+    assert!(
+        status == axum::http::StatusCode::UNPROCESSABLE_ENTITY
+            || status == axum::http::StatusCode::BAD_REQUEST,
+        "expected 4xx; got {status}: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completions_rejects_non_uuid_session_id() {
+    let (status, body) = post_chat(serde_json::json!({
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hello"}],
+        "session_id": "not-a-uuid",
+    }))
+    .await;
+
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert!(body.contains("session_id must be a UUID"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completions_rejects_unknown_provider() {
     let (status, body) = post_chat(serde_json::json!({
         "model": "doesnotexist/model",
-        "messages": [{"role": "user", "content": "hello"}]
+        "messages": [{"role": "user", "content": "hello"}],
+        "session_id": fresh_session_id(),
     }))
     .await;
 
@@ -57,7 +94,8 @@ async fn completions_rejects_unknown_provider() {
 async fn completions_rejects_missing_provider_credential() {
     let (status, body) = post_chat(serde_json::json!({
         "model": "openai/gpt-4o-mini",
-        "messages": [{"role": "user", "content": "hello"}]
+        "messages": [{"role": "user", "content": "hello"}],
+        "session_id": fresh_session_id(),
     }))
     .await;
 
@@ -79,7 +117,8 @@ async fn completions_rejects_unsupported_role_after_request_parsing() {
         serde_json::json!({
             "model": "openai/gpt-4o-mini",
             "messages": [{"role": "moderator", "content": "hello"}],
-            "system": "be brief"
+            "system": "be brief",
+            "session_id": fresh_session_id(),
         }),
     )
     .await;

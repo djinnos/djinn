@@ -8,6 +8,7 @@ use crate::server::AppState;
 mod handler;
 mod project_resolver;
 mod prompt;
+pub(super) mod sessions;
 
 use djinn_provider::message::Message;
 
@@ -45,6 +46,12 @@ pub(super) struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub system: Option<String>,
+    /// Client-minted UUID identifying the chat session.  Required since
+    /// cut-over to DB-backed chat sessions: each request upserts this
+    /// id into `sessions(agent_type='chat', project_id=NULL)` before
+    /// streaming, and persists both the incoming user turn and the
+    /// assistant reply against it.
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +118,15 @@ pub(super) struct ToolResultPayload {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+/// Emitted once, after the first assistant reply lands on a chat session
+/// that still has the default "New Chat" title.  Precedes the `done`
+/// event on the same SSE stream.
+#[derive(Serialize)]
+pub(super) struct SessionTitlePayload {
+    pub session_id: String,
+    pub title: String,
 }
 
 pub(super) async fn completions_handler(

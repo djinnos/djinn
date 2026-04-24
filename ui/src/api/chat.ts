@@ -39,14 +39,21 @@ export interface SendChatMessageOptions {
   signal?: AbortSignal;
   systemPrompt?: string;
   onCompleteText?: (text: string) => void;
+  /**
+   * Fires once per session when the server emits its `session_title` event
+   * (after the first assistant response). The server generates the title
+   * now — the client no longer does a follow-up completion call.
+   */
+  onSessionTitle?: (title: string) => void;
 }
 
 export async function sendChatMessage(
+  sessionId: string,
   messages: ChatMessage[],
   model: string,
   _projectSlug: string | null,
   onDelta: (text: string) => void,
-  onToolCall: (name: string) => void,
+  onToolCall: (name: string, input?: unknown) => void,
   onDone: () => void,
   onError: (msg: string) => void,
   options?: SendChatMessageOptions
@@ -60,10 +67,12 @@ export async function sendChatMessage(
     // specify their target project via the tool's `project` argument.
     const response = await fetch(`${baseUrl}/api/chat/completions`, {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        session_id: sessionId,
         system_prompt: options?.systemPrompt,
         messages: messages.map((message) => ({
           role: message.role,
@@ -128,11 +137,19 @@ export async function sendChatMessage(
         }
         case "tool_call": {
           const name = typeof payload.name === "string" ? payload.name : "tool";
-          onToolCall(name);
+          const input = "input" in payload ? payload.input : undefined;
+          onToolCall(name, input);
           break;
         }
         case "tool_result":
           break;
+        case "session_title": {
+          const title = typeof payload.title === "string" ? payload.title : "";
+          if (title && options?.onSessionTitle) {
+            options.onSessionTitle(title);
+          }
+          break;
+        }
         case "done":
           onDone();
           break;

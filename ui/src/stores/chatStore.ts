@@ -1,8 +1,17 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist, type PersistOptions } from 'zustand/middleware';
 
-const STORAGE_KEY = 'djinnos-chat-sessions';
-const AUTO_TITLE_MAX_LENGTH = 50;
+/**
+ * In-memory chat state.
+ *
+ * The server is the source of truth for sessions and messages — this store is
+ * a transient UI cache + streaming buffer, seeded from TanStack Query on load.
+ * Only the `activeSessionId` and per-session drafts are persisted (to
+ * sessionStorage) because they are purely UI state and shouldn't survive a
+ * browser restart.
+ */
+
+const UI_STORAGE_KEY = 'djinnos-chat-ui';
 
 export interface ChatSession {
   id: string;
@@ -28,22 +37,35 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   attachments?: ChatAttachment[];
-  toolCalls?: { name: string; success?: boolean }[];
+  toolCalls?: { name: string; success?: boolean; input?: unknown }[];
   createdAt: number;
 }
 
 export interface ChatState {
+  /** In-memory cache of sessions, seeded from the server list query. */
   sessions: ChatSession[];
+  /** In-memory cache of messages, seeded from the server messages query. */
   messagesBySession: Record<string, ChatMessage[]>;
   streamingBySession: Record<string, string>;
   loadingBySession: Record<string, boolean>;
   thinkingStartTimeBySession: Record<string, number | null>;
+  /** Persisted UI state. */
   draftBySession: Record<string, string>;
   globalDraft: string;
   activeSessionId: string | null;
 
-  createSession: (projectSlug?: string | null, model?: string | null) => string;
-  deleteSession: (sessionId: string) => void;
+  /**
+   * Replace the cached session list (used by `useQuery` onSuccess). Preserves
+   * any locally-mutated fields that only the store knows about (currently
+   * none — we keep it verbatim to stay honest about the server being canonical).
+   */
+  setSessions: (sessions: ChatSession[]) => void;
+  /** Insert or upsert a single session (used when a new chat is started locally). */
+  upsertSession: (session: ChatSession) => void;
+  /** Drop a session from the cache — server delete is done via mutation. */
+  removeSession: (sessionId: string) => void;
+  /** Seed the messages cache for one session (from `getChatSessionMessages`). */
+  setSessionMessages: (sessionId: string, messages: ChatMessage[]) => void;
   setActiveSession: (sessionId: string | null) => void;
   setSessionModel: (sessionId: string, model: string) => void;
   addMessage: (sessionId: string, message: ChatMessage) => void;
@@ -53,27 +75,29 @@ export interface ChatState {
   clearStreaming: (sessionId: string) => void;
   setThinkingStartTime: (sessionId: string, startTime: number | null) => void;
   setDraft: (sessionId: string | null, text: string) => void;
-  getSessionsForProject: (projectSlug: string | null) => ChatSession[];
 }
 
-function generateId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+interface PersistedChatState {
+  draftBySession: Record<string, string>;
+  globalDraft: string;
+  activeSessionId: string | null;
 }
 
-function toAutoTitle(content: string): string {
-  const trimmed = content.trim().replace(/\s+/g, ' ');
-  if (!trimmed) return 'New Chat';
-  if (trimmed.length <= AUTO_TITLE_MAX_LENGTH) return trimmed;
-  return `${trimmed.slice(0, AUTO_TITLE_MAX_LENGTH - 1)}…`;
-}
+const persistOptions: PersistOptions<ChatState, PersistedChatState> = {
+  name: UI_STORAGE_KEY,
+  // Only the transient UI state (drafts + last active session) survives
+  // a reload. Sessions and messages come from the server.
+  storage: createJSONStorage(() => sessionStorage),
+  partialize: (state) => ({
+    draftBySession: state.draftBySession,
+    globalDraft: state.globalDraft,
+    activeSessionId: state.activeSessionId,
+  }),
+};
 
 export const useChatStore = create<ChatState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       sessions: [],
       messagesBySession: {},
       streamingBySession: {},
@@ -83,36 +107,32 @@ export const useChatStore = create<ChatState>()(
       globalDraft: '',
       activeSessionId: null,
 
-      createSession: (projectSlug = null, model = null) => {
-        const now = Date.now();
-        const id = generateId();
-        const newSession: ChatSession = {
-          id,
-          title: 'New Chat',
-          projectSlug,
-          model,
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        set((state) => ({
-          sessions: [newSession, ...state.sessions],
-          activeSessionId: id,
-          messagesBySession: { ...state.messagesBySession, [id]: [] },
-          streamingBySession: { ...state.streamingBySession, [id]: '' },
-          loadingBySession: { ...state.loadingBySession, [id]: false },
-          thinkingStartTimeBySession: { ...state.thinkingStartTimeBySession, [id]: null },
-        }));
-
-        return id;
+      setSessions: (sessions) => {
+        set({ sessions });
       },
 
-      deleteSession: (sessionId) => {
+      upsertSession: (session) => {
         set((state) => {
-          const { [sessionId]: _messages, ...messagesBySession } = state.messagesBySession;
-          const { [sessionId]: _streaming, ...streamingBySession } = state.streamingBySession;
-          const { [sessionId]: _loading, ...loadingBySession } = state.loadingBySession;
-          const { [sessionId]: _thinkingStartTime, ...thinkingStartTimeBySession } = state.thinkingStartTimeBySession;
+          const existingIndex = state.sessions.findIndex((s) => s.id === session.id);
+          if (existingIndex === -1) {
+            return { sessions: [session, ...state.sessions] };
+          }
+          const next = state.sessions.slice();
+          next[existingIndex] = session;
+          return { sessions: next };
+        });
+      },
+
+      removeSession: (sessionId) => {
+        set((state) => {
+          const messagesBySession = { ...state.messagesBySession };
+          const streamingBySession = { ...state.streamingBySession };
+          const loadingBySession = { ...state.loadingBySession };
+          const thinkingStartTimeBySession = { ...state.thinkingStartTimeBySession };
+          delete messagesBySession[sessionId];
+          delete streamingBySession[sessionId];
+          delete loadingBySession[sessionId];
+          delete thinkingStartTimeBySession[sessionId];
 
           return {
             sessions: state.sessions.filter((session) => session.id !== sessionId),
@@ -126,6 +146,15 @@ export const useChatStore = create<ChatState>()(
                 : state.activeSessionId,
           };
         });
+      },
+
+      setSessionMessages: (sessionId, messages) => {
+        set((state) => ({
+          messagesBySession: {
+            ...state.messagesBySession,
+            [sessionId]: messages,
+          },
+        }));
       },
 
       setActiveSession: (sessionId) => {
@@ -155,24 +184,13 @@ export const useChatStore = create<ChatState>()(
             };
           }
 
-          const shouldAutoTitle =
-            existingSession.title === 'New Chat' &&
-            message.role === 'user' &&
-            existingMessages.filter((m) => m.role === 'user').length === 0;
-
           return {
             messagesBySession: {
               ...state.messagesBySession,
               [sessionId]: nextMessages,
             },
             sessions: state.sessions.map((session) =>
-              session.id === sessionId
-                ? {
-                    ...session,
-                    title: shouldAutoTitle ? toAutoTitle(message.content) : session.title,
-                    updatedAt: Date.now(),
-                  }
-                : session
+              session.id === sessionId ? { ...session, updatedAt: Date.now() } : session
             ),
           };
         });
@@ -291,21 +309,15 @@ export const useChatStore = create<ChatState>()(
           }));
         }
       },
-
-      getSessionsForProject: (projectSlug) => {
-        return get().sessions.filter((session) => session.projectSlug === projectSlug);
-      },
     }),
-    {
-      name: STORAGE_KEY,
-      partialize: (state) => ({
-        sessions: state.sessions,
-        messagesBySession: state.messagesBySession,
-        streamingBySession: state.streamingBySession,
-        loadingBySession: state.loadingBySession,
-        thinkingStartTimeBySession: state.thinkingStartTimeBySession,
-        activeSessionId: state.activeSessionId,
-      }),
-    }
+    persistOptions
   )
 );
+
+function generateId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}

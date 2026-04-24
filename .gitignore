@@ -24,12 +24,5 @@ mcp.json
 .pnpm-store/
 node_modules/
 
-# Tilt local state — dev vault key generated on first `tilt up`.
+# Tilt local state — dev vault key + optional GitHub App creds consumed by the Tiltfile.
 /.tilt/
-
-# Local secrets — pem files, vault keys, kubectl --from-file targets.
-# Drop anything sensitive into local-secrets/. The dir + README are tracked
-# so the path exists; everything else is ignored.
-/local-secrets/*
-!/local-secrets/.gitkeep
-!/local-secrets/README.md

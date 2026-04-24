@@ -54,8 +54,6 @@ This starts:
 
 Run Claude Code — the `djinn` plugin (configured for HTTP) connects automatically.
 
-See [DEPLOY.md](DEPLOY.md) for deployment details, data persistence, and remote-server configuration.
-
 ## How It Works
 
 ```

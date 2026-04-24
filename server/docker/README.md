@@ -17,8 +17,6 @@ the repo root (`tilt up`) — these files are the artefacts it drives.
 - `build-runtime-image.sh` — standalone wrapper for building the runtime
   image outside Tilt. Chains `build-agent-runtime-base.sh` → `build-
   binaries.sh` → `wrap-agent-runtime-image.sh`.
-- `docker-compose.langfuse.yml` — optional sidecar for local observability
-  (separate from the main compose stack).
 
 The djinn-server image is produced entirely host-side by `scripts/tilt/
 build-binaries.sh` + `scripts/tilt/wrap-server-image.sh` — no Dockerfile
