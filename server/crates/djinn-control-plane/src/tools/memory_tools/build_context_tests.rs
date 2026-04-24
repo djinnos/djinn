@@ -153,7 +153,7 @@ mod tests {
         let tight_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink.clone(),
                     depth: None,
                     max_related: Some(20),
@@ -168,7 +168,7 @@ mod tests {
         let loose_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink,
                     depth: None,
                     max_related: Some(20),
@@ -222,7 +222,7 @@ mod tests {
         let tight_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink.clone(),
                     depth: None,
                     max_related: Some(20),
@@ -237,7 +237,7 @@ mod tests {
         let loose_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink,
                     depth: None,
                     max_related: Some(20),
@@ -295,7 +295,7 @@ mod tests {
         let loose_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink.clone(),
                     depth: None,
                     max_related: Some(20),
@@ -310,7 +310,7 @@ mod tests {
         let medium_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink.clone(),
                     depth: None,
                     max_related: Some(20),
@@ -325,7 +325,7 @@ mod tests {
         let tight_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink,
                     depth: None,
                     max_related: Some(20),
@@ -396,7 +396,7 @@ mod tests {
         let default_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink.clone(),
                     depth: None,
                     max_related: Some(20),
@@ -411,7 +411,7 @@ mod tests {
         let explicit_result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink,
                     depth: None,
                     max_related: Some(20),
@@ -450,7 +450,7 @@ mod tests {
         let result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink,
                     depth: None,
                     max_related: Some(10),
@@ -558,7 +558,7 @@ mod tests {
         let result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink,
                     depth: None,
                     max_related: Some(20),
@@ -608,7 +608,7 @@ mod tests {
         let result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink,
                     depth: None,
                     max_related: Some(20),
@@ -658,7 +658,7 @@ mod tests {
         let result = server
             .memory_build_context(rmcp::handler::server::wrapper::Parameters(
                 BuildContextParams {
-                    project: tmp.path().to_str().unwrap().to_string(),
+                    project: project.id.clone(),
                     url: seed_permalink,
                     depth: None,
                     max_related: Some(20),

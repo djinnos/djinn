@@ -122,7 +122,7 @@ mod tests {
 
         let response = server
             .memory_confirm(Parameters(MemoryConfirmParams {
-                project: path.to_string_lossy().to_string(),
+                project: project_id.clone(),
                 identifier: note.permalink.clone(),
                 comment: None,
             }))
@@ -147,7 +147,7 @@ mod tests {
 
         let response = server
             .memory_confirm(Parameters(MemoryConfirmParams {
-                project: path.to_string_lossy().to_string(),
+                project: project_id.clone(),
                 identifier: note.permalink.clone(),
                 comment: None,
             }))
@@ -178,7 +178,7 @@ mod tests {
 
         let response = server
             .memory_confirm(Parameters(MemoryConfirmParams {
-                project: path.to_string_lossy().to_string(),
+                project: project_id.clone(),
                 identifier: note.permalink.clone(),
                 comment: None,
             }))
@@ -202,7 +202,7 @@ mod tests {
 
         let response = server
             .memory_confirm(Parameters(MemoryConfirmParams {
-                project: path.to_string_lossy().to_string(),
+                project: project_id.clone(),
                 identifier: note.id.clone(),
                 comment: None,
             }))
@@ -215,11 +215,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn confirm_invalid_identifier_returns_error() {
-        let (server, _db, _project_id, path) = make_server().await;
+        let (server, _db, project_id, _path) = make_server().await;
 
         let response = server
             .memory_confirm(Parameters(MemoryConfirmParams {
-                project: path.to_string_lossy().to_string(),
+                project: project_id.clone(),
                 identifier: "missing-note".to_string(),
                 comment: None,
             }))

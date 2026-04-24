@@ -164,7 +164,7 @@ async fn list_chat_sessions(
     }
     // Explicit updated_at DESC sort overrides the repository's COALESCE-
     // based ordering once the per-message timestamps are known.
-    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    out.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
 
     Ok(Json(ListChatSessionsResponse { sessions: out }))
 }
