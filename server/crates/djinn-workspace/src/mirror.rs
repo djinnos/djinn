@@ -134,12 +134,18 @@ impl MirrorManager {
         info!(project_id, path = ?mirror, "cloning bare mirror");
         // cwd = self.root — just created above by create_dir_all, and the
         // destination `mirror` does not yet exist so it cannot itself be cwd.
+        //
+        // NOTE: no `--filter=blob:none`. Chat's ephemeral-clone path
+        // needs full history locally so `git clone --local --shared`
+        // is pure hardlink-and-alternates (no lazy-fetch round-trip
+        // inside the sandboxed shell, which has no network). Mirrors
+        // pre-dating this change are upgraded in place by
+        // `ensure_full_mirror` on server boot.
         run_git_command(
             self.root.clone(),
             vec![
                 "clone".into(),
                 "--bare".into(),
-                "--filter=blob:none".into(),
                 origin_url.to_string(),
                 mirror.display().to_string(),
             ],
@@ -147,6 +153,108 @@ impl MirrorManager {
         .await
         .map_err(|e| git_err_to_mirror("git clone --bare", e))?;
         Ok(mirror)
+    }
+
+    /// Promote a pre-existing blobless mirror to a full mirror.
+    ///
+    /// Old mirrors were cloned with `--filter=blob:none`, which leaves
+    /// `extensions.partialClone` set in the repo config and a
+    /// `objects/info/promisor` file pointing at `origin`. Ephemeral
+    /// clones of such a mirror still work, but they're no longer
+    /// hardlink-and-alternates-only — any missing blob triggers a
+    /// lazy fetch at read time. The chat shell runs with
+    /// `CLONE_NEWNET`, so a lazy fetch inside the sandbox fails with
+    /// network-unreachable and the tool call errors out.
+    ///
+    /// The backfill strategy is:
+    ///   1. Detect partial-clone state via `git config --get
+    ///      extensions.partialClone`. Unset → already full → no-op.
+    ///   2. `git fetch --refetch` with an explicit
+    ///      `+refs/heads/*:refs/heads/* +refs/tags/*:refs/tags/*`
+    ///      refspec so every branch and tag is re-fetched with
+    ///      promisor blobs materialised locally.
+    ///   3. Unset `extensions.partialClone` and remove the
+    ///      `objects/info/promisor` marker so subsequent fetches
+    ///      don't re-enter partial-clone semantics. Bare repos put
+    ///      the marker at `objects/info/promisor`; non-bare repos
+    ///      put it at `.git/objects/info/promisor`. Handle both
+    ///      layouts; missing files are ignored.
+    ///
+    /// Idempotent: running twice on an already-full mirror is a
+    /// fast no-op (step 1 short-circuits). `git fetch --refetch` is
+    /// itself idempotent so a partial run (e.g. process killed
+    /// mid-fetch) is safe to retry.
+    pub async fn ensure_full_mirror(&self, project_id: &str) -> Result<(), MirrorError> {
+        let mirror = self.mirror_path(project_id);
+        if !mirror.exists() {
+            return Err(MirrorError::Missing(project_id.to_string()));
+        }
+
+        let lock = self.lock_for(project_id).await;
+        let _held = lock.lock().await;
+
+        // `git config --get` exits 1 when the key is unset; treat
+        // that specifically as "already full, nothing to do" rather
+        // than a hard error.
+        let partial_clone = run_git_command(
+            mirror.clone(),
+            vec![
+                "config".into(),
+                "--get".into(),
+                "extensions.partialClone".into(),
+            ],
+        )
+        .await;
+        match partial_clone {
+            Ok(out) if out.stdout.trim().is_empty() => return Ok(()),
+            Ok(_) => { /* value present — fall through and backfill */ }
+            Err(djinn_git::GitError::CommandFailed { code: 1, .. }) => return Ok(()),
+            Err(e) => return Err(git_err_to_mirror("git config --get", e)),
+        }
+
+        info!(project_id, path = ?mirror, "backfilling full mirror");
+
+        run_git_command(
+            mirror.clone(),
+            vec![
+                "fetch".into(),
+                "--refetch".into(),
+                "origin".into(),
+                "+refs/heads/*:refs/heads/*".into(),
+                "+refs/tags/*:refs/tags/*".into(),
+            ],
+        )
+        .await
+        .map_err(|e| git_err_to_mirror("git fetch --refetch", e))?;
+
+        run_git_command(
+            mirror.clone(),
+            vec![
+                "config".into(),
+                "--unset".into(),
+                "extensions.partialClone".into(),
+            ],
+        )
+        .await
+        .map_err(|e| git_err_to_mirror("git config --unset", e))?;
+
+        // Bare and non-bare repos place the promisor marker in
+        // different locations; neither is required to exist once
+        // `extensions.partialClone` is gone, so NotFound on either
+        // path is a success case.
+        for candidate in [
+            mirror.join(".git/objects/info/promisor"),
+            mirror.join("objects/info/promisor"),
+        ] {
+            match tokio::fs::remove_file(&candidate).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(MirrorError::Io(e)),
+            }
+        }
+
+        info!(project_id, "backfilled full mirror");
+        Ok(())
     }
 
     /// Refresh an existing mirror via `git fetch --prune origin`.
@@ -187,16 +295,16 @@ impl MirrorManager {
 
         let before = snapshot_refs(&mirror).await?;
 
-        // `git clone --bare --filter=blob:none` does NOT write a
-        // `fetch` refspec into `remote.origin`, so a plain
-        // `git fetch origin` ends up fetching objects for the default
-        // branch only and never advances any local refs. That's why a
-        // merged PR on the remote was invisible to stack detection —
-        // the mirror's `refs/heads/main` was frozen at clone time.
-        // Passing an explicit `+refs/heads/*:refs/heads/*` refspec
-        // mirrors every head on every fetch, with force-update so
-        // force-pushes and branch resets also sync. Tags follow so
-        // release-detection stays current.
+        // `git clone --bare` does NOT write a `fetch` refspec into
+        // `remote.origin`, so a plain `git fetch origin` ends up
+        // fetching objects for the default branch only and never
+        // advances any local refs. That's why a merged PR on the
+        // remote was invisible to stack detection — the mirror's
+        // `refs/heads/main` was frozen at clone time. Passing an
+        // explicit `+refs/heads/*:refs/heads/*` refspec mirrors every
+        // head on every fetch, with force-update so force-pushes and
+        // branch resets also sync. Tags follow so release-detection
+        // stays current.
         run_git_command(
             mirror.clone(),
             vec![

@@ -1082,6 +1082,19 @@ impl AppState {
             reindex_self.reindex_all_projects_on_startup().await;
         });
 
+        // One-shot backfill of pre-existing blobless mirrors to full
+        // mirrors. Mirrors cloned before the chat-user-global cut-over
+        // carry `extensions.partialClone` + a `promisor` marker; the
+        // chat shell sandbox runs with `CLONE_NEWNET` so a lazy-fetch
+        // inside an ephemeral clone would hard-fail. `ensure_full_mirror`
+        // is idempotent and serialized per-project by the same lock
+        // that guards `ensure_mirror` / `fetch_mirror`, so it is safe
+        // to run concurrently with normal server traffic.
+        let backfill_self = self.clone();
+        tokio::spawn(async move {
+            backfill_self.backfill_full_mirrors_on_startup().await;
+        });
+
         // Watch .djinn/ directories for KB note changes and auto-reindex.
         djinn_db::background::watchers::spawn_kb_watchers(
             self.db().clone(),
@@ -1302,6 +1315,66 @@ impl AppState {
                 ),
             }
         }
+    }
+
+    /// Iterate every project in the DB and upgrade its bare mirror
+    /// from blobless (pre-cut-over) to full on boot.
+    ///
+    /// Serialized per-project via the existing `MirrorManager` lock,
+    /// so a concurrent fetch from the normal fetch-watcher queues
+    /// behind the backfill for that project but other projects keep
+    /// progressing. Missing mirrors (project row exists but no clone
+    /// on disk yet) are skipped with a debug log — `ensure_mirror`
+    /// will create them with the new full-clone semantics on first
+    /// use. Projects whose mirrors are already full short-circuit
+    /// in `ensure_full_mirror` with no git process spawned.
+    async fn backfill_full_mirrors_on_startup(&self) {
+        let project_repo = ProjectRepository::new(self.db().clone(), self.event_bus());
+        let projects = match project_repo.list().await {
+            Ok(projects) => projects,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to list projects for mirror backfill");
+                return;
+            }
+        };
+
+        tracing::info!(
+            project_count = projects.len(),
+            "starting mirror full-history backfill"
+        );
+
+        let mirror = self.mirror();
+        let mut upgraded = 0usize;
+        let mut skipped_missing = 0usize;
+        let mut failed = 0usize;
+        for project in &projects {
+            match mirror.ensure_full_mirror(&project.id).await {
+                Ok(()) => upgraded += 1,
+                Err(djinn_workspace::MirrorError::Missing(_)) => {
+                    skipped_missing += 1;
+                    tracing::debug!(
+                        project = %project.slug(),
+                        "mirror backfill skipped: no mirror on disk yet"
+                    );
+                }
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(
+                        project = %project.slug(),
+                        error = %e,
+                        "mirror backfill failed"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            upgraded,
+            skipped_missing,
+            failed,
+            total = projects.len(),
+            "mirror full-history backfill complete"
+        );
     }
 
     pub async fn persist_model_health_state(&self) {
