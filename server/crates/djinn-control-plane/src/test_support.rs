@@ -350,6 +350,22 @@ impl RepoGraphOps for StubRepoGraph {
     ) -> std::result::Result<Vec<HotPathHit>, String> {
         Ok(Vec::new())
     }
+    async fn coupling(
+        &self,
+        _ctx: &ProjectCtx,
+        _file_path: &str,
+        _limit: usize,
+    ) -> std::result::Result<Vec<crate::bridge::CouplingEntry>, String> {
+        Ok(Vec::new())
+    }
+    async fn churn(
+        &self,
+        _ctx: &ProjectCtx,
+        _limit: usize,
+        _since_days: Option<u32>,
+    ) -> std::result::Result<Vec<crate::bridge::ChurnEntry>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// NoteEmbeddingProvider stub. `model_version` is informational; `embed_note`

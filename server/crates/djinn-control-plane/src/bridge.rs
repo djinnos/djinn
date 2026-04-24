@@ -428,6 +428,33 @@ pub struct CallerRef {
     pub file: Option<String>,
 }
 
+/// A single co-edit peer emitted by `coupling`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CouplingEntry {
+    pub file_path: String,
+    /// Number of distinct commits that touched both files.
+    pub co_edit_count: usize,
+    /// ISO-8601 UTC timestamp of the most recent co-edit.
+    pub last_co_edit: String,
+    /// Up to three sample SHAs from the supporting commits,
+    /// newest-first — lets the caller jump straight to a diff for
+    /// context.
+    pub supporting_commit_samples: Vec<String>,
+}
+
+/// A single churn row emitted by `churn`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ChurnEntry {
+    pub file_path: String,
+    /// Distinct commits that touched the file in the selected window.
+    pub commit_count: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+    /// ISO-8601 UTC timestamp of the most recent commit that touched
+    /// the file in the selected window.
+    pub last_commit_at: String,
+}
+
 /// A single hot-path hit emitted by `touches_hot_path`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HotPathHit {
@@ -654,4 +681,24 @@ pub trait RepoGraphOps: Send + Sync {
         seed_sinks: &[String],
         symbols: &[String],
     ) -> Result<Vec<HotPathHit>, String>;
+
+    /// Files most frequently co-edited with `file_path`, derived from
+    /// the commit-based coupling index (see
+    /// `djinn_graph::coupling_index`). Does not consult the SCIP graph.
+    async fn coupling(
+        &self,
+        ctx: &ProjectCtx,
+        file_path: &str,
+        limit: usize,
+    ) -> Result<Vec<CouplingEntry>, String>;
+
+    /// Top files by distinct-commit count over the optional window,
+    /// pulling from the coupling index. `since_days` maps to a UTC
+    /// lower bound on `committed_at`; omit for all-time churn.
+    async fn churn(
+        &self,
+        ctx: &ProjectCtx,
+        limit: usize,
+        since_days: Option<u32>,
+    ) -> Result<Vec<ChurnEntry>, String>;
 }

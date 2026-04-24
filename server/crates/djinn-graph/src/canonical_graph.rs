@@ -11,11 +11,9 @@ use crate::architect::ArchitectWarmToken;
 /// writes DB caches and installs the in-memory canonical slot.
 type CanonicalGraphBuildOutput = (
     crate::repo_graph::RepoDependencyGraph,
-    crate::repo_map::RenderedRepoMap,
     Vec<u8>,
     Arc<crate::repo_graph::RepoGraphRanking>,
     Arc<CachedSccs>,
-    u64,
     u64,
     u64,
     u64,
@@ -151,6 +149,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             && cached.project_path == handle.path()
             && cached.git_head == commit_sha
         {
+            ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
             return Ok((handle, cached.graph.clone()));
         }
     }
@@ -168,6 +167,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     sccs,
                 )
                 .await;
+                ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
                 return Ok((handle, graph));
             }
             Err(e) => {
@@ -190,6 +190,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             && cached.project_path == handle.path()
             && cached.git_head == commit_sha
         {
+            ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
             return Ok((handle, cached.graph.clone()));
         }
     }
@@ -206,6 +207,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     sccs,
                 )
                 .await;
+                ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
                 return Ok((handle, graph));
             }
             Err(e) => {
@@ -239,7 +241,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
 
     let t_indexers = std::time::Instant::now();
-    let run = crate::repo_map::run_indexers_already_locked(
+    let run = crate::scip_indexer::run_indexers_already_locked(
         handle.path(),
         &output_dir,
         Some(&target_dir),
@@ -251,7 +253,6 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
     let output_dir_for_blocking = output_dir.clone();
     let artifacts = run.artifacts;
-    const SKELETON_TOKEN_BUDGET: usize = 1200;
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
             let t_parse = std::time::Instant::now();
@@ -270,37 +271,26 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let (pagerank, sccs) = derive_graph_caches(&graph);
             let derive_ms = t_derive.elapsed().as_millis() as u64;
 
-            let t_render = std::time::Instant::now();
-            let rendered = crate::repo_map::render_repo_map(
-                &graph,
-                pagerank.as_ref(),
-                &crate::repo_map::RepoMapRenderOptions::new(SKELETON_TOKEN_BUDGET),
-            )
-            .map_err(|e| format!("render_repo_map: {e:?}"))?;
-            let render_ms = t_render.elapsed().as_millis() as u64;
-
             let t_serial = std::time::Instant::now();
             let serialized = bincode::serialize(&graph.to_artifact())
                 .map_err(|e| format!("bincode serialize graph: {e}"))?;
             let serial_ms = t_serial.elapsed().as_millis() as u64;
 
             Ok((
-                graph, rendered, serialized, pagerank, sccs, parse_ms, build_ms, derive_ms,
-                render_ms, serial_ms, node_count, edge_count,
+                graph, serialized, pagerank, sccs, parse_ms, build_ms, derive_ms, serial_ms,
+                node_count, edge_count,
             ))
         })
         .await
         .map_err(|e| format!("spawn_blocking join: {e}"))?;
     let (
         graph,
-        rendered,
         serialized_blob,
         pagerank,
         sccs,
         parse_ms,
         build_ms,
         derive_ms,
-        render_ms,
         serial_ms,
         node_count,
         edge_count,
@@ -313,22 +303,11 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         parse_ms,
         build_ms,
         derive_ms,
-        render_ms,
         serial_ms,
         node_count,
         edge_count,
         "ensure_canonical_graph: build pipeline complete"
     );
-
-    persist_canonical_skeleton(
-        ctx,
-        project_id,
-        project_root,
-        &commit_sha,
-        &graph,
-        &rendered,
-    )
-    .await;
 
     if let Err(e) = cache_repo
         .upsert(RepoGraphCacheInsert {
@@ -340,6 +319,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     {
         tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
     }
+
+    ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
 
     install_as_canonical(
         ctx,
@@ -354,50 +335,23 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     Ok((handle, graph))
 }
 
-async fn persist_canonical_skeleton<C: WarmContext>(
+/// Keep the per-project commit-coupling index current. Non-fatal on
+/// failure — the canonical graph succeeding matters more than coupling
+/// data being fresh. Called from every return site of
+/// [`ensure_canonical_graph`] so projects that only ever hit the cache
+/// still feed the coupling table.
+async fn ingest_coupling_best_effort<C: WarmContext>(
     ctx: &C,
     project_id: &str,
     project_root: &Path,
-    commit_sha: &str,
-    graph: &crate::repo_graph::RepoDependencyGraph,
-    rendered: &crate::repo_map::RenderedRepoMap,
 ) {
-    use djinn_db::{NoteRepository, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository};
-
-    let project_path = project_root.to_string_lossy().into_owned();
-    let cache_repo = RepoMapCacheRepository::new(ctx.db().clone());
-    if let Err(e) = cache_repo
-        .insert(RepoMapCacheInsert {
-            key: RepoMapCacheKey {
-                project_id,
-                project_path: &project_path,
-                worktree_path: None,
-                commit_sha,
-            },
-            rendered_map: &rendered.content,
-            token_estimate: rendered.token_estimate as i64,
-            included_entries: rendered.included_entries as i64,
-            graph_artifact: graph.serialize_artifact().ok().as_deref(),
-        })
-        .await
-    {
-        tracing::warn!(
-            project_id = %project_id,
-            commit_sha = %commit_sha,
-            error = %e,
-            "persist_canonical_skeleton: repo_map_cache insert failed"
-        );
-    }
-
-    let note_repo = NoteRepository::new(ctx.db().clone(), ctx.event_bus());
     if let Err(e) =
-        crate::repo_map::persist_repo_map_note(&note_repo, project_id, commit_sha, rendered).await
+        crate::coupling_index::ingest_new_commits(ctx.db(), project_id, project_root).await
     {
         tracing::warn!(
             project_id = %project_id,
-            commit_sha = %commit_sha,
             error = %e,
-            "persist_canonical_skeleton: repo_map note persist failed"
+            "ensure_canonical_graph: coupling ingest failed"
         );
     }
 }
@@ -557,8 +511,8 @@ async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option
 }
 
 /// Consult the persisted `projects.stack` JSON and translate the detected
-/// languages into the subset of [`crate::repo_map::SupportedIndexer`]
-/// variants [`crate::repo_map::run_indexers_already_locked`] should run
+/// languages into the subset of [`crate::scip_indexer::SupportedIndexer`]
+/// variants [`crate::scip_indexer::run_indexers_already_locked`] should run
 /// for this project.
 ///
 /// Returns `None` when:
@@ -572,7 +526,7 @@ async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option
 async fn resolve_stack_indexer_filter<C: WarmContext>(
     ctx: &C,
     project_id: &str,
-) -> Option<Vec<crate::repo_map::SupportedIndexer>> {
+) -> Option<Vec<crate::scip_indexer::SupportedIndexer>> {
     use djinn_db::ProjectRepository;
     use djinn_stack::Stack;
 
@@ -589,8 +543,8 @@ async fn resolve_stack_indexer_filter<C: WarmContext>(
         return None;
     }
 
-    let mut wanted: Vec<crate::repo_map::SupportedIndexer> = Vec::new();
-    let mut push = |ind: crate::repo_map::SupportedIndexer| {
+    let mut wanted: Vec<crate::scip_indexer::SupportedIndexer> = Vec::new();
+    let mut push = |ind: crate::scip_indexer::SupportedIndexer| {
         if !wanted.contains(&ind) {
             wanted.push(ind);
         }
@@ -598,18 +552,18 @@ async fn resolve_stack_indexer_filter<C: WarmContext>(
     for lang in &stack.languages {
         let name = lang.name.to_ascii_lowercase();
         match name.as_str() {
-            "rust" => push(crate::repo_map::SupportedIndexer::RustAnalyzer),
+            "rust" => push(crate::scip_indexer::SupportedIndexer::RustAnalyzer),
             "typescript" | "javascript" | "tsx" | "jsx" => {
-                push(crate::repo_map::SupportedIndexer::TypeScript)
+                push(crate::scip_indexer::SupportedIndexer::TypeScript)
             }
-            "python" => push(crate::repo_map::SupportedIndexer::Python),
-            "go" => push(crate::repo_map::SupportedIndexer::Go),
-            "java" | "kotlin" | "scala" => push(crate::repo_map::SupportedIndexer::Java),
+            "python" => push(crate::scip_indexer::SupportedIndexer::Python),
+            "go" => push(crate::scip_indexer::SupportedIndexer::Go),
+            "java" | "kotlin" | "scala" => push(crate::scip_indexer::SupportedIndexer::Java),
             "c" | "c++" | "cpp" | "objective-c" | "objective-c++" => {
-                push(crate::repo_map::SupportedIndexer::Clang)
+                push(crate::scip_indexer::SupportedIndexer::Clang)
             }
-            "ruby" => push(crate::repo_map::SupportedIndexer::Ruby),
-            "c#" | "csharp" | "f#" => push(crate::repo_map::SupportedIndexer::DotNet),
+            "ruby" => push(crate::scip_indexer::SupportedIndexer::Ruby),
+            "c#" | "csharp" | "f#" => push(crate::scip_indexer::SupportedIndexer::DotNet),
             _ => {}
         }
     }
@@ -758,9 +712,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::{TestWarmContext, create_test_db, workspace_tempdir};
     use djinn_core::events::EventBus;
-    use djinn_db::{
-        ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository, RepoMapCacheRepository,
-    };
+    use djinn_db::{ProjectRepository, RepoGraphCacheInsert, RepoGraphCacheRepository};
 
     async fn make_project(tmp: &std::path::Path) -> std::path::PathBuf {
         let project_root = tmp.join("repo");
@@ -930,61 +882,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_and_persist_paths_share_the_service_seam() {
-        let tmp = workspace_tempdir("canonical-graph-");
-        let project_root = make_project(tmp.path()).await;
-        let db = create_test_db();
-        let ctx = TestWarmContext::new(db.clone());
-        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        let project = proj_repo
-            .create("test-canonical-persist", "test", "test-canonical-persist")
-            .await
-            .expect("create project");
-
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
-            .await
-            .unwrap();
-        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
-
-        let graph = build_test_graph_fixture();
-        let rendered = crate::repo_map::render_repo_map(
-            &graph,
-            &graph.rank(),
-            &crate::repo_map::RepoMapRenderOptions::new(1200),
-        )
-        .expect("render repo map");
-
-        persist_canonical_skeleton(
-            &ctx,
-            &project.id,
-            &project_root,
-            &head_sha,
-            &graph,
-            &rendered,
-        )
-        .await;
-
-        let cache_repo = RepoMapCacheRepository::new(db.clone());
-        let project_path = project_root.to_string_lossy().into_owned();
-        let row = cache_repo
-            .get(djinn_db::RepoMapCacheKey {
-                project_id: &project.id,
-                project_path: &project_path,
-                worktree_path: None,
-                commit_sha: &head_sha,
-            })
-            .await
-            .expect("lookup repo_map_cache")
-            .expect("repo_map_cache row inserted");
-        assert_eq!(row.commit_sha, head_sha);
-        assert_eq!(row.rendered_map, rendered.content);
-    }
-
-
-    #[tokio::test]
     async fn resolve_stack_indexer_filter_maps_languages_to_indexers() {
         use djinn_stack::{LanguageStat, ManifestSignals, Runtimes, Stack};
 
@@ -1028,9 +925,9 @@ mod tests {
         let filter = resolve_stack_indexer_filter(&ctx, &project.id)
             .await
             .expect("filter is Some for non-empty stack");
-        assert!(filter.contains(&crate::repo_map::SupportedIndexer::RustAnalyzer));
-        assert!(filter.contains(&crate::repo_map::SupportedIndexer::TypeScript));
-        assert!(!filter.contains(&crate::repo_map::SupportedIndexer::Go));
+        assert!(filter.contains(&crate::scip_indexer::SupportedIndexer::RustAnalyzer));
+        assert!(filter.contains(&crate::scip_indexer::SupportedIndexer::TypeScript));
+        assert!(!filter.contains(&crate::scip_indexer::SupportedIndexer::Go));
         assert_eq!(filter.len(), 2, "unknown language must not add an indexer");
 
         // Empty stack (default) → None (fall back to all indexers).

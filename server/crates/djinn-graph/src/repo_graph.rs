@@ -1555,67 +1555,6 @@ mod tests {
         assert!(patched.file_node("src/helper.rs").is_some());
     }
 
-    /// Verify that the patched graph produces a different rendered map when
-    /// file content changes.
-    #[test]
-    fn patch_produces_updated_rendered_map() {
-        use crate::repo_map::{RepoMapRenderOptions, render_repo_map};
-
-        let original = RepoDependencyGraph::build(&[fixture_index()]);
-        let original_ranking = original.rank();
-        let original_rendered = render_repo_map(
-            &original,
-            &original_ranking,
-            &RepoMapRenderOptions::new(2000),
-        )
-        .expect("render original");
-
-        // Replace src/app.rs with entirely different content.
-        let widget_symbol = ScipSymbol {
-            symbol: "scip-rust pkg src/app.rs `Widget`#".to_string(),
-            kind: Some(ScipSymbolKind::Struct),
-            display_name: Some("Widget".to_string()),
-            signature: Some("struct Widget".to_string()),
-            documentation: vec![],
-            relationships: vec![],
-            visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        };
-        let new_index = ParsedScipIndex {
-            metadata: ScipMetadata::default(),
-            files: vec![ScipFile {
-                language: "rust".to_string(),
-                relative_path: PathBuf::from("src/app.rs"),
-                definitions: vec![definition_occurrence(&widget_symbol.symbol)],
-                references: vec![],
-                occurrences: vec![definition_occurrence(&widget_symbol.symbol)],
-                symbols: vec![widget_symbol],
-            }],
-            external_symbols: vec![],
-        };
-
-        let changed = BTreeSet::from([PathBuf::from("src/app.rs")]);
-        let patched = original.patch_changed_files(&changed, &[new_index]);
-        let patched_ranking = patched.rank();
-        let patched_rendered =
-            render_repo_map(&patched, &patched_ranking, &RepoMapRenderOptions::new(2000))
-                .expect("render patched");
-
-        // The rendered maps should differ because the file content changed.
-        assert_ne!(
-            original_rendered.content, patched_rendered.content,
-            "patched rendered map should differ from original"
-        );
-        // The patched map should mention Widget (the new symbol).
-        assert!(
-            patched_rendered.content.contains("Widget"),
-            "patched map should contain the new Widget symbol"
-        );
-        // The patched map should NOT mention main (the removed symbol).
-        assert!(
-            !patched_rendered.content.contains("main"),
-            "patched map should not contain the removed main symbol"
-        );
-    }
 
     // ── Chunk B: search / cycles / orphans / path tests ─────────────────────
 

@@ -1049,22 +1049,18 @@ mod tests {
     // ─── End-to-end prompt assembly → Anthropic request coverage ──────────────
 
     /// Build a system message using the current chat-layer production contract:
-    /// trim the base prompt, keep project context and repo map as stable blocks,
+    /// trim the base prompt, keep project context as a stable block,
     /// collapse dynamic client/task text into a trailing block, and attach
     /// Anthropic cache metadata only for Anthropic models.
     fn build_system_message_for_test(
         base_prompt: &str,
         project_context: Option<&str>,
-        repo_map: Option<&str>,
         client_system: Option<&str>,
         is_anthropic: bool,
     ) -> Message {
         let mut content = vec![ContentBlock::text(base_prompt.trim())];
         if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
             content.push(ContentBlock::text(project_context));
-        }
-        if let Some(repo_map) = repo_map.filter(|s| !s.trim().is_empty()) {
-            content.push(ContentBlock::text(repo_map));
         }
         if let Some(client_system) = client_system.filter(|s| !s.trim().is_empty()) {
             content.push(ContentBlock::text(client_system));
@@ -1094,17 +1090,15 @@ mod tests {
     /// tail). Stable-prefix `cache_control` appears on the stable system prefix
     /// and on the first tool-definition entry, but not on the dynamic tail.
     #[test]
-    fn e2e_repo_map_present_system_blocks_ordered_with_cache_control() {
+    fn e2e_system_blocks_ordered_with_cache_control() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
         let project_context = "## Project Context\nworkspace: demo";
-        let repo_map = "## Repository Map\nsrc/lib.rs\n  pub fn run()";
         let client = "Be concise.";
 
         let sys_msg = build_system_message_for_test(
             base,
             Some(project_context),
-            Some(repo_map),
             Some(client),
             true,
         );
@@ -1124,41 +1118,30 @@ mod tests {
             .as_array()
             .expect("system should be an array when cache_control is present");
 
-        assert_eq!(system.len(), 4, "expected 4 system blocks");
+        assert_eq!(system.len(), 3, "expected 3 system blocks");
         assert_eq!(system[0]["text"], base.trim());
         assert_eq!(system[1]["text"], project_context);
-        assert_eq!(system[2]["text"], repo_map);
-        assert_eq!(system[3]["text"], client);
+        assert_eq!(system[2]["text"], client);
 
-        let stable_texts: Vec<_> = system[..3]
-            .iter()
-            .map(|block| block["text"].as_str().expect("system block text"))
-            .collect();
-        assert_eq!(
-            stable_texts,
-            vec![base.trim(), project_context, repo_map],
-            "stable Anthropic system prefix should remain base -> project context -> repo map"
-        );
-
-        for stable_block in &system[..3] {
+        for stable_block in &system[..2] {
             assert_eq!(stable_block["cache_control"]["type"], "ephemeral");
             assert_eq!(stable_block["cache_control"]["kind"], "stable_prefix");
         }
         assert!(
-            system[3].get("cache_control").is_none(),
+            system[2].get("cache_control").is_none(),
             "dynamic tail block must not have cache_control"
         );
         assert_eq!(req["tools"][0]["cache_control"]["kind"], "stable_prefix");
     }
 
-    /// E2E: without repo map, tools, or dynamic context, a single non-cacheable
+    /// E2E: without tools or dynamic context, a single non-cacheable
     /// system block collapses to a plain string (no array, no cache_control).
     #[test]
-    fn e2e_no_repo_map_single_block_no_cache_control() {
+    fn e2e_single_block_no_cache_control() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
 
-        let sys_msg = build_system_message_for_test(base, None, None, None, false);
+        let sys_msg = build_system_message_for_test(base, None, None, false);
 
         let mut conv = Conversation::new();
         conv.push(sys_msg);
@@ -1181,7 +1164,7 @@ mod tests {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
 
-        let sys_msg = build_system_message_for_test(base, None, None, None, true);
+        let sys_msg = build_system_message_for_test(base, None, None, true);
 
         let mut conv = Conversation::new();
         conv.push(sys_msg);
@@ -1197,21 +1180,19 @@ mod tests {
         assert_eq!(req["system"], base.trim());
     }
 
-    /// E2E: repo-map session with request-level tools verifies that Anthropic
-    /// keeps the stable system prefix ordered as base -> project/tool-definition
-    /// context -> repo map, preserves the uncached dynamic tail, and still emits
-    /// the separate request `tools` array unchanged.
+    /// E2E: session with request-level tools verifies that Anthropic
+    /// keeps the stable system prefix ordered as base -> project context,
+    /// preserves the uncached dynamic tail, and still emits the separate
+    /// request `tools` array unchanged.
     #[test]
-    fn e2e_repo_map_with_tools_preserves_both_system_and_tools() {
+    fn e2e_tools_preserves_both_system_and_tools() {
         let provider = test_provider();
         let base = "You are a helpful assistant.";
         let project_context = "## Tool Definitions\nshell(cmd: string)";
-        let repo_map = "## Repository Map\nsrc/main.rs\n  fn main()";
 
         let sys_msg = build_system_message_for_test(
             base,
             Some(project_context),
-            Some(repo_map),
             Some("be brief"),
             true,
         );
@@ -1230,15 +1211,13 @@ mod tests {
         let system = req["system"]
             .as_array()
             .expect("system should be array with cache_control");
-        assert_eq!(system.len(), 4);
+        assert_eq!(system.len(), 3);
         assert_eq!(system[0]["text"], base.trim());
         assert_eq!(system[1]["text"], project_context);
-        assert_eq!(system[2]["text"], repo_map);
-        assert_eq!(system[3]["text"], "be brief");
+        assert_eq!(system[2]["text"], "be brief");
         assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
         assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
-        assert_eq!(system[2]["cache_control"]["kind"], "stable_prefix");
-        assert!(system[3].get("cache_control").is_none());
+        assert!(system[2].get("cache_control").is_none());
 
         let req_tools = req["tools"].as_array().expect("tools array");
         assert_eq!(req_tools.len(), 1);

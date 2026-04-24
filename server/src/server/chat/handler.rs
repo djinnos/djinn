@@ -172,7 +172,6 @@ pub(super) async fn completions_handler_impl(
     let system_message = super::prompt::system_message::build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
         chat_context.project_context.as_deref(),
-        chat_context.repo_map_context.as_deref(),
         req.system.as_deref(),
         &req.model,
     );

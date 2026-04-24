@@ -72,7 +72,6 @@ async fn apply_chat_skills_adds_global_skills_to_system_prompt() {
     let base = build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
         Some("project ctx"),
-        None,
         Some("client system"),
         "anthropic/claude-3-5-sonnet",
     );

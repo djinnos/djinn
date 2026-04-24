@@ -29,16 +29,11 @@ pub(in crate::server::chat) fn system_message_metadata(
 pub(in crate::server::chat) fn build_system_message(
     base_prompt: &str,
     project_context: Option<&str>,
-    repo_map_context: Option<&str>,
     client_system: Option<&str>,
     model: &str,
 ) -> Message {
-    let segments = compose_system_prompt_segments(
-        base_prompt,
-        project_context,
-        repo_map_context,
-        client_system,
-    );
+    let segments =
+        compose_system_prompt_segments(base_prompt, project_context, client_system);
     let layout = partition_system_prompt_segments(&segments);
     let metadata = system_message_metadata(model, !layout.stable_prefix.is_empty());
 

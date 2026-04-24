@@ -10,7 +10,7 @@ use scip::types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::repo_map::ScipArtifact;
+use crate::scip_indexer::ScipArtifact;
 
 /// Normalized SCIP payload ready for graph construction without exposing protobuf details.
 #[derive(Debug, Clone, PartialEq, Eq)]

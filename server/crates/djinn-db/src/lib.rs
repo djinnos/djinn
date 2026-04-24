@@ -26,6 +26,9 @@ pub use repositories::{
         AgentUpdateInput, LearnedPromptHistoryEntry, PendingAmendmentEvaluation, VALID_BASE_ROLES,
         WindowedRoleMetrics,
     },
+    commit_file_changes::{
+        CommitFileChange, CommitFileChangeRepository, CoupledFile, FileChurn,
+    },
     dolt_branch::{
         DoltBranchError, DoltBranchLifecycle, DoltBranchLifecycleAction, DoltBranchLifecycleResult,
         DoltBranchSqlHelper,
@@ -67,7 +70,6 @@ pub use repositories::{
         ProjectRepository,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
-    repo_map_cache::{CachedRepoMap, RepoMapCacheInsert, RepoMapCacheKey, RepoMapCacheRepository},
     session::{CreateSessionParams, SessionRepository},
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_message::SessionMessageRepository,

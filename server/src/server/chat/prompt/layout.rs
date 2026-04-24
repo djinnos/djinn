@@ -33,15 +33,11 @@ fn cached_prompt_segment(text: impl Into<String>) -> PromptSegment {
 pub(in crate::server::chat) fn compose_system_prompt_segments(
     base_prompt: &str,
     project_context: Option<&str>,
-    repo_map_context: Option<&str>,
     client_system: Option<&str>,
 ) -> Vec<PromptSegment> {
     let mut stable_prefix = vec![cached_prompt_segment(base_prompt.trim())];
     if let Some(project_context) = project_context.filter(|s| !s.trim().is_empty()) {
         stable_prefix.push(cached_prompt_segment(project_context));
-    }
-    if let Some(repo_map_context) = repo_map_context.filter(|s| !s.trim().is_empty()) {
-        stable_prefix.push(cached_prompt_segment(repo_map_context));
     }
 
     let dynamic_tail = client_system
@@ -76,17 +72,11 @@ pub(in crate::server::chat) fn partition_system_prompt_segments(
 pub(in crate::server::chat) fn compose_system_prompt(
     base_prompt: &str,
     project_context: Option<&str>,
-    repo_map_context: Option<&str>,
     client_system: Option<&str>,
 ) -> String {
-    compose_system_prompt_segments(
-        base_prompt,
-        project_context,
-        repo_map_context,
-        client_system,
-    )
-    .into_iter()
-    .map(|segment| segment.text)
-    .collect::<Vec<_>>()
-    .join("\n\n")
+    compose_system_prompt_segments(base_prompt, project_context, client_system)
+        .into_iter()
+        .map(|segment| segment.text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }

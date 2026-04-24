@@ -1,7 +1,6 @@
 //! Per-commit canonical SCIP graph cache (ADR-050 §3 Chunk C).
 //!
-//! This is a separate store from `repo_map_cache`: under ADR-050 the
-//! interactive code graph used by `code_graph` is built once per
+//! The interactive code graph used by `code_graph` is built once per
 //! `origin/main` commit and shared across every architect/chat session and
 //! every worker dispatch until `origin/main` advances.  The graph blob is
 //! produced by `RepoDependencyGraph::serialize_artifact` (or any other

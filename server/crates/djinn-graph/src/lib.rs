@@ -17,11 +17,11 @@ use djinn_db::Database;
 
 pub mod architect;
 pub mod canonical_graph;
+pub mod coupling_index;
 pub mod index_tree;
 pub mod process;
 pub mod repo_graph;
-pub mod repo_map;
-pub mod repo_map_personalization;
+pub mod scip_indexer;
 pub mod scip_parser;
 
 #[cfg(test)]

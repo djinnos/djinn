@@ -1211,6 +1211,24 @@ mod tests {
         ) -> Result<Vec<HotPathHit>, String> {
             Err("unused in test".into())
         }
+
+        async fn coupling(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::CouplingEntry>, String> {
+            Err("unused in test".into())
+        }
+
+        async fn churn(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+        ) -> Result<Vec<djinn_control_plane::bridge::ChurnEntry>, String> {
+            Err("unused in test".into())
+        }
     }
 
     async fn setup_project() -> (Database, AgentContext, Project, tempfile::TempDir) {

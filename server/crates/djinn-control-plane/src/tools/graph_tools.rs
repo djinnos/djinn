@@ -8,10 +8,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
-    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup, DeadSymbolEntry,
-    DeprecatedHit, EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry,
-    ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult,
-    ProjectCtx, RankedNode, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
+    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry, CouplingEntry,
+    CycleGroup, DeadSymbolEntry, DeprecatedHit, EdgeEntry, FileGroupEntry, GraphNeighbor,
+    GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult,
+    NeighborsResult, OrphanEntry, PathResult, ProjectCtx, RankedNode, SearchHit, SymbolAtHit,
+    SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -132,6 +133,10 @@ pub struct CodeGraphParams {
     /// entry→sink shortest path?
     #[serde(default)]
     pub symbols: Option<Vec<String>>,
+    /// Time-window (in days) for the `churn` op. Omit for all-time.
+    /// Clamped to `[1, 3650]` server-side.
+    #[serde(default)]
+    pub since_days: Option<u32>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -270,6 +275,19 @@ pub struct TouchesHotPathResponse {
     pub hits: Vec<HotPathHit>,
 }
 
+/// Response for the `coupling` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CouplingResponse {
+    pub file: String,
+    pub coupled: Vec<CouplingEntry>,
+}
+
+/// Response for the `churn` op.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ChurnResponse {
+    pub files: Vec<ChurnEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
@@ -293,6 +311,8 @@ pub enum CodeGraphResponse {
     DeadSymbols(DeadSymbolsResponse),
     DeprecatedCallers(DeprecatedCallersResponse),
     TouchesHotPath(TouchesHotPathResponse),
+    Coupling(CouplingResponse),
+    Churn(ChurnResponse),
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────────
@@ -415,7 +435,7 @@ fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path)."
+        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp)."
     )]
     pub async fn code_graph(
         &self,
@@ -479,13 +499,16 @@ impl DjinnMcpServer {
             "dead_symbols" => self.code_graph_dead_symbols(&ctx, &params).await,
             "deprecated_callers" => self.code_graph_deprecated_callers(&ctx, &params).await,
             "touches_hot_path" => self.code_graph_touches_hot_path(&ctx, &params).await,
+            "coupling" => self.code_graph_coupling(&ctx, &params).await,
+            "churn" => self.code_graph_churn(&ctx, &params).await,
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
                  'search', 'cycles', 'orphans', 'path', 'edges', \
                  'symbols_at', 'diff_touches', 'describe', 'status', \
                  'api_surface', 'boundary_check', 'hotspots', 'metrics_at', \
-                 'dead_symbols', 'deprecated_callers', 'touches_hot_path'"
+                 'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
+                 'coupling', 'churn'"
             )),
         };
 
@@ -1052,6 +1075,46 @@ impl DjinnMcpServer {
         ))
     }
 
+    /// Handler for `operation = "coupling"`.
+    async fn code_graph_coupling(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let file = params
+            .file
+            .as_deref()
+            .filter(|f| !f.is_empty())
+            .ok_or_else(|| format!("'file' is required for operation '{}'", params.operation))?;
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        let coupled = self
+            .state
+            .repo_graph()
+            .coupling(ctx, file, limit)
+            .await?;
+        Ok(CodeGraphResponse::Coupling(CouplingResponse {
+            file: file.to_string(),
+            coupled,
+        }))
+    }
+
+    /// Handler for `operation = "churn"`.
+    async fn code_graph_churn(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        let files = self
+            .state
+            .repo_graph()
+            .churn(ctx, limit, params.since_days)
+            .await?;
+        Ok(CodeGraphResponse::Churn(ChurnResponse { files }))
+    }
+
     /// Handler for `operation = "touches_hot_path"`.
     async fn code_graph_touches_hot_path(
         &self,
@@ -1150,6 +1213,7 @@ mod tests {
             seed_entries: None,
             seed_sinks: None,
             symbols: None,
+            since_days: None,
         }
     }
 

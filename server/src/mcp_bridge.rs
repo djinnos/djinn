@@ -1653,6 +1653,107 @@ impl RepoGraphOps for RepoGraphBridge {
         }
         Ok(out)
     }
+
+    async fn coupling(
+        &self,
+        ctx: &ProjectCtx,
+        file_path: &str,
+        limit: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CouplingEntry>, String> {
+        use djinn_control_plane::bridge::CouplingEntry;
+        use djinn_db::CommitFileChangeRepository;
+
+        let repo = CommitFileChangeRepository::new(self.state.db().clone());
+        let rows = repo
+            .top_coupled(&ctx.id, file_path, limit.max(1))
+            .await
+            .map_err(|e| format!("coupling lookup: {e}"))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let samples: Vec<String> = row
+                .supporting_commit_samples()
+                .into_iter()
+                .take(3)
+                .collect();
+            out.push(CouplingEntry {
+                file_path: row.file_path,
+                co_edit_count: row.co_edit_count.max(0) as usize,
+                last_co_edit: row.last_co_edit,
+                supporting_commit_samples: samples,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn churn(
+        &self,
+        ctx: &ProjectCtx,
+        limit: usize,
+        since_days: Option<u32>,
+    ) -> Result<Vec<djinn_control_plane::bridge::ChurnEntry>, String> {
+        use djinn_control_plane::bridge::ChurnEntry;
+        use djinn_db::CommitFileChangeRepository;
+
+        // `committed_at` is an ISO-8601 UTC string. We render the cutoff
+        // with the same format git itself uses (`%Y-%m-%dT%H:%M:%SZ`)
+        // via a seconds-since-epoch arithmetic → lexicographic string
+        // comparison — no chrono dependency required, and the
+        // comparison stays correct because every stored timestamp uses
+        // the same fixed-width representation.
+        let since = since_days.map(|d| {
+            let clamped = d.clamp(1, 3650) as u64;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let cutoff = now.saturating_sub(clamped * 86_400);
+            format_utc_iso8601(cutoff)
+        });
+        let repo = CommitFileChangeRepository::new(self.state.db().clone());
+        let rows = repo
+            .churn(&ctx.id, limit.max(1), since.as_deref())
+            .await
+            .map_err(|e| format!("churn lookup: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ChurnEntry {
+                file_path: row.file_path,
+                commit_count: row.commit_count.max(0) as usize,
+                insertions: row.insertions.max(0) as usize,
+                deletions: row.deletions.max(0) as usize,
+                last_commit_at: row.last_commit_at,
+            })
+            .collect())
+    }
+}
+
+/// Format a Unix timestamp (seconds since epoch) as ISO-8601 UTC with
+/// second resolution (`YYYY-MM-DDTHH:MM:SSZ`). Used to render a
+/// `since_days` cutoff for the `churn` op into the same lexical shape
+/// our stored `committed_at` uses, so a string comparison on the SQL
+/// side resolves the window correctly.
+fn format_utc_iso8601(secs: u64) -> String {
+    // Civil-from-Unix conversion via Howard Hinnant's algorithm
+    // (public domain). Avoids a chrono dependency for the single
+    // timestamp format we need.
+    let days = (secs / 86_400) as i64;
+    let rem_seconds = secs % 86_400;
+    let hour = (rem_seconds / 3600) as u32;
+    let minute = ((rem_seconds % 3600) / 60) as u32;
+    let second = (rem_seconds % 60) as u32;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Extract the SCIP crate-name token from a symbol identifier.

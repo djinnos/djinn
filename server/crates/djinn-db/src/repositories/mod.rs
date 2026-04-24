@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod commit_file_changes;
 pub mod dolt_branch;
 pub mod dolt_history_maintenance;
 pub mod epic;
@@ -10,7 +11,6 @@ pub mod note;
 pub mod org_config;
 pub mod project;
 pub mod repo_graph_cache;
-pub mod repo_map_cache;
 pub mod session;
 pub mod session_auth;
 pub mod session_message;
