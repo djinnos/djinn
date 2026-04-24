@@ -268,6 +268,21 @@ impl WorkspaceStore {
             return Err(WorkspaceError::MirrorMissing(project_id.to_string()));
         }
 
+        // Self-heal: backfill the underlying bare mirror to full before
+        // we try to reset --hard. The workspace's `origin` points at the
+        // local bare mirror and its `.git/objects/info/alternates` points
+        // at the mirror's object store. If the mirror is still a partial
+        // (blob:none) clone because the startup backfill hasn't reached
+        // this project yet, `git reset --hard origin/<branch>` reads trees
+        // from alternates but fails on "unable to read sha1 file" for
+        // every missing blob. ensure_full_mirror is idempotent and
+        // short-circuits when already full. Same rationale as the
+        // matching call in ensure_workspace.
+        self.mirror_manager
+            .ensure_full_mirror(project_id)
+            .await
+            .map_err(|e| WorkspaceError::Git(format!("ensure_full_mirror: {e}")))?;
+
         let lock = self.lock_for(project_id).await;
         let _held = lock.lock().await;
 
