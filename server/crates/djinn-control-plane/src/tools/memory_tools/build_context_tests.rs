@@ -70,7 +70,7 @@ mod tests {
     /// Create a seed note and 20 related notes with deterministic content
     /// that allows for stable ranking.
     async fn setup_ranking_test_data(
-        tmp: &tempfile::TempDir,
+        _tmp: &tempfile::TempDir,
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
         project: &Project,
@@ -81,7 +81,6 @@ mod tests {
         let seed = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Seed Note",
                 "This is the central seed note about database architecture and system design patterns.",
                 "adr",
@@ -106,7 +105,6 @@ mod tests {
 
             repo.create(
                 &project.id,
-                tmp.path(),
                 &title,
                 &content,
                 "reference",
@@ -125,7 +123,6 @@ mod tests {
 
             repo.create(
                 &project.id,
-                tmp.path(),
                 &title,
                 &content,
                 "research",
@@ -477,7 +474,7 @@ mod tests {
     /// Helper: create a seed note and related notes with controlled confidence values.
     /// Returns (seed_permalink, low_confidence_title, stale_citation_title, normal_title).
     async fn setup_confidence_test_data(
-        tmp: &tempfile::TempDir,
+        _tmp: &tempfile::TempDir,
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
         project: &Project,
@@ -488,7 +485,6 @@ mod tests {
         let seed = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Confidence Seed",
                 "This seed note covers database architecture patterns for confidence testing.",
                 "adr",
@@ -501,7 +497,6 @@ mod tests {
         let low_conf = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Low Confidence Note",
                 "database architecture patterns low confidence content that references [[Confidence Seed]].",
                 "reference",
@@ -515,7 +510,6 @@ mod tests {
         let stale = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Stale Citation Note",
                 "database architecture patterns stale citation content that references [[Confidence Seed]].",
                 "reference",
@@ -529,7 +523,6 @@ mod tests {
         let normal = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Normal Confidence Note",
                 "database architecture patterns normal confidence content that references [[Confidence Seed]].",
                 "reference",

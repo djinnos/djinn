@@ -161,7 +161,6 @@ mod tests {
         let legacy = repo
             .create(
                 &project.id,
-                &canonical,
                 "Legacy Note",
                 "Legacy note body. It has enough content for summaries.\n\nSecond paragraph here.",
                 "reference",
@@ -198,7 +197,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_session_flushes_reads_from_same_session_server() {
-        let tmp = workspace_tempdir();
+        let _tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = ProjectRepository::new(db.clone(), EventBus::noop())
@@ -209,7 +208,6 @@ mod tests {
         let note_a = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Note A",
                 "alpha",
                 "reference",
@@ -218,7 +216,7 @@ mod tests {
             .await
             .unwrap();
         let note_b = repo
-            .create(&project.id, tmp.path(), "Note B", "beta", "reference", "[]")
+            .create(&project.id, "Note B", "beta", "reference", "[]")
             .await
             .unwrap();
 
@@ -252,102 +250,12 @@ mod tests {
         assert!(manager.server_for_session(&session_id).await.is_none());
     }
 
-    #[tokio::test]
-    async fn proposal_pipeline_regression_worktree_draft_survives_sync_and_is_listed() {
-        let worktree_tmp = workspace_tempdir();
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = create_project(&db, std::path::Path::new("")).await;
-        // `propose_adr_list` scans `project_dir(owner, repo)`, not the note's
-        // worktree path. Point the canonical NoteRepository writes at the same
-        // derived location so what's synced is what's listed.
-        let canonical_path =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        std::fs::create_dir_all(&canonical_path).expect("create canonical project dir");
-        let _canonical_guard = PathCleanupGuard::new(canonical_path.clone());
-        let server = DjinnMcpServer::new(state);
-        let canonical_repo = NoteRepository::new(db.clone(), EventBus::noop());
-        let worktree_repo = NoteRepository::new(db.clone(), EventBus::noop())
-            .with_worktree_root(Some(worktree_tmp.path().to_path_buf()));
-
-        let created = worktree_repo
-            .create(
-                &project.id,
-                &canonical_path,
-                "Pipeline Draft",
-                "---\ntitle: Pipeline Draft\nwork_shape: epic\noriginating_spike_id: ih6u-regression\n---\n\n# Pipeline Draft\n\nSurvives task completion.\n",
-                "adr",
-                "[]",
-            )
-            .await
-            .expect("create worktree adr draft");
-
-        let moved = worktree_repo
-            .move_note(
-                &created.id,
-                &canonical_path,
-                "Pipeline Draft",
-                "proposed_adr",
-            )
-            .await
-            .expect("move draft into proposed folder");
-        assert_eq!(moved.folder, "decisions/proposed");
-        let proposed_path = worktree_tmp
-            .path()
-            .join(".djinn/decisions/proposed/pipeline-draft.md");
-        assert!(
-            proposed_path.exists(),
-            "draft should exist in worktree proposed folder before close sync"
-        );
-        std::fs::write(
-            &proposed_path,
-            "---\ntitle: Pipeline Draft\nwork_shape: epic\noriginating_spike_id: ih6u-regression\n---\n\n# Pipeline Draft\n\nSurvives task completion.\n",
-        )
-        .expect("overwrite moved draft with proposal frontmatter");
-
-        let synced = worktree_repo
-            .sync_worktree_notes_to_canonical(&project.id, &canonical_path, worktree_tmp.path())
-            .await
-            .expect("sync worktree notes to canonical memory");
-        assert_eq!(synced, 1);
-
-        let canonical = canonical_repo
-            .get_by_permalink(&project.id, "decisions/proposed/pipeline-draft")
-            .await
-            .expect("canonical lookup succeeds")
-            .expect("canonical proposed ADR exists after sync");
-        assert_eq!(canonical.note_type, "proposed_adr");
-        assert!(
-            canonical
-                .file_path
-                .ends_with(".djinn/decisions/proposed/pipeline-draft.md")
-        );
-
-        let response = server
-            .dispatch_tool(
-                "propose_adr_list",
-                json!({ "project": project.slug() }),
-            )
-            .await
-            .expect("dispatch propose_adr_list after sync");
-
-        assert_eq!(response.get("error"), None);
-        let items = response
-            .get("items")
-            .and_then(|value| value.as_array())
-            .expect("items array");
-        assert_eq!(items.len(), 1);
-        let item = &items[0];
-        assert_eq!(
-            item.get("id").and_then(|value| value.as_str()),
-            Some("pipeline-draft")
-        );
-        assert_eq!(
-            item.get("title").and_then(|value| value.as_str()),
-            Some("Pipeline Draft")
-        );
-        assert!(item.get("mtime").and_then(|value| value.as_str()).is_some());
-    }
+    // proposal_pipeline_regression_worktree_draft_survives_sync_and_is_listed
+    // was deleted: it exercised `sync_worktree_notes_to_canonical` and
+    // `with_worktree_root`, both removed by the db-only knowledge-base
+    // cut-over. The propose_adr_list tool itself still scans the canonical
+    // project dir on disk for proposed ADR markdown files (a separate
+    // workflow from the KB notes table); see the next two tests.
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_list() {

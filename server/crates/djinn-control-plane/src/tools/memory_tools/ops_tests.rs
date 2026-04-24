@@ -140,7 +140,6 @@ mod tests {
         let primary = note_repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Seed Note",
                 "Seed note content with links to [[Related Note]] and architecture context.",
                 "adr",
@@ -151,7 +150,6 @@ mod tests {
         let related = note_repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Related Note",
                 "Related architecture context note.",
                 "reference",
@@ -163,7 +161,6 @@ mod tests {
         let folder_note = note_repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Folder Note",
                 "Folder wildcard note.",
                 "reference",
@@ -333,7 +330,6 @@ mod tests {
         let stale_case = repo
             .create(
                 &project_id,
-                setup._tmp.path(),
                 "ADR-054 roadmap memory extraction quality gates and note taxonomy",
                 "Superseded case note mentioning ADR-054 roadmap extraction quality gates taxonomy.",
                 "case",
@@ -473,7 +469,6 @@ mod tests {
         let hidden = repo
             .create(
                 &project_id,
-                setup._tmp.path(),
                 "Hidden Note",
                 "completely unrelated content",
                 "reference",
@@ -533,7 +528,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_search_ops_merges_semantic_candidates_with_lexical_results() {
-        let tmp = workspace_tempdir();
+        let _tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let (tx, _rx) = broadcast::channel(256);
@@ -548,7 +543,6 @@ mod tests {
         let lexical = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Lexical Match",
                 "architecture planning context",
                 "reference",
@@ -793,7 +787,6 @@ mod tests {
 
         repo.create(
             &project_id,
-            setup._tmp.path(),
             "Broken Source",
             "See [[Missing Memory Target]].",
             "research",
@@ -803,7 +796,6 @@ mod tests {
         .unwrap();
         repo.create(
             &project_id,
-            setup._tmp.path(),
             "Standalone Orphan",
             "no inbound links",
             "pattern",

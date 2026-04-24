@@ -322,7 +322,6 @@ mod tests {
         let note = note_repo
             .create(
                 &project.id,
-                &project_path,
                 "Task Success Note",
                 "notes for task outcome confidence",
                 "research",
@@ -330,6 +329,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let _ = project_path;
         let before = note_repo.get(&note.id).await.unwrap().unwrap().confidence;
 
         let task = task_repo
@@ -544,7 +544,6 @@ mod tests {
         let note = note_repo
             .create(
                 &project.id,
-                &project_path,
                 "Dupe Note",
                 "notes for duplicate task outcome",
                 "research",
@@ -552,6 +551,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let _ = project_path;
 
         let task = task_repo
             .create_in_project(

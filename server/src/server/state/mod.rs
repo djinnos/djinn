@@ -16,8 +16,8 @@ use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_db::{
-    Database, NoopNoteVectorStore, NoteRepository, NoteVectorStore, ProjectRepository,
-    QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
+    Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantConfig,
+    QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
@@ -1055,13 +1055,9 @@ impl AppState {
         // Prune stale verification cache entries (>7 days old).
         self.prune_verification_cache_on_startup().await;
 
-        // Reindex in the background so the HTTP listener can bind immediately.
-        // The reindex can be slow (especially with embeddings) and is not
-        // required for the server to be functional.
-        let reindex_self = self.clone();
-        tokio::spawn(async move {
-            reindex_self.reindex_all_projects_on_startup().await;
-        });
+        // KB note storage is db-only: there is no on-disk reindex on startup
+        // and no .djinn/ filesystem watcher. Notes are written directly to
+        // Dolt by the MCP write path; embeddings catch up asynchronously.
 
         // One-shot backfill of pre-existing blobless mirrors to full
         // mirrors. Mirrors cloned before the chat-user-global cut-over
@@ -1087,14 +1083,6 @@ impl AppState {
         tokio::spawn(async move {
             warm_workspaces_self.warm_workspaces_on_startup().await;
         });
-
-        // Watch .djinn/ directories for KB note changes and auto-reindex.
-        djinn_db::background::watchers::spawn_kb_watchers(
-            self.db().clone(),
-            self.events().clone(),
-            self.cancel().clone(),
-            Some(Arc::new(self.embedding_service().clone())),
-        );
 
         // ADR-050 Chunk C: the filesystem-watcher SCIP trigger has been
         // removed.  SCIP indexing now happens lazily via
@@ -1270,43 +1258,6 @@ impl AppState {
         match repo.prune_older_than(7).await {
             Ok(()) => tracing::debug!("pruned stale verification cache entries"),
             Err(e) => tracing::warn!(error = %e, "failed to prune verification cache"),
-        }
-    }
-
-    async fn reindex_all_projects_on_startup(&self) {
-        let project_repo = ProjectRepository::new(self.db().clone(), self.event_bus());
-        let note_repo = NoteRepository::new(self.db().clone(), self.event_bus())
-            .with_embedding_provider(Some(Arc::new(self.embedding_service().clone())))
-            .with_vector_store(Some(self.note_vector_store()));
-        let projects = match project_repo.list().await {
-            Ok(projects) => projects,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to list projects for startup reindex");
-                return;
-            }
-        };
-
-        for project in projects {
-            let project_dir =
-                djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-            match note_repo
-                .reindex_from_disk(&project.id, &project_dir)
-                .await
-            {
-                Ok(summary) => tracing::info!(
-                    project = %project.slug(),
-                    updated = summary.updated,
-                    created = summary.created,
-                    deleted = summary.deleted,
-                    unchanged = summary.unchanged,
-                    "startup memory reindex completed"
-                ),
-                Err(e) => tracing::warn!(
-                    project = %project.slug(),
-                    error = %e,
-                    "startup memory reindex failed"
-                ),
-            }
         }
     }
 

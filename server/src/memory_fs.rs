@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use djinn_memory::Note;
 use djinn_db::{
-    NoteRepository, folder_for_type, infer_note_type, normalize_virtual_note_path, permalink_for,
-    permalink_from_virtual_note_path, render_note_markdown, task_branch_name, title_from_permalink,
-    virtual_note_path_for_permalink,
+    NoteRepository, folder_for_type, infer_embedding_branch_from_worktree, infer_note_type,
+    normalize_virtual_note_path, permalink_for, permalink_from_virtual_note_path,
+    render_note_markdown, task_branch_name, title_from_permalink, virtual_note_path_for_permalink,
 };
 use thiserror::Error;
 
@@ -85,20 +85,27 @@ impl MemoryViewResolver for DefaultMemoryViewResolver {
         base_repo: &NoteRepository,
     ) -> std::result::Result<ResolvedMemoryView, djinn_db::Error> {
         let mut repo = base_repo.clone();
+        // The repo no longer mirrors notes to disk, so the resolver
+        // collapses to "pick the embedding branch and remember the
+        // worktree_root for callers who need it as context (e.g. for
+        // logging or downstream filesystem mounts that overlay other
+        // non-note .djinn/ files)".
         let (branch, worktree_root) = match selection {
             MemoryViewSelection::Canonical => ("main".to_string(), None),
             MemoryViewSelection::Branch { branch } => (branch.clone(), None),
             MemoryViewSelection::Worktree { root } => {
-                repo = repo.with_worktree_root(Some(root.clone()));
-                (repo.embedding_branch().to_string(), Some(root.clone()))
+                let branch =
+                    infer_embedding_branch_from_worktree(root).unwrap_or_else(|| "main".to_string());
+                (branch, Some(root.clone()))
             }
             MemoryViewSelection::Task {
                 task_short_id,
                 worktree_root,
             } => {
                 if let Some(root) = worktree_root.clone() {
-                    repo = repo.with_worktree_root(Some(root.clone()));
-                    (repo.embedding_branch().to_string(), Some(root))
+                    let branch = infer_embedding_branch_from_worktree(&root)
+                        .unwrap_or_else(|| "main".to_string());
+                    (branch, Some(root))
                 } else if let Some(short_id) = task_short_id {
                     (task_branch_name(short_id), None)
                 } else {
@@ -430,10 +437,10 @@ impl MemoryFilesystemCore {
                     .await?
             }
             None => {
+                let _ = project_path;
                 view.repo
                     .create(
                         project_id,
-                        project_path,
                         &parsed.title,
                         &parsed.content,
                         &parsed.note_type,
@@ -699,11 +706,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolves_note_paths_and_reads_content() {
-        let (core, db, project_id, project_root) = make_core().await;
+        let (core, db, project_id, _project_root) = make_core().await;
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
         repo.create(
             &project_id,
-            project_root.path(),
             "Reusable Flow",
             "Body text",
             "pattern",
@@ -744,11 +750,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stats_and_lists_directories() {
-        let (core, db, project_id, project_root) = make_core().await;
+        let (core, db, project_id, _project_root) = make_core().await;
         let repo = NoteRepository::new(db, EventBus::noop());
         repo.create(
             &project_id,
-            project_root.path(),
             "Project Brief",
             "Overview",
             "brief",
@@ -758,7 +763,6 @@ mod tests {
         .unwrap();
         repo.create(
             &project_id,
-            project_root.path(),
             "Routing Guide",
             "Design body",
             "design_spec",
@@ -825,7 +829,6 @@ mod tests {
 
         repo.create(
             &project_id,
-            project_root.path(),
             "Target Note",
             "Target body",
             "reference",
@@ -1058,7 +1061,6 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
         repo.create(
             &project.id,
-            project_root.path(),
             "Selection Note",
             "body",
             "reference",

@@ -190,12 +190,10 @@ pub async fn create_test_note(db: &Database, project_id: &str) -> Note {
         .expect("failed to load project for note")
         .expect("project not found for note");
 
-    let project_path = project_dir(&project.github_owner, &project.github_repo);
-    std::fs::create_dir_all(&project_path).expect("failed to create test project path");
+    let _project_path = project_dir(&project.github_owner, &project.github_repo);
 
     repo.create(
         project_id,
-        &project_path,
         "test note",
         "test note body",
         "research",

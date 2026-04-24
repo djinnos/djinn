@@ -374,11 +374,11 @@ mod tests {
     async fn make_note(
         repo: &NoteRepository,
         project_id: &str,
-        path: &std::path::Path,
+        _path: &std::path::Path,
         title: &str,
         content: &str,
     ) -> djinn_memory::Note {
-        repo.create(project_id, path, title, content, "reference", "[]")
+        repo.create(project_id, title, content, "reference", "[]")
             .await
             .unwrap()
     }

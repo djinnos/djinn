@@ -293,7 +293,7 @@ mod tests {
 
     async fn make_project_and_two_notes(
         db: &Database,
-        tmp: &tempfile::TempDir,
+        _tmp: &tempfile::TempDir,
     ) -> (String, String) {
         let project = ProjectRepository::new(db.clone(), EventBus::noop())
             .create("test-project", "test", "test-project")
@@ -307,7 +307,6 @@ mod tests {
         let note1 = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Auth Token A",
                 shared_content,
                 "pattern",
@@ -319,7 +318,6 @@ mod tests {
         let note2 = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Auth Token B",
                 shared_content,
                 "pattern",

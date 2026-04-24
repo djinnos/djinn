@@ -531,12 +531,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_default_min_confidence_excludes_very_low_confidence() {
-        let (tmp, repo, project_id) = setup_repo().await;
+        let (_tmp, repo, project_id) = setup_repo().await;
 
         let seed = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Seed",
                 "Seed about architecture patterns.",
                 "adr",
@@ -549,7 +548,6 @@ mod tests {
         let low = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Low Conf",
                 "architecture patterns low content referencing [[Seed]].",
                 "reference",
@@ -563,7 +561,6 @@ mod tests {
         let _normal = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Normal Conf",
                 "architecture patterns normal content referencing [[Seed]].",
                 "reference",
@@ -593,12 +590,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_min_confidence_zero_includes_all() {
-        let (tmp, repo, project_id) = setup_repo().await;
+        let (_tmp, repo, project_id) = setup_repo().await;
 
         let seed = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Seed",
                 "Seed about architecture patterns.",
                 "adr",
@@ -610,7 +606,6 @@ mod tests {
         let low = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Low Conf",
                 "architecture patterns low content referencing [[Seed]].",
                 "reference",
@@ -647,12 +642,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_context_stale_citation_notes_annotated_superseded() {
-        let (tmp, repo, project_id) = setup_repo().await;
+        let (_tmp, repo, project_id) = setup_repo().await;
 
         let seed = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Seed",
                 "Seed about architecture patterns.",
                 "adr",
@@ -664,7 +658,6 @@ mod tests {
         let stale = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Stale Note",
                 "architecture patterns stale content referencing [[Seed]].",
                 "reference",
@@ -679,7 +672,6 @@ mod tests {
         let normal = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Normal Note",
                 "architecture patterns normal content referencing [[Seed]].",
                 "reference",

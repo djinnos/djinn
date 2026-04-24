@@ -8,7 +8,6 @@ use super::{
 
 use crate::server::DjinnMcpServer;
 use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
-use std::path::PathBuf;
 
 #[tool_router(router = memory_writes_router, vis = "pub(super)")]
 impl DjinnMcpServer {
@@ -21,26 +20,16 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<WriteParams>,
     ) -> Json<MemoryNoteResponse> {
-        self.memory_write_with_worktree(Parameters(p), None).await
-    }
-
-    pub async fn memory_write_with_worktree(
-        &self,
-        Parameters(p): Parameters<WriteParams>,
-        worktree_root: Option<PathBuf>,
-    ) -> Json<MemoryNoteResponse> {
-        self.memory_write_with_worktree_and_decider(
+        self.memory_write_with_decider(
             Parameters(p),
-            worktree_root,
             &LlmMemoryWriteDedupDecider::new(self.state.db().clone()),
         )
         .await
     }
 
-    pub(crate) async fn memory_write_with_worktree_and_decider(
+    pub(crate) async fn memory_write_with_decider(
         &self,
         Parameters(p): Parameters<WriteParams>,
-        worktree_root: Option<PathBuf>,
         decider: &dyn MemoryWriteDedupDecider,
     ) -> Json<MemoryNoteResponse> {
         let project_id = match self.resolve_project_id(&p.project).await {
@@ -54,7 +43,7 @@ impl DjinnMcpServer {
             .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
             .unwrap_or_else(|| "[]".to_string());
 
-        let repo = note_repository(self, worktree_root);
+        let repo = note_repository(self);
 
         if let Some(response) =
             maybe_update_singleton_note(self, &repo, &project_id, &p, &tags_json).await
@@ -102,32 +91,16 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<EditParams>,
     ) -> Json<MemoryNoteResponse> {
-        self.memory_edit_with_worktree(Parameters(p), None).await
+        super::edit_ops::memory_edit(self, Parameters(p)).await
     }
 
-    pub async fn memory_edit_with_worktree(
-        &self,
-        Parameters(p): Parameters<EditParams>,
-        worktree_root: Option<PathBuf>,
-    ) -> Json<MemoryNoteResponse> {
-        super::edit_ops::memory_edit_with_worktree(self, Parameters(p), worktree_root).await
-    }
-
-    /// Delete a note. Removes file and index entry.
-    #[tool(description = "Delete a note. Removes file and index entry.")]
+    /// Delete a note. Removes the row from Dolt.
+    #[tool(description = "Delete a note. Removes the row from Dolt.")]
     pub async fn memory_delete(
         &self,
         Parameters(p): Parameters<DeleteParams>,
     ) -> Json<MemoryDeleteResponse> {
-        self.memory_delete_with_worktree(Parameters(p), None).await
-    }
-
-    pub(crate) async fn memory_delete_with_worktree(
-        &self,
-        Parameters(p): Parameters<DeleteParams>,
-        worktree_root: Option<PathBuf>,
-    ) -> Json<MemoryDeleteResponse> {
-        super::delete_ops::memory_delete_with_worktree(self, Parameters(p), worktree_root).await
+        super::delete_ops::memory_delete(self, Parameters(p)).await
     }
 
     /// Move a note to a new location. Updates permalink and resolves inbound links.
@@ -139,13 +112,5 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<MoveParams>,
     ) -> Json<MemoryNoteResponse> {
         super::move_ops::memory_move(self, Parameters(p)).await
-    }
-
-    pub(crate) async fn memory_move_with_worktree(
-        &self,
-        Parameters(p): Parameters<MoveParams>,
-        worktree_root: Option<PathBuf>,
-    ) -> Json<MemoryNoteResponse> {
-        super::move_ops::memory_move_with_worktree(self, Parameters(p), worktree_root).await
     }
 }

@@ -722,7 +722,6 @@ mod contradiction_tests {
         for (i, content) in noise_content.iter().enumerate() {
             repo.create(
                 &project_id,
-                tmp.path(),
                 &format!("Noise {i}"),
                 content,
                 "adr",
@@ -739,7 +738,6 @@ mod contradiction_tests {
         let existing = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Existing Pattern",
                 shared,
                 "pattern",
@@ -752,7 +750,6 @@ mod contradiction_tests {
         let new_note = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "New Pattern",
                 shared,
                 "pattern",
@@ -786,7 +783,6 @@ mod contradiction_tests {
         let note = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Solo Note",
                 "unique content about tokio spawn concurrent execution patterns rust async",
                 "pattern",
@@ -819,7 +815,6 @@ mod contradiction_tests {
         // Note of a DIFFERENT type — should be filtered (Low risk)
         repo.create(
             &project_id,
-            tmp.path(),
             "Reference Note",
             "tokio spawn concurrent execution async rust service pattern for distributed systems",
             "reference",
@@ -831,7 +826,6 @@ mod contradiction_tests {
         let new_note = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Pattern Note",
                 "tokio spawn concurrent execution async rust service pattern for distributed systems",
                 "pattern",
@@ -886,12 +880,11 @@ mod scope_overlap_decay_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn query_scoped_by_path_overlap_matches_parent_and_child_scopes_only() {
-        let (repo, tmp, project_id) = make_repo_and_project().await;
+        let (repo, _tmp, project_id) = make_repo_and_project().await;
 
         let parent = repo
             .create_with_scope(
                 &project_id,
-                tmp.path(),
                 "Parent Scope",
                 "content",
                 "pattern",
@@ -904,7 +897,6 @@ mod scope_overlap_decay_tests {
         let child = repo
             .create_with_scope(
                 &project_id,
-                tmp.path(),
                 "Child Scope",
                 "content",
                 "pattern",
@@ -917,7 +909,6 @@ mod scope_overlap_decay_tests {
         let unrelated = repo
             .create_with_scope(
                 &project_id,
-                tmp.path(),
                 "Unrelated Scope",
                 "content",
                 "pattern",
@@ -930,7 +921,6 @@ mod scope_overlap_decay_tests {
         let global = repo
             .create(
                 &project_id,
-                tmp.path(),
                 "Global Note",
                 "content",
                 "pattern",
@@ -957,10 +947,9 @@ mod scope_overlap_decay_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn query_scoped_by_path_overlap_is_noop_for_empty_changed_paths() {
-        let (repo, tmp, project_id) = make_repo_and_project().await;
+        let (repo, _tmp, project_id) = make_repo_and_project().await;
         repo.create_with_scope(
             &project_id,
-            tmp.path(),
             "Scoped Note",
             "content",
             "pattern",

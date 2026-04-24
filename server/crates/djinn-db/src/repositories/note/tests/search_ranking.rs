@@ -116,7 +116,6 @@ async fn fts5_search() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "Rust Database Choice",
         "We chose rusqlite for its simplicity and bundled SQLite.",
         "adr",
@@ -126,7 +125,6 @@ async fn fts5_search() {
     .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Connection Strategy",
         "Use direct MCP connections for local operation.",
         "adr",
@@ -163,7 +161,6 @@ async fn fts5_search_folder_filter() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "Design Note",
         "common term",
         "design",
@@ -173,7 +170,6 @@ async fn fts5_search_folder_filter() {
     .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Research Note",
         "common term",
         "research",
@@ -209,7 +205,6 @@ async fn fts5_search_prefers_title_over_content() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "rankneedle in title",
         "unrelated body",
         "research",
@@ -219,7 +214,6 @@ async fn fts5_search_prefers_title_over_content() {
     .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "different title",
         "This content has rankneedle.",
         "research",
@@ -256,7 +250,6 @@ async fn fts5_search_prefers_tags_over_content() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "tag-ranked note",
         "unrelated body",
         "research",
@@ -266,7 +259,6 @@ async fn fts5_search_prefers_tags_over_content() {
     .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "content-ranked note",
         "This content has ranktag.",
         "research",
@@ -314,7 +306,6 @@ async fn resolve_prefers_exact_permalink_before_title_search_fallback() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "ADR-054 Roadmap Memory Extraction Quality Gates and Note Taxonomy",
         "Archived case note that would otherwise rank via title/content fallback.",
         "case",
@@ -365,7 +356,6 @@ async fn dedup_candidates_returns_no_matches_when_query_has_no_hits() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "Rust Database Choice",
         "We chose rusqlite for local simplicity.",
         "adr",
@@ -399,7 +389,6 @@ async fn dedup_candidates_filter_by_folder_and_note_type() {
     let matching = repo
         .create(
             &project.id,
-            tmp.path(),
             "Repository Dedup Strategy",
             "shared dedup token appears here",
             "adr",
@@ -417,7 +406,6 @@ async fn dedup_candidates_filter_by_folder_and_note_type() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "Repository Dedup Research",
         "shared dedup token appears here",
         "research",
@@ -428,7 +416,6 @@ async fn dedup_candidates_filter_by_folder_and_note_type() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "Design Dedup Strategy",
         "shared dedup token appears here",
         "design",
@@ -462,7 +449,6 @@ async fn search_rrf_prefers_higher_access_count_for_equivalent_matches() {
     let high = repo
         .create(
             &project.id,
-            tmp.path(),
             "sharedterm alpha",
             "same content",
             "research",
@@ -473,7 +459,6 @@ async fn search_rrf_prefers_higher_access_count_for_equivalent_matches() {
     let low = repo
         .create(
             &project.id,
-            tmp.path(),
             "sharedterm beta",
             "same content",
             "research",
@@ -519,7 +504,6 @@ async fn update_confidence_reads_updates_and_persists() {
     let note = repo
         .create(
             &project.id,
-            tmp.path(),
             "Confidence Note",
             "body",
             "research",
@@ -557,7 +541,6 @@ async fn search_rrf_confidence_lowers_equivalent_match_ranking() {
     let high = repo
         .create(
             &project.id,
-            tmp.path(),
             "sharedconfidence alpha",
             "same content",
             "research",
@@ -568,7 +551,6 @@ async fn search_rrf_confidence_lowers_equivalent_match_ranking() {
     let low = repo
         .create(
             &project.id,
-            tmp.path(),
             "sharedconfidence beta",
             "same content",
             "research",
@@ -618,12 +600,11 @@ async fn catalog_generation() {
     let project = make_project(&db, tmp.path()).await;
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
-    repo.create(&project.id, tmp.path(), "ADR One", "body", "adr", "[]")
+    repo.create(&project.id, "ADR One", "body", "adr", "[]")
         .await
         .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Research One",
         "body",
         "research",
@@ -650,7 +631,6 @@ async fn create_emits_event() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "Event Note",
         "body",
         "design",
@@ -685,7 +665,6 @@ async fn touch_accessed_does_not_emit_event() {
     let note = repo
         .create(
             &project.id,
-            tmp.path(),
             "Touch Me",
             "body",
             "reference",
@@ -717,7 +696,6 @@ async fn touch_accessed_increments_access_count() {
     let note = repo
         .create(
             &project.id,
-            tmp.path(),
             "Touch Count",
             "body",
             "reference",
@@ -745,7 +723,6 @@ async fn touch_accessed_emits_missing_summary_signal_when_summaries_are_missing(
     let note = repo
         .create(
             &project.id,
-            tmp.path(),
             "Needs Summary",
             "body",
             "reference",
@@ -782,7 +759,6 @@ async fn update_summaries_persists_summary_fields() {
     let note = repo
         .create(
             &project.id,
-            tmp.path(),
             "Summarize Me",
             "body",
             "reference",

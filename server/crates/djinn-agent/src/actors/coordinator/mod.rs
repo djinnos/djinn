@@ -188,7 +188,6 @@ mod tests {
         let note = note_repo
             .create(
                 &project.id,
-                &project_path,
                 title,
                 "body",
                 "research",

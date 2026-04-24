@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE notes SET\n                        title      = ?,\n                        file_path  = '',\n                        note_type  = ?,\n                        folder     = ?,\n                        permalink  = ?,\n                        updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')\n                     WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "9a0eb7f373040071ce959682599d9ec368587dd12f19c42c1ea0f2e64711f665"
+}

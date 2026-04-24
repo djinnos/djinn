@@ -1,6 +1,10 @@
-use super::*;
-
 // ── Note type helpers ────────────────────────────────────────────────────────
+//
+// These helpers used to compute on-disk paths for note markdown files. Now
+// that notes live exclusively in Dolt the path-related functions are gone;
+// what remains is the permalink/folder/slug machinery and the markdown
+// renderer used by the virtual `memory_fs` mount that synthesizes .md views
+// out of db rows for tools that read files.
 
 /// Return the storage folder for a given note type.
 ///
@@ -95,30 +99,6 @@ pub fn permalink_for_with_status(note_type: &str, title: &str, status: Option<&s
     }
 }
 
-/// Return the absolute path where a note's markdown file should be stored.
-pub fn file_path_for(project_path: &Path, note_type: &str, title: &str) -> PathBuf {
-    file_path_for_with_status(project_path, note_type, title, None)
-}
-
-pub fn file_path_for_with_status(
-    project_path: &Path,
-    note_type: &str,
-    title: &str,
-    status: Option<&str>,
-) -> PathBuf {
-    let djinn = project_path.join(".djinn");
-    if is_singleton(note_type) {
-        return djinn.join(format!("{note_type}.md"));
-    }
-    let folder = folder_for_type_with_status(note_type, status);
-    let slug = slugify(title);
-    if folder.is_empty() {
-        djinn.join(format!("{slug}.md"))
-    } else {
-        djinn.join(folder).join(format!("{slug}.md"))
-    }
-}
-
 /// Convert a title into a URL-safe slug.
 pub fn slugify(s: &str) -> String {
     let slug: String = s
@@ -139,28 +119,12 @@ pub fn slugify(s: &str) -> String {
         .join("-")
 }
 
-// ── File I/O ─────────────────────────────────────────────────────────────────
-
-/// Write (or overwrite) a note's markdown file with YAML frontmatter.
-pub(super) fn write_note_file(
-    file_path: &Path,
-    title: &str,
-    note_type: &str,
-    tags: &str,
-    content: &str,
-) -> Result<()> {
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| Error::InvalidData(format!("create_dir_all {}: {e}", parent.display())))?;
-    }
-    let file_content = render_note_markdown(title, note_type, tags, content);
-    std::fs::write(file_path, file_content)
-        .map_err(|e| Error::InvalidData(format!("write note file {}: {e}", file_path.display())))?;
-    Ok(())
-}
+// ── Markdown rendering ───────────────────────────────────────────────────────
 
 /// Render a note as markdown with YAML frontmatter using the repository's
 /// canonical on-disk format.
+///
+/// Used by `memory_fs` to synthesize a virtual .md view of a db-stored note.
 pub fn render_note_markdown(title: &str, note_type: &str, tags: &str, content: &str) -> String {
     format!("---\ntitle: {title}\ntype: {note_type}\ntags: {tags}\n---\n\n{content}")
 }

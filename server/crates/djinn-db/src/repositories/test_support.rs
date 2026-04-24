@@ -96,7 +96,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_one_stale_a = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Project One Stale A",
             "content one",
             "reference",
@@ -107,7 +106,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_one_stale_b = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Project One Stale B",
             "content two",
             "reference",
@@ -118,7 +116,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_one_recent_a = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Project One Recent A",
             "content three",
             "reference",
@@ -129,7 +126,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_one_recent_b = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Project One Recent B",
             "content four",
             "reference",
@@ -140,7 +136,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_one_orphan = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Project One Orphan",
             "orphan body",
             "reference",
@@ -151,7 +146,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_one_linked_target = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Project One Linked Target",
             "linked body",
             "reference",
@@ -162,7 +156,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let _project_one_linked_source = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Project One Linked Source",
             &format!("links to [[{}]]", project_one_linked_target.title),
             "reference",
@@ -193,7 +186,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_one_repair_target = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Rust Ownership Guide",
             "Rust Ownership. Rust Ownership. Rust Ownership. Rust Ownership. Borrowing and lifetimes details.",
             "reference",
@@ -204,7 +196,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_one_repair_source = repo
         .create(
             &project_one.id,
-            &project_one_path,
             "Project One Broken Link Source",
             "Read [[Rust Ownership]] before editing.",
             "reference",
@@ -216,7 +207,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_two_stale_a = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Project Two Stale A",
             "content five",
             "reference",
@@ -227,7 +217,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_two_stale_b = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Project Two Stale B",
             "content six",
             "reference",
@@ -238,7 +227,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_two_recent_a = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Project Two Recent A",
             "content seven",
             "reference",
@@ -249,7 +237,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_two_recent_b = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Project Two Recent B",
             "content eight",
             "reference",
@@ -260,7 +247,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_two_orphan = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Project Two Orphan",
             "orphan body",
             "reference",
@@ -271,7 +257,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_two_linked_target = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Project Two Linked Target",
             "linked body",
             "reference",
@@ -282,7 +267,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let _project_two_linked_source = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Project Two Linked Source",
             &format!("links to [[{}]]", project_two_linked_target.title),
             "reference",
@@ -313,7 +297,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_two_repair_target = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Async Runtime Guide",
             "Async Runtime. Async Runtime. Async Runtime. Async Runtime. Scheduling and executors details.",
             "reference",
@@ -324,7 +307,6 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     let project_two_repair_source = repo
         .create(
             &project_two.id,
-            &project_two_path,
             "Project Two Broken Link Source",
             "Review [[Async Runtime]] before tuning workers.",
             "reference",

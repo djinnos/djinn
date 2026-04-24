@@ -4,7 +4,7 @@ use super::*;
 async fn epic_extension_handlers_match_shared_epic_ops_behavior() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let _project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
     let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
     let epic = epic_repo
         .update(

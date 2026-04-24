@@ -278,7 +278,6 @@ async fn structural_extraction_flushes_co_access_associations() {
     let note_a = note_repo
         .create(
             &fixture.project.id,
-            fixture.tmpdir.path(),
             "Note Alpha",
             "content alpha",
             "reference",
@@ -289,7 +288,6 @@ async fn structural_extraction_flushes_co_access_associations() {
     let note_b = note_repo
         .create(
             &fixture.project.id,
-            fixture.tmpdir.path(),
             "Note Beta",
             "content beta",
             "reference",

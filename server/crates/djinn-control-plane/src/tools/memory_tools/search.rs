@@ -44,80 +44,25 @@ impl DjinnMcpServer {
 
     /// Get unified diff for a specific commit of a .djinn/ file. No SHA = returns
     /// diff for most recent change.
+    ///
+    /// As of the db-only knowledge-base cut-over, notes no longer have a
+    /// physical .md file under git, so this tool now always returns an empty
+    /// diff with an error message. Kept on the surface for backward-compat;
+    /// callers should switch to `memory_history` against db row updates.
     #[tool(
-        description = "Get unified diff for a specific commit of a .djinn/ file. No SHA = returns diff for most recent change."
+        description = "Get unified diff for a specific commit of a .djinn/ file. No SHA = returns diff for most recent change. Note: with db-only KB storage, this tool no longer returns a meaningful diff."
     )]
     pub async fn memory_diff(
         &self,
         Parameters(p): Parameters<DiffParams>,
     ) -> Json<MemoryDiffResponse> {
-        let Some(project_id) = self.project_id_for_path(&p.project).await else {
-            return Json(MemoryDiffResponse {
-                diff: String::new(),
-                error: Some(format!("project not found: {}", p.project)),
-            });
-        };
-
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
-            .with_vector_store(self.state.vector_store());
-
-        let Some(note) = repo
-            .get_by_permalink(&project_id, &p.permalink)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return Json(MemoryDiffResponse {
-                diff: String::new(),
-                error: Some(format!("note not found: {}", p.permalink)),
-            });
-        };
-
-        if note.storage != "file" {
-            return Json(MemoryDiffResponse {
-                diff: String::new(),
-                error: Some(format!(
-                    "note '{}' is stored in database only (storage='{}'); git diff is only available for file-backed notes",
-                    p.permalink, note.storage
-                )),
-            });
-        }
-
-        let diff = git_diff_for_file(&note.file_path, p.sha.as_deref()).await;
-        Json(MemoryDiffResponse { diff, error: None })
-    }
-
-    /// Re-index all memory notes for a project from disk on demand.
-    #[tool(
-        description = "Re-index memory notes for a project by scanning note files, comparing checksums to indexed content, and applying create/update/delete changes."
-    )]
-    pub async fn memory_reindex(
-        &self,
-        Parameters(params): Parameters<ReindexParams>,
-    ) -> Json<MemoryReindexResponse> {
-        let Some(project_id) = self.project_id_for_path(&params.project).await else {
-            return Json(MemoryReindexResponse {
-                updated: 0,
-                created: 0,
-                deleted: 0,
-                unchanged: 0,
-                error: Some(format!("project not found: {}", params.project)),
-            });
-        };
-
-        let repo = NoteRepository::new(self.state.db().clone(), self.state.event_bus())
-            .with_vector_store(self.state.vector_store());
-        let summary = repo
-            .reindex_from_disk(&project_id, Path::new(&params.project))
-            .await
-            .unwrap_or_else(|_| ReindexSummary::default());
-
-        Json(MemoryReindexResponse {
-            updated: summary.updated,
-            created: summary.created,
-            deleted: summary.deleted,
-            unchanged: summary.unchanged,
-            error: None,
+        let _ = p;
+        Json(MemoryDiffResponse {
+            diff: String::new(),
+            error: Some(
+                "memory_diff: notes are now stored db-only; on-disk git history is unavailable"
+                    .to_string(),
+            ),
         })
     }
 

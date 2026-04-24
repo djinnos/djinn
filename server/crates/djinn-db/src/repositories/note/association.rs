@@ -277,11 +277,11 @@ mod tests {
     async fn make_note(
         repo: &NoteRepository,
         project: &Project,
-        tmp: &tempfile::TempDir,
+        _tmp: &tempfile::TempDir,
         title: &str,
     ) -> String {
         let note = repo
-            .create(&project.id, tmp.path(), title, "content", "reference", "[]")
+            .create(&project.id, title, "content", "reference", "[]")
             .await
             .unwrap();
         note.id
@@ -676,7 +676,6 @@ mod tests {
         let p2_note1 = repo
             .create(
                 &project2.id,
-                &project2_path,
                 "P2 Note One",
                 "content",
                 "reference",
@@ -687,7 +686,6 @@ mod tests {
         let p2_note2 = repo
             .create(
                 &project2.id,
-                &project2_path,
                 "P2 Note Two",
                 "content",
                 "reference",

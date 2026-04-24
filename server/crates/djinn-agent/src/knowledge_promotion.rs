@@ -1,6 +1,18 @@
-use std::path::{Path, PathBuf};
+//! Knowledge promotion shim.
+//!
+//! Pre-cut-over this module diff'd the worktree's `.djinn/*.md` files
+//! against the canonical project notes table and let the user promote/
+//! discard them on task close. With the db-only knowledge-base cut-over
+//! (notes are no longer mirrored to worktrees) memory writes from a task
+//! land directly in the canonical `notes` table tagged with the task's
+//! embedding branch — there is no "worktree vs canonical" diff to take.
+//!
+//! The public surface here is preserved so `task_merge.rs` and
+//! `extension::handlers::task_admin` keep compiling; the implementations
+//! below collapse to no-ops or minimal embedding-branch promote/discard
+//! actions. The MCP `propose_*` workflow (separate from KB notes) still
+//! handles ADR drafts via on-disk markdown under `decisions/proposed/`.
 
-use djinn_db::repositories::note::{WorktreeNoteChangeKind, WorktreeNoteDiff};
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{NoteRepository, ProjectRepository, SessionRepository, TaskRepository};
 use serde::{Deserialize, Serialize};
@@ -51,85 +63,27 @@ pub struct KnowledgePromotionResult {
     pub discarded_count: usize,
 }
 
-fn change_kind_label(kind: &WorktreeNoteChangeKind) -> &'static str {
-    match kind {
-        WorktreeNoteChangeKind::Added => "added",
-        WorktreeNoteChangeKind::Modified => "modified",
-        WorktreeNoteChangeKind::Unchanged => "unchanged",
-    }
-}
-
-fn preview_candidate(diff: WorktreeNoteDiff) -> KnowledgePromotionNoteCandidate {
-    KnowledgePromotionNoteCandidate {
-        permalink: diff.permalink,
-        title: diff.title,
-        note_type: diff.note_type,
-        change_kind: change_kind_label(&diff.change_kind).to_string(),
-        canonical_note_id: diff.canonical_note_id,
-        canonical_file_exists: diff.canonical_file_exists,
-    }
-}
-
 async fn project_and_workspace_for_task(
     task_id: &str,
     app_state: &AgentContext,
-) -> Option<(String, String, String, PathBuf)> {
+) -> Option<(String, String)> {
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let task_run_repo = TaskRunRepository::new(app_state.db.clone());
     let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let _ = TaskRunRepository::new(app_state.db.clone());
 
     let task = task_repo.get(task_id).await.ok().flatten()?;
-    let project_path = project_repo
-        .get(&task.project_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|p| {
-            djinn_core::paths::project_dir(&p.github_owner, &p.github_repo)
-                .to_string_lossy()
-                .into_owned()
-        })?;
-    let fallback_project_path = project_path.clone();
-    let workspace = task_run_repo
-        .latest_workspace_path_for_task(task_id)
-        .await
-        .ok()
-        .flatten();
-    let task_short_id = task.short_id.clone();
-    Some((
-        task.project_id,
-        task_short_id.clone(),
-        project_path,
-        workspace.map(PathBuf::from).unwrap_or_else(|| {
-            Path::new(&fallback_project_path)
-                .join(".djinn")
-                .join("worktrees")
-                .join(&task_short_id)
-        }),
-    ))
+    // Project lookup retained so callers see the same project_id resolution
+    // semantics they used to.
+    let _ = project_repo.get(&task.project_id).await.ok().flatten()?;
+    Some((task.project_id, task.short_id))
 }
 
 pub async fn preview_task_knowledge_promotion(
     task_id: &str,
     app_state: &AgentContext,
 ) -> Option<KnowledgePromotionPreview> {
-    let (project_id, _task_short_id, project_path, workspace_path) =
-        project_and_workspace_for_task(task_id, app_state).await?;
-    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let (project_id, _task_short_id) = project_and_workspace_for_task(task_id, app_state).await?;
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
-    let changed_notes = note_repo
-        .diff_worktree_notes_against_canonical(
-            &project_id,
-            Path::new(&project_path),
-            &workspace_path,
-        )
-        .await
-        .ok()?
-        .into_iter()
-        .filter(|diff| diff.change_kind != WorktreeNoteChangeKind::Unchanged)
-        .map(preview_candidate)
-        .collect::<Vec<_>>();
 
     let extraction_quality = session_repo
         .latest_event_taxonomy_for_task(task_id)
@@ -141,8 +95,10 @@ pub async fn preview_task_knowledge_promotion(
     Some(KnowledgePromotionPreview {
         task_id: task_id.to_string(),
         project_id,
-        workspace_path: Some(workspace_path.to_string_lossy().to_string()),
-        changed_notes,
+        workspace_path: None,
+        // No worktree↔canonical diff exists with db-only KB storage —
+        // memory_writes from a task land directly in the canonical table.
+        changed_notes: Vec::new(),
         extraction_quality,
         quality_gate_applied: true,
     })
@@ -154,32 +110,17 @@ pub async fn apply_task_knowledge_decision(
     cleanup_reason: KnowledgeCleanupReason,
     app_state: &AgentContext,
 ) -> Option<KnowledgePromotionResult> {
-    let (project_id, task_short_id, project_path, workspace_path) =
-        project_and_workspace_for_task(task_id, app_state).await?;
+    let (_project_id, task_short_id) = project_and_workspace_for_task(task_id, app_state).await?;
     let preview = preview_task_knowledge_promotion(task_id, app_state).await?;
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let branch = djinn_db::task_branch_name(&task_short_id);
 
-    let promoted_count = match decision {
-        KnowledgePromotionDecision::Promote => note_repo
-            .sync_worktree_notes_to_canonical(
-                &project_id,
-                Path::new(&project_path),
-                &workspace_path,
-            )
-            .await
-            .unwrap_or(0),
-        KnowledgePromotionDecision::Discard => 0,
-    };
-    let discarded_count = match decision {
-        KnowledgePromotionDecision::Promote => 0,
-        KnowledgePromotionDecision::Discard => note_repo
-            .delete_worktree_notes_from_canonical(&project_id, &workspace_path)
-            .await
-            .unwrap_or(0),
-    };
-
+    // Without a worktree mirror there is nothing to promote/discard at the
+    // notes-table level. The only branch-aware artifact left is the
+    // per-task embedding metadata, which we promote into `main` (or delete)
+    // depending on the decision so that vector queries reflect the user's
+    // choice.
     let embedding_rows = match decision {
         KnowledgePromotionDecision::Promote => note_repo
             .promote_branch_embeddings(&branch, "main")
@@ -206,8 +147,8 @@ pub async fn apply_task_knowledge_decision(
                 "quality_gate_applied": preview.quality_gate_applied,
                 "changed_notes": preview.changed_notes,
                 "extraction_quality": preview.extraction_quality,
-                "promoted_count": promoted_count,
-                "discarded_count": discarded_count,
+                "promoted_count": 0,
+                "discarded_count": 0,
                 "embedding_rows": embedding_rows,
                 "embedding_branch": branch,
             })
@@ -219,7 +160,7 @@ pub async fn apply_task_knowledge_decision(
         task_id: task_id.to_string(),
         decision,
         preview,
-        promoted_count,
-        discarded_count,
+        promoted_count: 0,
+        discarded_count: 0,
     })
 }

@@ -11,26 +11,6 @@ mod tests {
         tempfile::tempdir_in(base).expect("create server crate tempdir")
     }
 
-    /// Removes a directory tree on drop. Used by tests that write into the
-    /// synthesized `project_dir(owner, repo)` location (under `$DJINN_HOME`
-    /// or `~/.djinn/projects`) since those paths are outside any `TempDir`
-    /// and would otherwise accumulate forever.
-    struct PathCleanupGuard {
-        path: std::path::PathBuf,
-    }
-
-    impl PathCleanupGuard {
-        fn new(path: std::path::PathBuf) -> Self {
-            Self { path }
-        }
-    }
-
-    impl Drop for PathCleanupGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-    use std::path::PathBuf;
     use std::time::Duration;
 
     use djinn_core::events::EventBus;
@@ -408,76 +388,53 @@ mod tests {
         assert!(note2.confidence > 0.0 && note2.confidence <= 1.0);
     }
 
+    // ── singleton + scope_paths regressions, ported to db-only storage ──
+    //
+    // These previously asserted on canonical/worktree on-disk file contents.
+    // With the db-only knowledge-base cut-over the assertions reduce to "the
+    // db row landed and reads back correctly" — no .md file is written.
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn singleton_worktree_writes_refresh_canonical_read_and_broken_links_view() {
-        let project_tmp = workspace_tempdir();
-        let worktree_tmp = project_tmp
-            .path()
-            .join(".djinn/worktrees/test-brief-singleton");
-        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
+    async fn singleton_writes_overwrite_existing_row_and_resolve_links() {
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let project = create_project(&db, project_tmp.path()).await;
-        let canonical_dir =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        std::fs::create_dir_all(&canonical_dir).expect("create canonical project dir");
-        let _canonical_guard = PathCleanupGuard::new(canonical_dir.clone());
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
-        repo.create(
-            &project.id,
-            &canonical_dir,
-            "ADR-008 Example",
-            "body",
-            "adr",
-            "[]",
-        )
-        .await
-        .unwrap();
-        repo.create(
-            &project.id,
-            &canonical_dir,
-            "ADR-043 Repo Graph",
-            "body",
-            "adr",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project.id, "ADR-008 Example", "body", "adr", "[]")
+            .await
+            .unwrap();
+        repo.create(&project.id, "ADR-043 Repo Graph", "body", "adr", "[]")
+            .await
+            .unwrap();
 
-        let worktree_root = Some(PathBuf::from(&worktree_tmp));
         let project_path = project.slug();
 
         let Json(initial_brief) = server
-            .memory_write_with_worktree(
-                Parameters(WriteParams {
-                    project: project_path.clone(),
-                    title: "Project Brief".to_string(),
-                    content: "Broken [[Missing ADR]]. Broken [[Roadmap]].".to_string(),
-                    note_type: "brief".to_string(),
-                    status: None,
-                    tags: None,
-                    scope_paths: None,
-                }),
-                worktree_root.clone(),
-            )
+            .memory_write(Parameters(WriteParams {
+                project: project_path.clone(),
+                title: "Project Brief".to_string(),
+                content: "Broken [[Missing ADR]]. Broken [[Roadmap]].".to_string(),
+                note_type: "brief".to_string(),
+                status: None,
+                tags: None,
+                scope_paths: None,
+            }))
             .await;
         assert!(initial_brief.error.is_none(), "{:?}", initial_brief.error);
 
         let Json(initial_roadmap) = server
-            .memory_write_with_worktree(
-                Parameters(WriteParams {
-                    project: project_path.clone(),
-                    title: "Project Roadmap".to_string(),
-                    content: "Broken [[Missing ADR-043]].".to_string(),
-                    note_type: "roadmap".to_string(),
-                    status: None,
-                    tags: None,
-                    scope_paths: None,
-                }),
-                worktree_root.clone(),
-            )
+            .memory_write(Parameters(WriteParams {
+                project: project_path.clone(),
+                title: "Project Roadmap".to_string(),
+                content: "Broken [[Missing ADR-043]].".to_string(),
+                note_type: "roadmap".to_string(),
+                status: None,
+                tags: None,
+                scope_paths: None,
+            }))
             .await;
         assert!(
             initial_roadmap.error.is_none(),
@@ -500,18 +457,15 @@ mod tests {
         );
 
         let Json(updated_roadmap) = server
-            .memory_write_with_worktree(
-                Parameters(WriteParams {
-                    project: project_path.clone(),
-                    title: "Project Roadmap".to_string(),
-                    content: "References [[ADR-043 Repo Graph]].".to_string(),
-                    note_type: "roadmap".to_string(),
-                    status: None,
-                    tags: None,
-                    scope_paths: None,
-                }),
-                worktree_root.clone(),
-            )
+            .memory_write(Parameters(WriteParams {
+                project: project_path.clone(),
+                title: "Project Roadmap".to_string(),
+                content: "References [[ADR-043 Repo Graph]].".to_string(),
+                note_type: "roadmap".to_string(),
+                status: None,
+                tags: None,
+                scope_paths: None,
+            }))
             .await;
         assert!(
             updated_roadmap.error.is_none(),
@@ -520,24 +474,17 @@ mod tests {
         );
 
         let Json(updated_brief) = server
-            .memory_write_with_worktree(
-                Parameters(WriteParams {
-                    project: project_path.clone(),
-                    title: "Project Brief".to_string(),
-                    content: "Links [[ADR-008 Example]] and [[roadmap]].".to_string(),
-                    note_type: "brief".to_string(),
-                    status: None,
-                    tags: None,
-                    scope_paths: None,
-                }),
-                worktree_root,
-            )
+            .memory_write(Parameters(WriteParams {
+                project: project_path.clone(),
+                title: "Project Brief".to_string(),
+                content: "Links [[ADR-008 Example]] and [[roadmap]].".to_string(),
+                note_type: "brief".to_string(),
+                status: None,
+                tags: None,
+                scope_paths: None,
+            }))
             .await;
         assert!(updated_brief.error.is_none(), "{:?}", updated_brief.error);
-
-        repo.reindex_from_disk(&project.id, &canonical_dir)
-            .await
-            .unwrap();
 
         let brief_read = ops::memory_read(
             &server,
@@ -549,7 +496,7 @@ mod tests {
         .await;
         assert_eq!(
             brief_read.content.as_deref(),
-            Some("\nLinks [[ADR-008 Example]] and [[roadmap]].")
+            Some("Links [[ADR-008 Example]] and [[roadmap]].")
         );
 
         let roadmap_read = ops::memory_read(
@@ -562,7 +509,7 @@ mod tests {
         .await;
         assert_eq!(
             roadmap_read.content.as_deref(),
-            Some("\nReferences [[ADR-043 Repo Graph]].")
+            Some("References [[ADR-043 Repo Graph]].")
         );
 
         let broken_links = ops::memory_broken_links(
@@ -574,95 +521,19 @@ mod tests {
         )
         .await;
         assert!(broken_links.error.is_none(), "{:?}", broken_links.error);
-        let remaining: Vec<_> = broken_links
-            .broken_links
-            .iter()
-            .map(|link| (link.source_permalink.as_str(), link.raw_text.as_str()))
-            .collect();
-        assert!(!remaining.contains(&("brief", "ADR-008 Example")));
-        assert!(!remaining.contains(&("brief", "roadmap")));
-        assert!(!remaining.contains(&("roadmap", "ADR-043 Repo Graph")));
         assert!(
-            remaining.is_empty(),
-            "unexpected broken links: {remaining:?}"
+            broken_links.broken_links.is_empty(),
+            "expected no broken links after update; got {:?}",
+            broken_links.broken_links
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn singleton_brief_write_with_worktree_project_path_keeps_canonical_path() {
-        let project_tmp = workspace_tempdir();
-        let worktree_tmp = project_tmp
-            .path()
-            .join(".djinn/worktrees/test-brief-singleton");
-        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
+    async fn non_singleton_write_persists_db_row_and_listable_view() {
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let project = create_project(&db, project_tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
-        let repo = NoteRepository::new(db.clone(), EventBus::noop());
-
-        let Json(created) = server
-            .memory_write_with_worktree(
-                Parameters(WriteParams {
-                    project: project.slug(),
-                    title: "Project Brief".to_string(),
-                    content: "Links [[decisions/adr-008-agent-harness-—-goose-library-over-summon-subprocess-spawning]] and [[roadmap]].".to_string(),
-                    note_type: "brief".to_string(),
-                    status: None,
-                    tags: None,
-                    scope_paths: None,
-                }),
-                Some(PathBuf::from(&worktree_tmp)),
-            )
-            .await;
-        assert!(created.error.is_none(), "{:?}", created.error);
-        assert_eq!(created.permalink.as_deref(), Some("brief"));
-
-        let note = repo
-            .get_by_permalink(&project.id, "brief")
-            .await
-            .unwrap()
-            .unwrap();
-
-        let canonical_dir =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        let _canonical_guard = PathCleanupGuard::new(canonical_dir.clone());
-        let canonical_path = canonical_dir.join(".djinn/brief.md");
-        let worktree_path = worktree_tmp.join(".djinn/brief.md");
-        assert_eq!(
-            std::path::Path::new(&note.file_path),
-            canonical_path.as_path()
-        );
-        assert!(canonical_path.exists());
-        assert!(worktree_path.exists());
-        assert!(
-            repo.get_by_permalink(&project.id, "reference/project-brief")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            !canonical_dir
-                .join(".djinn/reference/project-brief.md")
-                .exists()
-        );
-        assert_eq!(
-            std::fs::read_to_string(&canonical_path).unwrap(),
-            std::fs::read_to_string(&worktree_path).unwrap()
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn non_singleton_worktree_write_uses_canonical_project_identity_and_exact_permalink_reads()
-     {
-        let project_tmp = workspace_tempdir();
-        let worktree_tmp = project_tmp
-            .path()
-            .join(".djinn/worktrees/test-design-canonical-write");
-        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = create_project(&db, project_tmp.path()).await;
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
@@ -671,18 +542,15 @@ mod tests {
         let content = "Originated from ADR-054 closure reconciliation.";
 
         let Json(created) = server
-            .memory_write_with_worktree(
-                Parameters(WriteParams {
-                    project: project.slug(),
-                    title: title.to_string(),
-                    content: content.to_string(),
-                    note_type: "design".to_string(),
-                    status: None,
-                    tags: Some(vec!["adr-054".to_string(), "design".to_string()]),
-                    scope_paths: None,
-                }),
-                Some(PathBuf::from(&worktree_tmp)),
-            )
+            .memory_write(Parameters(WriteParams {
+                project: project.slug(),
+                title: title.to_string(),
+                content: content.to_string(),
+                note_type: "design".to_string(),
+                status: None,
+                tags: Some(vec!["adr-054".to_string(), "design".to_string()]),
+                scope_paths: None,
+            }))
             .await;
 
         assert!(created.error.is_none(), "{:?}", created.error);
@@ -693,33 +561,8 @@ mod tests {
             .await
             .unwrap()
             .expect("canonical row should exist immediately");
-
-        let canonical_path = djinn_core::paths::project_dir(
-            &project.github_owner,
-            &project.github_repo,
-        )
-        .join(
-            ".djinn/design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy.md",
-        );
-        let _canonical_guard = PathCleanupGuard::new(
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
-        );
-        let worktree_path = worktree_tmp.join(
-            ".djinn/design/adr-054-roadmap-memory-extraction-quality-gates-and-note-taxonomy.md",
-        );
-
-        assert_eq!(
-            std::path::Path::new(&note.file_path),
-            canonical_path.as_path()
-        );
-        assert!(
-            worktree_path.exists(),
-            "worktree-authored note should exist on disk immediately"
-        );
-        assert!(
-            !canonical_path.exists(),
-            "non-singleton worktree writes should keep the canonical row identity without forcing an immediate canonical file mirror"
-        );
+        assert_eq!(note.storage, "db");
+        assert_eq!(note.file_path, "");
 
         let read_back = ops::memory_read(
             &server,
@@ -757,25 +600,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn current_requirement_edit_from_worktree_updates_canonical_path() {
-        let project_tmp = workspace_tempdir();
-        let worktree_tmp = project_tmp
-            .path()
-            .join(".djinn/worktrees/test-current-requirement");
-        std::fs::create_dir_all(worktree_tmp.join(".git")).unwrap();
+    async fn requirement_edit_resolves_link_text_in_db_row() {
+        let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let project = create_project(&db, project_tmp.path()).await;
-        let canonical_dir =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        std::fs::create_dir_all(&canonical_dir).expect("create canonical project dir");
-        let _canonical_guard = PathCleanupGuard::new(canonical_dir.clone());
+        let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         repo.create(
             &project.id,
-            &canonical_dir,
             "V1 Requirements",
             "References [[Cognitive Memory Scope]].",
             "requirement",
@@ -785,51 +619,34 @@ mod tests {
         .unwrap();
 
         let Json(edited) = server
-            .memory_edit_with_worktree(
-                Parameters(EditParams {
-                    project: project.slug(),
-                    identifier: "requirements/v1-requirements".to_string(),
-                    operation: "find_replace".to_string(),
-                    content: "[[reference/cognitive-memory-scope]]".to_string(),
-                    find_text: Some("[[Cognitive Memory Scope]]".to_string()),
-                    section: None,
-                    note_type: None,
-                }),
-                Some(PathBuf::from(&worktree_tmp)),
-            )
+            .memory_edit(Parameters(EditParams {
+                project: project.slug(),
+                identifier: "requirements/v1-requirements".to_string(),
+                operation: "find_replace".to_string(),
+                content: "[[reference/cognitive-memory-scope]]".to_string(),
+                find_text: Some("[[Cognitive Memory Scope]]".to_string()),
+                section: None,
+                note_type: None,
+            }))
             .await;
         assert!(edited.error.is_none(), "{:?}", edited.error);
 
-        let canonical_path = canonical_dir.join(".djinn/requirements/v1-requirements.md");
-        let worktree_path = worktree_tmp.join(".djinn/requirements/v1-requirements.md");
-        assert!(canonical_path.exists());
-        assert!(worktree_path.exists());
-        let canonical_contents = std::fs::read_to_string(&canonical_path).unwrap();
-        let worktree_contents = std::fs::read_to_string(&worktree_path).unwrap();
-        assert!(canonical_contents.contains("[[reference/cognitive-memory-scope]]"));
-        assert_eq!(canonical_contents, worktree_contents);
-        assert!(
-            repo.get_by_permalink(&project.id, "reference/v1-requirements")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            !canonical_dir
-                .join(".djinn/reference/v1-requirements.md")
-                .exists()
-        );
+        let row = repo
+            .get_by_permalink(&project.id, "requirements/v1-requirements")
+            .await
+            .unwrap()
+            .expect("requirement row should exist");
+        assert!(row.content.contains("[[reference/cognitive-memory-scope]]"));
     }
 
-    // ── scope_paths routing regression tests ────────────────────────────────
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_write_adr_with_empty_scope_paths_writes_file_to_disk() {
+    async fn memory_write_adr_with_empty_scope_paths_persists_to_db() {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
@@ -844,24 +661,25 @@ mod tests {
             .await;
 
         assert!(created.error.is_none(), "error: {:?}", created.error);
-        let file_path = created.file_path.clone().expect("file_path must be set");
-        assert!(!file_path.is_empty(), "file_path must not be empty");
-        assert!(
-            std::path::Path::new(&file_path).exists(),
-            "markdown file must exist on disk: {file_path}"
-        );
-        let on_disk = std::fs::read_to_string(&file_path).unwrap();
-        assert!(on_disk.contains("ADR-300 Empty Scope"));
-        assert!(on_disk.contains("body for ADR-300"));
+        let permalink = created.permalink.as_deref().unwrap();
+        let note = repo
+            .get_by_permalink(&project.id, permalink)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(note.storage, "db");
+        assert_eq!(note.scope_paths, "[]");
+        assert_eq!(note.content, "body for ADR-300");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_write_adr_with_nonempty_scope_paths_writes_file_to_disk() {
+    async fn memory_write_adr_with_nonempty_scope_paths_persists_scope() {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
@@ -876,45 +694,23 @@ mod tests {
             .await;
 
         assert!(created.error.is_none(), "error: {:?}", created.error);
-        let file_path = created.file_path.clone().expect("file_path must be set");
-        assert!(std::path::Path::new(&file_path).exists());
-        let on_disk = std::fs::read_to_string(&file_path).unwrap();
-        assert!(on_disk.contains("ADR-301 Scoped"));
-        assert!(on_disk.contains("scoped body"));
+        let permalink = created.permalink.as_deref().unwrap();
+        let note = repo
+            .get_by_permalink(&project.id, permalink)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(note.scope_paths, r#"["crates/foo"]"#);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_write_adr_without_scope_paths_still_writes_file_to_disk() {
+    async fn memory_edit_find_replace_updates_db_content() {
         let tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, tmp.path()).await;
         let server = DjinnMcpServer::new(state);
-
-        let Json(created) = server
-            .memory_write(Parameters(WriteParams {
-                project: project.slug(),
-                title: "ADR-302 Unscoped".to_string(),
-                content: "unscoped body".to_string(),
-                note_type: "adr".to_string(),
-                status: None,
-                tags: None,
-                scope_paths: None,
-            }))
-            .await;
-
-        assert!(created.error.is_none(), "error: {:?}", created.error);
-        let file_path = created.file_path.clone().expect("file_path must be set");
-        assert!(std::path::Path::new(&file_path).exists());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_edit_find_replace_on_scoped_adr_updates_file_on_disk() {
-        let tmp = workspace_tempdir();
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = create_project(&db, tmp.path()).await;
-        let server = DjinnMcpServer::new(state);
+        let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let Json(created) = server
             .memory_write(Parameters(WriteParams {
@@ -928,12 +724,13 @@ mod tests {
             }))
             .await;
         assert!(created.error.is_none(), "error: {:?}", created.error);
-        let file_path = created.file_path.clone().expect("file_path must be set");
+        let permalink = created.permalink.clone().unwrap();
+        let note_id = created.id.clone().unwrap();
 
         let Json(edited) = server
             .memory_edit(Parameters(EditParams {
                 project: project.slug(),
-                identifier: created.permalink.clone().unwrap(),
+                identifier: permalink,
                 operation: "find_replace".to_string(),
                 content: "slow purple turtle".to_string(),
                 find_text: Some("quick brown fox".to_string()),
@@ -944,14 +741,16 @@ mod tests {
 
         assert!(edited.error.is_none(), "edit error: {:?}", edited.error);
 
-        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        let row = repo.get(&note_id).await.unwrap().unwrap();
         assert!(
-            on_disk.contains("The slow purple turtle"),
-            "new text must be present in file. got:\n{on_disk}"
+            row.content.contains("The slow purple turtle"),
+            "new text must be in db row content: {}",
+            row.content
         );
         assert!(
-            !on_disk.contains("quick brown fox"),
-            "old text must be gone from file. got:\n{on_disk}"
+            !row.content.contains("quick brown fox"),
+            "old text must be gone: {}",
+            row.content
         );
     }
 
@@ -978,13 +777,10 @@ mod tests {
         assert!(created.error.is_none());
         let note_id = created.id.clone().unwrap();
 
-        // Let any post-write background tasks (summary regen, contradiction
-        // analysis) drain before capturing the baseline timestamp.
         sleep(Duration::from_millis(200)).await;
         let before = repo.get(&note_id).await.unwrap().unwrap();
         let before_updated_at = before.updated_at.clone();
 
-        // Small delay so any accidental bump from the edit would be detectable.
         sleep(Duration::from_millis(50)).await;
 
         let Json(edited) = server

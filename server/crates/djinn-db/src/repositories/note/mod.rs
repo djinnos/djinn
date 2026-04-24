@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 
 use djinn_core::events::EventBus;
 use djinn_memory::{
     BrokenLink, ExtractedNoteAuditReport, GraphEdge, GraphNode, GraphResponse, HealthReport, Note,
-    NoteCompact, NoteSearchResult, OrphanNote, ReindexSummary, StaleFolder,
+    NoteCompact, NoteSearchResult, OrphanNote, StaleFolder,
 };
 use std::sync::Arc;
 
@@ -24,6 +23,12 @@ mod lexical_search;
 pub(crate) mod rrf;
 mod scoring;
 mod search;
+
+// Note: as of the db-only knowledge-base cut-over, `indexing` exposes only
+// the wikilink graph helpers (used by `crud.rs`). The on-disk reindex
+// pipeline (`reindex_from_disk`, `scan_project_notes`, `ScannedNote`,
+// `UpdateNoteIndexParams`, `ReindexSummary`, …) was deleted because notes
+// are no longer mirrored to disk.
 
 pub use association::NoteAssociationEntry;
 pub use consolidation::{
@@ -51,34 +56,14 @@ pub use scoring::{
     USER_CONFIRM, bayesian_update,
 };
 
-pub use indexing::UpdateNoteIndexParams;
-
-use file_helpers::{build_catalog, write_note_file};
+use file_helpers::build_catalog;
 pub use file_helpers::{
-    file_path_for, file_path_for_with_status, folder_for_type, folder_for_type_with_status,
-    infer_note_type, is_singleton, normalize_virtual_note_path, permalink_for,
-    permalink_for_with_status, permalink_from_virtual_note_path, render_note_markdown, slugify,
-    title_from_permalink, virtual_note_path_for_permalink,
+    folder_for_type, folder_for_type_with_status, infer_note_type, is_singleton,
+    normalize_virtual_note_path, permalink_for, permalink_for_with_status,
+    permalink_from_virtual_note_path, render_note_markdown, slugify, title_from_permalink,
+    virtual_note_path_for_permalink,
 };
 use indexing::{index_links_for_note, resolve_links_for_note};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorktreeNoteChangeKind {
-    Added,
-    Modified,
-    Unchanged,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeNoteDiff {
-    pub permalink: String,
-    pub title: String,
-    pub note_type: String,
-    pub tags: String,
-    pub change_kind: WorktreeNoteChangeKind,
-    pub canonical_note_id: Option<String>,
-    pub canonical_file_exists: bool,
-}
 
 #[derive(Debug, Clone)]
 pub struct NoteSearchParams<'a> {
@@ -122,7 +107,6 @@ pub(super) use note_select_where_id;
 pub struct NoteRepository {
     db: Database,
     events: EventBus,
-    worktree_root: Option<PathBuf>,
     embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
     embedding_branch: String,
     vector_store: Arc<dyn NoteVectorStore>,
@@ -133,22 +117,10 @@ impl NoteRepository {
         Self {
             db,
             events,
-            worktree_root: None,
             embedding_provider: None,
             embedding_branch: "main".to_string(),
             vector_store: Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
         }
-    }
-
-    pub fn with_worktree_root(mut self, worktree_root: Option<PathBuf>) -> Self {
-        if let Some(embedding_branch) = worktree_root
-            .as_deref()
-            .and_then(infer_embedding_branch_from_worktree)
-        {
-            self.embedding_branch = embedding_branch;
-        }
-        self.worktree_root = worktree_root;
-        self
     }
 
     pub fn with_embedding_provider(
@@ -171,10 +143,6 @@ impl NoteRepository {
             self.vector_store = vector_store;
         }
         self
-    }
-
-    pub fn worktree_root(&self) -> Option<&Path> {
-        self.worktree_root.as_deref()
     }
 
     pub fn embedding_provider(&self) -> Option<Arc<dyn NoteEmbeddingProvider>> {

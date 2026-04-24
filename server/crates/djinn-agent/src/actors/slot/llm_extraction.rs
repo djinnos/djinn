@@ -119,7 +119,6 @@ impl ExtractionContext<'_> {
                 self.note_repo
                     .create_with_scope(
                         self.project_id,
-                        Path::new(self.project_path),
                         title,
                         content,
                         note_type,
@@ -555,11 +554,14 @@ async fn run_llm_extraction_inner(
         worktree_root = ?knowledge_branch_target.worktree_root(),
         "llm_extraction: resolved knowledge write target"
     );
+    // Notes are db-only — no on-disk mirror — so the knowledge_branch_target
+    // worktree_root no longer routes file writes. The repo is constructed
+    // without a worktree root; the embedding branch is set explicitly below.
     let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-        .with_worktree_root(
+        .with_embedding_branch(
             knowledge_branch_target
                 .worktree_root()
-                .map(Path::to_path_buf),
+                .and_then(djinn_db::infer_embedding_branch_from_worktree),
         );
     let provenance = format!(
         "\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*"
@@ -827,7 +829,6 @@ async fn persist_working_spec(
             .note_repo
             .create_with_scope(
                 extraction_context.project_id,
-                Path::new(extraction_context.project_path),
                 &title,
                 &render_working_spec_document(extraction_context, &section, &scope_paths),
                 "design",

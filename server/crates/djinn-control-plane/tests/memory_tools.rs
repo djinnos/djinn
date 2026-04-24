@@ -624,61 +624,23 @@ async fn mcp_memory_history_and_diff_round_trip() {
         .or_else(|| history["entries"].as_array())
         .expect("memory_history should return history/entries array");
 
-    if entries.is_empty() {
-        let diff = harness
-            .call_tool(
-                "memory_diff",
-                json!({"project": project, "permalink": created["permalink"]}),
-            )
-            .await
-            .expect("memory_diff should dispatch");
-        assert!(diff.get("error").is_none() || diff["error"].is_null());
-        let d = diff["diff"].as_str().unwrap();
-        assert!(d.contains("@@") || d.contains("diff --git") || d.is_empty());
-        return;
-    }
-
-    let latest_sha = entries
-        .first()
-        .and_then(|e| e["sha"].as_str())
-        .unwrap()
-        .to_string();
+    // memory_diff: with the db-only KB cut-over the diff tool always
+    // returns an empty diff and an explanatory error string. Just confirm
+    // it dispatches and shape-checks; no longer asserts git diff content.
     let diff = harness
         .call_tool(
             "memory_diff",
-            json!({"project": project, "permalink": created["permalink"], "sha": latest_sha}),
+            json!({"project": project, "permalink": created["permalink"]}),
         )
         .await
         .expect("memory_diff should dispatch");
-    assert!(diff.get("error").is_none() || diff["error"].is_null());
-    let d = diff["diff"].as_str().unwrap();
-    assert!(d.contains("@@") || d.contains("diff --git") || !d.is_empty());
+    assert!(diff.get("diff").is_some());
+    // Suppress unused warnings.
+    let _ = entries;
 }
 
-#[tokio::test]
-async fn mcp_memory_reindex_returns_expected_contract_shape() {
-    let harness = McpTestHarness::new().await;
-    let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = proj.slug();
-
-    harness
-        .call_tool(
-            "memory_write",
-            json!({"project": project, "title": "Reindex Seed", "content": "seed", "type": "reference"}),
-        )
-        .await
-        .expect("memory_write should dispatch");
-
-    let reindex = harness
-        .call_tool("memory_reindex", json!({"project": project}))
-        .await
-        .expect("memory_reindex should dispatch");
-    assert!(reindex.get("error").is_none() || reindex["error"].is_null());
-    assert!(reindex.get("updated").and_then(|v| v.as_i64()).is_some());
-    assert!(reindex.get("created").and_then(|v| v.as_i64()).is_some());
-    assert!(reindex.get("deleted").and_then(|v| v.as_i64()).is_some());
-    assert!(reindex.get("unchanged").and_then(|v| v.as_i64()).is_some());
-}
+// memory_reindex tool was deleted alongside the on-disk reindex pipeline
+// (notes are db-only now). Removing the contract shape test.
 
 #[tokio::test]
 async fn mcp_memory_build_context_follows_wikilinks() {

@@ -6,7 +6,7 @@ use std::path::Path;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 
 use crate::server::DjinnMcpServer;
-use djinn_memory::{GitLogEntry, Note, ReindexSummary};
+use djinn_memory::{GitLogEntry, Note};
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
 
@@ -155,35 +155,10 @@ async fn git_log_for_file(file_path: &str, limit: i64) -> Vec<GitLogEntry> {
     }
 }
 
-/// Get the unified diff for a note file at a specific commit (or the latest change).
-async fn git_diff_for_file(file_path: &str, sha: Option<&str>) -> String {
-    let sha = match sha {
-        Some(s) => s.to_owned(),
-        None => {
-            // Find the most recent commit that touched this file.
-            let mut cmd = std::process::Command::new("git");
-            cmd.args(["log", "-n1", "--format=%H", "--", file_path]);
-            let out = crate::process::output(cmd).await;
-            match out {
-                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-                _ => return String::new(),
-            }
-        }
-    };
-
-    if sha.is_empty() {
-        return String::new();
-    }
-
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["diff", &format!("{sha}^"), &sha, "--", file_path]);
-    let out = crate::process::output(cmd).await;
-
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => String::new(),
-    }
-}
+// `git_diff_for_file` was deleted alongside the live memory_diff tool body;
+// notes are now db-only, so there's no on-disk file to diff. The
+// memory_diff tool surface still exists (for back-compat) but always
+// returns an empty diff with an error message.
 
 #[cfg(test)]
 mod param_tests {

@@ -31,13 +31,12 @@ async fn make_core() -> (MemoryFilesystemCore, Database, String, tempfile::TempD
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_backed_read_and_list_flow_tracks_access_and_rendering() {
-    let (core, db, project_id, project_dir) = make_core().await;
+    let (core, db, project_id, _project_dir) = make_core().await;
     let repo = NoteRepository::new(db.clone(), test_events());
 
     let singleton = repo
         .create(
             &project_id,
-            project_dir.path(),
             "Project Brief",
             "Brief body",
             "brief",
@@ -48,7 +47,6 @@ async fn repository_backed_read_and_list_flow_tracks_access_and_rendering() {
     let nested = repo
         .create(
             &project_id,
-            project_dir.path(),
             "Routing Guide",
             "Read [[Project Brief]].",
             "design_spec",
@@ -134,7 +132,6 @@ async fn repository_backed_mutation_flow_preserves_frontmatter_and_index_side_ef
     let target = repo
         .create(
             &project_id,
-            project_dir.path(),
             "Target Note",
             "Target body",
             "reference",

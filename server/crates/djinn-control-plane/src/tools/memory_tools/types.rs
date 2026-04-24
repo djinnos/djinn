@@ -186,11 +186,6 @@ pub struct OrphansParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct ReindexParams {
-    pub project: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
 pub struct AssociationsParams {
     pub project: String,
     /// Note ID or permalink (e.g. "decisions/my-adr").
@@ -375,15 +370,6 @@ pub struct MemoryOrphansResponse {
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
-pub struct MemoryReindexResponse {
-    pub updated: i64,
-    pub created: i64,
-    pub deleted: i64,
-    pub unchanged: i64,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize, schemars::JsonSchema)]
 pub struct MemoryNoteView {
     pub id: String,
     pub project_id: String,
@@ -444,11 +430,6 @@ impl MemoryNoteResponse {
 
     pub fn deduplicated_from_note(note: &djinn_memory::Note) -> Self {
         Self::from_note_with_deduplicated(note, true)
-    }
-
-    pub fn with_file_path(mut self, file_path: String) -> Self {
-        self.file_path = Some(file_path);
-        self
     }
 
     fn from_note_with_deduplicated(note: &djinn_memory::Note, deduplicated: bool) -> Self {

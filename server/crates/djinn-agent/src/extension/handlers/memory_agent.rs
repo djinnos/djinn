@@ -150,15 +150,14 @@ pub(super) async fn call_memory_write(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_path: &str,
-    worktree_root: &Path,
+    _worktree_root: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryWriteParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
     let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
-    let worktree_root = Some(worktree_root.to_path_buf());
     let result = server
-        .memory_write_with_worktree(
-            rmcp::handler::server::wrapper::Parameters(SharedMemoryWriteParams {
+        .memory_write(rmcp::handler::server::wrapper::Parameters(
+            SharedMemoryWriteParams {
                 project: project_path,
                 title: p.title,
                 content: p.content,
@@ -166,9 +165,8 @@ pub(super) async fn call_memory_write(
                 status: p.status,
                 tags: p.tags,
                 scope_paths: p.scope_paths,
-            }),
-            worktree_root,
-        )
+            },
+        ))
         .await;
     Ok(serde_json::to_value(result.0).unwrap_or_else(
         |_| serde_json::json!({ "error": "failed to serialize memory_write response" }),
@@ -179,15 +177,14 @@ pub(super) async fn call_memory_edit(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     project_path: &str,
-    worktree_root: &Path,
+    _worktree_root: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: MemoryEditParams = parse_args(arguments)?;
     let project_path = project_path.to_owned();
     let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
-    let worktree_root = Some(worktree_root.to_path_buf());
     let result = server
-        .memory_edit_with_worktree(
-            rmcp::handler::server::wrapper::Parameters(SharedMemoryEditParams {
+        .memory_edit(rmcp::handler::server::wrapper::Parameters(
+            SharedMemoryEditParams {
                 project: project_path,
                 identifier: p.identifier,
                 operation: p.operation,
@@ -195,9 +192,8 @@ pub(super) async fn call_memory_edit(
                 find_text: p.find_text,
                 section: p.section,
                 note_type: p.note_type,
-            }),
-            worktree_root,
-        )
+            },
+        ))
         .await;
     Ok(serde_json::to_value(result.0).unwrap_or_else(
         |_| serde_json::json!({ "error": "failed to serialize memory_edit response" }),

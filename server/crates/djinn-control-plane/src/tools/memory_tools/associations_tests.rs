@@ -62,10 +62,10 @@ mod tests {
     async fn make_note(
         repo: &NoteRepository,
         project: &Project,
-        tmp: &tempfile::TempDir,
+        _tmp: &tempfile::TempDir,
         title: &str,
     ) -> djinn_memory::Note {
-        repo.create(&project.id, tmp.path(), title, "content", "reference", "[]")
+        repo.create(&project.id, title, "content", "reference", "[]")
             .await
             .unwrap()
     }

@@ -7,4 +7,3 @@
 //! them up at startup instead of handing over an `AppState`.
 
 pub mod housekeeping;
-pub mod watchers;

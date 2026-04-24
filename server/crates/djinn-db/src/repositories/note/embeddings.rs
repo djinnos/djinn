@@ -163,17 +163,6 @@ impl QdrantNoteVectorStore {
     }
 }
 
-type EmbeddingRepairRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-
 pub fn task_branch_name(task_short_id: &str) -> String {
     format!("task/{task_short_id}")
 }
@@ -740,102 +729,6 @@ impl NoteRepository {
                 tracing::debug!(note_id, %reason, "semantic embedding unavailable; continuing with lexical indexing only");
             }
         }
-    }
-
-    pub(super) async fn purge_orphan_embeddings(&self) -> Result<u64> {
-        self.db.ensure_initialized().await?;
-
-        let orphan_ids = sqlx::query_scalar!(
-            "SELECT m.note_id
-             FROM note_embedding_meta m
-             LEFT JOIN notes n ON n.id = m.note_id
-             WHERE n.id IS NULL"
-        )
-        .fetch_all(self.db.pool())
-        .await?;
-
-        let mut deleted = 0u64;
-        for note_id in orphan_ids {
-            self.delete_embedding(&note_id).await?;
-            deleted += 1;
-        }
-
-        Ok(deleted)
-    }
-
-    pub(super) async fn repair_project_embeddings(&self, project_id: &str) -> Result<u64> {
-        let Some(provider) = self.embedding_provider() else {
-            return Ok(0);
-        };
-
-        self.db.ensure_initialized().await?;
-        self.purge_orphan_embeddings().await?;
-
-        let current_model_version = provider.model_version();
-        let rows: Vec<EmbeddingRepairRow> = sqlx::query!(
-            r#"SELECT n.id, n.title, n.note_type, n.tags, n.content,
-                        m.content_hash AS "content_hash: Option<String>",
-                        m.model_version AS "model_version: Option<String>",
-                        m.branch AS "branch: Option<String>"
-                 FROM notes n
-                 LEFT JOIN note_embedding_meta m ON m.note_id = n.id
-                 WHERE n.project_id = ?"#,
-            project_id
-        )
-        .fetch_all(self.db.pool())
-        .await?
-        .into_iter()
-        .map(|r| {
-            (
-                r.id,
-                r.title,
-                r.note_type,
-                r.tags,
-                r.content,
-                r.content_hash,
-                r.model_version,
-                r.branch,
-            )
-        })
-        .collect();
-
-        let total = rows.len();
-        let start = std::time::Instant::now();
-        let mut repaired = 0u64;
-        for (
-            note_id,
-            title,
-            note_type,
-            tags,
-            content,
-            embedded_hash,
-            embedded_model_version,
-            embedded_branch,
-        ) in rows
-        {
-            tokio::task::yield_now().await;
-            let expected_hash = embedding_content_hash(&title, &note_type, &tags, &content);
-            let needs_refresh = embedded_hash.as_deref() != Some(expected_hash.as_str())
-                || embedded_model_version.as_deref() != Some(current_model_version.as_str())
-                || embedded_branch.as_deref() != Some(self.embedding_branch());
-            if needs_refresh {
-                repaired += 1;
-                self.sync_note_embedding(&note_id, &title, &note_type, &tags, &content)
-                    .await;
-            }
-        }
-
-        if repaired > 0 {
-            tracing::info!(
-                project_id,
-                total,
-                repaired,
-                elapsed_secs = start.elapsed().as_secs_f32(),
-                "embedding repair completed"
-            );
-        }
-
-        Ok(repaired)
     }
 
     pub async fn upsert_embedding(

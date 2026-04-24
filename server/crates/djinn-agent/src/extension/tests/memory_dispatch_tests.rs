@@ -14,7 +14,6 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
     let seed = note_repo
         .create(
             &project.id,
-            Path::new(&project_path),
             "Shared Memory Seed",
             "Architecture guidance with [[Shared Memory Related]] references.",
             "adr",
@@ -25,7 +24,6 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
     note_repo
         .create(
             &project.id,
-            Path::new(&project_path),
             "Shared Memory Related",
             "Related architecture context.",
             "reference",
@@ -182,7 +180,6 @@ async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() 
     let note = note_repo
         .create(
             &project.id,
-            Path::new(&project_path),
             "Draft To Recover",
             "# Draft To Recover",
             "adr",
@@ -229,7 +226,6 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
     note_repo
         .create(
             &project.id,
-            Path::new(&project_path),
             "Broken Source",
             "Broken reference to [[Missing Note]].",
             "research",
@@ -240,7 +236,6 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
     note_repo
         .create(
             &project.id,
-            Path::new(&project_path),
             "Standalone Orphan",
             "No inbound links here.",
             "pattern",
@@ -622,7 +617,6 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
     note_repo
         .create(
             &project.id,
-            Path::new(&project_path),
             "V1 Requirements",
             "tracks [[Cognitive Memory Scope]]",
             "requirement",

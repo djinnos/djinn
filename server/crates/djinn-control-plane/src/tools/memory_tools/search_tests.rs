@@ -51,8 +51,12 @@ mod tests {
         tempfile::tempdir_in(base).unwrap()
     }
 
+    // memory_diff is a back-compat shim under the db-only knowledge-base
+    // cut-over: it always returns an empty diff with an explanatory error
+    // string. The pre-cut-over storage-routing tests are gone; this single
+    // contract test confirms the shape of the response.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_diff_returns_error_for_db_only_notes() {
+    async fn memory_diff_returns_empty_diff_with_explanatory_error() {
         let _tmp = workspace_tempdir();
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
@@ -64,150 +68,30 @@ mod tests {
             .await
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), event_bus);
-
-        // Create a DB-only note (no file on disk)
-        let db_note = note_repo
-            .create_db_note(&project.id, "DB Only Note", "db note body", "pattern", "[]")
-            .await
-            .unwrap();
-        assert_eq!(db_note.storage, "db");
-
-        let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
-
-        let response = server
-            .memory_diff(rmcp::handler::server::wrapper::Parameters(DiffParams {
-                project: project.slug(),
-                permalink: db_note.permalink.clone(),
-                sha: None,
-            }))
-            .await
-            .0;
-
-        // Should return error for DB-only notes
-        assert!(response.error.is_some(), "Expected error for DB-only note");
-        let error_msg = response.error.unwrap();
-        assert!(
-            error_msg.contains("database only"),
-            "Error should mention 'database only': {}",
-            error_msg
-        );
-        assert!(
-            error_msg.contains("storage='db'"),
-            "Error should show storage='db': {}",
-            error_msg
-        );
-        assert!(
-            response.diff.is_empty(),
-            "Diff should be empty for DB-only note"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_diff_returns_error_for_project_not_found() {
-        let _tmp = workspace_tempdir();
-        let db = Database::open_in_memory().unwrap();
-        db.ensure_initialized().await.unwrap();
-        let (tx, _rx) = broadcast::channel(256);
-
-        let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
-
-        let response = server
-            .memory_diff(rmcp::handler::server::wrapper::Parameters(DiffParams {
-                project: "/nonexistent/project".to_string(),
-                permalink: "test/note".to_string(),
-                sha: None,
-            }))
-            .await
-            .0;
-
-        assert!(response.error.is_some());
-        assert!(
-            response
-                .error
-                .as_ref()
-                .unwrap()
-                .contains("project not found")
-        );
-        assert!(response.diff.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_diff_returns_error_for_note_not_found() {
-        let _tmp = workspace_tempdir();
-        let db = Database::open_in_memory().unwrap();
-        db.ensure_initialized().await.unwrap();
-        let (tx, _rx) = broadcast::channel(256);
-        let event_bus = event_bus_for(&tx);
-        let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
-        let project = project_repo
-            .create("test-project", "test", "test-project")
-            .await
-            .unwrap();
-
-        let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
-
-        let response = server
-            .memory_diff(rmcp::handler::server::wrapper::Parameters(DiffParams {
-                project: project.slug(),
-                permalink: "nonexistent/note".to_string(),
-                sha: None,
-            }))
-            .await
-            .0;
-
-        assert!(response.error.is_some());
-        assert!(response.error.as_ref().unwrap().contains("note not found"));
-        assert!(response.diff.is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_diff_preserves_behavior_for_file_backed_notes() {
-        let tmp = workspace_tempdir();
-        let db = Database::open_in_memory().unwrap();
-        db.ensure_initialized().await.unwrap();
-        let (tx, _rx) = broadcast::channel(256);
-        let event_bus = event_bus_for(&tx);
-        let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
-        let project = project_repo
-            .create("test-project", "test", "test-project")
-            .await
-            .unwrap();
-        let note_repo = NoteRepository::new(db.clone(), event_bus);
-
-        // Create a file-backed note
-        let file_note = note_repo
+        let note = note_repo
             .create(
                 &project.id,
-                tmp.path(),
-                "File Backed Note",
-                "file note body content",
+                "Any Note",
+                "body",
                 "adr",
                 "[]",
             )
             .await
             .unwrap();
-        assert_eq!(file_note.storage, "file");
 
         let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
 
         let response = server
             .memory_diff(rmcp::handler::server::wrapper::Parameters(DiffParams {
                 project: project.slug(),
-                permalink: file_note.permalink.clone(),
+                permalink: note.permalink.clone(),
                 sha: None,
             }))
             .await
             .0;
 
-        // For file-backed notes, the git diff is attempted
-        // In test environment without git history, this may return empty diff
-        // but should not return an error
-        assert!(
-            response.error.is_none(),
-            "File-backed notes should not return error, got: {:?}",
-            response.error
-        );
-        // Diff may be empty in test environment, but no error should occur
+        assert!(response.error.is_some(), "memory_diff should now return error");
+        assert!(response.diff.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -265,48 +149,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn memory_history_preserves_behavior_for_file_backed_notes() {
-        let tmp = workspace_tempdir();
-        let db = Database::open_in_memory().unwrap();
-        db.ensure_initialized().await.unwrap();
-        let (tx, _rx) = broadcast::channel(256);
-        let event_bus = event_bus_for(&tx);
-        let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
-        let project = project_repo
-            .create("test-project", "test", "test-project")
-            .await
-            .unwrap();
-        let note_repo = NoteRepository::new(db.clone(), event_bus);
-
-        let file_note = note_repo
-            .create(
-                &project.id,
-                tmp.path(),
-                "File Backed History Note",
-                "file note body content",
-                "adr",
-                "[]",
-            )
-            .await
-            .unwrap();
-        assert_eq!(file_note.storage, "file");
-
-        let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
-
-        let response = server
-            .memory_history(rmcp::handler::server::wrapper::Parameters(HistoryParams {
-                project: project.slug(),
-                permalink: file_note.permalink.clone(),
-                limit: None,
-            }))
-            .await
-            .0;
-
-        assert!(
-            response.error.is_none(),
-            "File-backed notes should not return error, got: {:?}",
-            response.error
-        );
-    }
+    // memory_history previously had a "file-backed-vs-db" branching
+    // assertion. With db-only KB storage every note returns an error; we
+    // only assert the db-only error path.
 }

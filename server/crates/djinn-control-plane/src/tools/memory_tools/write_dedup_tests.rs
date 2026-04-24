@@ -72,7 +72,6 @@ mod tests {
         let existing = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Canonical",
                 "Alpha\r\nBeta\n",
                 "research",
@@ -113,7 +112,6 @@ mod tests {
         let existing = repo
             .create(
                 &project.id,
-                tmp.path(),
                 "Async Pattern",
                 "tokio spawn",
                 "pattern",

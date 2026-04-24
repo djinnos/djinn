@@ -149,7 +149,6 @@ async fn embedding_lifecycle_tracks_create_update_delete_with_provider() {
     let note = repo
         .create(
             &project.id,
-            tmp.path(),
             "Lifecycle Note",
             "original body",
             "reference",
@@ -158,39 +157,44 @@ async fn embedding_lifecycle_tracks_create_update_delete_with_provider() {
         .await
         .unwrap();
 
-    let created = repo
-        .get_embedding(&note.id)
-        .await
-        .unwrap()
-        .expect("created embedding");
-    assert_eq!(created.model_version, "model-v1");
-    assert_eq!(
-        created.content_hash,
-        crate::note_hash::note_content_hash(
-            "title: Lifecycle Note\ntype: reference\ntags: []\n\noriginal body"
-        )
+    // Embeddings are now scheduled on a background tokio task; poll until
+    // the create-time embedding lands.
+    let expected_hash = crate::note_hash::note_content_hash(
+        "title: Lifecycle Note\ntype: reference\ntags: []\n\noriginal body",
     );
+    let created = poll_embedding_with_hash(&repo, &note.id, &expected_hash).await;
+    assert_eq!(created.model_version, "model-v1");
 
     let updated = repo
         .update(&note.id, "Lifecycle Note", "updated body", "[]")
         .await
         .unwrap();
-    let updated_embedding = repo
-        .get_embedding(&updated.id)
-        .await
-        .unwrap()
-        .expect("updated embedding");
-    assert_eq!(updated_embedding.model_version, "model-v1");
-    assert_eq!(
-        updated_embedding.content_hash,
-        crate::note_hash::note_content_hash(
-            "title: Lifecycle Note\ntype: reference\ntags: []\n\nupdated body"
-        )
+    let updated_expected_hash = crate::note_hash::note_content_hash(
+        "title: Lifecycle Note\ntype: reference\ntags: []\n\nupdated body",
     );
+    let updated_embedding =
+        poll_embedding_with_hash(&repo, &updated.id, &updated_expected_hash).await;
+    assert_eq!(updated_embedding.model_version, "model-v1");
     assert_ne!(created.content_hash, updated_embedding.content_hash);
 
     repo.delete(&updated.id).await.unwrap();
     assert!(repo.get_embedding(&updated.id).await.unwrap().is_none());
+}
+
+async fn poll_embedding_with_hash(
+    repo: &NoteRepository,
+    note_id: &str,
+    expected_hash: &str,
+) -> NoteEmbeddingRecord {
+    for _ in 0..200 {
+        if let Some(record) = repo.get_embedding(note_id).await.unwrap()
+            && record.content_hash == expected_hash
+        {
+            return record;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("embedding for {note_id} never reached expected hash {expected_hash}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -256,74 +260,10 @@ async fn branch_embedding_promotion_and_discard_update_metadata() {
     assert!(repo.get_embedding(&note.id).await.unwrap().is_none());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reindex_repairs_missing_and_stale_embeddings_with_provider() {
-    let _guard = super::sqlite_vec_test_lock().lock().await;
-    crate::database::set_sqlite_vec_disabled_for_tests(false);
-
-    let tmp = crate::database::test_tempdir().unwrap();
-    let db = Database::open_in_memory().unwrap();
-    db.ensure_initialized().await.unwrap();
-    let (tx, _rx) = broadcast::channel(256);
-    let project = make_project(&db, tmp.path()).await;
-    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx)).with_embedding_provider(Some(
-        Arc::new(StubEmbeddingProvider {
-            value: 0.3,
-            model_version: "model-v2",
-            fail: false,
-        }),
-    ));
-
-    let file_note = repo
-        .create(
-            &project.id,
-            tmp.path(),
-            "Indexed File Note",
-            "body on disk",
-            "reference",
-            "[]",
-        )
-        .await
-        .unwrap();
-    let db_note = repo
-        .create_db_note(&project.id, "Indexed Db Note", "db body", "pattern", "[]")
-        .await
-        .unwrap();
-
-    repo.delete_embedding(&file_note.id).await.unwrap();
-    repo.upsert_embedding(UpsertNoteEmbedding {
-        note_id: &db_note.id,
-        content_hash: "stale-hash",
-        model_version: "old-model",
-        embedding: &embedding_with_value(0.9),
-        branch: "main",
-    })
-    .await
-    .unwrap();
-
-    let summary = repo
-        .reindex_from_disk(&project.id, tmp.path())
-        .await
-        .unwrap();
-    assert_eq!(summary.unchanged + summary.updated, 1);
-    assert_eq!(summary.created, 0);
-    assert_eq!(summary.deleted, 0);
-
-    let repaired_file = repo
-        .get_embedding(&file_note.id)
-        .await
-        .unwrap()
-        .expect("missing file embedding repaired");
-    let repaired_db = repo
-        .get_embedding(&db_note.id)
-        .await
-        .unwrap()
-        .expect("stale db embedding repaired");
-
-    assert_eq!(repaired_file.model_version, "model-v2");
-    assert_eq!(repaired_db.model_version, "model-v2");
-    assert_ne!(repaired_db.content_hash, "stale-hash");
-}
+// `reindex_repairs_missing_and_stale_embeddings_with_provider` was deleted
+// alongside the reindex pipeline. Embedding refresh is now an out-of-band
+// concern; if/when a maintenance tool resurfaces, add a focused test for
+// it then.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedding_provider_failure_degrades_without_persisting_embeddings() {

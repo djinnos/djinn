@@ -1,6 +1,4 @@
-use std::path::{Path, PathBuf};
-
-use djinn_db::{NoteRepository, ProjectRepository, is_singleton};
+use djinn_db::{NoteRepository, is_singleton};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::memory_tools::lifecycle::{
@@ -8,26 +6,8 @@ use crate::tools::memory_tools::lifecycle::{
 };
 use crate::tools::memory_tools::{MemoryNoteResponse, WriteParams};
 
-fn actual_file_path_for_response(
-    note: &djinn_memory::Note,
-    worktree_root: Option<&Path>,
-) -> String {
-    match worktree_root {
-        Some(root) => root
-            .join(".djinn")
-            .join(format!("{}.md", note.permalink))
-            .to_string_lossy()
-            .to_string(),
-        None => note.file_path.clone(),
-    }
-}
-
-pub(super) fn note_repository(
-    server: &DjinnMcpServer,
-    worktree_root: Option<PathBuf>,
-) -> NoteRepository {
+pub(super) fn note_repository(server: &DjinnMcpServer) -> NoteRepository {
     NoteRepository::new(server.state.db().clone(), server.state.event_bus())
-        .with_worktree_root(worktree_root)
         .with_embedding_provider(server.state.embedding_provider())
         .with_vector_store(server.state.vector_store())
 }
@@ -53,8 +33,8 @@ pub(super) async fn maybe_update_singleton_note(
             {
                 Ok(note) => {
                     schedule_summary_regeneration(server, &note.id);
+                    // No on-disk file anymore — file_path is the empty string.
                     MemoryNoteResponse::from_note(&note)
-                        .with_file_path(actual_file_path_for_response(&note, repo.worktree_root()))
                 }
                 Err(error) => MemoryNoteResponse::error(error.to_string()),
             },
@@ -71,24 +51,6 @@ pub(super) async fn create_note(
     params: &WriteParams,
     tags_json: &str,
 ) -> MemoryNoteResponse {
-    // ADR-054 closure regression: when memory_write is called from a task worktree,
-    // `params.project` may be the worktree root instead of the canonical project
-    // root. Passing that directly into the note repository caused non-singleton
-    // file-backed notes to be indexed with the worktree path as their canonical
-    // `file_path`, which left the new note attached to the right project_id but
-    // the wrong on-disk identity. Exact permalink reads/lists then observed a
-    // mismatch between the canonical note repository view and the worktree-authored
-    // file. Always resolve the canonical project root from the projects table
-    // before creating the note; the repository still uses `worktree_root` to write
-    // the editable worktree copy when present.
-    let project_repo = ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
-    let canonical_project_path = match project_repo.get(project_id).await {
-        Ok(Some(p)) => djinn_core::paths::project_dir(&p.github_owner, &p.github_repo)
-            .to_string_lossy()
-            .into_owned(),
-        _ => params.project.clone(),
-    };
-
     let scope_paths_json = params
         .scope_paths
         .as_ref()
@@ -98,7 +60,6 @@ pub(super) async fn create_note(
     let create_result = if params.scope_paths.is_some() {
         repo.create_with_scope(
             project_id,
-            Path::new(&canonical_project_path),
             &params.title,
             &params.content,
             &params.note_type,
@@ -110,7 +71,6 @@ pub(super) async fn create_note(
     } else {
         repo.create_with_status(
             project_id,
-            Path::new(&canonical_project_path),
             &params.title,
             &params.content,
             &params.note_type,
@@ -125,7 +85,6 @@ pub(super) async fn create_note(
             schedule_summary_regeneration(server, &note.id);
             detect_emit_and_schedule_contradictions(server, repo, &note).await;
             MemoryNoteResponse::from_note(&note)
-                .with_file_path(actual_file_path_for_response(&note, repo.worktree_root()))
         }
         Err(error) => MemoryNoteResponse::error(error.to_string()),
     }

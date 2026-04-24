@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use djinn_core::events::EventBus;
 use djinn_memory::Note;
 use tokio::sync::Mutex;

@@ -580,7 +580,6 @@ mod tests {
             "memory_edit",
             "memory_delete",
             "memory_move",
-            "memory_reindex",
             "memory_confirm",
             "task_create",
             "task_update",

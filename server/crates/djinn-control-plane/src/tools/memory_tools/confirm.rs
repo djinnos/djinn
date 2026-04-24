@@ -101,11 +101,11 @@ mod tests {
     async fn make_note(
         db: &Database,
         project_id: &str,
-        path: &std::path::Path,
+        _path: &std::path::Path,
         title: &str,
     ) -> djinn_memory::Note {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        repo.create(project_id, path, title, title, "reference", "[]")
+        repo.create(project_id, title, title, "reference", "[]")
             .await
             .unwrap()
     }

@@ -2,10 +2,9 @@ use super::*;
 
 use rmcp::{Json, handler::server::wrapper::Parameters};
 
-pub(super) async fn memory_edit_with_worktree(
+pub(super) async fn memory_edit(
     server: &DjinnMcpServer,
     Parameters(p): Parameters<EditParams>,
-    worktree_root: Option<std::path::PathBuf>,
 ) -> Json<MemoryNoteResponse> {
     let Some(project_id) = server.project_id_for_path(&p.project).await else {
         return Json(MemoryNoteResponse::error(format!(
@@ -15,7 +14,6 @@ pub(super) async fn memory_edit_with_worktree(
     };
 
     let repo = NoteRepository::new(server.state.db().clone(), server.state.event_bus())
-        .with_worktree_root(worktree_root)
         .with_embedding_provider(server.state.embedding_provider())
         .with_vector_store(server.state.vector_store());
 

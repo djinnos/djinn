@@ -599,7 +599,6 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
     let orphan = repo
         .create(
             &project.id,
-            tmp.path(),
             "Old orphan",
             "body",
             "reference",
@@ -610,7 +609,6 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
     let linked = repo
         .create(
             &project.id,
-            tmp.path(),
             "Linked target",
             "body",
             "reference",
@@ -621,7 +619,6 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
     let source = repo
         .create(
             &project.id,
-            tmp.path(),
             "Source",
             &format!("links to [[{}]]", linked.title),
             "reference",
@@ -675,7 +672,6 @@ async fn housekeeping_repair_broken_wikilinks_does_not_force_low_confidence_matc
     let _target = repo
         .create(
             &project.id,
-            tmp.path(),
             "Rust Ownership Guide",
             "Rust ownership guide. Rust ownership guide. Rust ownership guide. Rust ownership guide. Borrowing and lifetimes details.",
             "reference",
@@ -686,7 +682,6 @@ async fn housekeeping_repair_broken_wikilinks_does_not_force_low_confidence_matc
     let source = repo
         .create(
             &project.id,
-            tmp.path(),
             "Broken link source",
             "Read [[Rust Ownership]] before editing.",
             "reference",
@@ -728,7 +723,6 @@ async fn housekeeping_repair_broken_wikilinks_skips_ambiguous_matches() {
     let _ = repo
         .create(
             &project.id,
-            tmp.path(),
             "Rust Ownership Guide",
             "guide for rust ownership",
             "reference",
@@ -739,7 +733,6 @@ async fn housekeeping_repair_broken_wikilinks_skips_ambiguous_matches() {
     let _ = repo
         .create(
             &project.id,
-            tmp.path(),
             "Rust Ownership Rules",
             "rules for rust ownership",
             "reference",
@@ -750,7 +743,6 @@ async fn housekeeping_repair_broken_wikilinks_skips_ambiguous_matches() {
     let source = repo
         .create(
             &project.id,
-            tmp.path(),
             "Ambiguous link source",
             "Compare [[Rust Ownership]] options.",
             "reference",

@@ -1194,7 +1194,6 @@ mod tests {
         let note = repo
             .create(
                 &project.id,
-                project_dir.path(),
                 "runtime batched note",
                 initial_content,
                 "research",

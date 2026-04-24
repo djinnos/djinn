@@ -20,7 +20,7 @@ use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
     ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams,
-    ReindexParams, SearchParams, TaskRefsParams, WriteParams,
+    SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::project_tools::{
     GetProjectDevcontainerStatusParams, GetProjectStackParams, GithubListReposParams,
@@ -79,47 +79,18 @@ fn map_json<T: Serialize>(tool: &str, out: Json<T>) -> Result<Value, String> {
 }
 
 impl DjinnMcpServer {
+    /// Compatibility entry point retained for callers that still pass a
+    /// worktree_root through `dispatch_tool_with_worktree`. The
+    /// worktree-scoped variants of memory_write/edit/delete/move are gone
+    /// since notes are db-only; the path is ignored and the call is
+    /// forwarded to the canonical dispatch.
     pub async fn dispatch_tool_with_worktree(
         &self,
         name: &str,
         args: Value,
-        worktree_root: Option<std::path::PathBuf>,
+        _worktree_root: Option<std::path::PathBuf>,
     ) -> Result<Value, String> {
-        match name {
-            "memory_write" => map_json(
-                name,
-                self.memory_write_with_worktree(
-                    Parameters(decode_args::<WriteParams>(name, args)?),
-                    worktree_root,
-                )
-                .await,
-            ),
-            "memory_edit" => map_json(
-                name,
-                self.memory_edit_with_worktree(
-                    Parameters(decode_args::<EditParams>(name, args)?),
-                    worktree_root,
-                )
-                .await,
-            ),
-            "memory_delete" => map_json(
-                name,
-                self.memory_delete_with_worktree(
-                    Parameters(decode_args::<DeleteParams>(name, args)?),
-                    worktree_root,
-                )
-                .await,
-            ),
-            "memory_move" => map_json(
-                name,
-                self.memory_move_with_worktree(
-                    Parameters(decode_args::<MoveParams>(name, args)?),
-                    worktree_root,
-                )
-                .await,
-            ),
-            _ => self.dispatch_tool(name, args).await,
-        }
+        self.dispatch_tool(name, args).await
     }
 
     pub async fn dispatch_tool(&self, name: &str, args: Value) -> Result<Value, String> {
@@ -421,11 +392,6 @@ impl DjinnMcpServer {
             "memory_diff" => map_json(
                 name,
                 self.memory_diff(Parameters(decode_args::<DiffParams>(name, args)?))
-                    .await,
-            ),
-            "memory_reindex" => map_json(
-                name,
-                self.memory_reindex(Parameters(decode_args::<ReindexParams>(name, args)?))
                     .await,
             ),
             "memory_build_context" => map_json(

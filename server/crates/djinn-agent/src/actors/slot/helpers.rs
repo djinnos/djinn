@@ -1301,12 +1301,11 @@ mod tests {
 
     #[tokio::test]
     async fn planner_patrol_context_reports_memory_and_coverage_gaps() {
-        let (db, mut ctx, project, tmp) = setup_project().await;
+        let (db, mut ctx, project, _tmp) = setup_project().await;
         let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
         note_repo
             .create_with_scope(
                 &project.id,
-                tmp.path(),
                 "Server subsystem overview",
                 "documents server source",
                 "reference",
@@ -1319,7 +1318,6 @@ mod tests {
         let stale_note = note_repo
             .create_with_scope(
                 &project.id,
-                tmp.path(),
                 "Stale changed-area note",
                 "needs review after canonical graph changes",
                 "reference",

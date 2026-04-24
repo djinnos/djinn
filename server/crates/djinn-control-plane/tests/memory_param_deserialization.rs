@@ -8,7 +8,7 @@
 use djinn_control_plane::tools::memory_tools::{
     BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams, DiffParams, EditParams,
     GraphParams, HealthParams, HistoryParams, ListParams, MoveParams, OrphansParams, ReadParams,
-    RecentParams, ReindexParams, SearchParams, TaskRefsParams, WriteParams,
+    RecentParams, SearchParams, TaskRefsParams, WriteParams,
 };
 
 // ── Param deserialization ─────────────────────────────────────────────────
@@ -188,13 +188,6 @@ fn build_context_params_deserialize() {
     assert_eq!(p.url, "memory://references/note");
     assert_eq!(p.depth, Some(2));
     assert_eq!(p.max_related, Some(3));
-}
-
-#[test]
-fn reindex_params_deserialize() {
-    let p: ReindexParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
-    assert_eq!(p.project, "/tmp/p");
 }
 
 #[test]

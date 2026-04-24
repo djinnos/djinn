@@ -42,7 +42,6 @@ async fn wikilink_resolves_on_create() {
     let target = repo
         .create(
             &project.id,
-            tmp.path(),
             "Connection Strategy",
             "body",
             "adr",
@@ -54,7 +53,6 @@ async fn wikilink_resolves_on_create() {
     // Create source with a wikilink to the target by title.
     repo.create(
         &project.id,
-        tmp.path(),
         "Overview",
         "See [[Connection Strategy]] for details.",
         "research",
@@ -79,7 +77,6 @@ async fn broken_link_detection() {
 
     repo.create(
         &project.id,
-        tmp.path(),
         "Source Note",
         "Links to [[Missing Note]] which does not exist.",
         "research",
@@ -104,12 +101,11 @@ async fn orphan_detection() {
 
     // Two notes: source links to target, isolated is orphaned.
     let target = repo
-        .create(&project.id, tmp.path(), "Target", "body", "adr", "[]")
+        .create(&project.id, "Target", "body", "adr", "[]")
         .await
         .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Source",
         "See [[Target]].",
         "research",
@@ -119,7 +115,6 @@ async fn orphan_detection() {
     .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Isolated",
         "no links",
         "pattern",
@@ -155,7 +150,6 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
 
     repo.create(
         &project.id,
-        tmp.path(),
         "Project Brief",
         "brief body",
         "brief",
@@ -165,7 +159,6 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
     .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Project Roadmap",
         "roadmap body",
         "roadmap",
@@ -178,7 +171,6 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
         .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Reachable Target",
         "body",
         "adr",
@@ -188,7 +180,6 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
     .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Linked Source",
         "See [[Reachable Target]].",
         "research",
@@ -198,7 +189,6 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
     .unwrap();
     repo.create(
         &project.id,
-        tmp.path(),
         "Real Orphan",
         "no inbound links",
         "pattern",
@@ -347,7 +337,6 @@ async fn resolve_previously_broken_links_on_create() {
     // Create source first (target doesn't exist yet → broken link).
     repo.create(
         &project.id,
-        tmp.path(),
         "Source",
         "See [[Future Note]].",
         "research",
@@ -358,187 +347,11 @@ async fn resolve_previously_broken_links_on_create() {
     assert_eq!(repo.broken_links(&project.id, None).await.unwrap().len(), 1);
 
     // Now create the target → broken link should be resolved.
-    repo.create(&project.id, tmp.path(), "Future Note", "body", "adr", "[]")
+    repo.create(&project.id, "Future Note", "body", "adr", "[]")
         .await
         .unwrap();
     assert_eq!(repo.broken_links(&project.id, None).await.unwrap().len(), 0);
     assert_eq!(repo.graph(&project.id).await.unwrap().edges.len(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reindex_from_disk_detects_created_updated_and_deleted() {
-    let tmp = crate::database::test_tempdir().unwrap();
-    let db = Database::open_in_memory().unwrap();
-    let (tx, _rx) = broadcast::channel(256);
-    let project = make_project(&db, tmp.path()).await;
-    let repo = NoteRepository::new(db, event_bus_for(&tx));
-
-    let decisions_dir = tmp.path().join(".djinn").join("decisions");
-    std::fs::create_dir_all(&decisions_dir).unwrap();
-
-    let existing_path = decisions_dir.join("existing.md");
-    std::fs::write(
-        &existing_path,
-        "---\ntitle: Existing\ntype: adr\ntags: []\n---\n\noriginal content",
-    )
-    .unwrap();
-
-    let first = repo
-        .reindex_from_disk(&project.id, tmp.path())
-        .await
-        .unwrap();
-    assert_eq!(first.created, 1);
-    assert_eq!(first.updated, 0);
-    assert_eq!(first.deleted, 0);
-
-    // Modify existing + add one new file.
-    std::fs::write(
-        &existing_path,
-        "---\ntitle: Existing\ntype: adr\ntags: []\n---\n\nupdated content",
-    )
-    .unwrap();
-    std::fs::write(
-        decisions_dir.join("new-note.md"),
-        "---\ntitle: New Note\ntype: adr\ntags: []\n---\n\nhello",
-    )
-    .unwrap();
-
-    let second = repo
-        .reindex_from_disk(&project.id, tmp.path())
-        .await
-        .unwrap();
-    assert_eq!(second.created, 1);
-    assert_eq!(second.updated, 1);
-    assert_eq!(second.deleted, 0);
-
-    // Delete one file from disk.
-    std::fs::remove_file(decisions_dir.join("new-note.md")).unwrap();
-    let third = repo
-        .reindex_from_disk(&project.id, tmp.path())
-        .await
-        .unwrap();
-    assert_eq!(third.deleted, 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reindex_from_disk_keeps_db_backed_notes_when_files_are_missing() {
-    let tmp = crate::database::test_tempdir().unwrap();
-    let db = Database::open_in_memory().unwrap();
-    let (tx, _rx) = broadcast::channel(256);
-    let project = make_project(&db, tmp.path()).await;
-    let repo = NoteRepository::new(db, event_bus_for(&tx));
-
-    let db_note = repo
-        .create_db_note(&project.id, "Extracted Case", "db body", "case", "[]")
-        .await
-        .unwrap();
-    let file_note = repo
-        .create(
-            &project.id,
-            tmp.path(),
-            "File Note",
-            "file body",
-            "adr",
-            "[]",
-        )
-        .await
-        .unwrap();
-
-    std::fs::remove_file(&file_note.file_path).unwrap();
-
-    let summary = repo
-        .reindex_from_disk(&project.id, tmp.path())
-        .await
-        .unwrap();
-    assert_eq!(summary.deleted, 1);
-    assert!(repo.get(&db_note.id).await.unwrap().is_some());
-    assert!(repo.get(&file_note.id).await.unwrap().is_none());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reindex_from_disk_backfill_can_normalize_extracted_notes_to_db_storage() {
-    let tmp = crate::database::test_tempdir().unwrap();
-    let db = Database::open_in_memory().unwrap();
-    let (tx, _rx) = broadcast::channel(256);
-    let project = make_project(&db, tmp.path()).await;
-    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
-
-    let legacy_case = repo
-        .create(
-            &project.id,
-            tmp.path(),
-            "Legacy Extracted Case",
-            "legacy db migration body",
-            "case",
-            "[]",
-        )
-        .await
-        .unwrap();
-    let legacy_pattern = repo
-        .create(
-            &project.id,
-            tmp.path(),
-            "Legacy Extracted Pattern",
-            "legacy pattern body",
-            "pattern",
-            "[]",
-        )
-        .await
-        .unwrap();
-    let legacy_pitfall = repo
-        .create(
-            &project.id,
-            tmp.path(),
-            "Legacy Extracted Pitfall",
-            "legacy pitfall body",
-            "pitfall",
-            "[]",
-        )
-        .await
-        .unwrap();
-
-    for note in [&legacy_case, &legacy_pattern, &legacy_pitfall] {
-        assert!(
-            Path::new(&note.file_path).exists(),
-            "legacy extracted note should start on disk"
-        );
-    }
-
-    sqlx::query!(
-        "UPDATE notes
-         SET storage = 'db',
-             file_path = ''
-         WHERE project_id = ? AND note_type IN ('case', 'pattern', 'pitfall')",
-        project.id
-    )
-    .execute(db.pool())
-    .await
-    .unwrap();
-
-    for note in [&legacy_case, &legacy_pattern, &legacy_pitfall] {
-        let path = Path::new(&note.file_path);
-        if path.exists() {
-            std::fs::remove_file(path).unwrap();
-        }
-    }
-
-    let summary = repo
-        .reindex_from_disk(&project.id, tmp.path())
-        .await
-        .unwrap();
-    assert_eq!(
-        summary.deleted, 0,
-        "db-backed migrated notes should survive reindex"
-    );
-
-    let notes = repo.list(&project.id, None).await.unwrap();
-    let migrated: Vec<_> = notes
-        .iter()
-        .filter(|note| matches!(note.note_type.as_str(), "case" | "pattern" | "pitfall"))
-        .collect();
-    assert_eq!(migrated.len(), 3);
-    for note in migrated {
-        assert_eq!(note.storage, "db");
-        assert!(note.file_path.is_empty());
-    }
-}
+// reindex_from_disk tests removed: the on-disk reindex pipeline is gone.
