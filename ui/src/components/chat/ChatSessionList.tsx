@@ -3,7 +3,6 @@ import { Edit02Icon } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { Input } from '@/components/ui/input';
 import { useChatStore } from '@/stores/chatStore';
-import { useSelectedProject, useIsAllProjects } from '@/stores/useProjectStore';
 import { cn } from '@/lib/utils';
 
 interface ChatSessionListProps {
@@ -25,8 +24,6 @@ function getDateGroupLabel(timestamp: number): string {
 }
 
 export function ChatSessionList({ onSelectSession, onNewChat }: ChatSessionListProps) {
-  const selectedProject = useSelectedProject();
-  const isAllProjects = useIsAllProjects();
   const activeSessionId = useChatStore((state) => state.activeSessionId);
   const sessions = useChatStore((state) => state.sessions);
   const streamingBySession = useChatStore((state) => state.streamingBySession);
@@ -42,16 +39,14 @@ export function ChatSessionList({ onSelectSession, onNewChat }: ChatSessionListP
     return () => window.clearTimeout(timer);
   }, [search]);
 
+  // Chat is user-scoped under the chat-user-global refactor: sessions are
+  // not filtered by the currently-selected project. Every session the user
+  // has started shows in the sidebar.
   const filteredSessions = useMemo(() => {
-    const projectSlug =
-      isAllProjects || !selectedProject
-        ? null
-        : `${selectedProject.github_owner}/${selectedProject.github_repo}`;
     return sessions
-      .filter((session) => session.projectSlug === projectSlug)
       .filter((session) => session.title.toLowerCase().includes(debouncedSearch))
       .sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [sessions, selectedProject, isAllProjects, debouncedSearch]);
+  }, [sessions, debouncedSearch]);
 
   const groupedSessions = useMemo(() => {
     const groups: Array<{ label: string; sessions: typeof filteredSessions }> = [];
